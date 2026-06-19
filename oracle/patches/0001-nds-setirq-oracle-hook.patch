@@ -1,0 +1,18 @@
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 7cef3bf..e3f0361 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -1344,6 +1344,13 @@ void NDS::UpdateIRQ(u32 cpu)
+ 
+ void NDS::SetIRQ(u32 cpu, u32 irq)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    // ndsrecomp oracle: always-on hardware-event ring (vblank/dma/timer IRQs).
++    // Defined in the oracle shim (oracle/shim/nds_oracle.cpp); resolved at the
++    // final link of nds_oracle. No-op in any build without the shim define.
++    extern void Oracle_OnSetIRQ(NDS* nds, u32 cpu, u32 irq);
++    Oracle_OnSetIRQ(this, cpu, irq);
++#endif
+     IF[cpu] |= (1 << irq);
+     UpdateIRQ(cpu);
+ 

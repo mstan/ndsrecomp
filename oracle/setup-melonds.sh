@@ -40,15 +40,16 @@ for p in "$PATCHES_DIR"/*.patch; do
 done
 
 cat <<'EOF'
-==> melonDS source ready. Build the core + oracle shim, e.g.:
+==> melonDS source ready. The oracle shim builds OUT OF TREE (its sources live
+    in oracle/shim/, tracked in this repo; only the SetIRQ hook above is applied
+    to the clone). From the ndsrecomp root (mingw64 g++ + Ninja on PATH):
 
-    cd third_party/melonDS
-    cmake -B build -S . -DBUILD_QT_SDL=OFF -DBUILD_ORACLE_SHIM=ON
-    cmake --build build -j 8 --target nds_oracle
+    cmake -B oracle/shim/build -S oracle/shim -DMELONDS_DIR=third_party/melonDS -G Ninja
+    cmake --build oracle/shim/build --target nds_oracle
 
 Then run the oracle pointed at the same dumps as the native runtime:
 
-    third_party/melonDS/build/nds_oracle \
+    oracle/shim/build/nds_oracle.exe \
         --bios9 bios/biosnds9.rom --bios7 bios/biosnds7.rom \
         --firmware bios/firmware.bin --boot firmware --port 19843
 
