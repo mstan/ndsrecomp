@@ -1,0 +1,58 @@
+cmake_minimum_required(VERSION 3.20)
+project(nds_runner C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)   # the recompiled banks are huge; -O matters
+endif()
+if(NOT MSVC)
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# The recompiled ARM9 BIOS bank (generated; compiled as C). Generated TUs
+# trade warning-cleanliness for uniform emission — silence the expected
+# unused-temp warnings rather than touch generated/.
+set(GEN ${CMAKE_CURRENT_SOURCE_DIR}/../generated)
+add_library(nds_banks STATIC
+    ${GEN}/arm9_bios.c
+    ${GEN}/arm9_bios_dispatch.c
+    ${GEN}/arm7_bios.c
+    ${GEN}/arm7_bios_dispatch.c)
+target_include_directories(nds_banks PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+set_source_files_properties(
+    ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
+    ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
+    PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
+
+# SHA-1 helper (reused from the recompiler support lib).
+add_library(nds_support STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support/sha1.cpp)
+target_include_directories(nds_support PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+
+# The runner: runtime ABI + DS bus + CP15 + driver.
+# The portable ARMv4T/v5TE core (decoders + IR + the Tier-3 interpreter).
+add_library(nds_armv4t STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/arm_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/thumb_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/arm_ir.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/interpreter.cpp)
+target_include_directories(nds_armv4t PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+
+add_executable(nds_runner
+    src/runtime_arm.cpp
+    src/bus.cpp
+    src/cp15.cpp
+    src/io.cpp
+    src/tier3.cpp
+    src/scheduler.cpp
+    src/main.cpp)
+target_include_directories(nds_runner PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
+target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)

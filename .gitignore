@@ -1,0 +1,56 @@
+# ───────────────────────────────────────────────────────────────────────────
+# Copyrighted dumps — NEVER commit. These are Nintendo's BIOS/firmware images
+# and the per-machine key; the build hash-verifies the owner's own dumps.
+# ───────────────────────────────────────────────────────────────────────────
+bios/*.rom
+bios/*.bin
+bios/*.ROM
+bios/*.cfg
+# (kept: bios/*.toml curated configs, bios/README.md)
+
+# ───────────────────────────────────────────────────────────────────────────
+# Derived-from-BIOS artifacts — recompiled BIOS C and Ghidra-extracted analysis
+# are derivative works of the copyrighted dumps; regenerated, never committed.
+# ───────────────────────────────────────────────────────────────────────────
+generated/*
+!generated/.gitkeep
+
+# Ghidra project state holds the disassembled BIOS programs (derivative) + is
+# large binary churn. Keep the scripts (ghidra/*.py, *.sh) and ghidra/README.md.
+ghidra/*.gpr
+ghidra/*.rep/
+ghidra/*.lock
+ghidra/*.lock~
+
+# ───────────────────────────────────────────────────────────────────────────
+# Oracle emulator clone — melonDS is GPLv3, kept out of the native build and
+# vendored locally by oracle/setup-melonds.sh. The oracle shim itself lives in
+# oracle/shim/ (tracked); only melonDS source edits ship as oracle/patches/*.
+# ───────────────────────────────────────────────────────────────────────────
+third_party/
+
+# ── Build trees ────────────────────────────────────────────────────────────
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.a
+*.lib
+
+# ── Runtime artifacts ──────────────────────────────────────────────────────
+*.log
+*.bmp
+dispatch_misses.log
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+
+# ── Editor / OS cruft ──────────────────────────────────────────────────────
+.vs/
+.idea/
+.vscode/
+*.user
+.DS_Store
+Thumbs.db
