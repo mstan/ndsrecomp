@@ -238,14 +238,25 @@ uint32_t nds_irq_pending(int cpu) {
 // numbers land with the melonDS oracle. VBlank (IF bit 0) fires once per
 // frame. Both cores see it (a display event).
 void nds_tick_hw(unsigned long long cyc) {
-    // Display VBlank (IF bit 0), once per frame, both cores.
-    static const unsigned long long SCAN = 2130, LINES = 263;
+    // Display VBlank (IF bit 0): exactly once per frame at scanline 192, both
+    // cores. Timed in ARM9-cycle units. The DS display runs on the 33.51 MHz
+    // system clock (2130 cycles/scanline, 263 lines = 560190 cyc/frame =
+    // 59.83 Hz); nds_tick_hw is fed ARM9 cycles (67 MHz, 2x the system clock),
+    // so each unit doubles: 4260 ARM9 cyc/scanline, 1,120,380 ARM9 cyc/frame.
+    // VBlank begins at line 192. Count by absolute vblank index so a delta that
+    // spans the line-192 boundary fires once (and a delta > 1 frame fires per
+    // frame) — the old code double-fired (frame-wrap AND line-192) and used the
+    // system-clock period against ARM9 cycles, making VBlank 4x too fast.
+    static const unsigned long long SCAN = 4260, LINES = 263;
     static const unsigned long long FRAME = SCAN * LINES;
+    static const unsigned long long VB_START = 192ull * SCAN;
     static unsigned long long last = 0;
-    unsigned long long pf = last / FRAME, pl = (last % FRAME) / SCAN;
-    unsigned long long cf = cyc / FRAME,  cl = (cyc % FRAME) / SCAN;
+    auto vb_index = [](unsigned long long c) -> unsigned long long {
+        return c < VB_START ? 0ull : (c - VB_START) / FRAME + 1ull;
+    };
+    unsigned long long pv = vb_index(last), cv = vb_index(cyc);
     last = cyc;
-    if ((cf > pf) || (pl < 192 && cl >= 192)) {
+    for (unsigned long long i = pv; i < cv; ++i) {
         ++g_counts.vblank9;
         ++g_counts.vblank7;
         nds_raise_irq(0, 0x1u); nds_raise_irq(1, 0x1u);
