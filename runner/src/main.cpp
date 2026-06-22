@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -17,6 +18,7 @@
 #include "scheduler.h"
 #include "runtime_arm.h"
 #include "io.h"
+#include "debug_server.h"
 #include "sha1.h"
 
 // Generated per-CPU dispatch tables (C linkage).
@@ -57,9 +59,33 @@ void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string dir = (argc > 1) ? argv[1] : "bios";
-    uint64_t budget = (argc > 2) ? std::strtoull(argv[2], nullptr, 0)
-                                 : 4000000ull;
+    std::string dir = "bios";
+    uint64_t budget = 4000000ull;
+    bool serve = false;
+    uint16_t port = 19842;
+    int positional = 0;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--serve") {
+            serve = true;
+        } else if (a == "--port" && i + 1 < argc) {
+            port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (a == "--help" || a == "-h") {
+            std::fprintf(stderr,
+                "usage: %s [bios-dir] [cycle-budget] [--serve] [--port 19842]\n",
+                argv[0]);
+            return 0;
+        } else if (positional == 0) {
+            dir = a;
+            ++positional;
+        } else if (positional == 1) {
+            budget = std::strtoull(a.c_str(), nullptr, 0);
+            ++positional;
+        } else {
+            std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
+            return 2;
+        }
+    }
 
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
@@ -88,6 +114,12 @@ int main(int argc, char** argv) {
     scheduler_init();
     scheduler_reset_cpu(0, 0xFFFF0000u, reset_cpsr);  // ARM9
     scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
+
+    if (serve) {
+        std::fprintf(stderr, "[run] debug server mode from reset\n");
+        debug_serve(port);
+        return 0;
+    }
 
     std::fprintf(stderr, "[run] dual-CPU from reset, ARM9 budget=%llu cycles\n",
                  (unsigned long long)budget);

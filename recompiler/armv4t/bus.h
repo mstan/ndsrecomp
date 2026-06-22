@@ -37,6 +37,18 @@ struct Bus {
                                    bool /*sequential*/) const {
         return 1;
     }
+
+    virtual void coproc_write(uint32_t /*cp_num*/, uint32_t /*op1*/,
+                              uint32_t /*crn*/, uint32_t /*crm*/,
+                              uint32_t /*op2*/, uint32_t /*value*/) {}
+    virtual uint32_t coproc_read(uint32_t /*cp_num*/, uint32_t /*op1*/,
+                                 uint32_t /*crn*/, uint32_t /*crm*/,
+                                 uint32_t /*op2*/) {
+        return 0;
+    }
+    virtual void coproc_cdp(uint32_t /*cp_num*/, uint32_t /*op1*/,
+                            uint32_t /*crn*/, uint32_t /*crm*/,
+                            uint32_t /*op2*/) {}
 };
 
 }  // namespace armv4t

@@ -82,6 +82,10 @@ struct FinderStats {
     std::size_t functions_thumb = 0;
     std::size_t indirect_transfer_count = 0;
     std::size_t branch_targets_discovered = 0;
+    // LR landing pads auto-discovered (Tier 2): an executable-ROM constant
+    // live in LR at an UNRESOLVED indirect PC-write — the return-pad idiom
+    // (adr lr,X; ldr pc,[handler]). Seeded as a dispatch entry.
+    std::size_t landing_pads_discovered = 0;
     std::size_t undefined_instr_count = 0;
     // Automatic jump-table detection (MC-HP-000).
     std::size_t auto_jump_tables = 0;          // tables emitted

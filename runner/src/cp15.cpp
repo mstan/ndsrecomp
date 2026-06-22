@@ -81,8 +81,12 @@ extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
             if (crm == 1 && op2 == 0) {          // DTCM base/size
                 g_cp15.dtcm_base = value & 0xFFFFF000u;
                 g_cp15.dtcm_size = tcm_bytes(value);
+                std::fprintf(stderr, "[cp15] DTCM region: base=%08X vsize=%u\n",
+                             g_cp15.dtcm_base, g_cp15.dtcm_size);
             } else if (crm == 1 && op2 == 1) {   // ITCM size (base = 0)
                 g_cp15.itcm_size = tcm_bytes(value);
+                std::fprintf(stderr, "[cp15] ITCM region: base=0 vsize=%u\n",
+                             g_cp15.itcm_size);
             }
             break;
         default:

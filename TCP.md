@@ -28,8 +28,10 @@ events** and only then read state:
 | `ping` | — | `{"pong":true}` |
 | `regs` | `cpu`:9\|7 | `{r:[16],cpsr,spsr,mode}` |
 | `event_counts` | — | `{vblank9,vblank7,ipcsync_w,fifo9to7,fifo7to9,dma_done,timer_ovf}` |
+| `io_state` | — | ARM9/ARM7 `{ime,ie,if,postflg,ipcsync}`, `cpu_stop`, `num_frames`, and event counts |
 | `run_to_event` | `event`,`count` | advances until the named counter reaches `count`; `{reached,counts}` |
 | `read_mem` | `cpu`:9\|7,`addr`,`len` | `{hex}` — the **CPU's** memory view (ARM9 and ARM7 differ) |
+| `read_io` | `cpu`:9\|7,`addr`,`width`:8\|16\|32 | `{value}` — exact-width I/O register read |
 | `read_region` | `region` | raw region bytes (see below) |
 | `framebuffer` | `engine`:A\|B | `{w:256,h:192,rgb:<hex>}` |
 | `touch` | `x`,`y`,`down` | injects a TSC touch (oracle + native both accept) |

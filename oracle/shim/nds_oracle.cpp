@@ -80,6 +80,23 @@ class OracleNDS : public NDS
 public:
     explicit OracleNDS(NDSArgs&& args) : NDS(std::move(args)) {}
 
+    u32 DebugIORead(u32 cpu, u32 addr, u32 width)
+    {
+        if (cpu == 7)
+        {
+            if (width == 8) return ARM7IORead8(addr);
+            if (width == 16) return ARM7IORead16(addr);
+            if (width == 32) return ARM7IORead32(addr);
+        }
+        else
+        {
+            if (width == 8) return ARM9IORead8(addr);
+            if (width == 16) return ARM9IORead16(addr);
+            if (width == 32) return ARM9IORead32(addr);
+        }
+        return 0;
+    }
+
     void ARM9IOWrite16(u32 addr, u16 val) override
     {
         if (addr == 0x04000180) g_oracle_counts.ipcsync_w++;
@@ -224,6 +241,23 @@ static std::string countsJson()
     return buf;
 }
 
+static std::string ioStateJson(OracleNDS* nds)
+{
+    char buf[768];
+    snprintf(buf, sizeof(buf),
+        "{\"cpu9\":{\"ime\":%u,\"ie\":%u,\"if\":%u,\"postflg\":%u,\"ipcsync\":%u},"
+        "\"cpu7\":{\"ime\":%u,\"ie\":%u,\"if\":%u,\"postflg\":%u,\"ipcsync\":%u},"
+        "\"cpu_stop\":%u,\"num_frames\":%u,\"counts\":%s}",
+        nds->IME[0], nds->IE[0], nds->IF[0],
+        nds->DebugIORead(9, 0x04000300, 8),
+        nds->DebugIORead(9, 0x04000180, 16),
+        nds->IME[1], nds->IE[1], nds->IF[1],
+        nds->DebugIORead(7, 0x04000300, 8),
+        nds->DebugIORead(7, 0x04000180, 16),
+        nds->CPUStop, nds->NumFrames, countsJson().c_str());
+    return buf;
+}
+
 // ───────────────────────────────────────────────────────── command dispatch ─
 
 // Cap so run_to_event can't spin forever if the target event never advances
@@ -269,6 +303,9 @@ static std::string handle(OracleNDS* nds, const std::string& line)
     if (cmd == "event_counts")
         return countsJson();
 
+    if (cmd == "io_state")
+        return ioStateJson(nds);
+
     if (cmd == "run_to_event")
     {
         std::string ev = jsonStr(line, "event");
@@ -297,6 +334,19 @@ static std::string handle(OracleNDS* nds, const std::string& line)
             tmp[i] = (cpu == 7) ? nds->ARM7Read8(addr + i) : nds->ARM9Read8(addr + i);
         appendHex(hex, tmp.data(), tmp.size());
         return "{\"hex\":\"" + hex + "\"}";
+    }
+
+    if (cmd == "read_io")
+    {
+        uint64_t cpu = jsonU64(line, "cpu", 9);
+        uint32_t addr = (uint32_t)jsonU64(line, "addr", 0);
+        uint32_t width = (uint32_t)jsonU64(line, "width", 32);
+        if (width != 8 && width != 16 && width != 32)
+            return "{\"error\":\"width must be 8, 16, or 32\"}";
+        char buf[64];
+        snprintf(buf, sizeof(buf), "{\"value\":%u}",
+                 nds->DebugIORead(cpu == 7 ? 7 : 9, addr, width));
+        return buf;
     }
 
     if (cmd == "read_region")

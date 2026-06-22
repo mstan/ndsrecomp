@@ -419,10 +419,11 @@ int main(int argc, char** argv) {
     finder.run();
     const auto& st = finder.stats();
     std::printf("\n[finder] functions=%zu (arm=%zu thumb=%zu) "
-                "indirect=%zu undefined=%zu auto_jump_tables=%zu\n",
+                "indirect=%zu undefined=%zu auto_jump_tables=%zu "
+                "landing_pads=%zu\n",
                 st.functions_total, st.functions_arm, st.functions_thumb,
                 st.indirect_transfer_count, st.undefined_instr_count,
-                st.auto_jump_tables);
+                st.auto_jump_tables, st.landing_pads_discovered);
     if (!finder.collisions().empty()) {
         std::printf("[finder] %zu data-range collisions (flow into data):\n",
                     finder.collisions().size());

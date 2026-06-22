@@ -863,18 +863,22 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             // decoder but still have a fully-known target. Keep this
             // intentionally narrow so misses stay loud and false
             // positives stay rare.
+            bool indirect_resolved = false;
             uint32_t resolved = 0;
             if (eval_dp_imm_pc_write(ins, &resolved)) {
+                indirect_resolved = true;
                 CpuMode target_mode = entry_mode;
                 if (ins.rn != 15 && (resolved & 1u)) {
                     target_mode = CpuMode::Thumb;
                 }
                 enqueue_resolved_target(resolved, target_mode, "branch");
             } else if (eval_dp_reg_pc_write(ins, &resolved)) {
+                indirect_resolved = true;
                 enqueue_resolved_target(resolved, entry_mode, "branch");
             } else if (ins.op == armv4t::IrOp::LDR && ins.rd == 15) {
                 uint32_t ea = 0;
                 if (eval_mem_imm_addr(ins, &ea) && can_read_at(ea, 4)) {
+                    indirect_resolved = true;
                     uint32_t raw = read_u32(ea & ~uint32_t{3});
                     raw = ror32(raw, (ea & 3u) * 8u);
                     CpuMode target_mode = (raw & 1u)
@@ -886,6 +890,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     uint32_t raw = 0;
                     if (eval_symbolic_mem_addr(ins, &rn, &offset) &&
                         lookup_mem_const(rn, offset, &raw)) {
+                        indirect_resolved = true;
                         CpuMode target_mode = (raw & 1u)
                             ? CpuMode::Thumb : entry_mode;
                         enqueue_resolved_target(raw, target_mode, "branch");
@@ -905,6 +910,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     resolve_symbolic_base(ins.block.rn, offset,
                                           &rn, &resolved_offset) &&
                     lookup_mem_const(rn, resolved_offset, &raw)) {
+                    indirect_resolved = true;
                     enqueue_resolved_target(raw, entry_mode, "branch");
                 }
             }
@@ -946,6 +952,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     raw_known = true;
                 }
                 if (raw_known) {
+                    indirect_resolved = true;
                     uint32_t tgt = raw & ~uint32_t{1};
                     CpuMode tgt_mode = entry_mode;
                     if (src_is_bx) {
@@ -967,6 +974,54 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 CpuMode return_mode = (raw & 1u)
                     ? CpuMode::Thumb : CpuMode::Arm;
                 enqueue_resolved_target(raw, return_mode, "branch");
+            }
+
+            // Tier-2 landing-pad auto-discovery. The return-pad idiom sets LR
+            // to a code address, then transfers control OUT via an indirect
+            // PC-write the finder can't resolve (e.g. `adr lr,X; ldr pc,
+            // [dtcm+0x3FFC]` — the BIOS IRQ handler calling the firmware's
+            // installed handler). The callee returns with `bx lr`, landing at
+            // X, which NO static branch ever targets — so without this it is a
+            // dispatch miss. Seed X as a dispatch entry (the finder then splits
+            // the containing function there, exactly like any other entry).
+            //
+            // Soundness gates (see the multi-entry-dispatch design):
+            //   - LR holds a statically-known constant — reg_const tracks the
+            //     load and clears on any clobber, so "known" ⇒ live + unclobbered;
+            //   - it points into executable ROM and decodes to a valid aligned
+            //     instruction (looks_like_code);
+            //   - the transfer is genuinely UNRESOLVED (else the callee is known
+            //     and there is nothing to call back to);
+            //   - the transfer is a call-OUT, not a return shape (bx/mov pc via
+            //     LR, or any LDM pop {...,pc}) — those land AT the pad, not past it.
+            if (!indirect_resolved && reg_const[14].known) {
+                bool is_return_shape = false;
+                if (ins.op == armv4t::IrOp::LDM) {
+                    is_return_shape = true;  // pop {...,pc} is a return
+                } else if ((ins.op == armv4t::IrOp::BX ||
+                            ins.op == armv4t::IrOp::BLX_reg) &&
+                           ins.rm == 14) {
+                    is_return_shape = true;  // bx lr
+                } else if (ins.rd == 15 &&
+                           ins.op2.kind == armv4t::Op2::Kind::Shifted &&
+                           !ins.op2.shifted.by_register &&
+                           ins.op2.shifted.imm_or_rs == 0 &&
+                           ins.op2.shifted.rm == 14) {
+                    is_return_shape = true;  // mov pc, lr
+                }
+                uint32_t pad_raw = reg_const[14].value;
+                uint32_t pad = pad_raw & ~uint32_t{1};
+                CpuMode pad_mode = (pad_raw & 1u) ? CpuMode::Thumb
+                                                  : CpuMode::Arm;
+                if (!is_return_shape && pad != 0 &&
+                    addr_in_rom(pad) && !addr_in_data_range(pad) &&
+                    looks_like_code(pad, pad_mode, /*strict=*/false)) {
+                    char nm[64];
+                    std::snprintf(nm, sizeof nm, "lpad_%08X", pad);
+                    mode_switch_seeds_.push_back(
+                        FunctionSeed{pad, pad_mode, nm});
+                    ++stats_.landing_pads_discovered;
+                }
             }
         }
 

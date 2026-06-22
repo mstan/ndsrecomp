@@ -585,6 +585,7 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
+    uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
     if (g_call_return_depth >= kCallReturnStackSize) {
         std::fprintf(stderr,
                      "runtime_arm: generated call-return stack overflow "
@@ -593,15 +594,16 @@ extern "C" void runtime_call_push_return(uint32_t return_pc) {
         runtime_trace_dump_recent(96);
         std::abort();
     }
-    g_call_return_stack[g_call_return_depth++] = pc;
+    g_call_return_stack[g_call_return_depth++] = key;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth, 1u);
 }
 
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
+    uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
     for (uint32_t i = g_call_return_depth; i != 0; --i) {
         uint32_t slot = i - 1u;
-        if (g_call_return_stack[slot] == pc) {
+        if (g_call_return_stack[slot] == key) {
             runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc,
                                 g_call_return_depth,
                                 (slot + 1u == g_call_return_depth) ? 2u : 5u);
@@ -610,7 +612,7 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
         }
     }
     uint32_t top = g_call_return_depth != 0
-        ? g_call_return_stack[g_call_return_depth - 1u]
+        ? (g_call_return_stack[g_call_return_depth - 1u] & ~1u)
         : 0xFFFFFFFFu;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc, top, g_call_return_depth, 3u);
     return 0;
@@ -619,7 +621,7 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
 extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
     if (g_call_return_depth != 0 &&
-        g_call_return_stack[g_call_return_depth - 1u] == pc) {
+        (g_call_return_stack[g_call_return_depth - 1u] & ~1u) == pc) {
         runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
                             4u);
         --g_call_return_depth;

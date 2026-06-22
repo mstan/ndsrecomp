@@ -55,6 +55,26 @@ void (*lookup_in(const DispatchEntry* table, unsigned len,
         if ((table[i].thumb != 0) == thumb) return table[i].fn;
     return nullptr;
 }
+
+// Bracket the static function range containing `pc` in a dispatch table
+// (sorted by addr): [*start, *end). Returns false if the table is empty or
+// `pc` precedes the first entry. Used only by the dispatch-miss diagnostic
+// to localize a non-function-start entry to its containing recompiled func.
+bool bracket_static_range(const DispatchEntry* table, unsigned len,
+                          uint32_t pc, uint32_t* start, uint32_t* end) {
+    if (!table || len == 0) return false;
+    unsigned lo = 0, hi = len;
+    while (lo < hi) {                       // first index with addr > pc
+        unsigned mid = (lo + hi) >> 1u;
+        if (table[mid].addr <= pc) lo = mid + 1u; else hi = mid;
+    }
+    if (lo == 0) return false;              // pc precedes the first entry
+    *start = table[lo - 1u].addr;
+    unsigned j = lo;                        // first entry with a larger addr
+    while (j < len && table[j].addr == *start) ++j;
+    *end = (j < len) ? table[j].addr : *start;
+    return true;
+}
 }  // namespace
 
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
@@ -75,6 +95,9 @@ extern "C" int nds_has_bank(uint32_t pc, int thumb) {
 }
 extern "C" int nds_slice_over(void) {
     return (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) ? 1 : 0;
+}
+extern "C" uint32_t nds_exception_base(void) {
+    return g_ctx[g_nds_active].exc_base;
 }
 
 // Terminal halt for the active CPU: unwind now and don't resume it.
@@ -299,10 +322,11 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     const CpuCtx& c = g_ctx[g_nds_active];
     if (void (*fn)(void) = lookup_in(c.table, c.len, pc, thumb)) { fn(); return; }
-    // Tier 3: code copied into RAM at runtime (firmware boot, menu) has no
-    // static bank — run the guest's OWN bytes through the interpreter
-    // (PRINCIPLES.md "the one exception"), never an HLE model.
-    if (pc >= 0x02000000u && pc < 0x04000000u) { tier3_run(pc); return; }
+    // Tier 3: code copied into RAM at runtime (firmware boot, menu, and the
+    // ITCM-resident IRQ handler) has no static bank — run the guest's OWN
+    // bytes through the interpreter (PRINCIPLES.md "the one exception"),
+    // never an HLE model. The bus owns the memory map (covers ITCM mirror).
+    if (bus_addr_is_exec_ram(pc)) { tier3_run(pc); return; }
     runtime_dispatch_miss(target_pc);
 }
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
@@ -313,25 +337,71 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const char* cpu = (g_nds_active == NDS_ARM9) ? "arm9" : "arm7";
-    bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    const char* mode = thumb ? "thumb" : "arm";
+    const uint32_t t = target_pc & ~1u;
     std::fprintf(stderr,
         "[dispatch-miss] cpu=%s pc=0x%08X %s (lr=0x%08X)\n",
-        cpu, target_pc & ~1u, thumb ? "thumb" : "arm", g_cpu.R[14]);
-    // Append the discovery-loop hint line (CLAUDE.md BUILD LOOP step 5).
+        cpu, t, mode, g_cpu.R[14]);
+
+    // A miss INSIDE recompiled static ROM is a real non-function-start entry
+    // PC (a BIOS-ABI landing pad reached by a runtime-computed branch), NOT a
+    // Tier-3/HLE case. The finder's landing-pad discovery should normally seed
+    // it; if one slips through, it is a genuine entry fact — declare it. Never
+    // route static ROM to Tier-3.
+    const bool arm9 = (g_nds_active == NDS_ARM9);
+    const bool in_static_rom =
+        (arm9 && t >= 0xFFFF0000u) || (!arm9 && t < 0x00004000u);
+
+    // Localize the pad to its containing recompiled function.
+    uint32_t rs = 0, re = 0;
+    const CpuCtx& cc = g_ctx[g_nds_active];
+    const bool have_range = bracket_static_range(cc.table, cc.len, t, &rs, &re);
+
+    if (in_static_rom) {
+        std::fprintf(stderr,
+            "  [!] dispatch miss INSIDE executable static %s BIOS ROM at 0x%08X\n"
+            "      real non-function-start entry reached by a computed branch.\n"
+            "      The finder's landing-pad discovery should seed it; if not,\n"
+            "      add this entry_point to the bank config (do NOT interpret ROM):\n",
+            arm9 ? "ARM9" : "ARM7", t);
+        if (have_range)
+            std::fprintf(stderr,
+                "      # containing static range: 0x%08X..0x%08X\n", rs, re);
+        std::fprintf(stderr,
+            "        [[entry_point]]\n"
+            "        addr = 0x%08X\n"
+            "        mode = \"%s\"\n"
+            "        kind = \"runtime_confirmed\"\n",
+            t, mode);
+    }
+
+    // Discovery-loop log (CLAUDE.md BUILD LOOP step 5): a copy-pasteable
+    // [[entry_point]] block per miss, directly appendable to the config.
     if (std::FILE* f = std::fopen("dispatch_misses.log", "ab")) {
-        std::fprintf(f, "extra_func 0x%08X  %s   # cpu=%s lr=0x%08X\n",
-                     target_pc & ~1u, thumb ? "thumb" : "arm", cpu, g_cpu.R[14]);
+        std::fprintf(f, "# cpu=%s pc=0x%08X lr=0x%08X%s\n",
+                     cpu, t, g_cpu.R[14],
+                     in_static_rom ? " (static ROM non-function-start entry)"
+                                   : "");
+        if (in_static_rom && have_range)
+            std::fprintf(f, "#   containing static range 0x%08X..0x%08X\n",
+                         rs, re);
+        std::fprintf(f,
+            "[[entry_point]]\naddr = 0x%08X\nmode = \"%s\"\n"
+            "kind = \"runtime_confirmed\"\n\n",
+            t, mode);
         std::fclose(f);
     }
-    // If the target is RAM-resident (copied firmware code), dump the bytes
-    // there — this is the Tier-3 dirty-RAM case; show what would run.
-    uint32_t t = target_pc & ~1u;
+
+    // RAM-resident target (copied firmware code): this is the Tier-3 dirty-RAM
+    // case — dump the bytes there to show what would run.
     if (t >= 0x02000000u && t < 0x04000000u) {
         std::fprintf(stderr, "  [ram@0x%08X]", t);
         for (int i = 0; i < 16; i += 4)
             std::fprintf(stderr, " %08X", bus_read_u32(t + i));
         std::fprintf(stderr, "\n");
     }
+
     runtime_trace_dump_recent(16);
     nds_halt("dispatch miss");
 }
@@ -344,25 +414,28 @@ uint32_t g_crs_depth = 0;
 }  // namespace
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
+    uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
     if (g_crs_depth >= kCRS) { nds_halt("call-return overflow"); return; }
-    g_crs[g_crs_depth++] = pc;
+    g_crs[g_crs_depth++] = key;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 1u);
 }
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
+    uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
     for (uint32_t i = g_crs_depth; i != 0; --i)
-        if (g_crs[i - 1u] == pc) {
+        if (g_crs[i - 1u] == key) {
             runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth,
                                 (i == g_crs_depth) ? 2u : 5u);
             g_crs_depth = i - 1u; return 1;
         }
     runtime_trace_event(RUNTIME_TRACE_CALL, pc,
-        g_crs_depth ? g_crs[g_crs_depth - 1u] : 0xFFFFFFFFu, g_crs_depth, 3u);
+        g_crs_depth ? (g_crs[g_crs_depth - 1u] & ~1u) : 0xFFFFFFFFu,
+        g_crs_depth, 3u);
     return 0;
 }
 extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
-    if (g_crs_depth && g_crs[g_crs_depth - 1u] == pc) {
+    if (g_crs_depth && (g_crs[g_crs_depth - 1u] & ~1u) == pc) {
         runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 4u);
         --g_crs_depth;
     }

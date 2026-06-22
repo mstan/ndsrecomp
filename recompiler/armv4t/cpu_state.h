@@ -19,6 +19,7 @@
 //   Z (30)        : Zero
 //   C (29)        : Carry
 //   V (28)        : Overflow
+//   Q (27)        : sticky saturation (ARMv5TE only; ARM9)
 //   I (7)         : IRQ disable
 //   F (6)         : FIQ disable
 //   T (5)         : THUMB state (set = THUMB)
@@ -65,6 +66,7 @@ struct CPSR {
     bool z : 1;
     bool c : 1;
     bool v : 1;
+    bool q : 1;  // sticky saturation (ARMv5TE; set by QADD/SMLAxy family)
     bool i : 1;  // IRQ disable
     bool f : 1;  // FIQ disable
     bool t : 1;  // THUMB state

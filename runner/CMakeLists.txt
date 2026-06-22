@@ -50,9 +50,13 @@ add_executable(nds_runner
     src/io.cpp
     src/tier3.cpp
     src/scheduler.cpp
+    src/debug_server.cpp
     src/main.cpp)
 target_include_directories(nds_runner PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
 target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
+if(WIN32)
+    target_link_libraries(nds_runner PRIVATE ws2_32)
+endif()

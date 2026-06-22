@@ -46,6 +46,35 @@ BusEvent g_ring[kRingSize];
 uint32_t g_ring_w = 0;
 uint64_t g_ring_seq = 0;
 
+constexpr uint32_t kWatchSize = 512;
+BusWatchEvent g_watch[kWatchSize];
+uint32_t g_watch_w = 0;
+uint32_t g_watch_count = 0;
+
+bool watch_range(uint32_t addr, uint32_t width, uint32_t lo, uint32_t hi) {
+    uint32_t end = addr + width;
+    return addr < hi && end > lo;
+}
+
+bool watch_addr(uint32_t addr, uint32_t width) {
+    return watch_range(addr, width, 0x021F0000u, 0x021F0040u) ||
+           watch_range(addr, width, 0x027FF800u, 0x027FF880u) ||
+           watch_range(addr, width, 0x0380F800u, 0x0380F840u);
+}
+
+void watch_push(uint8_t width, uint32_t addr, uint32_t value) {
+    if (!watch_addr(addr, width)) return;
+    BusWatchEvent& e = g_watch[g_watch_w];
+    e.seq = g_ring_seq;
+    e.cpu = static_cast<uint8_t>(g_nds_active);
+    e.width = width;
+    e.pc = g_cpu.R[15];
+    e.addr = addr;
+    e.value = value;
+    g_watch_w = (g_watch_w + 1u) % kWatchSize;
+    if (g_watch_count < kWatchSize) ++g_watch_count;
+}
+
 inline void ring_push(uint8_t write, uint8_t width, uint32_t addr, uint32_t value) {
     BusEvent& e = g_ring[g_ring_w];
     e.seq = ++g_ring_seq;
@@ -55,6 +84,7 @@ inline void ring_push(uint8_t write, uint8_t width, uint32_t addr, uint32_t valu
     e.addr = addr;
     e.value = value;
     g_ring_w = (g_ring_w + 1u) % kRingSize;
+    if (write) watch_push(width, addr, value);
 }
 
 // Resolve an address to a backing pointer for the active CPU. Returns
@@ -64,10 +94,13 @@ uint8_t* resolve(uint32_t addr, uint32_t len) {
     const bool arm9 = (g_nds_active == NDS_ARM9);
 
     if (arm9) {
-        // ITCM: mirrored across [0, 0x02000000) when enabled.
+        // ITCM: responds across its virtual region [0, itcm_size) (the DS
+        // firmware programs a 32 MB span), with the 32 KB physical backing
+        // MIRRORED every 32 KB within that span. itcm_size is the virtual
+        // span; the mirror modulus is the physical size (g_itcm.size()).
         if (g_cp15.itcm_enable && g_cp15.itcm_size &&
-            addr < 0x02000000u && (addr & (0x02000000u - 1u)) < g_cp15.itcm_size) {
-            uint32_t o = addr & (g_cp15.itcm_size - 1u);
+            addr < 0x02000000u && addr < g_cp15.itcm_size) {
+            uint32_t o = addr & static_cast<uint32_t>(g_itcm.size() - 1u);
             if (o + len <= g_itcm.size()) return g_itcm.data() + o;
         }
         // DTCM: at its configured base.
@@ -140,6 +173,8 @@ void bus_init() {
     g_arm7_bios.assign(16u * 1024, 0);
     g_ring_w = 0;
     g_ring_seq = 0;
+    g_watch_w = 0;
+    g_watch_count = 0;
 }
 
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n) {
@@ -165,6 +200,64 @@ void bus_dump_access_ring(uint32_t max_entries) {
                      e.cpu == 0 ? '9' : '7', e.write ? "W" : "R",
                      e.width, e.addr, e.value);
     }
+}
+
+bool bus_get_region(const char* name, BusRegion* out) {
+    if (!name || !out) return false;
+    if (std::strcmp(name, "mainram") == 0) {
+        *out = {g_main_ram.data(), static_cast<uint32_t>(g_main_ram.size())};
+        return true;
+    }
+    if (std::strcmp(name, "wram7") == 0) {
+        *out = {g_arm7_wram.data(), static_cast<uint32_t>(g_arm7_wram.size())};
+        return true;
+    }
+    if (std::strcmp(name, "wramshared") == 0) {
+        *out = {g_shared_wram.data(), static_cast<uint32_t>(g_shared_wram.size())};
+        return true;
+    }
+    if (std::strcmp(name, "itcm") == 0) {
+        *out = {g_itcm.data(), static_cast<uint32_t>(g_itcm.size())};
+        return true;
+    }
+    if (std::strcmp(name, "dtcm") == 0) {
+        *out = {g_dtcm.data(), static_cast<uint32_t>(g_dtcm.size())};
+        return true;
+    }
+    return false;
+}
+
+// True for writable regions that can hold guest-copied executable code —
+// the Tier-3 dirty-RAM interpreter runs from these. Branches on the active
+// CPU for ARM9 ITCM (mirrored across its virtual span). Keeps the
+// memory-map authority in the bus so Tier-3 can't drift from resolve().
+bool bus_addr_is_exec_ram(uint32_t addr) {
+    if (g_nds_active == NDS_ARM9 && g_cp15.itcm_enable && g_cp15.itcm_size &&
+        addr < 0x02000000u && addr < g_cp15.itcm_size)
+        return true;                              // ITCM virtual span
+    if (addr >= 0x02000000u && addr < 0x04000000u)
+        return true;                              // main RAM + WRAM (+DTCM)
+    return false;
+}
+
+uint8_t bus_debug_read8(int cpu, uint32_t addr) {
+    NdsCpu old = g_nds_active;
+    g_nds_active = (cpu == 7) ? NDS_ARM7 : NDS_ARM9;
+    uint8_t v = 0;
+    if (uint8_t* p = resolve(addr, 1)) v = *p;
+    else if (is_io(addr)) v = static_cast<uint8_t>(io_read(addr, 1));
+    g_nds_active = old;
+    return v;
+}
+
+uint32_t bus_debug_watch_copy(BusWatchEvent* out, uint32_t max_entries) {
+    if (!out || max_entries == 0) return 0;
+    uint32_t count = g_watch_count;
+    if (count > max_entries) count = max_entries;
+    uint32_t start = (g_watch_w + kWatchSize - count) % kWatchSize;
+    for (uint32_t i = 0; i < count; ++i)
+        out[i] = g_watch[(start + i) % kWatchSize];
+    return count;
 }
 
 // ── C ABI: the generated banks call these ──────────────────────────────

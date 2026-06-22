@@ -138,6 +138,7 @@ void Interpreter::enter_irq(CPUState& cpu, uint32_t return_address) {
     if (cpu.cpsr.z) cpsr_u32 |= 1u << 30;
     if (cpu.cpsr.c) cpsr_u32 |= 1u << 29;
     if (cpu.cpsr.v) cpsr_u32 |= 1u << 28;
+    if (cpu.cpsr.q) cpsr_u32 |= 1u << 27;
     if (cpu.cpsr.i) cpsr_u32 |= 1u << 7;
     if (cpu.cpsr.f) cpsr_u32 |= 1u << 6;
     if (cpu.cpsr.t) cpsr_u32 |= 1u << 5;
@@ -185,6 +186,7 @@ void Interpreter::enter_swi(CPUState& cpu, uint32_t return_address,
     if (cpu.cpsr.z) cpsr_u32 |= 1u << 30;
     if (cpu.cpsr.c) cpsr_u32 |= 1u << 29;
     if (cpu.cpsr.v) cpsr_u32 |= 1u << 28;
+    if (cpu.cpsr.q) cpsr_u32 |= 1u << 27;
     if (cpu.cpsr.i) cpsr_u32 |= 1u << 7;
     if (cpu.cpsr.f) cpsr_u32 |= 1u << 6;
     if (cpu.cpsr.t) cpsr_u32 |= 1u << 5;
@@ -351,6 +353,12 @@ void write_user_reg(CPUState& cpu, int reg, uint32_t value) {
     }
 }
 
+void load_pc_interworking(CPUState& cpu, uint32_t value) {
+    cpu.cpsr.t = (value & 1u) != 0;
+    cpu.thumb = cpu.cpsr.t;
+    cpu.R[15] = value & ~1u;
+}
+
 // ARM ARM A2.6.5 / A4.1.45 "Exception return": when a data-processing
 // instruction or LDM has Rd=R15 (PC) AND the S bit set AND we are in
 // a privileged mode (anything except User/System), the SPSR of the
@@ -383,6 +391,7 @@ void exception_return(CPUState& cpu, uint32_t new_pc) {
     cpu.cpsr.z = (spsr >> 30) & 1u;
     cpu.cpsr.c = (spsr >> 29) & 1u;
     cpu.cpsr.v = (spsr >> 28) & 1u;
+    cpu.cpsr.q = (spsr >> 27) & 1u;
     cpu.cpsr.i = (spsr >>  7) & 1u;
     cpu.cpsr.f = (spsr >>  6) & 1u;
     cpu.cpsr.t = (spsr >>  5) & 1u;
@@ -413,6 +422,7 @@ void restore_cpsr_from_spsr(CPUState& cpu) {
     cpu.cpsr.z = (spsr >> 30) & 1u;
     cpu.cpsr.c = (spsr >> 29) & 1u;
     cpu.cpsr.v = (spsr >> 28) & 1u;
+    cpu.cpsr.q = (spsr >> 27) & 1u;
     cpu.cpsr.i = (spsr >>  7) & 1u;
     cpu.cpsr.f = (spsr >>  6) & 1u;
     cpu.cpsr.t = (spsr >>  5) & 1u;
@@ -599,6 +609,23 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             wrote_pc = true;
             break;
         }
+        case IrOp::BLX_reg: {
+            uint32_t target = read_reg(cpu, i.rm, i);
+            cpu.R[14] = i.pc + kArmInsnBytes;
+            cpu.cpsr.t = (target & 1u) != 0;
+            cpu.thumb = cpu.cpsr.t;
+            cpu.R[15] = target & ~1u;
+            wrote_pc = true;
+            break;
+        }
+        case IrOp::BLX_imm: {
+            cpu.R[14] = i.pc + kArmInsnBytes;
+            cpu.cpsr.t = true;
+            cpu.thumb = true;
+            cpu.R[15] = i.branch_target & ~1u;
+            wrote_pc = true;
+            break;
+        }
         case IrOp::BL_prefix: {
             // Upper half of a THUMB BL pair: stash the partial target
             // (PC+4 + sext(imm11) << 12) into LR. The lower half will
@@ -611,9 +638,15 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             // Lower half: target = LR + (imm11 << 1).
             // New LR = (PC_of_lower + 2) | 1 so a BX LR resumes in
             // THUMB.
-            uint32_t target = (cpu.R[14] + i.swi_imm) & ~1u;
+            uint32_t target = cpu.R[14] + i.swi_imm;
             cpu.R[14] = (i.pc + kThumbInsnBytes) | 1u;
-            cpu.R[15] = target;
+            if (i.branch_exchange) {
+                cpu.cpsr.t = false;
+                cpu.thumb = false;
+                cpu.R[15] = target & ~3u;
+            } else {
+                cpu.R[15] = target & ~1u;
+            }
             wrote_pc = true;
             break;
         }
@@ -711,7 +744,12 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                     }
                     default: break;
                 }
-                wrote_pc = write_dest(cpu, i.rd, value, i);
+                if (i.rd == 15) {
+                    load_pc_interworking(cpu, value);
+                    wrote_pc = true;
+                } else {
+                    wrote_pc = write_dest(cpu, i.rd, value, i);
+                }
             } else {
                 // Store form. Note: STR of PC stores `pc + 12` on
                 // ARMv4T (pipeline + one extra instruction).
@@ -761,7 +799,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                     if (i.block.s_bit && is_priv_non_system(cpu.cpsr.mode)) {
                         exception_return(cpu, v & ~1u);
                     } else {
-                        cpu.R[15] = v & ~1u;
+                        load_pc_interworking(cpu, v);
                     }
                     wrote_pc = true;
                 } else {
@@ -806,12 +844,10 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                         // we're in a privileged non-User/System mode,
                         // this is an exception return — SPSR → CPSR
                         // (and bank-swap). Otherwise plain PC load.
-                        // ARMv4T loads PC as a word; bit 0 is forced
-                        // clear (no interworking).
                         if (i.block.s_bit && is_priv_non_system(cpu.cpsr.mode)) {
                             exception_return(cpu, v & ~1u);
                         } else {
-                            cpu.R[15] = v & ~1u;
+                            load_pc_interworking(cpu, v);
                         }
                         wrote_pc = true;
                     } else if (i.block.s_bit &&
@@ -931,6 +967,131 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             break;
         }
 
+        // ── ARMv5TE: count leading zeros (ARM9) ────────────────────
+        case IrOp::CLZ: {
+            uint32_t v = cpu.R[i.rm];
+            uint32_t n = 0;
+            while (n < 32u && !(v & 0x80000000u)) { v <<= 1; ++n; }
+            cpu.R[i.rd] = n;
+            break;
+        }
+
+        // ── ARMv5TE: saturating add/sub (set CPSR.Q on clamp) ──────
+        // QADD  Rd,Rm,Rn : Rd = SignedSat(Rm + Rn)
+        // QSUB  Rd,Rm,Rn : Rd = SignedSat(Rm - Rn)
+        // QDADD Rd,Rm,Rn : Rd = SignedSat(Rm + SignedSat(2*Rn))
+        // QDSUB Rd,Rm,Rn : Rd = SignedSat(Rm - SignedSat(2*Rn))
+        // Mirrors arm_codegen.cpp emit_saturating / emit_signed_sat32.
+        case IrOp::QADD: case IrOp::QSUB:
+        case IrOp::QDADD: case IrOp::QDSUB: {
+            auto sat32 = [&](int64_t x) -> int32_t {
+                if (x >  2147483647LL) { cpu.cpsr.q = 1; return  2147483647; }
+                if (x < -2147483648LL) { cpu.cpsr.q = 1;
+                                         return (int32_t)(-2147483648LL); }
+                return (int32_t)x;
+            };
+            int64_t rm = (int32_t)cpu.R[i.rm];
+            int64_t rn = (int32_t)cpu.R[i.rn];
+            const bool dbl = (i.op == IrOp::QDADD || i.op == IrOp::QDSUB);
+            const bool sub = (i.op == IrOp::QSUB  || i.op == IrOp::QDSUB);
+            int64_t rhs = dbl ? (int64_t)sat32(rn * 2) : rn;
+            int64_t res = sub ? (rm - rhs) : (rm + rhs);
+            cpu.R[i.rd] = (uint32_t)sat32(res);
+            break;
+        }
+
+        // ── ARMv5TE: signed 16x16 / 32x16 multiply(-accumulate) ────
+        // Half-word selectors mul_x_top (Rm) / mul_y_top (Rs). The
+        // 32-bit-accumulate forms set CPSR.Q on overflow. Mirrors
+        // arm_codegen.cpp emit_signed_multiply.
+        case IrOp::SMULxy: case IrOp::SMLAxy:
+        case IrOp::SMULWy: case IrOp::SMLAWy:
+        case IrOp::SMLALxy: {
+            auto half = [](uint32_t r, bool top) -> int32_t {
+                return top ? (int32_t)(int16_t)(uint16_t)(r >> 16)
+                           : (int32_t)(int16_t)(uint16_t)(r & 0xFFFFu);
+            };
+            switch (i.op) {
+                case IrOp::SMULxy:
+                    cpu.R[i.rd] = (uint32_t)(half(cpu.R[i.rm], i.mul_x_top) *
+                                             half(cpu.R[i.rs], i.mul_y_top));
+                    break;
+                case IrOp::SMLAxy: {
+                    int64_t s = (int64_t)(half(cpu.R[i.rm], i.mul_x_top) *
+                                          half(cpu.R[i.rs], i.mul_y_top)) +
+                                (int64_t)(int32_t)cpu.R[i.rn];
+                    cpu.R[i.rd] = (uint32_t)(int32_t)s;
+                    if (s != (int32_t)s) cpu.cpsr.q = 1;
+                    break;
+                }
+                case IrOp::SMULWy:
+                    cpu.R[i.rd] = (uint32_t)(int32_t)
+                        (((int64_t)(int32_t)cpu.R[i.rm] *
+                          half(cpu.R[i.rs], i.mul_y_top)) >> 16);
+                    break;
+                case IrOp::SMLAWy: {
+                    int64_t s = (((int64_t)(int32_t)cpu.R[i.rm] *
+                                  half(cpu.R[i.rs], i.mul_y_top)) >> 16) +
+                                (int64_t)(int32_t)cpu.R[i.rn];
+                    cpu.R[i.rd] = (uint32_t)(int32_t)s;
+                    if (s != (int32_t)s) cpu.cpsr.q = 1;
+                    break;
+                }
+                case IrOp::SMLALxy: {
+                    // RdHi:RdLo += Rm.x * Rs.y.  RdHi = rd, RdLo = rn.
+                    int64_t p = (int64_t)(half(cpu.R[i.rm], i.mul_x_top) *
+                                          half(cpu.R[i.rs], i.mul_y_top));
+                    uint64_t acc = ((uint64_t)cpu.R[i.rd] << 32) | cpu.R[i.rn];
+                    acc += (uint64_t)p;
+                    cpu.R[i.rn] = (uint32_t)(acc & 0xFFFFFFFFu);
+                    cpu.R[i.rd] = (uint32_t)(acc >> 32);
+                    break;
+                }
+                default: break;
+            }
+            break;
+        }
+
+        // ── ARMv5TE: load/store doubleword (Rd and Rd+1) ───────────
+        // Same addressing as LDR/STR; the EA is word-aligned and the
+        // pair is transferred at EA and EA+4. Mirrors emit_doubleword.
+        case IrOp::LDRD: case IrOp::STRD: {
+            uint32_t base = cpu.R[i.mem.rn];
+            uint32_t offset;
+            if (i.mem.by_register) {
+                uint32_t rm_val = cpu.R[i.mem.reg_offset.rm];
+                auto sh = do_shift(rm_val, i.mem.reg_offset.type,
+                                   i.mem.reg_offset.imm_or_rs,
+                                   i.mem.reg_offset.imm_or_rs == 0, cpu.cpsr.c);
+                offset = sh.value;
+            } else {
+                offset = i.mem.imm_offset;
+            }
+            uint32_t ea = i.mem.pre_indexed
+                ? (i.mem.add ? base + offset : base - offset) : base;
+            uint32_t post = i.mem.add ? base + offset : base - offset;
+            uint32_t a = ea & ~3u;
+            unsigned rd  = i.rd;
+            unsigned rd1 = (i.rd + 1u) & 15u;
+            mem_cycles += bus.access_cycles(a, 4, false);
+            mem_cycles += bus.access_cycles(a + 4u, 4, true);
+            if (i.op == IrOp::LDRD) {
+                cpu.R[rd]  = bus.read32(a);
+                cpu.R[rd1] = bus.read32(a + 4u);
+            } else {
+                bus.write32(a, cpu.R[rd]);
+                bus.write32(a + 4u, cpu.R[rd1]);
+            }
+            if (i.mem.writeback || !i.mem.pre_indexed) {
+                cpu.R[i.mem.rn] = i.mem.pre_indexed ? ea : post;
+            }
+            break;
+        }
+
+        // ── ARMv5TE: preload hint — no architectural effect ────────
+        case IrOp::PLD:
+            break;
+
         // ── Swap (atomic) ─────────────────────────────────────────
         case IrOp::SWP: {
             uint32_t addr = cpu.R[i.rn];
@@ -980,6 +1141,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             if (src.z) v |= 1u << 30;
             if (src.c) v |= 1u << 29;
             if (src.v) v |= 1u << 28;
+            if (src.q) v |= 1u << 27;
             if (src.i) v |= 1u << 7;
             if (src.f) v |= 1u << 6;
             if (src.t) v |= 1u << 5;
@@ -1039,6 +1201,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             if (cpu.cpsr.z) old |= 1u << 30;
             if (cpu.cpsr.c) old |= 1u << 29;
             if (cpu.cpsr.v) old |= 1u << 28;
+            if (cpu.cpsr.q) old |= 1u << 27;
             if (cpu.cpsr.i) old |= 1u << 7;
             if (cpu.cpsr.f) old |= 1u << 6;
             if (cpu.cpsr.t) old |= 1u << 5;
@@ -1060,6 +1223,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             cpu.cpsr.z = (newv >> 30) & 1u;
             cpu.cpsr.c = (newv >> 29) & 1u;
             cpu.cpsr.v = (newv >> 28) & 1u;
+            cpu.cpsr.q = (newv >> 27) & 1u;
             cpu.cpsr.i = (newv >>  7) & 1u;
             cpu.cpsr.f = (newv >>  6) & 1u;
             cpu.cpsr.t = (newv >>  5) & 1u;
@@ -1092,6 +1256,35 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         }
 
         // ── Software interrupt ─────────────────────────────────────
+        // Coprocessor transfer/data operations. The concrete bus owns the
+        // coprocessor model; on DS ARM9 this routes to CP15.
+        case IrOp::MCR: {
+            uint32_t value = (i.rd == 15) ? (i.pc + 12u) : cpu.R[i.rd];
+            bus.coproc_write(i.coproc.cp_num, i.coproc.op1, i.coproc.crn,
+                             i.coproc.crm, i.coproc.op2, value);
+            break;
+        }
+
+        case IrOp::MRC: {
+            uint32_t value = bus.coproc_read(i.coproc.cp_num, i.coproc.op1,
+                                             i.coproc.crn, i.coproc.crm,
+                                             i.coproc.op2);
+            if (i.rd == 15) {
+                cpu.cpsr.n = (value >> 31) & 1u;
+                cpu.cpsr.z = (value >> 30) & 1u;
+                cpu.cpsr.c = (value >> 29) & 1u;
+                cpu.cpsr.v = (value >> 28) & 1u;
+            } else {
+                cpu.R[i.rd] = value;
+            }
+            break;
+        }
+
+        case IrOp::CDP:
+            bus.coproc_cdp(i.coproc.cp_num, i.coproc.op1, i.coproc.crn,
+                           i.coproc.crm, i.coproc.op2);
+            break;
+
         case IrOp::SWI:
             if (cycles_out) *cycles_out = instr_cycle_base(i.op);
             return Result::Swi;
@@ -1115,6 +1308,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                      mem_cycles + extra_cycles;
         bool branch_op = (i.op == IrOp::B || i.op == IrOp::BL ||
                           i.op == IrOp::BX || i.op == IrOp::BLX_reg ||
+                          i.op == IrOp::BLX_imm ||
                           i.op == IrOp::BL_prefix || i.op == IrOp::BL_suffix);
         if (i.op2.kind == Op2::Kind::Shifted &&
             i.op2.shifted.by_register) {

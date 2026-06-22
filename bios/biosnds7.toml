@@ -19,730 +19,770 @@ sha1 = "24f67bdea115a2c847c8813a262502ee1607b7df"
 # ── Function entries (from ndsbios global symbols) ──────────────
 # 145 entries: arm=20 thumb=125
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00000030
 mode = "arm"
 name = "EncryptionKeys"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001188
 mode = "thumb"
 name = "SVC_GetBootProcs"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000119C
 mode = "thumb"
 name = "SignalBootFinish"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000011A4
 mode = "arm"
 name = "EnterAGBMode"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000011AC
 mode = "arm"
 name = "SVC_Halt"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000011B4
 mode = "arm"
 name = "SVC_Stop"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001204
 mode = "thumb"
 name = "FUN_00001204"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001212
 mode = "thumb"
 name = "FUN_00001212"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000121A
 mode = "thumb"
 name = "FUN_0000121A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000124A
 mode = "thumb"
 name = "FUN_0000124A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000137A
 mode = "thumb"
 name = "FUN_0000137A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000013B6
 mode = "thumb"
 name = "FUN_000013B6"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000145A
 mode = "thumb"
 name = "FUN_0000145A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000161C
 mode = "thumb"
 name = "FUN_0000161C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001660
 mode = "thumb"
 name = "FUN_00001660"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000166A
 mode = "thumb"
 name = "FUN_0000166A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001698
 mode = "thumb"
 name = "FUN_00001698"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001730
 mode = "thumb"
 name = "FUN_00001730"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001750
 mode = "thumb"
 name = "FUN_00001750"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000177E
 mode = "thumb"
 name = "FUN_0000177E"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001796
 mode = "thumb"
 name = "FUN_00001796"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001820
 mode = "thumb"
 name = "FUN_00001820"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001834
 mode = "thumb"
 name = "FUN_00001834"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001888
 mode = "thumb"
 name = "FUN_00001888"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000018B6
 mode = "thumb"
 name = "FUN_000018B6"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000018DC
 mode = "thumb"
 name = "FUN_000018DC"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000018EA
 mode = "thumb"
 name = "FUN_000018EA"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001910
 mode = "thumb"
 name = "FUN_00001910"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001934
 mode = "thumb"
 name = "FUN_00001934"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001948
 mode = "thumb"
 name = "FUN_00001948"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000195A
 mode = "thumb"
 name = "FUN_0000195A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000198C
 mode = "thumb"
 name = "FUN_0000198C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000019E0
 mode = "thumb"
 name = "FUN_000019E0"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001A2C
 mode = "thumb"
 name = "FUN_00001A2C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001A46
 mode = "thumb"
 name = "FUN_00001A46"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001A66
 mode = "thumb"
 name = "FUN_00001A66"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001A88
 mode = "thumb"
 name = "FUN_00001A88"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001AAA
 mode = "thumb"
 name = "FUN_00001AAA"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001ACC
 mode = "thumb"
 name = "FUN_00001ACC"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001B2A
 mode = "thumb"
 name = "FUN_00001B2A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001B8E
 mode = "thumb"
 name = "FUN_00001B8E"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001BAE
 mode = "thumb"
 name = "FUN_00001BAE"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001BCE
 mode = "thumb"
 name = "FUN_00001BCE"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001C0A
 mode = "thumb"
 name = "FUN_00001C0A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001C42
 mode = "thumb"
 name = "FUN_00001C42"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001C7E
 mode = "thumb"
 name = "FUN_00001C7E"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001D28
 mode = "thumb"
 name = "FUN_00001D28"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001DC4
 mode = "thumb"
 name = "FUN_00001DC4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001E74
 mode = "thumb"
 name = "FUN_00001E74"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001EBA
 mode = "thumb"
 name = "FUN_00001EBA"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001ED2
 mode = "thumb"
 name = "FUN_00001ED2"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001EE8
 mode = "thumb"
 name = "FUN_00001EE8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001F3A
 mode = "thumb"
 name = "FUN_00001F3A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001F50
 mode = "thumb"
 name = "FUN_00001F50"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001FB4
 mode = "thumb"
 name = "EncryptDecryptStep"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00001FFA
 mode = "thumb"
 name = "Encrypt_64bit"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002036
 mode = "thumb"
 name = "FUN_00002036"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000020BC
 mode = "thumb"
 name = "Decrypt_64bit"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000020F8
 mode = "thumb"
 name = "FUN_000020F8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000214A
 mode = "thumb"
 name = "FUN_0000214A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000217C
 mode = "thumb"
 name = "FUN_0000217C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000021BE
 mode = "thumb"
 name = "FUN_000021BE"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000021C2
 mode = "thumb"
 name = "FUN_000021C2"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000021E8
 mode = "thumb"
 name = "FUN_000021E8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000227C
 mode = "thumb"
 name = "FUN_0000227C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000022A4
 mode = "thumb"
 name = "FUN_000022A4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000022C6
 mode = "thumb"
 name = "FUN_000022C6"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000022D6
 mode = "thumb"
 name = "FUN_000022D6"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002330
 mode = "thumb"
 name = "FUN_00002330"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002368
 mode = "thumb"
 name = "FUN_00002368"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002388
 mode = "thumb"
 name = "FUN_00002388"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000245A
 mode = "thumb"
 name = "FUN_0000245A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002462
 mode = "thumb"
 name = "FUN_00002462"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000251A
 mode = "thumb"
 name = "FUN_0000251A"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002568
 mode = "thumb"
 name = "FUN_00002568"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000025B4
 mode = "thumb"
 name = "FUN_000025B4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000025C2
 mode = "thumb"
 name = "FUN_000025C2"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000025D8
 mode = "thumb"
 name = "FUN_000025D8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000025F0
 mode = "thumb"
 name = "FUN_000025F0"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002606
 mode = "thumb"
 name = "SVC_GetCRC16"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002646
 mode = "thumb"
 name = "SVC_IsDebugger"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002678
 mode = "thumb"
 name = "FUN_00002678"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000026A6
 mode = "thumb"
 name = "FUN_000026A6"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000026CA
 mode = "thumb"
 name = "FUN_000026CA"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000275E
 mode = "thumb"
 name = "InitKeycode"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000027D4
 mode = "thumb"
 name = "ApplyKeycode"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000027F8
 mode = "thumb"
 name = "DecryptARM7SecureArea"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000028B4
 mode = "thumb"
 name = "FUN_000028B4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000028E0
 mode = "thumb"
 name = "SVC_HuffUnComp"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002A2A
 mode = "thumb"
 name = "SVC_LZ77UnCompVRAM"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002B36
 mode = "thumb"
 name = "SVC_RLUnCompVRAM"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002BFA
 mode = "thumb"
 name = "SVC_GetSineTable"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002C16
 mode = "thumb"
 name = "SVC_GetPitchTable"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002C30
 mode = "thumb"
 name = "SVC_GetVolumeTable"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002C48
 mode = "thumb"
 name = "FUN_00002C48"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002C5C
 mode = "thumb"
 name = "FUN_00002C5C"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002C8C
 mode = "arm"
 name = "abort_vector"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002CD0
 mode = "arm"
 name = "reset_vector"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002D4C
 mode = "arm"
 name = "SVC_SoftReset"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002D60
 mode = "arm"
 name = "FUN_00002D60"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002D78
 mode = "arm"
 name = "FUN_00002D78"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002DC4
 mode = "arm"
 name = "irq_vector"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002DDC
 mode = "arm"
 name = "swi_vector"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002EC4
 mode = "arm"
 name = "FUN_00002EC4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002F08
 mode = "thumb"
 name = "SVC_WaitByLoop"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002F10
 mode = "arm"
 name = "SVC_VBlankIntrWait"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002F44
 mode = "arm"
 name = "FUN_00002F44"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002F68
 mode = "thumb"
 name = "SVC_SoundBias"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002F92
 mode = "thumb"
 name = "CopyData"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00002FB0
 mode = "arm"
 name = "SVC_Div"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003000
 mode = "arm"
 name = "SVC_Sqrt"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000306C
 mode = "thumb"
 name = "SVC_CpuSet"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000030BC
 mode = "thumb"
 name = "Thumb_BoundsCheck"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000030C4
 mode = "arm"
 name = "Arm_BoundsCheck"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000030E0
 mode = "thumb"
 name = "Thumb_SVC_CpuFastSet"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000030E4
 mode = "arm"
 name = "SVC_CpuFastSet"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003170
 mode = "arm"
 name = "SVC_BitUnPack"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003220
 mode = "arm"
 name = "SVC_LZ77UnCompWRAM"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000032B8
 mode = "thumb"
 name = "SVC_RLUnCompWRAM"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003300
 mode = "thumb"
 name = "__call_via_r1"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003302
 mode = "thumb"
 name = "__call_via_r2"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003304
 mode = "thumb"
 name = "__call_via_r3"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003306
 mode = "thumb"
 name = "__call_via_r4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003308
 mode = "thumb"
 name = "__call_via_r5"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000330C
 mode = "thumb"
 name = "__VENEER_BiosCall_FUN_00001F50"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003314
 mode = "thumb"
 name = "__VENEER_BiosCall_DecryptARM7SecureArea"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000331C
 mode = "thumb"
 name = "__VENEER__SVC_CpuFastSet"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003324
 mode = "thumb"
 name = "__VENEER__SVC_IntrWait"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000332C
 mode = "thumb"
 name = "__VENEER_BiosCall_Encrypt_64bit"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003334
 mode = "thumb"
 name = "__VENEER_BiosCall_Encrypt_64bit_ExpandedArgs"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000333C
 mode = "thumb"
 name = "__VENEER_BiosCall_InitKeycode_r3eq8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003344
 mode = "thumb"
 name = "__VENEER_BiosCall_Decrypt_64bit"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000334C
 mode = "thumb"
 name = "__VENEER_BiosCall_InitKeycode_r3eqC"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003354
 mode = "thumb"
 name = "__VENEER_BiosCall_CopyData"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000335C
 mode = "thumb"
 name = "__VENEER_BiosCall_Div2_1"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003364
 mode = "thumb"
 name = "__VENEER_BiosCall_Mul2_1"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000336C
 mode = "thumb"
 name = "__VENEER_BiosCall_ApplyKeycode"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003374
 mode = "thumb"
 name = "__VENEER_BiosCall_Encrypt_64bit_Plus4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000337C
 mode = "thumb"
 name = "__VENEER_BiosCall_FUN_00002036"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003384
 mode = "thumb"
 name = "__VENEER_BiosCall_CpuFastSet"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000338C
 mode = "thumb"
 name = "__VENEER_BiosCall_FUN_000028B4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x00003394
 mode = "thumb"
 name = "__VENEER__000010B8"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x0000339C
 mode = "thumb"
 name = "__VENEER__000010C0"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000033A4
 mode = "thumb"
 name = "FUN_000033A4"
 
-[[extra_func]]
+[[entry_point]]
 addr = 0x000033C0
 mode = "thumb"
 name = "FUN_000033C0"
+
+# ── Non-symbol entry points (Tier-0 config facts) ───────────────
+# Exception vectors + indirect-only handlers the static finder
+# cannot reach. See EXTRA_ENTRIES in import_bios_symbols.py.
+
+[[entry_point]]
+addr = 0x00000008
+mode = "arm"
+name = "swi_vector_entry"
+kind = "exception_vector"
+
+[[entry_point]]
+addr = 0x00000018
+mode = "arm"
+name = "irq_vector_entry"
+kind = "exception_vector"
+
+[[entry_point]]
+addr = 0x00001CAA
+mode = "thumb"
+name = "irqh_00001CAA"
+kind = "indirect_handler"
+
+[[entry_point]]
+addr = 0x00001D1A
+mode = "thumb"
+name = "irqh_00001D1A"
+kind = "indirect_handler"
+
+[[entry_point]]
+addr = 0x0000201A
+mode = "thumb"
+name = "irqh_0000201A"
+kind = "indirect_handler"
+
+[[entry_point]]
+addr = 0x00002DD4
+mode = "arm"
+name = "irqh_00002DD4"
+kind = "indirect_handler"
 
 # ── SWI dispatch table ──────────────────────────────────────────
 # Indexed by SWI#*4; ABS32 entries, bit0 = Thumb. Located via the
@@ -756,36 +796,3 @@ format       = "abs32"
 entries_mode = "auto"  # bit 0 of each entry encodes Thumb/ARM
 name         = "swi_jump_table"
 
-
-# ARM IRQ exception vector (ldr pc,[pc,#..] trampoline at 0x18).
-# runtime_irq dispatches here, so it must be a dispatch entry. (The SWI
-# vector at 0x08 is already reached from the reset path.)
-[[extra_func]]
-addr = 0x00000018
-mode = "arm"
-name = "irq_vector_entry"
-
-[[extra_func]]
-addr = 0x00002DD4
-mode = "arm"
-name = "irqh_00002DD4"
-
-[[extra_func]]
-addr = 0x00001CAA
-mode = "thumb"
-name = "irqh_00001CAA"
-
-[[extra_func]]
-addr = 0x0000201A
-mode = "thumb"
-name = "irqh_0000201A"
-
-[[extra_func]]
-addr = 0x00001D1A
-mode = "thumb"
-name = "irqh_00001D1A"
-
-[[extra_func]]
-addr = 0x00000008
-mode = "arm"
-name = "swi_vector_entry"

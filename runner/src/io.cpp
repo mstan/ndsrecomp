@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "state.h"
 
@@ -39,6 +40,7 @@ uint32_t card_block_words(uint32_t romctrl) {
 }
 
 uint8_t  g_haltcnt[2] = {0, 0};       // 0x04000301 (ARM7: bit7 = HALT)
+NdsEventCounts g_counts = {};
 
 // IPC FIFO (0x04000184 CNT / 0x04000188 SEND / 0x04100000 RECV). Two 16-word
 // hardware queues, one per direction. g_fifo[c] holds words CPU c has SENT
@@ -53,6 +55,8 @@ uint32_t g_fifo_lastrx[2] = {0, 0};
 void fifo_send(int c, uint32_t v) {
     if (!(g_fifocnt[c] & 0x8000u)) return;            // FIFOs disabled
     if (g_fifo_cnt[c] >= 16) { g_fifocnt[c] |= 0x4000u; return; }  // full → error
+    if (c == 0) ++g_counts.fifo9to7;
+    else ++g_counts.fifo7to9;
     bool was_empty = (g_fifo_cnt[c] == 0);
     g_fifo[c][(g_fifo_head[c] + g_fifo_cnt[c]) % 16] = v;
     ++g_fifo_cnt[c];
@@ -163,6 +167,7 @@ void ipcsync_write(int cpu, uint16_t val) {
     // Writable: bits 11..8 (out data), bit 14 (enable IRQ from other core).
     // Bit 13 is a send-IRQ pulse to the other core — wired when IRQ
     // delivery is modeled (the current handshake is polled).
+    ++g_counts.ipcsync_w;
     g_ipcsync_out[cpu] = (g_ipcsync_out[cpu] & ~0x4F00u) | (val & 0x4F00u);
 }
 
@@ -178,6 +183,7 @@ void nds_io_reset() {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
         g_ime[i] = 0; g_ie[i] = 0; g_if[i] = 0; g_haltcnt[i] = 0;
     }
+    g_counts = {};
     g_romctrl = 0; g_card_words_left = 0;
     for (auto& cpu : g_timer) for (auto& t : cpu) t = Timer{};
     g_timer_last = 0;
@@ -190,6 +196,28 @@ void nds_io_reset() {
 }
 
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) { g_fw = p; g_fw_size = n; }
+
+const NdsEventCounts& nds_event_counts() { return g_counts; }
+
+uint64_t nds_event_value(const char* name) {
+    if (!name) return UINT64_MAX;
+    if (std::strcmp(name, "vblank9") == 0) return g_counts.vblank9;
+    if (std::strcmp(name, "vblank7") == 0) return g_counts.vblank7;
+    if (std::strcmp(name, "ipcsync_w") == 0) return g_counts.ipcsync_w;
+    if (std::strcmp(name, "fifo9to7") == 0) return g_counts.fifo9to7;
+    if (std::strcmp(name, "fifo7to9") == 0) return g_counts.fifo7to9;
+    if (std::strcmp(name, "dma_done") == 0) return g_counts.dma_done;
+    if (std::strcmp(name, "timer_ovf") == 0) return g_counts.timer_ovf;
+    return UINT64_MAX;
+}
+
+uint32_t nds_io_debug_read(int cpu, uint32_t addr, uint32_t width) {
+    NdsCpu old = g_nds_active;
+    g_nds_active = (cpu == 7) ? NDS_ARM7 : NDS_ARM9;
+    uint32_t v = nds_io_read(addr, width);
+    g_nds_active = old;
+    return v;
+}
 
 // ── Interrupt controller ────────────────────────────────────────────────
 void nds_raise_irq(int cpu, uint32_t bits) { g_if[cpu & 1] |= bits; }
@@ -218,6 +246,8 @@ void nds_tick_hw(unsigned long long cyc) {
     unsigned long long cf = cyc / FRAME,  cl = (cyc % FRAME) / SCAN;
     last = cyc;
     if ((cf > pf) || (pl < 192 && cl >= 192)) {
+        ++g_counts.vblank9;
+        ++g_counts.vblank7;
         nds_raise_irq(0, 0x1u); nds_raise_irq(1, 0x1u);
     }
 
@@ -251,7 +281,10 @@ void nds_tick_hw(unsigned long long cyc) {
             unsigned long long extra = ticks / reload_span;
             T.counter = static_cast<uint16_t>(T.reload + (ticks % reload_span));
             carry = 1 + extra;                                 // overflows this round
-            if (T.ctrl & 0x40u) nds_raise_irq(cpu, 1u << (3 + t));
+            if (T.ctrl & 0x40u) {
+                g_counts.timer_ovf += carry;
+                nds_raise_irq(cpu, 1u << (3 + t));
+            }
         }
     }
 }

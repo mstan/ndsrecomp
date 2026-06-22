@@ -24,6 +24,8 @@ struct SchedResult {
 // Interleave both CPUs until ARM9 reaches `arm9_cycle_budget` or both CPUs
 // have terminally halted. ARM9 runs ~2× the cycles per round (clock ratio).
 SchedResult scheduler_run(uint64_t arm9_cycle_budget);
+void scheduler_run_round();
 
 // Inspect a CPU's saved state after a run (for reporting).
 const struct ArmCpuState& scheduler_cpu_state(int cpu);
+uint64_t scheduler_cpu_cycles(int cpu);

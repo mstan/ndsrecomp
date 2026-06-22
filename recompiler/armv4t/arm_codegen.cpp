@@ -893,8 +893,10 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
         // Store the loaded value into Rd. If Rd == PC, dispatch.
         if (ins.rd == 15) {
             body << indent << "g_cpu.R[15] = " << val_var << " & ~1u;\n";
+            body << indent << "if (" << val_var
+                 << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
             body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
-            body << indent << "runtime_dispatch(" << val_var << " & ~1u);\n";
+            body << indent << "runtime_dispatch_with_exchange(" << val_var << ");\n";
             body << indent << "return;\n";
         } else {
             body << indent << "g_cpu.R[" << static_cast<unsigned>(ins.rd)
@@ -983,8 +985,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                      << " & ~1u); return; }\n";
             }
             body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
+            body << indent << "if (" << pcv
+                 << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
             body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
-            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
+            body << indent << "runtime_dispatch_with_exchange(" << pcv << ");\n";
             body << indent << "return;\n";
         } else {
             body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
@@ -1028,6 +1032,7 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
     // sequential (S). Matches the interpreter's per-register cost loop,
     // which matters over slow regions (e.g. EWRAM: 6 N vs 3 S per word).
     bool first_access = true;
+    std::string pc_var;
 
     // Iterate registers in ascending order.
     for (int r = 0; r < 16; ++r) {
@@ -1039,6 +1044,7 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         if (blk.load) {
             if (r == 15) {
                 std::string pcv = "_pc" + sfx;
+                pc_var = pcv;
                 body << indent << "uint32_t " << pcv
                      << " = bus_read_u32(" << addr_var << " & ~3u);\n";
                 if (blk.s_bit) {
@@ -1046,10 +1052,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                          << ") { runtime_tick(" << cyc_var_for(ins)
                          << "); runtime_exception_return(" << pcv
                          << " & ~1u); return; }\n";
-                    body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
-                } else {
-                    body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
                 }
+                body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
+                body << indent << "if (" << pcv
+                     << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
             } else {
                 if (blk.s_bit && !pc_in_list) {
                     body << indent << "runtime_write_user_reg(" << r
@@ -1104,10 +1110,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
         if (blk.rn == 13) {
             body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
-            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
+            body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
             body << indent << "return;\n";
         } else {
-            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
+            body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
             body << indent << "return;\n";
         }
     }

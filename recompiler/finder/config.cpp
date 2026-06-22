@@ -104,15 +104,16 @@ std::string get_string_field(const toml::table& t, std::string_view key,
     return std::string();
 }
 
-// Parse [[extra_func]] entries.
-bool parse_extra_funcs(const toml::array& arr,
-                       std::vector<ConfigExtraFunc>& out) {
+// Parse [[entry_point]] / [[extra_func]] entries. Both table names map to
+// the same record; `label` is used only for diagnostics.
+bool parse_entry_points(const toml::array& arr, const char* label,
+                        std::vector<ConfigExtraFunc>& out) {
     for (std::size_t i = 0; i < arr.size(); ++i) {
         const auto* t = arr[i].as_table();
         if (!t) {
             std::fprintf(stderr,
-                "%s[[extra_func]] entry %zu is not a table\n",
-                kAbortHeader, i);
+                "%s%s entry %zu is not a table\n",
+                kAbortHeader, label, i);
             return false;
         }
         ConfigExtraFunc e;
@@ -121,19 +122,20 @@ bool parse_extra_funcs(const toml::array& arr,
         e.addr = get_u32_field(*t, "addr", true, ok, err);
         if (!ok) {
             std::fprintf(stderr,
-                "%s[[extra_func]] entry %zu: %s\n",
-                kAbortHeader, i, err.c_str());
+                "%s%s entry %zu: %s\n",
+                kAbortHeader, label, i, err.c_str());
             return false;
         }
         std::string mode_s = get_string_field(*t, "mode", true, ok, err);
         if (!ok || !parse_mode(mode_s, e.mode)) {
             std::fprintf(stderr,
-                "%s[[extra_func]] entry %zu: mode must be \"arm\" or "
+                "%s%s entry %zu: mode must be \"arm\" or "
                 "\"thumb\" (got %s)\n",
-                kAbortHeader, i, mode_s.c_str());
+                kAbortHeader, label, i, mode_s.c_str());
             return false;
         }
         e.name = get_string_field(*t, "name", false, ok, err);
+        e.kind = get_string_field(*t, "kind", false, ok, err);
         e.note = get_string_field(*t, "note", false, ok, err);
         out.push_back(std::move(e));
     }
@@ -414,9 +416,15 @@ bool load_config(const std::string& path, Config& out) {
         }
     }
 
-    // [[extra_func]]
+    // [[entry_point]] (preferred) and legacy [[extra_func]] — both feed the
+    // same finder seed list. A future importer should emit [[entry_point]].
+    if (auto ep = tbl["entry_point"].as_array()) {
+        if (!parse_entry_points(*ep, "[[entry_point]]", out.extra_funcs))
+            return false;
+    }
     if (auto ef = tbl["extra_func"].as_array()) {
-        if (!parse_extra_funcs(*ef, out.extra_funcs)) return false;
+        if (!parse_entry_points(*ef, "[[extra_func]]", out.extra_funcs))
+            return false;
     }
 
     // [[data_range]]
@@ -484,7 +492,7 @@ void print_config_summary(const Config& cfg) {
     std::printf("  entry_pc:              0x%08X\n", cfg.program.entry_pc);
     std::printf("  identity sha1:         %s (verified)\n",
                 hex_lower(cfg.identity.sha1).c_str());
-    std::printf("  extra_func entries:    %zu\n", cfg.extra_funcs.size());
+    std::printf("  entry_point entries:   %zu\n", cfg.extra_funcs.size());
     std::printf("  data_range entries:    %zu\n", cfg.data_ranges.size());
     std::printf("  code_copy entries:     %zu\n", cfg.code_copies.size());
     std::printf("  jump_table entries:    %zu\n", cfg.jump_tables.size());

@@ -4,9 +4,12 @@ PikalaxALT/ndsbios disassembly.
 
 ndsbios reassembles to binaries that SHA-1-match our `bios/biosnds7.rom`
 and `bios/biosnds9.rom` (verified by its own `bios.sha1`, and by
-`make compare`). We import its global LABEL set as `[[extra_func]]`
+`make compare`). We import its global LABEL set as `[[entry_point]]`
 entries (addr + ARM/Thumb mode + name) and declare the BIOS SWI jump
-tables as `[[jump_table]]` directives.
+tables as `[[jump_table]]` directives. Entry points the global-symbol set
+does not cover (exception vectors, indirect-only handlers) are added from
+the curated EXTRA_ENTRIES table — the importer is the single source of
+truth, so hand-editing the generated TOMLs is never needed.
 
 Pipeline (mirrors gbarecomp/tools/import_bios_symbols):
   1. Build the disasm:  make -C third_party/ndsbios all
@@ -29,6 +32,40 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 FUNC_START_RE = re.compile(
     r"^\s*(arm|thumb|non_word_aligned_thumb)_func_start\s+(\S+)")
+
+# Entry points the ndsbios global-symbol set does NOT cover but which the
+# runtime genuinely dispatches to. These are Tier-0 config facts: addresses
+# reached ONLY by the CPU exception mechanism or by indirect/computed branches
+# the static finder cannot resolve, so they can never be auto-discovered.
+# Each is (addr, name, mode, kind). Identified by the Ghidra analysis
+# (docs/bios_analysis.md). Folding them here keeps the importer the single
+# source of truth — a re-run no longer drops hand-added entries.
+#
+# NOT listed here on purpose: the ARM9 IRQ-return epilogue at 0xFFFF0290. It
+# is reached only by the firmware handler's `bx lr` after the BIOS does
+# `adr lr,0xFFFF0290; ldr pc,[dtcm+0x3FFC]`, and the finder's Tier-2
+# landing-pad auto-discovery now seeds it from exactly that idiom (it appears
+# as lpad_FFFF0290). Declaring it would be redundant.
+EXTRA_ENTRIES = {
+    "biosnds7": [
+        # Exception vectors — entered by the CPU on SWI/IRQ, never by a static
+        # branch, so the finder cannot see them.
+        (0x00000008, "swi_vector_entry", "arm",   "exception_vector"),
+        (0x00000018, "irq_vector_entry", "arm",   "exception_vector"),
+        # IRQ handler entries reached only indirectly (installed-handler tables
+        # / computed dispatch).
+        (0x00001CAA, "irqh_00001CAA",    "thumb", "indirect_handler"),
+        (0x00001D1A, "irqh_00001D1A",    "thumb", "indirect_handler"),
+        (0x0000201A, "irqh_0000201A",    "thumb", "indirect_handler"),
+        (0x00002DD4, "irqh_00002DD4",    "arm",   "indirect_handler"),
+    ],
+    "biosnds9": [
+        (0xFFFF0008, "swi_vector",       "arm",   "exception_vector"),
+        (0xFFFF0018, "irq_vector_entry", "arm",   "exception_vector"),
+        (0xFFFF01BC, "irqh_FFFF01BC",    "thumb", "indirect_handler"),
+        (0xFFFF09FC, "booth_FFFF09FC",   "arm",   "indirect_target"),
+    ],
+}
 
 # Per-binary facts: ELF/asm names, base, CPU, identity, and the SWI jump
 # table located during the Ghidra analysis (see docs/bios_analysis.md).
@@ -97,11 +134,26 @@ def emit_toml(path: pathlib.Path, b: dict,
     th = sum(1 for _, _, m in funcs if m == "thumb")
     L += [f"# {len(funcs)} entries: arm={arm} thumb={th}", ""]
     for addr, name, mode in funcs:
-        L += ["[[extra_func]]",
+        L += ["[[entry_point]]",
               f"addr = 0x{addr:08X}",
               f'mode = "{mode}"',
               f'name = "{name}"',
               ""]
+
+    extras = EXTRA_ENTRIES.get(b["ident"], [])
+    if extras:
+        L += ["# ── Non-symbol entry points (Tier-0 config facts) ───────────────",
+              "# Exception vectors + indirect-only handlers the static finder",
+              "# cannot reach. See EXTRA_ENTRIES in import_bios_symbols.py.",
+              ""]
+        for addr, name, mode, kind in extras:
+            L += ["[[entry_point]]",
+                  f"addr = 0x{addr:08X}",
+                  f'mode = "{mode}"',
+                  f'name = "{name}"',
+                  f'kind = "{kind}"',
+                  ""]
+
     sa, sc = b["swi_table"]
     L += ["# ── SWI dispatch table ──────────────────────────────────────────",
           "# Indexed by SWI#*4; ABS32 entries, bit0 = Thumb. Located via the",

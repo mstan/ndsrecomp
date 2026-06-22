@@ -5,79 +5,63 @@ BIOS + firmware and serves the `TCP.md` debug protocol on `127.0.0.1:19843`, so
 the diff harness can sync the native runtime against melonDS on counted
 hardware events. melonDS is GPLv3, kept as a separate binary (tool-use).
 
-## Status: shim works; melonDS boot-to-menu blocked on these dumps
+## Status: shim boots to the firmware menu
 
-The shim itself is complete and verified: it builds clean (out-of-tree against
-the `1.0rc` clone, frontend/OGL/GDB/JIT/LTO off), boots melonDS in firmware
-mode, and answers every protocol command correctly. Confirmed live:
+The shim builds cleanly out-of-tree against the `1.0rc` melonDS clone
+(frontend/OGL/GDB/JIT/LTO off), runs the real BIOS + firmware path, and reaches
+the interactive DS firmware menu with the known-good local dumps:
 
-- `run_to_event vblank9 N` is exact (one VBlank per CPU per `RunFrame`).
-- `event_counts` — vblank9/7, dma_done, timer_ovf come from the patched
-  `NDS::SetIRQ` hook; ipcsync_w / fifo9to7 / fifo7to9 from the `OracleNDS`
-  IO-write overrides. (timer_ovf ticks during boot, proving the hook fires.)
-- `regs` (both CPUs, with banked SPSR), `read_mem` (per-CPU bus view),
-  `read_region` (mainram 4 MB, wram7 64 KB, vram, pal, oam, itcm, dtcm),
-  `framebuffer` (256×192 RGB), `touch`, `keys`.
+- ARM9 BIOS SHA-1: `bfaac75f101c135e32e2aaf541de6b1be4c8c62d`
+- ARM7 BIOS SHA-1: `24f67bdea115a2c847c8813a262502ee1607b7df`
+- Firmware SHA-1: `ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b`
 
-## The blocker: identical IPCSYNC deadlock in melonDS AND the native runner
+Verified framebuffer state at `run_to_event vblank9 120` shows the firmware
+date/time screen on engine A and the main menu on engine B. Touch, keys, regs,
+memory, event counts, and framebuffer commands all answer over TCP.
 
-With `bios/biosnds9.rom`, `bios/biosnds7.rom`, `bios/firmware.bin`, melonDS
-does **not** reach the firmware menu. State (stable from frame 1 onward):
+## Debug protocol notes
 
-| | ARM9 | ARM7 |
-|---|---|---|
-| PC | `0xFFFF07F4` (BIOS WFI/IntrWait poll loop) | `0x000011C4` (SWI Sleep/Halt: `STRB #0xC0 → HALTCNT 0x04000301`) |
-| POSTFLG | 1 (init done) | 0 (early) |
-| IE / IF / IME | 0 / 0 / 1 | 0 / 0 / 1 |
+- `run_to_event vblank9 N` is exact for this oracle: one VBlank per CPU per
+  `RunFrame`.
+- `event_counts` tracks VBlank, DMA, timer, IPCSYNC writes, and IPC FIFO sends.
+- `io_state` snapshots ARM9/ARM7 `IME`, `IE`, `IF`, `POSTFLG`, `IPCSYNC`,
+  `CPUStop`, `NumFrames`, and event counts.
+- `read_io` performs exact-width I/O reads. Use it for registers; byte-wise
+  `read_mem` is a CPU bus view and can be misleading for registers that only
+  implement 16-bit/32-bit access paths.
 
-- `IPCSYNC9 = IPCSYNC7 = 0`, `ipcsync_w = fifo* = 0` — no handshake ever occurs.
-- ARM9 finished init and polls IPCSYNC (R10=`0x04000180`) for the ARM7.
-- ARM7 wrote `HALTCNT=0xC0` (sleep) from boot context `LR=0x2E10` and waits for
-  an IRQ — but `IE=0`, so nothing (not even the VBlank that does fire every
-  frame) can wake it. Permanent circular wait.
-- **Load evidence:** the ARM9 boot section partially loads — a jump stub
-  appears at `0x021F0000` (`LDR r0,[pc]; BX r0`) and ~320 KB of main RAM is
-  written in frame 0 — but the ARM7 section at `0x0380CC00` stays **all zero**.
-  So the ARM7 BIOS firmware-boot aborts *after* the ARM9 part, *before* the
-  ARM7 part, and falls into IntrWait instead of completing the hand-off.
+## Correct interpretation of the apparent ARM7 halt
 
-This matches the native runner's blocker exactly (ARM7 waits on IF bit 18
-IPC-recv; ARM9 jumps null on empty boot params; menu parts to `0x021F0000` /
-`0x0380CC00` not copied). Two independent emulations failing the same way.
+The previously documented "deadlock" was a false positive. At menu time:
 
-## What was ruled out
+- ARM7 often sits at BIOS `SVC_Halt` (`0x000011C4`) from the firmware wait loop.
+- ARM7 `IE/IME` are enabled and VBlank IRQs continue to fire.
+- The installed ARM7 IRQ dispatcher at `0x037FD798` clears `IF`, dispatches the
+  VBlank handler through the table at `0x03805230`, and that handler sets bit 0
+  in the shared IRQ flag word at `0x0380FFF8`.
+- The firmware wait helper at `0x037FF124` consumes that bit and clears it before
+  waiting for the next event.
 
-melonDS confirms the inputs are valid, so the deadlock is not a "bad BIOS / not
-bootable" case:
+Seeing ARM7 parked in `SVC_Halt` with `0x0380FFF8` bit 0 clear after a full
+frame is therefore normal idle behavior, not a boot failure.
 
-- `NDS::NeedsDirectBoot()` returns **false** → `Firmware::IsBootable()` true AND
-  **both BIOSes CRC32-match the retail dumps** (`ARM7BIOSNative`/`ARM9BIOSNative`
-  are exact-CRC checks in `NDS.cpp`). The dumps are genuine retail.
-- Post-`Reset()` setup mirrors the qt_sdl frontend and none of it breaks the
-  deadlock: `SPI.GetPowerMan()->SetBatteryLevelOkay(true)`,
-  `RTC.SetDateTime(2024,1,1,12,0,0)` (fixed for determinism),
-  `SetLidClosed(false)` (lid is open by default anyway —
-  `KeyInput` bit 23 clear), and `Firmware::UpdateChecksums()`.
+## Native next steps
 
-## Next moves (for whoever continues)
+The native runner is now the blocker, not the dumps or the oracle setup:
 
-1. **Isolate dumps vs. setup.** Boot this exact `firmware.bin` + BIOSes in the
-   stock melonDS Qt build (the project's oracle reference). If Qt also stalls →
-   the firmware's ARM7 boot section is bad/unusual → get a known-good dump. If
-   Qt reaches the menu → the headless shim is still missing a setup step the Qt
-   frontend does (compare `EmuInstance::createConsole`/`reset` line by line:
-   `SetNDSCart(nullptr)`, GBA slot, renderer/GPU init, threading).
-2. If the firmware is the problem, that explains the native runner too — the
-   firmware-menu gate can't be met until the firmware boot-section load works.
-3. Once melonDS reaches the menu, run `oracle/find_first_diverge.py` to localize
-   the native-vs-oracle divergence (default `--event-name vblank9`).
+1. Bring the native firmware boot path to the same visible menu state as the
+   oracle.
+2. Add the native TCP debug server on `127.0.0.1:19842` so
+   `oracle/find_first_diverge.py` can compare native vs oracle on hardware
+   event counts.
+3. Implement the user-facing SDL window(s), input plumbing, and persistent
+   firmware save writes only after the native core reaches the oracle menu.
 
 ## Build / run quickref
 
-    bash oracle/setup-melonds.sh            # clone @1.0rc + apply patches/*.patch
+    bash oracle/setup-melonds.sh
     export PATH="/c/msys64/mingw64/bin:$PATH"
     cmake -B oracle/shim/build -S oracle/shim -DMELONDS_DIR=third_party/melonDS -G Ninja
     cmake --build oracle/shim/build --target nds_oracle
     oracle/shim/build/nds_oracle.exe --bios9 bios/biosnds9.rom \
         --bios7 bios/biosnds7.rom --firmware bios/firmware.bin --boot firmware --port 19843
-    # probe:  cd oracle && python -c "import _client; ..."  (see find_first_diverge.py)

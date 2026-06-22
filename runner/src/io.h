@@ -13,6 +13,20 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width);
 void     nds_io_write(uint32_t addr, uint32_t value, uint32_t width);
 void     nds_io_reset();
 
+struct NdsEventCounts {
+    uint64_t vblank9;
+    uint64_t vblank7;
+    uint64_t ipcsync_w;
+    uint64_t fifo9to7;
+    uint64_t fifo7to9;
+    uint64_t dma_done;
+    uint64_t timer_ovf;
+};
+
+const NdsEventCounts& nds_event_counts();
+uint64_t nds_event_value(const char* name);
+uint32_t nds_io_debug_read(int cpu, uint32_t addr, uint32_t width);
+
 // Interrupt controller. Sources raise IF bits via nds_raise_irq; the
 // runtime polls nds_irq_pending(cpu) each tick and vectors when set and
 // CPSR.I is clear. cpu: 0 = ARM9, 1 = ARM7. Returns IE&IF when IME enabled.

@@ -24,17 +24,20 @@ struct CpuSlot {
 CpuSlot g_slot[2];
 int     g_cur = -1;           // currently-loaded CPU (-1 = none)
 
+void save_current() {
+    if (g_cur < 0) return;
+    g_slot[g_cur].state = g_cpu;
+    g_slot[g_cur].crs_depth = runtime_call_stack_depth();
+    const uint32_t* src = runtime_call_stack_data();
+    for (uint32_t i = 0; i < g_slot[g_cur].crs_depth; ++i)
+        g_slot[g_cur].crs[i] = src[i];
+}
+
 void switch_to(int cpu) {
     if (g_cur == cpu) return;
-    if (g_cur >= 0) {
-        // Save outgoing: register file AND call-return stack (a preempted
-        // spin may be deep in a call chain whose returns must survive).
-        g_slot[g_cur].state = g_cpu;
-        g_slot[g_cur].crs_depth = runtime_call_stack_depth();
-        const uint32_t* src = runtime_call_stack_data();
-        for (uint32_t i = 0; i < g_slot[g_cur].crs_depth; ++i)
-            g_slot[g_cur].crs[i] = src[i];
-    }
+    // Save outgoing: register file AND call-return stack (a preempted
+    // spin may be deep in a call chain whose returns must survive).
+    save_current();
     g_cpu = g_slot[cpu].state;                       // load incoming
     runtime_call_stack_restore(g_slot[cpu].crs, g_slot[cpu].crs_depth);
     g_nds_active = (cpu == 0) ? NDS_ARM9 : NDS_ARM7;
@@ -92,20 +95,23 @@ void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr) {
     g_slot[cpu].started = true;
 }
 
+void scheduler_run_round() {
+    const uint32_t kQ9 = 2048, kQ7 = 1024;
+    if (g_slot[0].started) run_slice(0, kQ9);   // ARM9
+    if (g_slot[1].started) run_slice(1, kQ7);   // ARM7
+    nds_tick_hw(g_slot[0].cycles);              // display/timer clocks
+}
+
 SchedResult scheduler_run(uint64_t budget) {
     // ARM9 issues ~2 cycles per ARM7 cycle (67 vs 33 MHz). The quantum is
     // a balance: small enough that a polled IPCSYNC/FIFO write by one core
     // is seen by the other promptly, large enough to amortize the
     // context-switch (state + call-return-stack save/restore).
-    const uint32_t kQ9 = 2048, kQ7 = 1024;
-
     uint64_t rounds = 0;
     uint64_t last9 = 0, stall = 0;
     while (g_slot[0].cycles < budget &&
            !(g_slot[0].halted && g_slot[1].halted)) {
-        if (g_slot[0].started) run_slice(0, kQ9);   // ARM9
-        if (g_slot[1].started) run_slice(1, kQ7);   // ARM7
-        nds_tick_hw(g_slot[0].cycles);              // display/timer clocks
+        scheduler_run_round();
         ++rounds;
         // Diagnostic: if ARM9 stops advancing for many rounds while ARM7
         // keeps running, report and stop (a cross-CPU wait isn't resolving).
@@ -122,7 +128,7 @@ SchedResult scheduler_run(uint64_t budget) {
         } else { stall = 0; last9 = g_slot[0].cycles; }
     }
     // Park final live state back into its slot.
-    if (g_cur >= 0) g_slot[g_cur].state = g_cpu;
+    save_current();
 
     SchedResult r{};
     for (int c = 0; c < 2; ++c) {
@@ -134,4 +140,11 @@ SchedResult scheduler_run(uint64_t budget) {
     return r;
 }
 
-const ArmCpuState& scheduler_cpu_state(int cpu) { return g_slot[cpu].state; }
+const ArmCpuState& scheduler_cpu_state(int cpu) {
+    save_current();
+    return g_slot[cpu].state;
+}
+
+uint64_t scheduler_cpu_cycles(int cpu) {
+    return g_slot[cpu & 1].cycles;
+}

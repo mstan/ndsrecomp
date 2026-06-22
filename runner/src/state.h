@@ -56,3 +56,24 @@ void bus_init();
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n);
 void bus_load_arm7_bios(const uint8_t* p, uint32_t n);
 void bus_dump_access_ring(uint32_t max_entries);
+
+struct BusRegion {
+    const uint8_t* ptr;
+    uint32_t len;
+};
+bool bus_get_region(const char* name, BusRegion* out);
+uint8_t bus_debug_read8(int cpu, uint32_t addr);
+// True if `addr` maps to a writable region that can hold guest-copied
+// executable code (main RAM, shared/ARM7 WRAM, ARM9 ITCM). Used by Tier-3
+// to decide whether a PC is interpretable dirty RAM vs. a genuine gap.
+bool bus_addr_is_exec_ram(uint32_t addr);
+
+struct BusWatchEvent {
+    uint64_t seq;
+    uint8_t cpu;
+    uint8_t width;
+    uint32_t pc;
+    uint32_t addr;
+    uint32_t value;
+};
+uint32_t bus_debug_watch_copy(BusWatchEvent* out, uint32_t max_entries);

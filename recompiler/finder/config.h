@@ -47,10 +47,16 @@ struct ConfigIdentity {
     std::string md5;        // optional, empty if not declared
 };
 
+// A declared dispatch entry point (a guest address known to be reached as
+// code). Parsed from either [[entry_point]] (preferred) or the legacy
+// [[extra_func]] table name — both feed the same finder seed path. An
+// entry_point need not be a "function" start: it may be a BIOS-ABI landing
+// pad (e.g. the IRQ epilogue) reached only by a runtime-computed branch.
 struct ConfigExtraFunc {
     uint32_t    addr = 0;
     CpuMode     mode = CpuMode::Arm;
     std::string name;       // optional; finder generates one if empty
+    std::string kind;       // optional; documentation (e.g. "bios_irq_epilogue")
     std::string note;       // documentation only
 };
 
