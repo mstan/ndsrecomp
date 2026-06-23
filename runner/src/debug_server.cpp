@@ -72,14 +72,16 @@ uint64_t json_u64(const std::string& s, const std::string& key,
 
 std::string counts_json() {
     const NdsEventCounts& c = nds_event_counts();
-    char buf[320];
+    char buf[448];
     std::snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
-        "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu}",
+        "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
+        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
-        (unsigned long long)c.timer_ovf);
+        (unsigned long long)c.timer_ovf,
+        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last);
     return buf;
 }
 

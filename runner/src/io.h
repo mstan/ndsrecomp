@@ -21,6 +21,12 @@ struct NdsEventCounts {
     uint64_t fifo7to9;
     uint64_t dma_done;
     uint64_t timer_ovf;
+    // SOUNDBIAS (0x04000504) write stream — an invariant for the ARM7 boot
+    // sound-bias ramp (a side-effect loop: each step writes the register).
+    // Compared per-iteration against the oracle, NOT normalized away.
+    uint64_t soundbias_w;       // total writes
+    uint32_t soundbias_first;   // first value written
+    uint32_t soundbias_last;    // most recent value written
 };
 
 const NdsEventCounts& nds_event_counts();

@@ -91,36 +91,171 @@ void fifocnt_write(int c, uint16_t v) {
     g_fifocnt[c] = keep | (v & 0x8404u);               // store enable + IRQ enables
 }
 
-// SPI bus (ARM7). The boot path needs the firmware FLASH device (device
-// select = 1): the ARM7 BIOS issues READ (0x03 + 24-bit address) and RDSR
-// (0x05) commands and clocks the firmware bytes out of SPIDATA. Powerman
-// (0) and touchscreen (2) are stubbed to 0 for now.
+// SPI bus (ARM7). Three chip-selectable devices share SPIDATA (0x040001C2);
+// SPICNT bits 9..8 select (0 power-management, 1 firmware FLASH, 2 touchscreen)
+// and bit 11 holds chip-select across a multi-byte transfer. Each device keeps
+// its own transaction phase; deasserting CS (a non-hold byte, or clearing the
+// SPI enable) resets that phase. Modeled after melonDS's SPI device chips —
+// the ARM7 firmware boot reads battery/backlight (power-man) and the RTC and
+// branches on them, so an all-zero stub silently diverges the entire boot.
 const uint8_t* g_fw = nullptr;
 uint32_t       g_fw_size = 0;
 uint16_t g_spicnt = 0;       // 0x040001C0
-uint8_t  g_spi_cmd = 0, g_spi_resp = 0;
-uint32_t g_spi_addr = 0;
-int      g_spi_phase = 0;    // 0 cmd, 1-3 addr, 4 read-data, 10 status
+uint8_t  g_spi_resp = 0;     // byte clocked back on the next SPIDATA read
 
-void spi_byte(uint8_t v) {
-    if (((g_spicnt >> 8) & 3) != 1) { g_spi_resp = 0; return; }  // not firmware
-    switch (g_spi_phase) {
-        case 0:                                   // command byte
-            g_spi_cmd = v; g_spi_addr = 0; g_spi_resp = 0;
-            if (v == 0x03) g_spi_phase = 1;        // READ → 3 address bytes
-            else if (v == 0x05) g_spi_phase = 10;  // RDSR → status
-            else g_spi_phase = 0;
-            break;
-        case 1: g_spi_addr = (g_spi_addr << 8) | v; g_spi_phase = 2; break;
-        case 2: g_spi_addr = (g_spi_addr << 8) | v; g_spi_phase = 3; break;
-        case 3: g_spi_addr = (g_spi_addr << 8) | v; g_spi_phase = 4; break;
-        case 4:                                   // stream firmware bytes
-            g_spi_resp = (g_fw && g_spi_addr < g_fw_size) ? g_fw[g_spi_addr] : 0xFF;
-            ++g_spi_addr;
-            break;
-        case 10: g_spi_resp = 0x00; break;        // status: ready, not busy
-        default: g_spi_resp = 0; break;
+// Firmware FLASH (device 1): READ (0x03 + 24-bit addr, auto-increment) + RDSR.
+uint8_t  g_fw_cmd = 0; uint32_t g_fw_addr = 0; int g_fw_phase = 0;
+uint8_t fw_write(uint8_t v) {
+    switch (g_fw_phase) {
+        case 0:                                       // command byte
+            g_fw_cmd = v; g_fw_addr = 0;
+            if (v == 0x03) g_fw_phase = 1;             // READ → 3 address bytes
+            else if (v == 0x05) g_fw_phase = 10;       // RDSR → status
+            else g_fw_phase = 0;
+            return 0;
+        case 1: g_fw_addr = (g_fw_addr << 8) | v; g_fw_phase = 2; return 0;
+        case 2: g_fw_addr = (g_fw_addr << 8) | v; g_fw_phase = 3; return 0;
+        case 3: g_fw_addr = (g_fw_addr << 8) | v; g_fw_phase = 4; return 0;
+        case 4: {                                     // stream firmware bytes
+            uint8_t r = (g_fw && g_fw_addr < g_fw_size) ? g_fw[g_fw_addr] : 0xFF;
+            ++g_fw_addr; return r;
+        }
+        case 10: return 0x00;                          // status: ready, not busy
+        default: return 0;
     }
+}
+void fw_release() { g_fw_phase = 0; }
+
+// Power management (device 0): index byte (bit7 = read), then a data byte.
+// reg1 = battery (0 = OK), reg4 = backlight (0x40). RegMasks gate writes.
+uint8_t  g_pm_index = 0; uint8_t g_pm_regs[8] = {}; uint8_t g_pm_masks[8] = {};
+bool     g_pm_hold = false;
+uint8_t pm_write(uint8_t v) {
+    if (!g_pm_hold) { g_pm_index = v; g_pm_hold = true; return 0; }  // index byte
+    uint32_t regid = g_pm_index & 7u;
+    if (g_pm_index & 0x80u) return g_pm_regs[regid];                 // read
+    g_pm_regs[regid] = (g_pm_regs[regid] & ~g_pm_masks[regid])       // write
+                     | (v & g_pm_masks[regid]);
+    return 0;
+}
+void pm_release() { g_pm_hold = false; }
+
+// Touchscreen (device 2): control byte (bit7) selects a channel and latches a
+// 12-bit conversion; the two following bytes shift it out MSB-first. Pen state
+// is reported via EXTKEYIN bit6 (pen-up here); the ADC just needs stable values.
+uint8_t  g_tsc_ctrl = 0; uint16_t g_tsc_conv = 0xFFF; int g_tsc_datapos = 0;
+uint16_t g_tsc_x = 0, g_tsc_y = 0xFFF;   // pen up
+uint8_t tsc_write(uint8_t v) {
+    uint8_t out = (g_tsc_datapos == 1) ? ((g_tsc_conv >> 5) & 0xFFu)
+                : (g_tsc_datapos == 2) ? ((g_tsc_conv << 3) & 0xFFu) : 0u;
+    if (v & 0x80u) {                          // control byte
+        g_tsc_ctrl = v; g_tsc_datapos = 1;
+        switch (v & 0x70u) {
+            case 0x10: g_tsc_conv = g_tsc_y; break;   // TouchY channel
+            case 0x50: g_tsc_conv = g_tsc_x; break;   // TouchX channel
+            default:   g_tsc_conv = 0xFFF;  break;
+        }
+        if (v & 0x08u) g_tsc_conv &= 0x0FF0;          // 8-bit conversion mode
+    } else {
+        ++g_tsc_datapos;
+    }
+    return out;
+}
+void tsc_release() { g_tsc_datapos = 0; }
+
+void release_device(int dev) {
+    switch (dev) {
+        case 0: pm_release();  break;
+        case 1: fw_release();  break;
+        case 2: tsc_release(); break;
+    }
+}
+void spi_transfer(uint8_t v) {
+    int dev = (g_spicnt >> 8) & 3;
+    switch (dev) {
+        case 0: g_spi_resp = pm_write(v);  break;
+        case 1: g_spi_resp = fw_write(v);  break;
+        case 2: g_spi_resp = tsc_write(v); break;
+        default: g_spi_resp = 0;           break;
+    }
+    if (!(g_spicnt & 0x0800u)) release_device(dev);   // no hold → CS deassert
+}
+
+// ── RTC (0x04000138, ARM7) — bit-banged serial clock chip ───────────────
+// The firmware reads status + date/time during boot and branches on them; an
+// unmodeled latch returns garbage and diverges the boot. Bit-bang protocol
+// (melonDS RTC): bit2 = CS, bit1 = SCK, bit0 = SIO, bit4 = SIO direction
+// (1 = host→RTC). CS rising edge starts a transfer; each SCK-low shifts one
+// bit. Command byte (bit-reversed when top nibble is 0x6) selects a register;
+// bit7 = read. Date/time is fixed to 2024-01-01 12:00:00 to match the oracle.
+uint16_t g_rtc_io = 0;
+uint8_t  g_rtc_input = 0; int g_rtc_inbit = 0, g_rtc_inpos = 0;
+uint8_t  g_rtc_output[8] = {}; int g_rtc_outbit = 0, g_rtc_outpos = 0;
+uint8_t  g_rtc_cmd = 0;
+uint8_t  g_rtc_datetime[7] = {0x24, 0x01, 0x01, 0x01, 0x52, 0x00, 0x00};
+uint8_t  g_rtc_status1 = 0x02;   // 24-hour mode, power-on/reset flag cleared
+uint8_t  g_rtc_status2 = 0x00;
+
+void rtc_cmd_read() {
+    if ((g_rtc_cmd & 0x0Fu) != 0x06u) return;
+    switch (g_rtc_cmd & 0x70u) {
+        case 0x00: g_rtc_output[0] = g_rtc_status1; g_rtc_status1 &= 0x0Fu; break;
+        case 0x40: g_rtc_output[0] = g_rtc_status2; break;
+        case 0x20: std::memcpy(g_rtc_output, &g_rtc_datetime[0], 7); break;
+        case 0x60: std::memcpy(g_rtc_output, &g_rtc_datetime[4], 3); break;
+        default:   g_rtc_output[0] = 0; break;
+    }
+}
+void rtc_byte_in(uint8_t v) {
+    if (g_rtc_inpos == 0) {                       // command byte
+        if ((v & 0xF0u) == 0x60u) {
+            static const uint8_t rev[16] = {
+                0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6,
+                0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6};
+            g_rtc_cmd = rev[v & 0xFu];
+        } else {
+            g_rtc_cmd = v;
+        }
+        if (g_rtc_cmd & 0x80u) rtc_cmd_read();
+        return;
+    }
+    if ((g_rtc_cmd & 0x0Fu) == 0x06u) {           // accept status-register writes
+        if ((g_rtc_cmd & 0x70u) == 0x00u && g_rtc_inpos == 1)
+            g_rtc_status1 = (g_rtc_status1 & 0xF0u) | (v & 0x0Eu);
+        else if ((g_rtc_cmd & 0x70u) == 0x40u && g_rtc_inpos == 1)
+            g_rtc_status2 = v;
+        // date/time writes ignored — we hold the oracle's fixed time
+    }
+}
+uint16_t rtc_read() { return g_rtc_io; }
+void rtc_write(uint16_t val, bool byte) {
+    if (byte) val |= (g_rtc_io & 0xFF00u);
+    if (val & 0x0004u) {                          // CS asserted
+        if (!(g_rtc_io & 0x0004u)) {              // CS rising edge → start xfer
+            g_rtc_input = 0; g_rtc_inbit = 0; g_rtc_inpos = 0;
+            std::memset(g_rtc_output, 0, sizeof(g_rtc_output));
+            g_rtc_outbit = 0; g_rtc_outpos = 0;
+        } else if (!(val & 0x0002u)) {            // SCK low → shift one bit
+            if (val & 0x0010u) {                  // write (host → RTC)
+                if (val & 0x0001u) g_rtc_input |= (1u << g_rtc_inbit);
+                if (++g_rtc_inbit >= 8) {
+                    g_rtc_inbit = 0; rtc_byte_in(g_rtc_input);
+                    g_rtc_input = 0; ++g_rtc_inpos;
+                }
+            } else {                              // read (RTC → host)
+                if (g_rtc_output[g_rtc_outpos] & (1u << g_rtc_outbit))
+                    g_rtc_io |= 0x0001u;
+                else
+                    g_rtc_io &= 0xFFFEu;
+                if (++g_rtc_outbit >= 8) {
+                    g_rtc_outbit = 0;
+                    if (g_rtc_outpos < 7) ++g_rtc_outpos;
+                }
+            }
+        }
+    }
+    if (val & 0x0010u) g_rtc_io = val;
+    else               g_rtc_io = (g_rtc_io & 0x0001u) | (val & 0xFFFEu);
 }
 
 // Timers: 4 per CPU at 0x04000100 + N*4 (counter/reload @+0, control @+2).
@@ -187,7 +322,24 @@ void nds_io_reset() {
     g_romctrl = 0; g_card_words_left = 0;
     for (auto& cpu : g_timer) for (auto& t : cpu) t = Timer{};
     g_timer_last = 0;
-    g_spicnt = 0; g_spi_cmd = 0; g_spi_resp = 0; g_spi_addr = 0; g_spi_phase = 0;
+    g_spicnt = 0; g_spi_resp = 0;
+    g_fw_cmd = 0; g_fw_addr = 0; g_fw_phase = 0;
+    g_pm_index = 0; g_pm_hold = false;
+    std::memset(g_pm_regs, 0, sizeof(g_pm_regs));
+    std::memset(g_pm_masks, 0, sizeof(g_pm_masks));
+    g_pm_regs[4] = 0x40;                                  // backlight on
+    g_pm_masks[0] = 0x7F; g_pm_masks[1] = 0x00; g_pm_masks[2] = 0x01;
+    g_pm_masks[3] = 0x03; g_pm_masks[4] = 0x0F;
+    g_tsc_ctrl = 0; g_tsc_conv = 0xFFF; g_tsc_datapos = 0;
+    g_tsc_x = 0; g_tsc_y = 0xFFF;
+    g_rtc_io = 0; g_rtc_input = 0; g_rtc_inbit = 0; g_rtc_inpos = 0;
+    std::memset(g_rtc_output, 0, sizeof(g_rtc_output));
+    g_rtc_outbit = 0; g_rtc_outpos = 0; g_rtc_cmd = 0;
+    {
+        static const uint8_t dt[7] = {0x24, 0x01, 0x01, 0x01, 0x52, 0x00, 0x00};
+        std::memcpy(g_rtc_datetime, dt, 7);
+    }
+    g_rtc_status1 = 0x02; g_rtc_status2 = 0x00;
     for (int i = 0; i < 2; ++i) {
         g_fifo_cnt[i] = 0; g_fifo_head[i] = 0; g_fifocnt[i] = 0; g_fifo_lastrx[i] = 0;
     }
@@ -337,6 +489,8 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             return ((g_spicnt & ~0x0080u) >> ((addr & 1u) * 8)) & m;
         case 0x040001C2: case 0x040001C3:  // SPIDATA (last clocked-in byte)
             return g_spi_resp & m;
+        case 0x04000138: case 0x04000139:  // RTC register (bit-banged serial)
+            return (rtc_read() >> ((addr & 1u) * 8)) & m;
         case 0x04100010:  // gamecard data — empty slot reads all-ones
             if (g_card_words_left) {
                 if (--g_card_words_left == 0) {
@@ -402,14 +556,26 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             fifo_send(cpu, value);
             return;
         case 0x040001C0: {  // SPICNT
-            bool was_hold = (g_spicnt & 0x0800u) != 0;
+            uint16_t old = g_spicnt;
             g_spicnt = static_cast<uint16_t>(value);
-            if (was_hold && !(g_spicnt & 0x0800u)) g_spi_phase = 0;  // CS released
+            if ((old & 0x8000u) && !(g_spicnt & 0x8000u))   // SPI disabled → drop CS
+                release_device((old >> 8) & 3);
             return;
         }
-        case 0x040001C2:    // SPIDATA — clock one byte through the device
-            if (g_spicnt & 0x8000u) spi_byte(static_cast<uint8_t>(value));
+        case 0x040001C2:    // SPIDATA — clock one byte through the selected device
+            if (g_spicnt & 0x8000u) spi_transfer(static_cast<uint8_t>(value));
             return;
+        case 0x04000138:    // RTC register (bit-banged serial)
+            rtc_write(static_cast<uint16_t>(value), width == 1);
+            return;
+        case 0x04000504: {  // SOUNDBIAS (ARM7) — track the boot ramp invariant
+            uint32_t v = value & 0x3FFu;
+            if (g_counts.soundbias_w == 0) g_counts.soundbias_first = v;
+            ++g_counts.soundbias_w;
+            g_counts.soundbias_last = v;
+            io_mem_write(addr, value, width);   // keep the latch (reads see it)
+            return;
+        }
         case 0x040001A4:  // ROMCTRL (32-bit write starts a gamecard block)
             g_romctrl = value;
             if (value & 0x80000000u) {           // block start

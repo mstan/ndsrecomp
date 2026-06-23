@@ -23,6 +23,11 @@ struct OracleCounters
     uint64_t fifo7to9  = 0;  // ARM7 IPC FIFO sends
     uint64_t dma_done  = 0;  // SetIRQ(cpu, IRQ_DMA0..3)
     uint64_t timer_ovf = 0;  // SetIRQ(cpu, IRQ_Timer0..3)
+    // SOUNDBIAS (0x04000504) write stream — invariant for the ARM7 boot
+    // sound-bias ramp. Symmetric with the native runtime's NdsEventCounts.
+    uint64_t soundbias_w     = 0;  // total ARM7 writes to SOUNDBIAS
+    uint32_t soundbias_first = 0;  // first value written
+    uint32_t soundbias_last  = 0;  // most recent value written
 };
 
 // Single global ring — the oracle runs exactly one NDS instance.

@@ -68,13 +68,38 @@ void Oracle_OnSetIRQ(NDS* /*nds*/, u32 cpu, u32 irq)
         default: break;
     }
 }
+
+// Always-on register-write ring. Called from the base NDS::ARMxIOWriteN
+// (patched, guarded by MELONDS_ORACLE_HOOKS) so it sees writes regardless of
+// the `NDS::`-qualified (non-virtual) call sites that bypass the OracleNDS
+// vtable overrides. The width rules dedupe melonDS's internal width-forwarding:
+//   0x180 IPCSYNC : 16-bit handler is canonical (32-bit forwards down to it).
+//   0x188 FIFOsend: 32-bit handler is canonical (16-bit forwards up to it).
+//   0x504 SOUNDBIAS: every width is handled directly (no forwarding).
+// cpu: 0 = ARM9, 1 = ARM7. Symmetric with the native NdsEventCounts.
+void Oracle_OnIOWrite(NDS* /*nds*/, u32 cpu, u32 addr, u32 val, u32 width)
+{
+    if (addr == 0x04000180) {
+        if (width == 16) g_oracle_counts.ipcsync_w++;
+    } else if (addr == 0x04000188) {
+        if (width == 32) (cpu == 0 ? g_oracle_counts.fifo9to7
+                                   : g_oracle_counts.fifo7to9)++;
+    } else if (addr == 0x04000504 && cpu == 1) {
+        u32 v = val & 0x3FF;
+        if (g_oracle_counts.soundbias_w == 0) g_oracle_counts.soundbias_first = v;
+        g_oracle_counts.soundbias_w++;
+        g_oracle_counts.soundbias_last = v;
+    }
+}
 }
 
 // ─────────────────────────────────────────────────────── the NDS subclass ───
 
-// Counts IPC register traffic by observing the (virtual) IO-write entry points
-// the ARM cores dispatch through. IPCSYNC is 0x04000180; IPC FIFO send is
-// 0x04000188. ARM9 sends → fifo9to7, ARM7 sends → fifo7to9.
+// Adds a width-dispatched debug read used by the TCP protocol. Register-write
+// event counting is NOT done here: melonDS's bus calls the IO-write methods
+// with explicit `NDS::` qualification (non-virtual), so subclass overrides are
+// never invoked. Counting lives in Oracle_OnIOWrite, called from the patched
+// base methods (see above).
 class OracleNDS : public NDS
 {
 public:
@@ -95,29 +120,6 @@ public:
             if (width == 32) return ARM9IORead32(addr);
         }
         return 0;
-    }
-
-    void ARM9IOWrite16(u32 addr, u16 val) override
-    {
-        if (addr == 0x04000180) g_oracle_counts.ipcsync_w++;
-        NDS::ARM9IOWrite16(addr, val);
-    }
-    void ARM9IOWrite32(u32 addr, u32 val) override
-    {
-        if (addr == 0x04000180) g_oracle_counts.ipcsync_w++;
-        else if (addr == 0x04000188) g_oracle_counts.fifo9to7++;
-        NDS::ARM9IOWrite32(addr, val);
-    }
-    void ARM7IOWrite16(u32 addr, u16 val) override
-    {
-        if (addr == 0x04000180) g_oracle_counts.ipcsync_w++;
-        NDS::ARM7IOWrite16(addr, val);
-    }
-    void ARM7IOWrite32(u32 addr, u32 val) override
-    {
-        if (addr == 0x04000180) g_oracle_counts.ipcsync_w++;
-        else if (addr == 0x04000188) g_oracle_counts.fifo7to9++;
-        NDS::ARM7IOWrite32(addr, val);
     }
 };
 
@@ -230,14 +232,16 @@ static uint64_t eventValue(const std::string& ev)
 static std::string countsJson()
 {
     const OracleCounters& c = g_oracle_counts;
-    char buf[320];
+    char buf[448];
     snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
-        "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu}",
+        "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
+        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
-        (unsigned long long)c.timer_ovf);
+        (unsigned long long)c.timer_ovf,
+        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last);
     return buf;
 }
 

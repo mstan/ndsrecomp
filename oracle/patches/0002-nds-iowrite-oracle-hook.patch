@@ -1,0 +1,70 @@
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 7cef3bf..fd9ce95 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -3174,6 +3174,10 @@ u32 NDS::ARM9IORead32(u32 addr)
+ 
+ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 8);
++#endif
+     switch (addr)
+     {
+     case 0x0400006C:
+@@ -3282,6 +3286,10 @@ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 16);
++#endif
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val); return;
+@@ -3480,6 +3488,10 @@ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM9IOWrite32(u32 addr, u32 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 32);
++#endif
+     switch (addr)
+     {
+     case 0x04000004:
+@@ -3984,6 +3996,10 @@ u32 NDS::ARM7IORead32(u32 addr)
+ 
+ void NDS::ARM7IOWrite8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 8);
++#endif
+     switch (addr)
+     {
+     case 0x04000132:
+@@ -4089,6 +4105,10 @@ void NDS::ARM7IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM7IOWrite16(u32 addr, u16 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 16);
++#endif
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(1, val); return;
+@@ -4253,6 +4273,10 @@ void NDS::ARM7IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM7IOWrite32(u32 addr, u32 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 32);
++#endif
+     switch (addr)
+     {
+     case 0x04000004:
