@@ -69,3 +69,13 @@ See `PRINCIPLES.md`, `CLAUDE.md`, `DEBUG.md`. In short: no HLE BIOS,
 no stubs, never edit generated C (fix the recompiler and regen),
 always-on ring buffers (never arm-then-capture), dispatch-miss log
 clean every run.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
