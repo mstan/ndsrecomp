@@ -432,16 +432,19 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
         uint32_t s32 = r.s16 + r.s16;
         return (s32 > 1u) ? (s32 - 1u) : 0u;                 // ARM-mode S32 beyond the baked 1
     }
-    // Sequential (fall-through) vs non-sequential (branch/refill) code fetch;
-    // the sequential access is cheaper on both the raw bus and the I-cache, so a
-    // tight spin loop is far cheaper than data/branch-heavy early boot.
-    const bool seq = (pc == g_last_code_pc[0] + 2u || pc == g_last_code_pc[0] + 4u);
+    // ARM9 code fetch is FORCED non-sequential 32-bit — melonDS: "all code
+    // accesses are forced nonseq 32bit" (ARM.h:254); there is NO sequential-fetch
+    // speedup on the ARM9 (RegionCodeCycles is pinned to the region's N32 cost).
+    // Charge that N32 cost (post +3 non-seq penalty on every region except main
+    // RAM, post x2 ARM9 clock shift) on EVERY fetch. The static instr_cycle_base
+    // already bakes one sequential fetch cycle, so subtract 1 to absorb it.
+    // (Per-PU-region cacheability -> flat averaged 3/1 is a later refinement; the
+    // firmware MPU/cache isn't set up yet during the early-boot IPC handshake.)
     g_last_code_pc[0] = pc;
-    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size)
-        return 1u;                                          // ITCM: no wait states
-    if (g_cp15.control & (1u << 12)) return seq ? 1u : 3u;  // C1 bit12 I-cache: cached
-    if (pc >= 0xFFFF0000u) return seq ? 2u : 8u;            // BIOS 32-bit
-    if (pc >= 0x02000000u && pc < 0x03000000u)              // main RAM 16-bit
-        return seq ? 5u : 16u;
-    return seq ? 2u : 8u;                                   // WRAM 32-bit / I/O / VRAM
+    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size) return 0u;   // ITCM = 1, baked
+    uint32_t n;
+    if (pc >= 0xFFFF0000u)                            n = 8u;     // BIOS 32-bit: (1+3)x2
+    else if (pc >= 0x02000000u && pc < 0x03000000u)  n = 18u;    // main RAM 16-bit: (8+1)x2
+    else                                             n = 8u;     // WRAM/IO/OAM 32-bit: (1+3)x2
+    return n > 1u ? n - 1u : 0u;                                  // absorb the baked 1S
 }
