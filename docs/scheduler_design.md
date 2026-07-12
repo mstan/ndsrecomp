@@ -272,3 +272,62 @@ rescheduling may shorten an active target
 4. The merged IPC transcript has the same write/read observation order.
 5. ARM9 sends the missing FIFO word naturally.
 6. ARM7 receives it and exits the wait without any IPC-specific yielding.
+
+---
+
+# EXACT melonDS ARM9 timing + the combine refactor (2026-07-12, research agents A+B)
+
+Two Sonnet agents extracted melonDS's exact ARM9 model and mapped the recompiler's
+cycle emission. This is the implementation spec for the proper combine.
+
+## melonDS ARM9 combine (ARM.h:266-303, verbatim; numC=(R15&2)?0:CodeCycles)
+- AddCycles_C  (branch/simple ALU-imm): `Cycles += numC`
+- AddCycles_CI (reg-shift ALU, MUL, MCR/MRC): `Cycles += numC + numI`  (ADD, no overlap)
+- AddCycles_CD (store) AND AddCycles_CDI (load): `Cycles += max(numC+numD-6, max(numC,numD))`
+  -- byte-identical; LOADS SKIP THE INTERNAL CYCLE ("ARM9 seems to skip" per source).
+- Taken branch / PC-write: instruction's own AddCycles_* runs first, THEN JumpTo adds
+  2x the TARGET region's CodeCycles (pipeline refill).
+
+## numC (code fetch) — ARM.h:254 "all code accesses are forced nonseq 32bit"
+Region N32 (post +3 penalty on every region EXCEPT main RAM, post <<1 x2 shift):
+BIOS/WRAM/IO/OAM=8, main RAM=18, palette/VRAM=10, ITCM=1. NO sequential discount.
+Pinned to region N32 at JumpTo; reused straight-line. Thumb odd-half (R15&2): numC=0.
+CACHE: per-PU-region cacheable flag `pu&0x40` (NOT C1 bit12) -> flat kCodeCacheTiming=3
+on branch/32-byte-boundary, else 1 (un-shifted). ICacheLookup is DEAD CODE on master.
+Data cache regions -> kDataCacheTiming=3 flat.
+
+## numD (data) — CP15.cpp DataRead/Write
+8/16-bit single = always N (MemTimings[..][1]); 32-bit first word = N ([2]),
+subsequent (LDM/STM/LDRD) = S ([3], ACCUMULATES). ITCM/DTCM = flat 1 any width.
+LDM/STM: numD = N + (n-1)*S summed, ONE combine call.
+
+## numI (internal) — ARMInterpreter*.cpp
+reg-specified-shift ALU = +1; MUL/MLA/etc ARM9 = flat 1 (S=0) or 3 (S=1) -- NOT the
+ARM7 operand-dependent count; MCR=2, MRC=3; loads/stores/branches = 0 (folded).
+
+## Recompiler cycle-emission map (agent B) + the edit set
+- instr_cycle_base (arm_ir.cpp:99-166) FOLDS the code fetch into the GBA base
+  (branch=3="2S+1N", LDR=2, ...) -- this is why ARM7 is byte-exact, and why it does
+  NOT map to melonDS's separate numC/numD/numI.
+- Codegen builds one _cyc = base + shift/PC surcharges + Sum runtime_mem_cycles;
+  runtime_insn_fp ALSO adds runtime_code_cycles(pc). 14 runtime_tick sites, 4
+  mem_cycles sites (LDM loop = N per register), 6 mul_cycles sites.
+- GAPS: runtime_mul_cycles is a FLAT-1 STUB (banks) though the codegen plumbs it;
+  tier3 RtBus never overrides access_cycles -> FLAT-1 data (region-blind).
+- PROPER combine (regen required): split _cyc into _code=runtime_code_cycles(pc) /
+  _data=Sum raw mem_cycles / _int=internal-only; at each tick emit
+  runtime_tick(combine(_code,_data,_int,class)); branch emitters add 2x code(target);
+  fix runtime_mul_cycles to call mul_wait_cycles; give tier3 a real access_cycles +
+  expose interpreter step's components (or approximate). MUST keep the ARM7 path
+  behaviorally identical (it's exact) -- combine branches on CPU.
+- Regen: nds_recompile.exe --config bios/biosnds{9,7}.toml --bin ... --out generated
+  --bank arm{9,7}_bios ; then rebuild recompiler+runner ; check dispatch_misses.log.
+
+## Diagnostic (2026-07-12): the handshake is cycle-gated + EXTREMELY sensitive
+Merged IPCSYNC transcript: both sides reach SYNC 202/202 (6th write) with cyc9 only
++2% apart, then native's ARM9 freezes while the oracle advances. The +2% is enough
+to flip the ARM7's cross-CPU read (byte-exact until insn7=154719, then diverges to a
+garbage PC -> ARM9 spins). The +2% is dominated by the BIOS-spin OVERCHARGE (native
+9.2 vs oracle 6.0 cyc/insn in that window) -> the per-PU-region cache model is NOT
+cosmetic; the ARM9 spins in the BIOS during the handshake wait. => convergence needs
+BOTH the combine AND the BIOS cache, i.e. cyc9 accurate to ~1%.
