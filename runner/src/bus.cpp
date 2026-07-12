@@ -387,7 +387,11 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
         data = 4u;                                          // shared / ARM7 WRAM 32-bit
     else
         data = 4u;                                          // I/O, VRAM, palette, ...
-    // Overlap: the first ~6 cycles hide behind the code fetch.
+    // Overlap applies ONCE per instruction: the first data access hides ~6
+    // cycles behind the code fetch. Subsequent (sequential) words of an LDM/STM
+    // have no fetch to hide behind, so they cost the full data rate — otherwise
+    // multi-word transfers (the early-boot memory clears) are undercharged.
+    if (sequential) return data;
     return data > 6u ? data - 6u : 1u;
 }
 
