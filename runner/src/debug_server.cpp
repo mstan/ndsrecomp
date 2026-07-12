@@ -202,7 +202,7 @@ std::string handle(const std::string& line) {
             if (scheduler_cpu_cycles(0) == before)
                 break;
         }
-        char buf[256];
+        char buf[768];
         std::snprintf(buf, sizeof(buf),
             "{\"reached\":%s,\"cycles\":[%llu,%llu],\"counts\":%s}",
             scheduler_cpu_cycles(0) >= target ? "true" : "false",
@@ -218,7 +218,7 @@ std::string handle(const std::string& line) {
         if (count > kMaxRounds) count = kMaxRounds;
         for (uint64_t i = 0; i < count; ++i)
             scheduler_run_round();
-        char buf[256];
+        char buf[768];
         std::snprintf(buf, sizeof(buf),
             "{\"rounds\":%llu,\"cycles\":[%llu,%llu],\"counts\":%s}",
             (unsigned long long)count,

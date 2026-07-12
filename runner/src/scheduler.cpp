@@ -24,6 +24,17 @@ struct CpuSlot {
 CpuSlot g_slot[2];
 int     g_cur = -1;           // currently-loaded CPU (-1 = none)
 
+// melonDS-faithful timeline (docs/scheduler_design.md, Commit A). g_sys_timestamp
+// is in SYSTEM cycles (= ARM7 cycles = ARM9 cycles >> kArm9ClockShift).
+// g_slot[0].cycles is the ARM9 timestamp (ARM9 cycles); g_slot[1].cycles the ARM7.
+uint64_t           g_sys_timestamp = 0;
+constexpr int      kArm9ClockShift = 1;    // ARM9 runs at 2x the system clock
+constexpr uint64_t kIterCap        = 64;   // system cycles per outer iteration
+// Next scheduled hardware-event time in SYSTEM cycles. Commit A has no event
+// table yet, so the kIterCap always dominates; Commit B+ returns the next
+// LCD/timer/SPI/DMA deadline here (and lets an MMIO write shorten it).
+uint64_t next_scheduled_event_time() { return UINT64_MAX; }
+
 void save_current() {
     if (g_cur < 0) return;
     g_slot[g_cur].state = g_cpu;
@@ -89,6 +100,7 @@ void scheduler_init() {
     g_slot[0] = CpuSlot{};
     g_slot[1] = CpuSlot{};
     g_cur = -1;
+    g_sys_timestamp = 0;
 }
 
 void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr) {
@@ -102,10 +114,46 @@ void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr) {
 }
 
 void scheduler_run_round() {
-    const uint32_t kQ9 = 2048, kQ7 = 1024;
-    if (g_slot[0].started) run_slice(0, kQ9);   // ARM9
-    if (g_slot[1].started) run_slice(1, kQ7);   // ARM7
-    nds_tick_hw(g_slot[0].cycles);              // display/timer clocks
+    // melonDS-faithful interleave (docs/scheduler_design.md, Commit A). Each
+    // outer iteration is capped at kIterCap SYSTEM cycles (or the next scheduled
+    // event, whichever is sooner). ARM9 runs FIRST up to its target and may
+    // overshoot atomically on its final instruction; ARM7 then CATCHES UP to
+    // ARM9's ACTUAL resulting timestamp (run-until->=, not force-equal), so the
+    // two timelines stay tightly aligned and cross-CPU writes land in the order
+    // real parallel hardware produces. Replaces the fixed 2048/1024 round, whose
+    // ~1024-ARM7-cycle within-round lead desynced the IPCSYNC handshake.
+    // NOTE: with the current naive cycle model (ARM9 ~1.8 vs melonDS ~6-8
+    // cyc/insn) the ARM9 still retires too many instructions per iteration, so
+    // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
+    // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
+    uint64_t planned = g_sys_timestamp + kIterCap;
+    const uint64_t ev = next_scheduled_event_time();
+    if (ev < planned) planned = ev;
+
+    // ARM9 first, to its target in ARM9 cycles; do NOT clamp its overshoot.
+    const uint64_t arm9_target = planned << kArm9ClockShift;
+    if (g_slot[0].started && !g_slot[0].halted && g_slot[0].cycles < arm9_target)
+        run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
+
+    // Rendezvous = ARM9's ACTUAL (possibly overshot) timestamp, normalized to
+    // system cycles. The ARM7 catches up to THIS, not to `planned`.
+    const uint64_t rendezvous = g_slot[0].cycles >> kArm9ClockShift;
+
+    // Update display/timer clocks at the ARM9 timestamp, so the VBlank/timer
+    // IRQs they raise are visible to the ARM7 as it catches up.
+    nds_tick_hw(g_slot[0].cycles);
+
+    // ARM7 catches up to the rendezvous (run-until->=; it too may overshoot its
+    // final instruction). Bail if it makes no progress (terminally halted or a
+    // debug/insn break is armed) to avoid a busy spin.
+    while (g_slot[1].started && !g_slot[1].halted && g_slot[1].cycles < rendezvous) {
+        const uint64_t before = g_slot[1].cycles;
+        run_slice(1, static_cast<uint32_t>(rendezvous - g_slot[1].cycles));
+        if (g_slot[1].cycles == before) break;
+    }
+
+    g_sys_timestamp = rendezvous;
+    // run_due_system_events(rendezvous);  // Commit B+
 }
 
 SchedResult scheduler_run(uint64_t budget) {
