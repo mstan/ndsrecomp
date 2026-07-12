@@ -146,6 +146,11 @@ void tier3_run(uint32_t /*entry*/) {
         uint32_t pc = ic.R[15];
         bool thumb = ic.cpsr.t;
 
+        // insn7/insn9 anchor reached during interpreted code → stop AT this
+        // (not-yet-executed) instruction, symmetric with the bank path's
+        // runtime_should_yield check. State is fully in `ic`; sync_out below.
+        if (g_nds_insn_stop) break;
+
         // Tier-1 takeover: a static bank covers this PC — hand back to the
         // dispatcher (it will call the recompiled function).
         if (nds_has_bank(pc & ~1u, thumb ? 1 : 0)) break;
@@ -154,6 +159,11 @@ void tier3_run(uint32_t /*entry*/) {
         // memory map, so ask it (covers the ITCM mirror the firmware uses
         // for its IRQ handler).
         if (!bus_addr_is_exec_ram(pc & ~1u)) break;
+
+        // Retired-instruction counter (insn9/insn7), symmetric with the
+        // recompiled-bank runtime_insn_fp hook: one bump per interpreted guest
+        // instruction, counted as it begins (committed to execute).
+        nds_note_insn_retired(g_nds_active);
 
         Instr in = thumb
             ? armv4t::ThumbDecoder::decode(g_bus.read16(pc & ~1u), pc & ~1u)

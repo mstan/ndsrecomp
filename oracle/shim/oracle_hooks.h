@@ -28,6 +28,14 @@ struct OracleCounters
     uint64_t soundbias_w     = 0;  // total ARM7 writes to SOUNDBIAS
     uint32_t soundbias_first = 0;  // first value written
     uint32_t soundbias_last  = 0;  // most recent value written
+    // Per-CPU retired-instruction counters, from power-on reset. Bumped once
+    // per architectural guest instruction (ARM or THUMB, taken or condition-
+    // failed) by Oracle_OnInsnRetire, hooked into ARMv5::Execute/ARMv4::Execute
+    // (see ../patches/0004-nds-insn-retire-hook.patch). A Thumb BL long branch
+    // is two separate table entries (prefix + suffix halfword), so it bumps
+    // the counter twice — matching real ARMv5TE/ARMv4T semantics.
+    uint64_t insn9 = 0;  // ARM9 (ARMv5TE) instructions retired
+    uint64_t insn7 = 0;  // ARM7 (ARMv4T)  instructions retired
 };
 
 // Single global ring — the oracle runs exactly one NDS instance.

@@ -30,6 +30,8 @@ using socket_t = int;
 
 namespace {
 
+std::function<void()> g_reset_fn;
+
 const char HEX[] = "0123456789abcdef";
 
 void append_hex(std::string& s, const uint8_t* data, size_t len) {
@@ -72,16 +74,18 @@ uint64_t json_u64(const std::string& s, const std::string& key,
 
 std::string counts_json() {
     const NdsEventCounts& c = nds_event_counts();
-    char buf[448];
+    char buf[512];
     std::snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
         "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
-        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u}",
+        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u,"
+        "\"insn9\":%llu,\"insn7\":%llu}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
         (unsigned long long)c.timer_ovf,
-        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last);
+        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
+        (unsigned long long)c.insn9, (unsigned long long)c.insn7);
     return buf;
 }
 
@@ -122,6 +126,12 @@ std::string handle(const std::string& line) {
 
     if (cmd == "ping") return "{\"pong\":true}";
 
+    if (cmd == "reset") {
+        if (!g_reset_fn) return "{\"error\":\"reset unsupported\"}";
+        g_reset_fn();   // full power-on re-init (both cores from reset vectors)
+        return "{\"ok\":true}";
+    }
+
     if (cmd == "regs") {
         uint64_t cpu = json_u64(line, "cpu", 9);
         const ArmCpuState& c = scheduler_cpu_state(cpu == 7 ? 1 : 0);
@@ -148,14 +158,34 @@ std::string handle(const std::string& line) {
         if (nds_event_value(ev.c_str()) == UINT64_MAX)
             return "{\"error\":\"unknown event\"}";
 
+        // Arm the sub-event break so the slice stops AT the Nth event, not at
+        // the next round boundary. The loop condition (checked each round)
+        // guarantees we exit once the target is reached.
+        nds_event_break_arm(ev.c_str(), target);
         uint64_t rounds = 0;
         constexpr uint64_t kMaxRounds = 5000000;
+        // No-progress early-out: if the watched counter has not advanced for
+        // this many consecutive rounds the boot has stalled (diverged into an
+        // idle loop / halt that never reaches the Nth event), so bail with
+        // reached=false instead of grinding to kMaxRounds (minutes). Sized far
+        // above the largest legitimate inter-event gap during boot (a few
+        // VBlank waits ~ hundreds of rounds); overridable via "stall".
+        uint64_t stall_limit = json_u64(line, "stall", 300000);
+        uint64_t last_val = nds_event_value(ev.c_str());
+        uint64_t stale = 0;
+        bool stalled = false;
         while (nds_event_value(ev.c_str()) < target && rounds < kMaxRounds) {
             scheduler_run_round();
             ++rounds;
+            uint64_t v = nds_event_value(ev.c_str());
+            if (v > last_val) { last_val = v; stale = 0; }
+            else if (++stale >= stall_limit) { stalled = true; break; }
         }
+        nds_event_break_disarm();
         bool reached = nds_event_value(ev.c_str()) >= target;
         return std::string("{\"reached\":") + (reached ? "true" : "false") +
+            ",\"stalled\":" + (stalled ? "true" : "false") +
+            ",\"rounds\":" + std::to_string(rounds) +
             ",\"counts\":" + counts_json() + "}";
     }
 
@@ -317,6 +347,8 @@ bool send_all(socket_t s, const char* data, size_t len) {
 }
 
 }  // namespace
+
+void debug_set_reset_fn(std::function<void()> fn) { g_reset_fn = std::move(fn); }
 
 void debug_serve(uint16_t port) {
 #ifdef _WIN32

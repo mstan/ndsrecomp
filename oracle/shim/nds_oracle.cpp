@@ -52,11 +52,41 @@ using namespace melonDS;
 // the OracleNDS IO-write overrides bump the register-write counters.
 OracleCounters g_oracle_counts;
 
+// ── sub-frame event break ───────────────────────────────────────────────
+// run_to_event arms a watched counter + target here; the event hooks call
+// oracle_brk_check() right after each bump, and the patched RunFrame loop
+// (MELONDS_ORACLE_HOOKS) polls Oracle_BreakRequested() and bails mid-frame.
+// Without this, RunFrame only stops at a frame boundary (~560k cycles), so a
+// sub-frame event (IPCSYNC/FIFO, dozens per frame) overshoots by a whole frame
+// and a clean native-vs-oracle state diff at the Nth event is impossible.
+static const uint64_t* g_brk_ptr    = nullptr;
+static uint64_t        g_brk_target = 0;
+static bool            g_brk_hit    = false;
+static inline void oracle_brk_check(melonDS::NDS* nds)
+{
+    if (g_brk_ptr && *g_brk_ptr >= g_brk_target && !g_brk_hit)
+    {
+        g_brk_hit = true;
+        // Tight stop: truncate both CPUs' execution targets to "now" so the
+        // interpreter loops exit after the *current* instruction rather than
+        // running to the end of the scheduler chunk (which can be thousands of
+        // cycles, overshooting the Nth event well into a later routine). The
+        // next RunFrame reloads the targets from NextTarget(), so resume is
+        // clean and emulated time stays continuous.
+        nds->ARM9Target = nds->ARM9Timestamp;
+        nds->ARM7Target = nds->ARM7Timestamp;
+    }
+}
+
 namespace melonDS
 {
+// Polled by the patched RunFrame loop. External linkage in namespace melonDS
+// to match the `extern bool Oracle_BreakRequested();` declaration in NDS.cpp.
+bool Oracle_BreakRequested() { return g_brk_hit; }
+
 // Resolved at link time by the patched NDS::SetIRQ. Must live in namespace
 // melonDS to match the unqualified extern declaration inside SetIRQ.
-void Oracle_OnSetIRQ(NDS* /*nds*/, u32 cpu, u32 irq)
+void Oracle_OnSetIRQ(NDS* nds, u32 cpu, u32 irq)
 {
     switch (irq)
     {
@@ -67,6 +97,7 @@ void Oracle_OnSetIRQ(NDS* /*nds*/, u32 cpu, u32 irq)
             g_oracle_counts.timer_ovf++; break;
         default: break;
     }
+    oracle_brk_check(nds);
 }
 
 // Always-on register-write ring. Called from the base NDS::ARMxIOWriteN
@@ -77,7 +108,7 @@ void Oracle_OnSetIRQ(NDS* /*nds*/, u32 cpu, u32 irq)
 //   0x188 FIFOsend: 32-bit handler is canonical (16-bit forwards up to it).
 //   0x504 SOUNDBIAS: every width is handled directly (no forwarding).
 // cpu: 0 = ARM9, 1 = ARM7. Symmetric with the native NdsEventCounts.
-void Oracle_OnIOWrite(NDS* /*nds*/, u32 cpu, u32 addr, u32 val, u32 width)
+void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width)
 {
     if (addr == 0x04000180) {
         if (width == 16) g_oracle_counts.ipcsync_w++;
@@ -90,6 +121,20 @@ void Oracle_OnIOWrite(NDS* /*nds*/, u32 cpu, u32 addr, u32 val, u32 width)
         g_oracle_counts.soundbias_w++;
         g_oracle_counts.soundbias_last = v;
     }
+    oracle_brk_check(nds);
+}
+
+// Always-on per-CPU retired-instruction ring. Called once per architectural
+// guest instruction from the patched ARMv5::Execute (ARM9) / ARMv4::Execute
+// (ARM7) — see ../patches/0004-nds-insn-retire-hook.patch for the exact hook
+// site and the Thumb-BL-long-branch counting rationale (it retires as two
+// instructions here, matching real hardware: Thumb has no native 32-bit
+// encoding, BL is architecturally a prefix+suffix halfword pair).
+// cpu: 0 = ARM9, 1 = ARM7 (same convention as Oracle_OnSetIRQ/Oracle_OnIOWrite).
+void Oracle_OnInsnRetire(NDS* nds, u32 cpu)
+{
+    (cpu == 0 ? g_oracle_counts.insn9 : g_oracle_counts.insn7)++;
+    oracle_brk_check(nds);
 }
 }
 
@@ -226,22 +271,45 @@ static uint64_t eventValue(const std::string& ev)
     if (ev == "fifo7to9")  return c.fifo7to9;
     if (ev == "dma_done")  return c.dma_done;
     if (ev == "timer_ovf") return c.timer_ovf;
+    if (ev == "soundbias_w") return c.soundbias_w;
+    if (ev == "insn9")     return c.insn9;
+    if (ev == "insn7")     return c.insn7;
     return UINT64_MAX;  // unknown event
+}
+
+// Pointer to the counter named by `ev`, for arming the sub-frame break.
+// Mirrors eventValue; nullptr for an unknown event (break stays disarmed).
+static const uint64_t* eventPtr(const std::string& ev)
+{
+    OracleCounters& c = g_oracle_counts;
+    if (ev == "vblank9")     return &c.vblank9;
+    if (ev == "vblank7")     return &c.vblank7;
+    if (ev == "ipcsync_w")   return &c.ipcsync_w;
+    if (ev == "fifo9to7")    return &c.fifo9to7;
+    if (ev == "fifo7to9")    return &c.fifo7to9;
+    if (ev == "dma_done")    return &c.dma_done;
+    if (ev == "timer_ovf")   return &c.timer_ovf;
+    if (ev == "soundbias_w") return &c.soundbias_w;
+    if (ev == "insn9")       return &c.insn9;
+    if (ev == "insn7")       return &c.insn7;
+    return nullptr;
 }
 
 static std::string countsJson()
 {
     const OracleCounters& c = g_oracle_counts;
-    char buf[448];
+    char buf[512];
     snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
         "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
-        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u}",
+        "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u,"
+        "\"insn9\":%llu,\"insn7\":%llu}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
         (unsigned long long)c.timer_ovf,
-        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last);
+        (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
+        (unsigned long long)c.insn9, (unsigned long long)c.insn7);
     return buf;
 }
 
@@ -274,6 +342,20 @@ static std::string handle(OracleNDS* nds, const std::string& line)
 
     if (cmd == "ping")
         return "{\"pong\":true}";
+
+    if (cmd == "reset")
+    {
+        // Full power-on re-init, identical to main()'s sequence, so the
+        // bisector can compare fresh-from-reset at each event count.
+        nds->Reset();
+        nds->SPI.GetPowerMan()->SetBatteryLevelOkay(true);
+        nds->RTC.SetDateTime(2024, 1, 1, 12, 0, 0);
+        nds->SetLidClosed(false);
+        nds->Start();
+        g_oracle_counts = OracleCounters{};   // clear the event ring
+        g_brk_ptr = nullptr; g_brk_target = 0; g_brk_hit = false;
+        return "{\"ok\":true}";
+    }
 
     if (cmd == "regs")
     {
@@ -316,14 +398,46 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         uint64_t target = jsonU64(line, "count", 0);
         if (eventValue(ev) == UINT64_MAX)
             return "{\"error\":\"unknown event\"}";
-        uint64_t frames = 0;
+        // Arm the sub-frame break so RunFrame stops AT the Nth event, not at
+        // the next frame boundary. The loop condition (checked before each
+        // frame) guarantees we never re-enter RunFrame once the target is hit.
+        g_brk_ptr = eventPtr(ev); g_brk_target = target; g_brk_hit = false;
+        // No-progress early-out: if the watched counter has not advanced for
+        // this many consecutive frames the boot has stalled / plateaued (e.g.
+        // reached the menu and stopped IPC-ing), so bail with reached=false
+        // instead of grinding to kMaxFrames. Sized far above the largest
+        // legitimate inter-event gap during boot; overridable via "stall".
+        uint64_t stallLimit = jsonU64(line, "stall", 2000);
+        uint64_t lastVal = eventValue(ev);
+        uint64_t stale = 0, frames = 0;
+        bool stalled = false;
         while (eventValue(ev) < target && frames < kMaxFrames)
         {
+            g_brk_hit = false;
             nds->RunFrame();
             frames++;
+            uint64_t v = eventValue(ev);
+            if (v > lastVal) { lastVal = v; stale = 0; }
+            else if (++stale >= stallLimit) { stalled = true; break; }
         }
+        g_brk_ptr = nullptr; g_brk_hit = false;  // disarm
         bool reached = eventValue(ev) >= target;
         return std::string("{\"reached\":") + (reached ? "true" : "false")
+             + ",\"stalled\":" + (stalled ? "true" : "false")
+             + ",\"frames\":" + std::to_string(frames)
+             + ",\"counts\":" + countsJson() + "}";
+    }
+
+    if (cmd == "run_frames")
+    {
+        // Advance exactly N full frames (no break). Lets the harness step the
+        // oracle by raw frames — useful for characterizing per-frame progress
+        // without relying on vblank9 (which counts IRQs-delivered, not frames).
+        uint64_t count = jsonU64(line, "count", 1);
+        if (count > kMaxFrames) count = kMaxFrames;
+        g_brk_ptr = nullptr; g_brk_hit = false;
+        for (uint64_t i = 0; i < count; i++) nds->RunFrame();
+        return std::string("{\"frames\":") + std::to_string(count)
              + ",\"counts\":" + countsJson() + "}";
     }
 

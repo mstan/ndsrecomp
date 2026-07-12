@@ -20,6 +20,16 @@ uint16_t g_ipcsync_out[2] = {0, 0};   // [cpu] = last value written (bits 8..14)
 // POSTFLG (0x04000300) — per-CPU boot flag (bit0 latches set).
 uint8_t  g_postflg[2] = {0, 0};
 
+// DISPSTAT (0x04000004) is PER-CPU (ARM9 and ARM7 each own one) + VCOUNT
+// (0x04000006). The display controller raises the VBlank/HBlank/VCount IRQ
+// only when the matching DISPSTAT enable bit is set (GBATEK; melonDS GPU).
+// bits: 0 VBlank flag (RO), 1 HBlank flag (RO), 2 VCount-match flag (RO),
+// 3 VBlank IRQ enable, 4 HBlank IRQ enable, 5 VCount IRQ enable,
+// 7 = VCount-compare MSB, 15..8 = VCount-compare low 8 (LYC).
+uint16_t g_dispstat[2] = {0, 0};   // writable bits (3,4,5,7,15..8), per CPU
+uint16_t g_vcount = 0;             // current scanline 0..262
+bool     g_in_vblank = false;      // current line >= 192
+
 // Interrupt registers, per CPU.
 uint32_t g_ime[2] = {0, 0};           // 0x208 master enable (bit0)
 uint32_t g_ie[2]  = {0, 0};           // 0x210 enable mask
@@ -42,6 +52,31 @@ uint32_t card_block_words(uint32_t romctrl) {
 uint8_t  g_haltcnt[2] = {0, 0};       // 0x04000301 (ARM7: bit7 = HALT)
 NdsEventCounts g_counts = {};
 
+// ── sub-event break (debug-server anchoring) ────────────────────────────
+// Armed by nds_event_break_arm; brk_check() (called right after every counter
+// bump) trips g_brk_hit when the watched counter reaches the target. The
+// scheduler polls nds_event_break_hit() between dispatched blocks. Disarmed by
+// default (g_brk_ptr == nullptr → check is a no-op), so normal runs are
+// unaffected. Symmetric with the oracle shim's g_brk_* mechanism.
+const uint64_t* g_brk_ptr = nullptr;
+uint64_t        g_brk_target = 0;
+bool            g_brk_hit = false;
+// True when the armed break is an insn7/insn9 anchor. Those need a PER-
+// INSTRUCTION stop: the scheduler's block-boundary break overshoots by a whole
+// recompiled function (hundreds of insns). g_nds_insn_stop makes
+// runtime_should_yield (checked at every bank instruction) and the Tier-3 loop
+// return AT exactly insn==target. Safe because the fp-stream bisector resets
+// per K and never resumes from the mid-function stop. g_nds_insn_stop itself is
+// defined at global scope (below) — it needs external linkage so
+// runtime_should_yield / Tier-3 (other TUs) can read it via io.h.
+bool            g_brk_is_insn = false;
+inline void brk_check() {
+    if (g_brk_ptr && *g_brk_ptr >= g_brk_target) {
+        g_brk_hit = true;
+        if (g_brk_is_insn) g_nds_insn_stop = true;
+    }
+}
+
 // IPC FIFO (0x04000184 CNT / 0x04000188 SEND / 0x04100000 RECV). Two 16-word
 // hardware queues, one per direction. g_fifo[c] holds words CPU c has SENT
 // (the other core RECVs them). The firmware boot uses this to hand the ARM9
@@ -57,6 +92,7 @@ void fifo_send(int c, uint32_t v) {
     if (g_fifo_cnt[c] >= 16) { g_fifocnt[c] |= 0x4000u; return; }  // full → error
     if (c == 0) ++g_counts.fifo9to7;
     else ++g_counts.fifo7to9;
+    brk_check();
     bool was_empty = (g_fifo_cnt[c] == 0);
     g_fifo[c][(g_fifo_head[c] + g_fifo_cnt[c]) % 16] = v;
     ++g_fifo_cnt[c];
@@ -299,11 +335,21 @@ uint16_t ipcsync_read(int cpu) {
 }
 
 void ipcsync_write(int cpu, uint16_t val) {
-    // Writable: bits 11..8 (out data), bit 14 (enable IRQ from other core).
-    // Bit 13 is a send-IRQ pulse to the other core — wired when IRQ
-    // delivery is modeled (the current handshake is polled).
+    // Writable/stored: bits 11..8 (out data) + bit 14 (enable IRQ from remote).
     ++g_counts.ipcsync_w;
+    brk_check();
     g_ipcsync_out[cpu] = (g_ipcsync_out[cpu] & ~0x4F00u) | (val & 0x4F00u);
+    // Bit 13 is a send-IRQ STROBE (not stored): pulse an IPCSYNC IRQ (IF bit 16)
+    // on the OTHER core iff that core has enabled IPCSYNC IRQs (its bit 14). The
+    // firmware boot handshake goes IRQ-driven around ipcsync_w~80 (the data
+    // nibbles freeze and the cores signal via this strobe + a HALT/wait); the
+    // melonDS oracle delivers it and reaches the menu, whereas leaving it
+    // unwired parks the receiver forever — the ipcsync_w=95 deadlock. Verified
+    // via the IPCSYNC ping-pong trace: oracle freezes at SYNC9=0x307/SYNC7=0x703
+    // past N=80 (pure strobing) while native desynced.
+    const int other = cpu ^ 1;
+    if ((val & 0x2000u) && (g_ipcsync_out[other] & 0x4000u))
+        nds_raise_irq(other, 0x00010000u);   // IF bit 16 = IPCSYNC
 }
 
 // Width-mask helpers for sub-word access to a 32-bit register value.
@@ -313,11 +359,17 @@ uint32_t mask_for(uint32_t width) {
 
 }  // namespace
 
+// Global (external linkage): read by runtime_should_yield (runtime_arm.cpp) and
+// the Tier-3 loop (tier3.cpp) via the io.h extern. Set by brk_check above.
+bool g_nds_insn_stop = false;
+
 void nds_io_reset() {
     for (int i = 0; i < 2; ++i) {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
         g_ime[i] = 0; g_ie[i] = 0; g_if[i] = 0; g_haltcnt[i] = 0;
+        g_dispstat[i] = 0;
     }
+    g_vcount = 0; g_in_vblank = false;
     g_counts = {};
     g_romctrl = 0; g_card_words_left = 0;
     for (auto& cpu : g_timer) for (auto& t : cpu) t = Timer{};
@@ -351,6 +403,11 @@ void nds_io_load_firmware(const uint8_t* p, uint32_t n) { g_fw = p; g_fw_size = 
 
 const NdsEventCounts& nds_event_counts() { return g_counts; }
 
+void nds_note_insn_retired(int cpu) {
+    if (cpu & 1) ++g_counts.insn7; else ++g_counts.insn9;
+    brk_check();
+}
+
 uint64_t nds_event_value(const char* name) {
     if (!name) return UINT64_MAX;
     if (std::strcmp(name, "vblank9") == 0) return g_counts.vblank9;
@@ -360,8 +417,42 @@ uint64_t nds_event_value(const char* name) {
     if (std::strcmp(name, "fifo7to9") == 0) return g_counts.fifo7to9;
     if (std::strcmp(name, "dma_done") == 0) return g_counts.dma_done;
     if (std::strcmp(name, "timer_ovf") == 0) return g_counts.timer_ovf;
+    if (std::strcmp(name, "soundbias_w") == 0) return g_counts.soundbias_w;
+    if (std::strcmp(name, "insn9") == 0) return g_counts.insn9;
+    if (std::strcmp(name, "insn7") == 0) return g_counts.insn7;
     return UINT64_MAX;
 }
+
+namespace {
+const uint64_t* event_ptr(const char* name) {
+    if (!name) return nullptr;
+    if (std::strcmp(name, "vblank9") == 0) return &g_counts.vblank9;
+    if (std::strcmp(name, "vblank7") == 0) return &g_counts.vblank7;
+    if (std::strcmp(name, "ipcsync_w") == 0) return &g_counts.ipcsync_w;
+    if (std::strcmp(name, "fifo9to7") == 0) return &g_counts.fifo9to7;
+    if (std::strcmp(name, "fifo7to9") == 0) return &g_counts.fifo7to9;
+    if (std::strcmp(name, "dma_done") == 0) return &g_counts.dma_done;
+    if (std::strcmp(name, "timer_ovf") == 0) return &g_counts.timer_ovf;
+    if (std::strcmp(name, "soundbias_w") == 0) return &g_counts.soundbias_w;
+    if (std::strcmp(name, "insn9") == 0) return &g_counts.insn9;
+    if (std::strcmp(name, "insn7") == 0) return &g_counts.insn7;
+    return nullptr;
+}
+}  // namespace
+
+void nds_event_break_arm(const char* name, uint64_t target) {
+    g_brk_ptr = event_ptr(name);
+    g_brk_target = target;
+    g_brk_hit = false;
+    g_brk_is_insn = name && (std::strcmp(name, "insn7") == 0 ||
+                             std::strcmp(name, "insn9") == 0);
+    g_nds_insn_stop = false;
+}
+void nds_event_break_disarm() {
+    g_brk_ptr = nullptr; g_brk_hit = false;
+    g_brk_is_insn = false; g_nds_insn_stop = false;
+}
+bool nds_event_break_hit() { return g_brk_hit; }
 
 uint32_t nds_io_debug_read(int cpu, uint32_t addr, uint32_t width) {
     NdsCpu old = g_nds_active;
@@ -406,12 +497,22 @@ void nds_tick_hw(unsigned long long cyc) {
     auto vb_index = [](unsigned long long c) -> unsigned long long {
         return c < VB_START ? 0ull : (c - VB_START) / FRAME + 1ull;
     };
+    // Current scanline, for DISPSTAT/VCOUNT reads (round-granular; the precise
+    // sub-scanline position lands with finer display timing if a poll needs it).
+    g_vcount = static_cast<uint16_t>((cyc / SCAN) % LINES);
+    g_in_vblank = (g_vcount >= 192);
     unsigned long long pv = vb_index(last), cv = vb_index(cyc);
     last = cyc;
     for (unsigned long long i = pv; i < cv; ++i) {
-        ++g_counts.vblank9;
-        ++g_counts.vblank7;
-        nds_raise_irq(0, 0x1u); nds_raise_irq(1, 0x1u);
+        // VBlank IRQ fires (and is counted) per CPU ONLY when that CPU enabled
+        // it via DISPSTAT bit 3 — matching melonDS/GBATEK. Previously native
+        // raised IF bit0 on both cores every frame unconditionally, a spurious
+        // pending IRQ vs the oracle. Counting it the same way also makes
+        // vblank9/vblank7 mean "delivered VBlank IRQs" (the oracle's semantics),
+        // so they become valid cross-impl anchors once the guest enables VBlank.
+        if (g_dispstat[0] & 0x0008u) { ++g_counts.vblank9; nds_raise_irq(0, 0x1u); }
+        if (g_dispstat[1] & 0x0008u) { ++g_counts.vblank7; nds_raise_irq(1, 0x1u); }
+        brk_check();
     }
 
     // Timers. Advance each enabled, non-cascade timer by the elapsed cycles
@@ -447,6 +548,7 @@ void nds_tick_hw(unsigned long long cyc) {
             if (T.ctrl & 0x40u) {
                 g_counts.timer_ovf += carry;
                 nds_raise_irq(cpu, 1u << (3 + t));
+                brk_check();
             }
         }
     }
@@ -463,6 +565,16 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
         return (reg >> (off * 8)) & m;
     }
     switch (addr) {
+        case 0x04000004: case 0x04000005: {  // DISPSTAT (per CPU)
+            uint16_t v = g_dispstat[cpu] & 0xFFB8u;        // enable + LYC bits
+            if (g_in_vblank) v |= 0x0001u;                  // VBlank flag
+            uint16_t lyc = static_cast<uint16_t>(
+                ((g_dispstat[cpu] & 0x0080u) << 1) | (g_dispstat[cpu] >> 8));
+            if (lyc == g_vcount) v |= 0x0004u;              // VCount-match flag
+            return (v >> ((addr & 1u) * 8)) & m;
+        }
+        case 0x04000006: case 0x04000007:    // VCOUNT (current scanline)
+            return (g_vcount >> ((addr & 1u) * 8)) & m;
         case 0x04000180: case 0x04000181:
             return (ipcsync_read(cpu) >> ((addr & 1u) * 8)) & m;
         case 0x04000208:
@@ -495,7 +607,10 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             if (g_card_words_left) {
                 if (--g_card_words_left == 0) {
                     g_romctrl &= ~0x80800000u;   // clear data-ready + busy
-                    nds_raise_irq(cpu, 0x00080000u);  // bit 19: card xfer done
+                    // Cart transfer-done IRQ (IF bit19) only if AUXSPICNT
+                    // (0x040001A0) bit14 enables it (melonDS ROMEndTransfer).
+                    if (io_mem_read(0x040001A0u, 2) & 0x4000u)
+                        nds_raise_irq(cpu, 0x00080000u);
                 }
             }
             return 0xFFFFFFFFu & m;
@@ -530,6 +645,13 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
         return;
     }
     switch (addr) {
+        case 0x04000004: case 0x04000005: {  // DISPSTAT (per CPU)
+            uint32_t shift = (addr & 1u) * 8;
+            uint32_t wmask = mask_for(width) << shift;
+            uint32_t merged = (g_dispstat[cpu] & ~wmask) | ((value << shift) & wmask);
+            g_dispstat[cpu] = static_cast<uint16_t>(merged & 0xFFB8u);  // writable bits
+            return;
+        }
         case 0x04000180:
             ipcsync_write(cpu, static_cast<uint16_t>(value));
             return;
@@ -573,6 +695,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             if (g_counts.soundbias_w == 0) g_counts.soundbias_first = v;
             ++g_counts.soundbias_w;
             g_counts.soundbias_last = v;
+            brk_check();
             io_mem_write(addr, value, width);   // keep the latch (reads see it)
             return;
         }
@@ -585,10 +708,12 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
                 else
                     g_romctrl &= ~0x80000000u;    // nothing to transfer → done
                 // Empty slot: the block transfer completes essentially
-                // instantly. Raise the transfer-complete IRQ (IF bit 19)
-                // for cores that wait on it (e.g. a DMA-driven read where
-                // the data port isn't polled). IE gates whether it matters.
-                nds_raise_irq(cpu, 0x00080000u);
+                // instantly. Raise the transfer-complete IRQ (IF bit 19) only
+                // if AUXSPICNT (0x040001A0) bit14 enables it (melonDS
+                // ROMEndTransfer) — previously unconditional, a spurious IF
+                // bit19 vs the oracle.
+                if (io_mem_read(0x040001A0u, 2) & 0x4000u)
+                    nds_raise_irq(cpu, 0x00080000u);
             }
             return;
         default:

@@ -20,7 +20,11 @@
 // ── Globals the ABI exposes ─────────────────────────────────────────────
 extern "C" ArmCpuState g_cpu = {};
 extern "C" unsigned long long g_runtime_cycles = 0;
-extern "C" unsigned g_runtime_insn_trace = 0;
+// On by default: the recompiled banks gate their per-instruction hook on this,
+// and the hook is what keeps the always-on insn9/insn7 retired-instruction
+// counters live (DEBUG.md "all on in Release"). The hook only bumps a counter
+// + break-check — no control-flow / cycle effect — so behaviour is unchanged.
+extern "C" unsigned g_runtime_insn_trace = 1;
 extern "C" uint32_t g_runtime_break_pc = 0;
 
 NdsCpu      g_nds_active = NDS_ARM9;
@@ -173,9 +177,11 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
     return max_entries;
 }
 
-// Per-instruction fingerprint ring — present for ABI completeness; the
-// armed path is wired with the oracle-diff work later.
-extern "C" void runtime_insn_fp(void) {}
+// Per-instruction hook, fired once at the top of every recompiled-bank guest
+// instruction (g_runtime_insn_trace on). Bumps the active CPU's retired-insn
+// counter so insn9/insn7 can anchor the fp-stream bisector. Tier-3 bumps the
+// same counters from its own step loop (tier3.cpp).
+extern "C" void runtime_insn_fp(void) { nds_note_insn_retired(g_nds_active); }
 extern "C" void runtime_fp_reset(void) {}
 extern "C" uint32_t runtime_fp_count(void) { return 0; }
 extern "C" uint32_t runtime_fp_save_file(const char*) { return 0; }
@@ -193,6 +199,10 @@ extern "C" void runtime_tick(uint32_t cycles) {
 // Per-instruction unwind: terminal halts only (a guest spin waiting on the
 // other core is NOT a fault — it is preempted at a backward branch instead).
 extern "C" bool runtime_should_yield(void) {
+    // insn7/insn9 anchor reached → stop at this exact instruction (see io.cpp
+    // g_nds_insn_stop). The bisector resets per K, so the mid-function unwind
+    // (which does not preserve the call-return stack) is never resumed from.
+    if (g_nds_insn_stop) return true;
     if (g_runtime_break_pc && (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u))
         nds_halt("break pc");
     return g_nds_terminal;

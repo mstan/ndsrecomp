@@ -1,0 +1,76 @@
+diff --git a/src/ARM.cpp b/src/ARM.cpp
+index 0d93dc4..7426abb 100644
+--- a/src/ARM.cpp
++++ b/src/ARM.cpp
+@@ -698,6 +698,26 @@ void ARMv5::Execute()
+                     AddCycles_C();
+             }
+ 
++#ifdef MELONDS_ORACLE_HOOKS
++            // ndsrecomp oracle: always-on per-CPU retired-instruction ring.
++            // Fires exactly once per loop iteration of this Execute() while
++            // loop, i.e. once per architectural instruction retired (ARM or
++            // THUMB, taken or condition-failed). A Thumb BL long branch is two
++            // separate table entries (T_BL_LONG_1/T_BL_LONG_2, one per
++            // halfword) dispatched on two separate iterations, so it retires
++            // as two instructions here — matching real ARMv5TE semantics
++            // (Thumb has no native 32-bit encoding; BL is architecturally a
++            // prefix+suffix pair). Defined in the oracle shim
++            // (oracle/shim/nds_oracle.cpp); resolved at the final link of
++            // nds_oracle. No-op in any build without the shim define.
++            // NOTE: fully qualified melonDS::NDS* — the unqualified `NDS`
++            // here would resolve to this class's `melonDS::NDS& NDS` member
++            // (see ARM.h), not the type, and silently break overload/type
++            // resolution.
++            extern void Oracle_OnInsnRetire(melonDS::NDS* nds, u32 cpu);
++            Oracle_OnInsnRetire(&NDS, Num);
++#endif
++
+             // TODO optimize this shit!!!
+             if (Halted)
+             {
+@@ -832,6 +852,16 @@ void ARMv4::Execute()
+                     AddCycles_C();
+             }
+ 
++#ifdef MELONDS_ORACLE_HOOKS
++            // ndsrecomp oracle: always-on per-CPU retired-instruction ring.
++            // See the matching hook in ARMv5::Execute above for the full
++            // rationale (applies identically here for ARM7/ARMv4). Fully
++            // qualified melonDS::NDS* — see the note above (ARM's `NDS`
++            // member shadows the type name here).
++            extern void Oracle_OnInsnRetire(melonDS::NDS* nds, u32 cpu);
++            Oracle_OnInsnRetire(&NDS, Num);
++#endif
++
+             // TODO optimize this shit!!!
+             if (Halted)
+             {
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 3183431..854db36 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -994,7 +994,22 @@ u32 NDS::RunFrame()
+                 target = ARM9Timestamp >> ARM9ClockShift;
+                 CurCPU = 1;
+ 
+-                while (ARM7Timestamp < target)
++                // ndsrecomp oracle: this catch-up loop re-enters ARM7.Execute()
++                // with ARM7Target reset back to the full `target` on every
++                // iteration. Without the break check, an event that trips
++                // mid-instruction inside Execute() (which truncates ARM7Target
++                // to stop precisely AT that instruction, per oracle_brk_check
++                // in the shim) gets its truncation silently discarded here:
++                // the very next iteration re-widens ARM7Target back to `target`
++                // and keeps running, overshooting the requested stop point.
++                // The other outer RunFrame loops already guard on
++                // MELONDS_ORACLE_BREAK (see above); this nested per-CPU loop
++                // is the one place that didn't, so ARM7-side events (IPCSYNC/
++                // FIFO/SOUNDBIAS writes, IRQs, and now insn7) were not
++                // guaranteed to stop AT the Nth occurrence when it landed
++                // here. Stock (non-oracle) builds are unaffected: the macro is
++                // `false` there, identical to before.
++                while (ARM7Timestamp < target && !MELONDS_ORACLE_BREAK)
+                 {
+                     ARM7Target = target; // might be changed by a reschedule
+ 

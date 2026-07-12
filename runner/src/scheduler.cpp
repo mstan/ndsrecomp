@@ -68,6 +68,12 @@ void run_slice(int cpu, uint32_t quantum) {
             g_slot[cpu].reason = g_nds_halt_reason;
             break;
         }
+        // Debug-server event break: stop this slice at the dispatched-block
+        // boundary right after the armed event fired, so run_to_event lands AT
+        // the Nth event. The other CPU's slice this round breaks immediately
+        // too (flag stays set until run_to_event disarms), so neither core
+        // free-runs past the sync point.
+        if (nds_event_break_hit()) break;
         if (++guard > 20'000'000) {     // host-loop backstop
             g_slot[cpu].halted = true;
             g_slot[cpu].reason = "slice guard (no progress)";

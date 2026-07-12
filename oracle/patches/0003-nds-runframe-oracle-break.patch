@@ -1,0 +1,130 @@
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 7cef3bf..3183431 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -891,6 +891,18 @@ void NDS::RunSystemSleep(u64 timestamp)
+     }
+ }
+ 
++#ifdef MELONDS_ORACLE_HOOKS
++// Defined by the ndsrecomp oracle shim (nds_oracle.cpp). When the shim arms a
++// hardware-event break, the IO-write / SetIRQ hooks set the break flag the
++// moment the watched counter reaches its target; RunFrame then bails out mid-
++// frame so run_to_event can stop AT the Nth event instead of at the next frame
++// boundary (a whole ~560k-cycle frame later). Stock builds never see this.
++extern bool Oracle_BreakRequested();
++#  define MELONDS_ORACLE_BREAK (Oracle_BreakRequested())
++#else
++#  define MELONDS_ORACLE_BREAK false
++#endif
++
+ template <CPUExecuteMode cpuMode>
+ u32 NDS::RunFrame()
+ {
+@@ -902,7 +914,7 @@ u32 NDS::RunFrame()
+ 
+     LagFrameFlag = true;
+     bool runFrame = Running && !(CPUStop & CPUStop_Sleep);
+-    while (Running)
++    while (Running && !MELONDS_ORACLE_BREAK)
+     {
+         u64 frametarget = SysTimestamp + 560190;
+ 
+@@ -946,7 +958,7 @@ u32 NDS::RunFrame()
+             }
+             CPUStop &= ~CPUStop_Wakeup;
+ 
+-            while (Running && GPU.TotalScanlines==0)
++            while (Running && GPU.TotalScanlines==0 && !MELONDS_ORACLE_BREAK)
+             {
+                 u64 target = NextTarget();
+                 ARM9Target = target << ARM9ClockShift;
+@@ -1041,6 +1053,8 @@ u32 NDS::RunFrame()
+         return 263;
+ }
+ 
++#undef MELONDS_ORACLE_BREAK
++
+ u32 NDS::RunFrame()
+ {
+ #ifdef JIT_ENABLED
+@@ -1344,6 +1358,13 @@ void NDS::UpdateIRQ(u32 cpu)
+ 
+ void NDS::SetIRQ(u32 cpu, u32 irq)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    // ndsrecomp oracle: always-on hardware-event ring (vblank/dma/timer IRQs).
++    // Defined in the oracle shim (oracle/shim/nds_oracle.cpp); resolved at the
++    // final link of nds_oracle. No-op in any build without the shim define.
++    extern void Oracle_OnSetIRQ(NDS* nds, u32 cpu, u32 irq);
++    Oracle_OnSetIRQ(this, cpu, irq);
++#endif
+     IF[cpu] |= (1 << irq);
+     UpdateIRQ(cpu);
+ 
+@@ -3174,6 +3195,10 @@ u32 NDS::ARM9IORead32(u32 addr)
+ 
+ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 8);
++#endif
+     switch (addr)
+     {
+     case 0x0400006C:
+@@ -3282,6 +3307,10 @@ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 16);
++#endif
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(0, val); return;
+@@ -3480,6 +3509,10 @@ void NDS::ARM9IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM9IOWrite32(u32 addr, u32 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 0, addr, val, 32);
++#endif
+     switch (addr)
+     {
+     case 0x04000004:
+@@ -3984,6 +4017,10 @@ u32 NDS::ARM7IORead32(u32 addr)
+ 
+ void NDS::ARM7IOWrite8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 8);
++#endif
+     switch (addr)
+     {
+     case 0x04000132:
+@@ -4089,6 +4126,10 @@ void NDS::ARM7IOWrite8(u32 addr, u8 val)
+ 
+ void NDS::ARM7IOWrite16(u32 addr, u16 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 16);
++#endif
+     switch (addr)
+     {
+     case 0x04000004: GPU.SetDispStat(1, val); return;
+@@ -4253,6 +4294,10 @@ void NDS::ARM7IOWrite16(u32 addr, u16 val)
+ 
+ void NDS::ARM7IOWrite32(u32 addr, u32 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnIOWrite(this, 1, addr, val, 32);
++#endif
+     switch (addr)
+     {
+     case 0x04000004:

@@ -95,28 +95,34 @@ int main(int argc, char** argv) {
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
     if (!ok) { std::fprintf(stderr, "refusing to start: dump verification failed\n"); return 1; }
 
-    bus_init();
-    bus_load_arm9_bios(a9.data(), (uint32_t)a9.size());
-    bus_load_arm7_bios(a7.data(), (uint32_t)a7.size());
-    cp15_reset();
-    nds_io_reset();
-    nds_io_load_firmware(fw.data(), (uint32_t)fw.size());
-    runtime_init(nullptr);
-    runtime_trace_reset();
+    // Full power-on init, reusable so the debug server can honour `reset`
+    // (the bisector compares fresh-from-reset at each event count).
+    auto boot = [&]() {
+        bus_init();
+        bus_load_arm9_bios(a9.data(), (uint32_t)a9.size());
+        bus_load_arm7_bios(a7.data(), (uint32_t)a7.size());
+        cp15_reset();
+        nds_io_reset();
+        nds_io_load_firmware(fw.data(), (uint32_t)fw.size());
+        runtime_init(nullptr);
+        runtime_trace_reset();
 
-    nds_register_dispatch(NDS_ARM9, g_dispatch_arm9_bios,
-                          g_dispatch_arm9_bios_len, 0xFFFF0000u);
-    nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
-                          g_dispatch_arm7_bios_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_arm9_bios,
+                              g_dispatch_arm9_bios_len, 0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
+                              g_dispatch_arm7_bios_len, 0x00000000u);
 
-    // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
-    const uint32_t reset_cpsr = 0x13u | CPSR_I_BIT | CPSR_F_BIT;
-    scheduler_init();
-    scheduler_reset_cpu(0, 0xFFFF0000u, reset_cpsr);  // ARM9
-    scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
+        // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
+        const uint32_t reset_cpsr = 0x13u | CPSR_I_BIT | CPSR_F_BIT;
+        scheduler_init();
+        scheduler_reset_cpu(0, 0xFFFF0000u, reset_cpsr);  // ARM9
+        scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
+    };
+    boot();
 
     if (serve) {
         std::fprintf(stderr, "[run] debug server mode from reset\n");
+        debug_set_reset_fn(boot);
         debug_serve(port);
         return 0;
     }
