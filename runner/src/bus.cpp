@@ -335,10 +335,14 @@ inline Arm7Region arm7_region(uint32_t addr) {
 }
 
 // Data-access memory timing (Commit C for the ARM9; Commit D for the ARM7).
-// ARM9: returns the MARGINAL data cost after the code/data overlap: melonDS
-// combines them as max(code+data-6, max(code,data)), so the first ~6 data cycles
-// hide behind the code fetch already charged by runtime_code_cycles. Cost is in
-// the active CPU's cycle units (ARM9 = 2x system). Region costs are a first cut,
+// ARM9: returns the RAW region data cost (numD). The code/data overlap
+// (melonDS: max(numC+numD-6, max(numC,numD))) is applied ONCE per
+// instruction by arm9_cycle_combine, over the SUM of every call this
+// instruction makes (e.g. one per register for LDM/STM) — never here, so
+// this always returns the true per-access cost regardless of how many
+// calls a single instruction makes or whether a given call is the
+// sequential continuation of an LDM/STM. Cost is in the active CPU's
+// cycle units (ARM9 = 2x system). Region costs are a first cut,
 // calibrated against the oracle's cyc9-at-equal-retired-index.
 //
 // ARM7: region-aware per melonDS's ARM7MemTimings (single 8/16-bit accesses are
@@ -387,12 +391,7 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
         data = 4u;                                          // shared / ARM7 WRAM 32-bit
     else
         data = 4u;                                          // I/O, VRAM, palette, ...
-    // Overlap applies ONCE per instruction: the first data access hides ~6
-    // cycles behind the code fetch. Subsequent (sequential) words of an LDM/STM
-    // have no fetch to hide behind, so they cost the full data rate — otherwise
-    // multi-word transfers (the early-boot memory clears) are undercharged.
-    if (sequential) return data;
-    return data > 6u ? data - 6u : 1u;
+    return data;                // raw numD; `sequential` is ARM7-only (above)
 }
 
 // Code-FETCH memory timing (Commit B for the ARM9 — see docs/scheduler_design.md
@@ -401,13 +400,16 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
 // cost table (recompiler/armv4t/arm_ir.cpp instr_cycle_base), which already
 // assumes a 1-cycle sequential code fetch ("1S") for every op.
 //
-// ARM9: the naive ~1 cyc/insn undercount (measured -75% vs melonDS) is almost
-// entirely the missing code fetch: uncached BIOS fetch is 8 ARM9 cyc ((32-bit
-// nonseq base 1 + ARM9 nonseq penalty 3) x2). Uncached ARM9 has no sequential-
-// fetch speedup (it is cache-line based), so we charge the region's fetch cost
-// every instruction; the CP15 I-cache, once enabled, averages it down.
-// Constants are a first cut, calibrated against the oracle's cyc9-at-equal-
-// retired-index.
+// ARM9: returns the RAW numC (this instruction's own code-fetch cost, or a
+// branch/PC-write TARGET's, when called from arm_codegen.cpp's pipeline-
+// refill term) — melonDS: all code accesses are forced nonseq 32-bit
+// (ARM.h:254), so numC is the region's N32 cost (post +3 ARM9 nonseq
+// penalty on every region except main RAM, post x2 ARM9 clock shift), e.g.
+// uncached BIOS fetch = 8 ARM9 cyc. arm9_cycle_combine (bottom of this
+// file) is the ONLY place that folds numC together with numD/numI per
+// melonDS's exact AddCycles_C/CI/CD/CDI — this function must never predict
+// or absorb any part of that combine itself. Constants are a first cut,
+// calibrated against the oracle's cyc9-at-equal-retired-index.
 //
 // ARM7: the static base's baked-in "1S" already matches melonDS's steady-state
 // AddCycles_C exactly for every region that is genuinely 1-cycle-sequential —
@@ -436,27 +438,44 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // accesses are forced nonseq 32bit" (ARM.h:254); there is NO sequential-fetch
     // speedup on the ARM9 (RegionCodeCycles is pinned to the region's N32 cost).
     // Charge that N32 cost (post +3 non-seq penalty on every region except main
-    // RAM, post x2 ARM9 clock shift) on EVERY fetch. The static instr_cycle_base
-    // already bakes one sequential fetch cycle, so subtract 1 to absorb it.
+    // RAM, post x2 ARM9 clock shift) on EVERY fetch — the full RAW numC; the
+    // combine (arm9_cycle_combine) is what folds this together with numD/numI,
+    // not this function.
     // (Per-PU-region cacheability -> flat averaged 3/1 is a later refinement; the
     // firmware MPU/cache isn't set up yet during the early-boot IPC handshake.)
     g_last_code_pc[0] = pc;
     // Thumb "free second half" (melonDS numC=(R15&2)?0:CodeCycles): the ARM9
     // fetches 32 bits even in Thumb, so the odd-halfword instruction shares its
     // predecessor's fetch and costs ZERO. Halves the cost of Thumb loops (e.g.
-    // the firmware's Thumb BIOS IRQ-wait spin during the IPC handshake).
+    // the firmware's Thumb BIOS IRQ-wait spin during the IPC handshake). This is
+    // a true raw-zero (not a baseline absorption) — kept as-is.
     if ((g_cpu.cpsr & CPSR_T_BIT) && (pc & 2u)) return 0u;
-    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size) return 0u;   // ITCM = 1, baked
+    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size) return 0u;   // ITCM raw numC = 0 (kept as-is)
     // I-cache-served region: melonDS degrades the fetch to a flat averaged cost
     // (kCodeCacheTiming=3 at a 32-byte line boundary, else 1; un-shifted). This
     // is what makes the firmware's BIOS spin loop cheap during the IPC handshake.
-    if (cp15_code_cacheable(pc)) {
-        uint32_t c = (pc & 0x1Fu) ? 1u : 3u;
-        return c > 1u ? c - 1u : 0u;                              // absorb the baked 1S
+    if (cp15_code_cacheable(pc)) return (pc & 0x1Fu) ? 1u : 3u;    // raw numC
+    if (pc >= 0xFFFF0000u)                           return 8u;   // BIOS 32-bit: (1+3)x2
+    if (pc >= 0x02000000u && pc < 0x03000000u)       return 18u;  // main RAM 16-bit: (8+1)x2
+    return 8u;                                                    // WRAM/IO/OAM 32-bit: (1+3)x2
+}
+
+// ARM9 per-instruction cycle COMBINE — melonDS's exact AddCycles_C/CI/CD/CDI
+// (ARM.h:266-303). See runtime_arm.h for the full contract; called from every
+// codegen-emitted tick site's ARM9 branch (arm_codegen.cpp), never for ARM7.
+// `has_data` selects CD/CDI (loads/stores: no internal cycle, code/data
+// overlap) vs C/CI (everything else: internal cycles add flat, no overlap).
+// int math for the -6 (only the has_data branch can go negative before the
+// outer max), floored at 0 defensively though the max(numC,numD) term already
+// guarantees a non-negative result whenever numC/numD themselves are.
+extern "C" uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD,
+                                       uint32_t numI, uint32_t has_data) {
+    if (has_data) {
+        int overlap = static_cast<int>(numC) + static_cast<int>(numD) - 6;
+        int floor_v = static_cast<int>(numC) > static_cast<int>(numD)
+                          ? static_cast<int>(numC) : static_cast<int>(numD);
+        int m = overlap > floor_v ? overlap : floor_v;
+        return m > 0 ? static_cast<uint32_t>(m) : 0u;
     }
-    uint32_t n;
-    if (pc >= 0xFFFF0000u)                            n = 8u;     // BIOS 32-bit: (1+3)x2
-    else if (pc >= 0x02000000u && pc < 0x03000000u)  n = 18u;    // main RAM 16-bit: (8+1)x2
-    else                                             n = 8u;     // WRAM/IO/OAM 32-bit: (1+3)x2
-    return n > 1u ? n - 1u : 0u;                                  // absorb the baked 1S
+    return numI ? (numC + numI) : numC;
 }

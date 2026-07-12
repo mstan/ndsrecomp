@@ -78,6 +78,45 @@ bool writes_pc_nonbranch(const Instr& ins) {
     }
 }
 
+// ARM9 combine HAS_DATA (arm9_cycle_combine): true for every op that makes a
+// data-bus (non-code) access — selects melonDS's AddCycles_CD/CDI vs C/CI.
+bool arm9_has_data(IrOp op) {
+    switch (op) {
+        case IrOp::LDR:  case IrOp::LDRB: case IrOp::LDRH:
+        case IrOp::LDRSB: case IrOp::LDRSH:
+        case IrOp::STR:  case IrOp::STRB: case IrOp::STRH:
+        case IrOp::LDM:  case IrOp::STM:
+        case IrOp::LDRD: case IrOp::STRD:
+        case IrOp::SWP:  case IrOp::SWPB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Static ARM9 internal-cycle count (numI) for the combine — melonDS
+// ARMInterpreter*.cpp: +1 for a register-specified shift, a FLAT 1 (S=0) or
+// 3 (S=1) for the classic MUL family (NOT operand-dependent — that's the
+// separate ARM7-only mul_wait_cycles path, untouched), +2 for MCR, +3 for
+// MRC. Everything else (including the ARMv5 signed xy-multiply family,
+// which really is single-cycle on ARM9) is 0.
+uint32_t arm9_internal_cost(const Instr& ins) {
+    uint32_t n = 0u;
+    if (ins.op2.kind == Op2::Kind::Shifted && ins.op2.shifted.by_register)
+        n += 1u;
+    switch (ins.op) {
+        case IrOp::MUL: case IrOp::MLA:
+        case IrOp::UMULL: case IrOp::UMLAL:
+        case IrOp::SMULL: case IrOp::SMLAL:
+            n += ins.set_flags ? 3u : 1u;
+            break;
+        case IrOp::MCR: n += 2u; break;
+        case IrOp::MRC: n += 3u; break;
+        default: break;
+    }
+    return n;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Condition wrapping
 // ─────────────────────────────────────────────────────────────────────
@@ -144,6 +183,62 @@ std::string uniq_suffix(const Instr& ins) {
 // the instruction's cost exactly once.
 std::string cyc_var_for(const Instr& ins) {
     return "_cyc" + uniq_suffix(ins);
+}
+
+// ARM9 cycle-combine accumulators (arm9_cycle_combine — see runtime_arm.h).
+// _code holds this instruction's OWN numC (runtime_code_cycles(pc)),
+// computed once, unconditionally (valid even on a runtime cond-fail, where
+// melonDS still charges AddCycles_C() = numC for the skipped fetch). _data
+// sums every runtime_mem_cycles() call this instruction makes (mirrors
+// _cyc's own memory-cost additions, at the same 4 call sites); _int is the
+// static internal-cycle count (arm9_internal_cost, below), assigned once
+// inside the cond guard (0 on cond-fail, matching melonDS's class-C-only
+// skipped-instruction cost). All three are declared in emit_instr alongside
+// _cyc and are dead code on the ARM7 path (never referenced there). BL /
+// BLX_reg / BLX_imm / BL_suffix zero _code (with _data/_int) right where
+// they already zero _cyc, so the fall-through epilogue tick reached after
+// the callee's C-return — which re-evaluates this same ternary — combines
+// to 0 there too, instead of re-adding this instruction's own numC a
+// second time (see arm9_tick_expr's doc comment below).
+std::string code_var_for(const Instr& ins) {
+    return "_code" + uniq_suffix(ins);
+}
+std::string data_var_for(const Instr& ins) {
+    return "_data" + uniq_suffix(ins);
+}
+std::string int_var_for(const Instr& ins) {
+    return "_int" + uniq_suffix(ins);
+}
+
+// Emit the ARM9-vs-ARM7 `runtime_tick` ternary argument. The ARM7 branch is
+// ALWAYS `cyc_var` verbatim — the original flat expression, unchanged. The
+// ARM9 branch calls arm9_cycle_combine with this instruction's OWN numC
+// (`code_expr`), the runtime _data/_int accumulators, and HAS_DATA;
+// `refill_target_expr`, when non-empty, is a C expression for a taken-
+// branch/PC-write TARGET pc and adds melonDS's pipeline-refill term
+// (2*numC(target)) on top of the combine — see arm9_cycle_combine's doc
+// comment in runtime_arm.h. `code_expr` is normally the `_code_<pc>`
+// variable (see code_var_for's doc comment above for why a variable, not
+// an inline runtime_code_cycles(pc) call, is required for correctness).
+std::string arm9_tick_expr_ex(const std::string& code_expr,
+                              const std::string& cyc_var,
+                              const std::string& data_var,
+                              const std::string& int_var, bool has_data,
+                              const std::string& refill_target_expr) {
+    std::ostringstream s;
+    s << "g_nds_active == NDS_ARM9 ? arm9_cycle_combine(" << code_expr << ", "
+      << data_var << ", " << int_var << ", " << (has_data ? "1u" : "0u")
+      << ")";
+    if (!refill_target_expr.empty())
+        s << " + 2u*runtime_code_cycles(" << refill_target_expr << ")";
+    s << " : " << cyc_var;
+    return s.str();
+}
+std::string arm9_tick_expr(const Instr& ins, bool has_data,
+                           const std::string& refill_target_expr = "") {
+    return arm9_tick_expr_ex(code_var_for(ins), cyc_var_for(ins),
+                             data_var_for(ins), int_var_for(ins), has_data,
+                             refill_target_expr);
 }
 
 Op2Code emit_op2(const Instr& ins, const char* indent) {
@@ -327,10 +422,26 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
                                 const CodegenCtx& ctx,
                                 const char* indent) {
     std::ostringstream s;
-    // The cycle accumulator declared by emit_instr for this branch's PC.
+    // The cycle/code/data/internal accumulators declared by emit_instr for
+    // this branch's PC (emit_direct_branch only has the raw pc, not the
+    // Instr, so rebuild the names the same way cyc_var_for/code_var_for/
+    // data_var_for/int_var_for do).
     char cycbuf[24];
     std::snprintf(cycbuf, sizeof(cycbuf), "_cyc_%08X", branch_pc);
     const std::string cyc(cycbuf);
+    char codebuf[24];
+    std::snprintf(codebuf, sizeof(codebuf), "_code_%08X", branch_pc);
+    const std::string codev(codebuf);
+    char databuf[24];
+    std::snprintf(databuf, sizeof(databuf), "_data_%08X", branch_pc);
+    const std::string datav(databuf);
+    char intbuf[24];
+    std::snprintf(intbuf, sizeof(intbuf), "_int_%08X", branch_pc);
+    const std::string intv(intbuf);
+    // B/BL always have a compile-time-known target (no interworking), so the
+    // ARM9 pipeline-refill term uses the static target literal directly.
+    const bool has_data = false;  // B/BL never touch the data bus
+    const std::string refill_target = fmt_hex32(target);
     // A link call that returns with any other PC was really a tail
     // transfer through the callee, so do not execute link fallthrough.
     if (is_link) {
@@ -353,7 +464,10 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
         s << indent << "runtime_trace_event(RUNTIME_TRACE_BRANCH, "
           << fmt_hex32(branch_pc) << ", " << fmt_hex32(target)
           << ", 0u, 0u);\n";
-        s << indent << "runtime_tick(" << cyc << ");\n";
+        s << indent << "runtime_tick("
+          << arm9_tick_expr_ex(codev, cyc, datav, intv, has_data,
+                               refill_target)
+          << ");\n";
         // Preemption point: a backward branch (loop top) is a dispatch
         // entry, so it is a SAFE place to yield to the scheduler — the
         // resume re-dispatches `target` cleanly. This is how a tight
@@ -383,8 +497,19 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
     // next boundary). For a link call (BL / BL_suffix) zero _cyc after,
     // so the fall-through epilogue tick (reached when the callee C-
     // returns) does not double-count.
-    s << indent << "runtime_tick(" << cyc << ");\n";
-    if (is_link) s << indent << cyc << " = 0u;\n";
+    s << indent << "runtime_tick("
+      << arm9_tick_expr_ex(codev, cyc, datav, intv, has_data, refill_target)
+      << ");\n";
+    if (is_link) {
+        // Zero ALL THREE combine accumulators (not just _cyc) so the
+        // fall-through epilogue tick reached after the callee's C-return
+        // (this is a BL: control resumes here, see the is_link comment
+        // below) evaluates arm9_cycle_combine(0, 0, 0, 0) = 0 for ARM9 too,
+        // instead of re-deriving a fresh nonzero numC(own pc) — see
+        // code_var_for's doc comment.
+        s << indent << cyc << " = 0u; " << codev << " = 0u; " << datav
+          << " = 0u; " << intv << " = 0u;\n";
+    }
 
     const std::string* name = nullptr;
     if (ctx.names_by_key) {
@@ -645,8 +770,11 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
                  << (ins.thumb ? " & ~1u" : " & ~3u") << ";\n";
             body << indent << "g_cpu.R[15] = " << pc_var << ";\n";
             // PC write completes the instruction; tick its cost (incl.
-            // the +2 refill folded into _cyc) before transferring.
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+            // the +2 refill folded into _cyc for ARM7) before transferring.
+            // ARM9: DP-to-PC never interworks (CPSR.T is unchanged), so
+            // pc_var is already the correct-mode target for the refill.
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, false, pc_var) << ");\n";
             if (is_lr_return) {
                 body << indent << "if (runtime_call_should_return("
                      << pc_var << ")) return;\n";
@@ -684,8 +812,15 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
             // BX always transfers; tick its cost before either the C-
-            // return or the dispatch path (both exit the function).
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+            // return or the dispatch path (both exit the function). CPSR.T
+            // for the ARM9 refill's target-numC is set AFTER this tick (by
+            // interworking, below) — target_var&~1u is the correct-mode
+            // target address regardless, but the combine's internal Thumb-
+            // odd-half check may see the stale (pre-exchange) CPSR.T; see
+            // the report's "hard site" note.
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, false, "(" + target_var + " & ~1u)")
+                 << ");\n";
             if (ins.rm == 14 || ctx.force_bx_c_return) {
                 // `bx lr` — the AAPCS function-return idiom. In the
                 // direct-C-call dispatch model, BL emits a real C
@@ -720,8 +855,20 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[14] = " << fmt_hex32(link) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
-            body << indent << cyc_var_for(ins) << " = 0u;\n";
+            // CPSR.T staleness caveat: same as BX above (interworking
+            // happens inside runtime_dispatch_with_exchange, after this
+            // tick).
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, false, "(" + target_var + " & ~1u)")
+                 << ");\n";
+            // Zero ALL combine accumulators (not just _cyc): control resumes
+            // here after the callee's C-return (BLX_reg is a CALL), and the
+            // fall-through epilogue tick reached then must combine to 0 for
+            // ARM9 too, not re-derive a fresh nonzero numC — see
+            // code_var_for's doc comment.
+            body << indent << cyc_var_for(ins) << " = 0u; " << code_var_for(ins)
+                 << " = 0u; " << data_var_for(ins) << " = 0u; "
+                 << int_var_for(ins) << " = 0u;\n";
             body << indent << "runtime_call_push_return("
                  << fmt_hex32(link) << ");\n";
             body << indent << "runtime_dispatch_with_exchange("
@@ -741,8 +888,17 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "g_cpu.R[14] = " << fmt_hex32(link) << ";\n";
             body << indent << "g_cpu.R[15] = "
                  << fmt_hex32(ins.branch_target) << ";\n";
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
-            body << indent << cyc_var_for(ins) << " = 0u;\n";
+            // BLX_imm's target is a compile-time constant, so the ARM9
+            // refill can use the static literal directly. CPSR.T staleness
+            // caveat: same as BX/BLX_reg (interworking happens inside
+            // runtime_dispatch_with_exchange, after this tick).
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, false, fmt_hex32(ins.branch_target))
+                 << ");\n";
+            // Zero ALL combine accumulators — see the BLX_reg comment above.
+            body << indent << cyc_var_for(ins) << " = 0u; " << code_var_for(ins)
+                 << " = 0u; " << data_var_for(ins) << " = 0u; "
+                 << int_var_for(ins) << " = 0u;\n";
             body << indent << "runtime_call_push_return("
                  << fmt_hex32(link) << ");\n";
             body << indent << "runtime_dispatch_with_exchange("
@@ -778,11 +934,22 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "g_cpu.R[15] = " << target_var << ";\n";
             body << indent << "runtime_call_push_return("
                  << fmt_hex32(new_lr & ~1u) << ");\n";
-            // Pump the call's cost before transferring; zero _cyc so the
-            // fall-through epilogue tick (after the callee C-returns)
-            // does not double-count.
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
-            body << indent << cyc_var_for(ins) << " = 0u;\n";
+            // Pump the call's cost before transferring; zero ALL combine
+            // accumulators so the fall-through epilogue tick (after the
+            // callee C-returns) does not double-count — for ARM7 that's just
+            // _cyc; for ARM9 it's _cyc/_code/_data/_int together, so the
+            // epilogue's combine call there evaluates to 0 too (see
+            // code_var_for's doc comment). target_var is already masked to
+            // the correct-mode address (~3u if this BL_suffix is a THUMB BLX
+            // to ARM, ~1u if it stays THUMB); the blx (ARM-switch) case has
+            // the same CPSR.T-staleness caveat as BX/BLX_reg/BLX_imm above
+            // (interworking happens inside runtime_dispatch_with_exchange,
+            // after this tick) — the plain-BL (stays THUMB) case has none.
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, false, target_var) << ");\n";
+            body << indent << cyc_var_for(ins) << " = 0u; " << code_var_for(ins)
+                 << " = 0u; " << data_var_for(ins) << " = 0u; "
+                 << int_var_for(ins) << " = 0u;\n";
             // BLX switches to ARM (target is even → clears CPSR.T); plain
             // BL stays THUMB.
             body << indent
@@ -837,8 +1004,9 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
         case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSH: access_w = 2u; break;
         default: access_w = 4u; break;
     }
-    body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
-         << ea_var << ", " << access_w << "u, 0u);\n";
+    body << indent << "{ uint32_t _m = runtime_mem_cycles(" << ea_var << ", "
+         << access_w << "u, 0u); " << cyc_var_for(ins) << " += _m; "
+         << data_var_for(ins) << " += _m; }\n";
 
     bool is_load = (ins.op == IrOp::LDR || ins.op == IrOp::LDRB ||
                     ins.op == IrOp::LDRH || ins.op == IrOp::LDRSB ||
@@ -895,7 +1063,12 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
             body << indent << "g_cpu.R[15] = " << val_var << " & ~1u;\n";
             body << indent << "if (" << val_var
                  << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+            // CPSR.T is already set to the target mode (just above), so the
+            // ARM9 refill's numC(target) sees the correct mode — no
+            // staleness caveat here (unlike the BX/BLX family).
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, true, "(" + val_var + " & ~1u)")
+                 << ");\n";
             body << indent << "runtime_dispatch_with_exchange(" << val_var << ");\n";
             body << indent << "return;\n";
         } else {
@@ -968,8 +1141,9 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         }
         // Empty-list LDM/STM performs a single N access at the
         // 0x40-stride address (interpreter parity).
-        body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
-             << addr_var << " & ~3u, 4u, 0u);\n";
+        body << indent << "{ uint32_t _m = runtime_mem_cycles(" << addr_var
+             << " & ~3u, 4u, 0u); " << cyc_var_for(ins) << " += _m; "
+             << data_var_for(ins) << " += _m; }\n";
         if (blk.load) {
             std::string pcv = "_pc" + sfx;
             body << indent << "uint32_t " << pcv
@@ -979,15 +1153,24 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                      << "] = " << fb_var << ";\n";
             }
             if (blk.s_bit) {
+                // CPSR.T staleness caveat: runtime_exception_return (below)
+                // restores CPSR (incl. T) from SPSR AFTER this tick, so the
+                // ARM9 refill's numC(target) sees the pre-restore CPSR.T —
+                // same class of imprecision as the BX-family sites.
                 body << indent << "if (" << mode_is_priv_non_system_expr()
-                     << ") { runtime_tick(" << cyc_var_for(ins)
+                     << ") { runtime_tick("
+                     << arm9_tick_expr(ins, true, "(" + pcv + " & ~1u)")
                      << "); runtime_exception_return(" << pcv
                      << " & ~1u); return; }\n";
             }
             body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
             body << indent << "if (" << pcv
                  << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
-            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+            // CPSR.T is already set to the target mode (just above) — no
+            // staleness caveat here.
+            body << indent << "runtime_tick("
+                 << arm9_tick_expr(ins, true, "(" + pcv + " & ~1u)")
+                 << ");\n";
             body << indent << "runtime_dispatch_with_exchange(" << pcv << ");\n";
             body << indent << "return;\n";
         } else {
@@ -1037,9 +1220,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
     // Iterate registers in ascending order.
     for (int r = 0; r < 16; ++r) {
         if (!(blk.reg_list & (1u << r))) continue;
-        body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
-             << addr_var << " & ~3u, 4u, " << (first_access ? "0u" : "1u")
-             << ");\n";
+        body << indent << "{ uint32_t _m = runtime_mem_cycles(" << addr_var
+             << " & ~3u, 4u, " << (first_access ? "0u" : "1u") << "); "
+             << cyc_var_for(ins) << " += _m; " << data_var_for(ins)
+             << " += _m; }\n";
         first_access = false;
         if (blk.load) {
             if (r == 15) {
@@ -1048,8 +1232,12 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                 body << indent << "uint32_t " << pcv
                      << " = bus_read_u32(" << addr_var << " & ~3u);\n";
                 if (blk.s_bit) {
+                    // Same CPSR.T staleness caveat as the empty-list case
+                    // above (runtime_exception_return restores CPSR after
+                    // this tick).
                     body << indent << "if (" << mode_is_priv_non_system_expr()
-                         << ") { runtime_tick(" << cyc_var_for(ins)
+                         << ") { runtime_tick("
+                         << arm9_tick_expr(ins, true, "(" + pcv + " & ~1u)")
                          << "); runtime_exception_return(" << pcv
                          << " & ~1u); return; }\n";
                 }
@@ -1106,8 +1294,13 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         // jump (state-machine dispatch, jump tables popped from
         // arbitrary memory). Those still need runtime_dispatch.
         // Every path here exits the function, so tick the accumulated
-        // cost once before any of them.
-        body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+        // cost once before any of them. CPSR.T was already set to the
+        // target mode inside the loop's r==15 iteration (r==15 is always
+        // the last iteration — ascending order, and pc_in_list guarantees
+        // it ran), so no staleness caveat here.
+        body << indent << "runtime_tick("
+             << arm9_tick_expr(ins, true, "(" + pc_var + " & ~1u)")
+             << ");\n";
         if (blk.rn == 13) {
             body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
             body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
@@ -1317,10 +1510,12 @@ bool emit_doubleword(std::ostringstream& body, const Instr& ins,
          << ";\n";
 
     // Two word accesses: first non-sequential, second sequential.
-    body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
-         << ea_var << " & ~3u, 4u, 0u);\n";
-    body << indent << cyc_var_for(ins) << " += runtime_mem_cycles(("
-         << ea_var << " & ~3u) + 4u, 4u, 1u);\n";
+    body << indent << "{ uint32_t _m = runtime_mem_cycles(" << ea_var
+         << " & ~3u, 4u, 0u); " << cyc_var_for(ins) << " += _m; "
+         << data_var_for(ins) << " += _m; }\n";
+    body << indent << "{ uint32_t _m = runtime_mem_cycles((" << ea_var
+         << " & ~3u) + 4u, 4u, 1u); " << cyc_var_for(ins) << " += _m; "
+         << data_var_for(ins) << " += _m; }\n";
 
     unsigned rd = ins.rd;
     unsigned rd1 = (ins.rd + 1u) & 15u;
@@ -1565,7 +1760,18 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         s << "    if (g_runtime_insn_trace) runtime_insn_fp();\n";
         s << "    g_cpu.R[15] = "
           << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
-        s << "    runtime_tick(1u);\n";
+        // No _cyc/_data/_int accumulators exist on this early-return path (a
+        // statically-NV instruction never executes at all), so numC is
+        // computed inline (no double-tick risk here — there is no callee
+        // C-return / fall-through epilogue on this path, it always returns
+        // immediately). ARM9 combines as class C (numI=0, has_data=0 ->
+        // cost=numC) with a literal "1u" ARM7 fallback — the identical value
+        // the old flat `runtime_tick(1u)` used for both CPUs, so ARM7 is
+        // byte-for-byte unchanged.
+        s << "    runtime_tick("
+          << arm9_tick_expr_ex("runtime_code_cycles(" + fmt_hex32(ins.pc) + ")",
+                               "1u", "0u", "0u", false, "")
+          << ");\n";
         return s.str();
     }
 
@@ -1589,7 +1795,23 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // matching the interpreter oracle, which pumps the full cost AFTER
     // executing and checks IRQs at the next boundary.
     const std::string cyc_var = cyc_var_for(ins);
+    const std::string code_var = code_var_for(ins);
+    const std::string data_var = data_var_for(ins);
+    const std::string int_var = int_var_for(ins);
     os << "    uint32_t " << cyc_var << " = 1u;\n";
+    // ARM9 combine accumulators (arm9_cycle_combine — melonDS AddCycles_C/
+    // CI/CD/CDI). Declared here (unconditionally, like _cyc) so they are
+    // visible at the epilogue tick outside the cond guard below. _code is
+    // this instruction's own numC, valid regardless of whether cond passes
+    // (melonDS still fetches — and charges AddCycles_C() for — a condition-
+    // failed instruction). _data/_int stay 0 unless cond passes (assigned/
+    // accumulated only inside the guard), so a runtime cond-fail combines as
+    // class C (numC only) — matching melonDS exactly. All three are dead
+    // code on the ARM7 path.
+    os << "    uint32_t " << code_var << " = runtime_code_cycles("
+       << fmt_hex32(ins.pc) << ");\n";
+    os << "    uint32_t " << data_var << " = 0u;\n";
+    os << "    uint32_t " << int_var << " = 0u;\n";
 
     emit_cond_open(os, ins.cond);
     const char* indent = indent_for(ins.cond);
@@ -1609,6 +1831,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
             exec_cost += 2u;  // pipeline refill
         }
         os << indent << cyc_var << " = " << exec_cost << "u;\n";
+        os << indent << int_var << " = " << arm9_internal_cost(ins) << "u;\n";
     }
 
     bool ok = false;
@@ -1692,7 +1915,12 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // cond-fail case (where _cyc is the 1-cycle fetch baseline).
     os << "    g_cpu.R[15] = "
        << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
-    os << "    runtime_tick(" << cyc_var << ");\n";
+    // Every PC-writing op (branch or non-branch) already ticked and returned
+    // above, so this site never sees a taken branch / PC write — no refill
+    // term. has_data reflects whether THIS op (if it in fact executed —
+    // cond-fail leaves _data/_int at 0, see above) made a data-bus access.
+    os << "    runtime_tick("
+       << arm9_tick_expr(ins, arm9_has_data(ins.op)) << ");\n";
     return os.str();
 }
 

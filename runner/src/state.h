@@ -7,11 +7,13 @@
 
 #include <cstdint>
 
-// Which core is currently executing. The bus view (TCM, per-CPU I/O) and
-// the exception-vector base branch on this. Set by the scheduler; the
-// first bring-up slice runs ARM9 only.
-enum NdsCpu { NDS_ARM9 = 0, NDS_ARM7 = 1 };
-extern NdsCpu g_nds_active;
+#include "runtime_arm.h"
+
+// Which core is currently executing (NdsCpu / g_nds_active — declared in
+// runtime_arm.h, the ABI boundary generated banks also see, so there is
+// one definition shared by C++ runtime code and C generated code). The
+// bus view (TCM, per-CPU I/O) and the exception-vector base branch on
+// this. Set by the scheduler; the first bring-up slice runs ARM9 only.
 
 // Terminal-halt signal for the active CPU (dispatch miss / unlowered op):
 // the emitted per-instruction prologue checks runtime_should_yield(), so

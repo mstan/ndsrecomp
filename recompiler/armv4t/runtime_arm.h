@@ -65,6 +65,17 @@ typedef struct ArmCpuState {
 
 extern ArmCpuState g_cpu;
 
+// ── Active CPU selector (DS dual-CPU only) ─────────────────────────
+// Which core is currently executing. 0 = ARM9, 1 = ARM7. Declared here
+// (the ABI boundary — see the file header) rather than in a runner-only
+// header, because generated per-CPU banks include ONLY this header and
+// must be able to select the ARM9 cycle combine (arm9_cycle_combine,
+// below) at codegen-emitted tick sites via `g_nds_active == NDS_ARM9`.
+// runner/src/state.h includes this header for the C++-side runtime
+// rather than redeclaring the enum, so there is exactly one definition.
+typedef enum NdsCpu { NDS_ARM9 = 0, NDS_ARM7 = 1 } NdsCpu;
+extern NdsCpu g_nds_active;
+
 // Convenience accessors. CSR-bit constants follow ARM ARM A2.5.
 #define CPSR_N_BIT (1u << 31)
 #define CPSR_Z_BIT (1u << 30)
@@ -121,6 +132,28 @@ uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
 // charged per instruction. ARM7 returns 0 for now (its timing lands separately).
 // See docs/scheduler_design.md "Cycle-model design".
 uint32_t runtime_code_cycles(uint32_t pc);
+
+// ARM9 per-instruction cycle COMBINE — melonDS's exact AddCycles_C /
+// AddCycles_CI / AddCycles_CD / AddCycles_CDI model (ARM.h). Given this
+// instruction's numC (this instruction's OWN code-fetch cost, i.e.
+// runtime_code_cycles(pc) at ITS pc — not a branch target), numD (the sum
+// of every runtime_mem_cycles() this instruction made — 0 for non-memory
+// ops), numI (the static ARM9 internal-cycle count: +1 register-specified
+// shift, flat 1/3 for the classic MUL family by the S bit, +2 MCR, +3
+// MRC — computed at codegen time from the decoded instruction) and
+// has_data (nonzero for LDR/STR/LDM/STM/LDRD/STRD/SWP/SWPB), returns:
+//   has_data:  max(numC + numD - 6, max(numC, numD))   -- CD/CDI: loads
+//              and stores add NO internal cycles; the first ~6 cycles of
+//              the data access overlap the code fetch already in flight.
+//   !has_data: numI ? numC + numI : numC                -- CI, else C.
+// A taken branch / any PC write additionally adds 2*numC(target region)
+// for the pipeline refill — that term is NOT part of this function (it
+// depends on the branch target, which codegen adds separately at the
+// branch/PC-write tick sites); this returns only the instruction's own
+// class cost. ARM9 only — every codegen tick site's ARM7 branch is the
+// ORIGINAL flat _cyc expression, verbatim; this is never called for ARM7.
+uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD, uint32_t numI,
+                            uint32_t has_data);
 
 // ── Shifter helpers ────────────────────────────────────────────────
 // Generated code uses these for data-processing operand2 shifts and

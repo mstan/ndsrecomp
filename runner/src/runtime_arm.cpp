@@ -183,10 +183,17 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
 // same counters from its own step loop (tier3.cpp).
 extern "C" void runtime_insn_fp(void) {
     nds_note_insn_retired(g_nds_active);
-    // Code-fetch memory timing (Commit B). R[15] is this instruction's PC
-    // (set by the generated code just before this hook), so charge its fetch
-    // cost on top of the baked exec/data cost. See runtime_code_cycles.
-    g_runtime_cycles += runtime_code_cycles(g_cpu.R[15] & ~1u);
+    // Code-fetch memory timing (Commit B) — ARM7 ONLY. R[15] is this
+    // instruction's PC (set by the generated code just before this hook), so
+    // charge its fetch cost on top of the baked exec/data cost. See
+    // runtime_code_cycles. The ARM9's code-fetch cost is no longer added
+    // flat here: it is folded into the per-instruction cycle COMBINE
+    // (arm9_cycle_combine) at the generated bank's own runtime_tick site
+    // (arm_codegen.cpp emit_instr), together with that instruction's numD/
+    // numI, exactly matching melonDS's AddCycles_C/CI/CD/CDI. The ARM7 path
+    // is unchanged (byte-exact, cyc7 drift 0.1%) — this flat add is it.
+    if (g_nds_active != NDS_ARM9)
+        g_runtime_cycles += runtime_code_cycles(g_cpu.R[15] & ~1u);
 }
 extern "C" void runtime_fp_reset(void) {}
 extern "C" uint32_t runtime_fp_count(void) { return 0; }
@@ -544,7 +551,15 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     g_cpu.cpsr = nc; g_cpu.banked_spsr[nb] = saved; g_cpu.R[14] = ret;
     uint32_t base = g_ctx[g_nds_active].exc_base;
     g_cpu.R[15] = base + 0x08u;
-    runtime_tick(3u);
+    // ARM7: flat 3 (2S+1N), matching the static base table exactly (unchanged).
+    // ARM9: melonDS charges SWI entry as a taken branch to the exception vector
+    // — 2*numC(exception base+8) (no class cost of its own; the SWI instruction
+    // itself already ticked nothing here, see arm_codegen.cpp emit_swi). CPSR.T
+    // was just cleared above (ARM mode, exception entry), so runtime_code_cycles
+    // sees the correct target-mode state.
+    runtime_tick(g_nds_active == NDS_ARM9
+                     ? 2u * runtime_code_cycles(base + 0x08u)
+                     : 3u);
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
