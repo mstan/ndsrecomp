@@ -36,6 +36,8 @@ struct Cp15State {
 extern Cp15State g_cp15;
 
 void cp15_reset();
+// True if ARM9 code fetches from addr are I-cache-served (per-PU-region, C1 bit12).
+bool cp15_code_cacheable(uint32_t addr);
 
 // ── Dispatch + run control (implemented in runtime_arm.cpp) ─────────────
 // Layout-compatible with the generated <bank>_dispatch.c table entries.

@@ -51,6 +51,25 @@ void cp15_reset() {
     g_cp15.control = (1u << 13);
 }
 
+// True if code fetches from `addr` are served by the ARM9 instruction cache:
+// the I-cache is enabled (C1 bit12) AND `addr` falls in an MPU protection region
+// whose instruction-cacheable bit (c2,c0,1) is set. Highest-numbered enabled
+// region wins (ARM946E-S priority). Mirrors melonDS's per-PU-region cacheability
+// (pu & 0x40), which the code-fetch timing degrades to a flat averaged cost.
+bool cp15_code_cacheable(uint32_t addr) {
+    if (!(g_cp15.control & (1u << 12))) return false;      // I-cache disabled
+    const uint32_t icache_bits = g_cache_cfg[1];           // c2,c0,1 = instr cacheable
+    for (int i = 7; i >= 0; --i) {
+        uint32_t r = g_mpu_region[i];
+        if (!(r & 1u)) continue;                           // region disabled
+        uint32_t size = 512u << ((r >> 1) & 0x1Fu);        // 512<<N bytes
+        uint32_t base = r & 0xFFFFF000u;
+        if (addr >= base && (addr - base) < size)
+            return (icache_bits >> i) & 1u;
+    }
+    return false;
+}
+
 extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
                                      uint32_t crn, uint32_t crm,
                                      uint32_t op2, uint32_t value) {

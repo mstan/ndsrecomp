@@ -441,7 +441,19 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // (Per-PU-region cacheability -> flat averaged 3/1 is a later refinement; the
     // firmware MPU/cache isn't set up yet during the early-boot IPC handshake.)
     g_last_code_pc[0] = pc;
+    // Thumb "free second half" (melonDS numC=(R15&2)?0:CodeCycles): the ARM9
+    // fetches 32 bits even in Thumb, so the odd-halfword instruction shares its
+    // predecessor's fetch and costs ZERO. Halves the cost of Thumb loops (e.g.
+    // the firmware's Thumb BIOS IRQ-wait spin during the IPC handshake).
+    if ((g_cpu.cpsr & CPSR_T_BIT) && (pc & 2u)) return 0u;
     if (g_cp15.itcm_enable && pc < g_cp15.itcm_size) return 0u;   // ITCM = 1, baked
+    // I-cache-served region: melonDS degrades the fetch to a flat averaged cost
+    // (kCodeCacheTiming=3 at a 32-byte line boundary, else 1; un-shifted). This
+    // is what makes the firmware's BIOS spin loop cheap during the IPC handshake.
+    if (cp15_code_cacheable(pc)) {
+        uint32_t c = (pc & 0x1Fu) ? 1u : 3u;
+        return c > 1u ? c - 1u : 0u;                              // absorb the baked 1S
+    }
     uint32_t n;
     if (pc >= 0xFFFF0000u)                            n = 8u;     // BIOS 32-bit: (1+3)x2
     else if (pc >= 0x02000000u && pc < 0x03000000u)  n = 18u;    // main RAM 16-bit: (8+1)x2
