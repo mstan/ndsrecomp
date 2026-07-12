@@ -295,21 +295,27 @@ static const uint64_t* eventPtr(const std::string& ev)
     return nullptr;
 }
 
-static std::string countsJson()
+static std::string countsJson(OracleNDS* nds)
 {
     const OracleCounters& c = g_oracle_counts;
-    char buf[512];
+    // cyc9/cyc7 = ARM9/ARM7 timestamps in each core's own cycle units (ARM9 =
+    // 2x ARM7). Lets the fp-stream microscope compare timestamps at equal
+    // retired-instruction indices vs native's scheduler_cpu_cycles, to separate
+    // pure interleave-order divergence from cycle-accounting drift.
+    char buf[640];
     snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
         "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
         "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u,"
-        "\"insn9\":%llu,\"insn7\":%llu}",
+        "\"insn9\":%llu,\"insn7\":%llu,\"cyc9\":%llu,\"cyc7\":%llu}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
         (unsigned long long)c.timer_ovf,
         (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
-        (unsigned long long)c.insn9, (unsigned long long)c.insn7);
+        (unsigned long long)c.insn9, (unsigned long long)c.insn7,
+        (unsigned long long)nds->ARM9Timestamp,
+        (unsigned long long)nds->ARM7Timestamp);
     return buf;
 }
 
@@ -326,7 +332,7 @@ static std::string ioStateJson(OracleNDS* nds)
         nds->IME[1], nds->IE[1], nds->IF[1],
         nds->DebugIORead(7, 0x04000300, 8),
         nds->DebugIORead(7, 0x04000180, 16),
-        nds->CPUStop, nds->NumFrames, countsJson().c_str());
+        nds->CPUStop, nds->NumFrames, countsJson(nds).c_str());
     return buf;
 }
 
@@ -387,7 +393,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
     }
 
     if (cmd == "event_counts")
-        return countsJson();
+        return countsJson(nds);
 
     if (cmd == "io_state")
         return ioStateJson(nds);
@@ -425,7 +431,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         return std::string("{\"reached\":") + (reached ? "true" : "false")
              + ",\"stalled\":" + (stalled ? "true" : "false")
              + ",\"frames\":" + std::to_string(frames)
-             + ",\"counts\":" + countsJson() + "}";
+             + ",\"counts\":" + countsJson(nds) + "}";
     }
 
     if (cmd == "run_frames")
@@ -438,7 +444,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         g_brk_ptr = nullptr; g_brk_hit = false;
         for (uint64_t i = 0; i < count; i++) nds->RunFrame();
         return std::string("{\"frames\":") + std::to_string(count)
-             + ",\"counts\":" + countsJson() + "}";
+             + ",\"counts\":" + countsJson(nds) + "}";
     }
 
     if (cmd == "read_mem")

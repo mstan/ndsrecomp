@@ -144,3 +144,131 @@ land within 1–2 sys cycles of writes, the handshake is highly timing-sensitive
 
 Final call: implement the melonDS scheduler structure now; no IPC write-yields;
 HALT wake is a first-class check.
+
+---
+
+# Cycle-model design — ARM9 memory timing (2nd ChatGPT consult, 2026-07-11)
+
+Follow-up consult after running Steps 1-2. STEP 1: the ARM7 is NOT stuck-halted at
+the deadlock (IRQ mode, IME7=1, servicing VBlank/Timer; recv FIFO empty so IF18=0
+is correct) — HALT-wake works; blocker is the ARM9 not sending the FIFO word.
+STEP 2 (timestamps at equal retired index, added cyc9/cyc7 to both servers):
+**ARM7 native ~1.85 cyc/insn vs melonDS ~1.63 (+13%); ARM9 native ~1.8 vs melonDS
+~6-8 (-75%).** So the naive ~1 cyc/insn model is the problem.
+
+## Verdict: need BOTH the scheduler AND an ARM9 cycle model
+
+`Correct CPU semantics + correct cycles-per-CPU + correct timestamp-aligned
+interleave = correct cross-CPU observation order.` The 64-cycle cap bounds how LONG
+a timing error persists but can't fix the ARM9 executing the wrong NUMBER of
+instructions per 64 cycles. Scheduler alone will reproduce the wrong order in
+smaller intervals. **Pin the exact melonDS commit the oracle uses** — match THAT
+effective timeline.
+
+Unit check: melonDS stores ARM9Timestamp in ARM9-clock units (ARM9ClockShift=1),
+compares `ARM9Timestamp>>1` vs ARM7/system. Native cyc9 is ARM9 ticks (2048/1024
+quantum ratio), so the ~4-5x mismatch is real.
+
+## The 8.6-cyc/insn fingerprint (early ARM9 boot = uncached BIOS code fetch)
+
+```
+BIOS 32-bit nonseq base   1 system cycle
+ARM9 nonseq CPU penalty   +3
+ARM9 clock shift          x2
+------------------------------------
+code fetch                8 raw ARM9 cycles   (+~0.6 data/internal => ~8.6)
+```
+The ~8.6 → ~6 drop is uncached BIOS + CP15 cacheability/TCM changes + branch/mix,
+NOT cache warmup. First high-value fix = charge melonDS's uncached BIOS code-fetch
+timing correctly.
+
+## melonDS ARM9 region timings (N/S, system cycles, before the x2 shift)
+
+| Region | Bus | Base N / S |
+|---|---|---|
+| BIOS | 32-bit | 1 / 1  (+ ARM9 nonseq penalty) |
+| Main RAM | 16-bit | 8 / 1 |
+| Shared / ARM9 WRAM | 32-bit | 1 / 1  (+ nonseq penalty) |
+| I/O | 32-bit | 1 / 1  (+ nonseq penalty) |
+| VRAM / palette | 16-bit | 1 / 1  (+ nonseq penalty) |
+| ITCM / DTCM | internal | ~1 |
+
+melonDS adds a **+3 ARM9 CPU nonseq penalty** outside main RAM (main RAM's nonseq
+already includes its larger penalty), and **splits 32-bit accesses on 16-bit buses**.
+
+## Minimal ARM9 model (port effective behavior, NOT full hardware)
+
+1. Per-region non-seq/seq bus timings. 2. ARM9 clock shift. 3. ITCM/DTCM ranges.
+4. CP15 MPU/cacheability state. 5. Code-fetch timing. 6. **Data timing by the
+DYNAMIC data address, width, sequential status** (not PC region!). 7. Instruction
+timing-class combine (Code / Code+Internal / Code+Data / Code+Data+Internal).
+8. Branch/pipeline-refill.
+
+**No real cache** — melonDS uses averaged cache timing: `code-cache=3, data-cache=3`
+(3 cyc at a branch or 32-byte code boundary, 1 otherwise; real ICacheLookup() is
+commented out). A real cache would be LESS timeline-compatible.
+
+**Code/data overlap** (not simple addition):
+`combine = max(code + data - 6, max(code, data))`.
+
+Do NOT do per-PC-region average CPI — it fails on `ldr r0,[r1]` where PC is fast
+WRAM but the data address is slow main RAM, or `ldmia` (first=N, rest=S). Data cost
+is data-address-dependent.
+
+## Cheap in a recompiler
+
+PC / opcode class / ARM-Thumb / branch type are **compile-time constants** (bake
+into codegen). Memory helpers already know the runtime data address + width. CP15
+writes rebuild a page-timing table / bump a timing epoch. Per instruction, inline:
+```c
+uint32_t code = arm9_code_cycles(cpu, pc, branch_or_refill);  // mostly compile-time
+uint32_t data = cpu->last_data_cycles;                        // set by the mem helper
+cpu->timestamp += arm9_combine_cd(code, data);
+```
+
+## ARM7: fix ARM9 first, but ARM7's +13% still matters
+
+`(1.85-1.63) * 18198 = ~4000 system cycles drift` over the ARM7 boot ≈ 62 of the
+64-cycle intervals — enough to move an IPC poll / timer / VBlank across an ARM9
+write. ARM7 needs its own N/S accesses, branch/internal categories, code/data
+overlap. Priority: (1) ARM9 region/CP15/TCM/code-fetch, (2) ARM9 data timing +
+combine, (3) ARM7 correction, (4) IPC/event convergence.
+
+## Calibration via an oracle per-retired-instruction record
+
+Emit from the oracle (to validate the model instruction-by-instruction + fit
+unclear constants): retired index, PC, ARM/Thumb, timestamp delta, timing class
+(C/CI/CD/CDI), branch-taken/refill, 32-byte code boundary, code cacheable/ITCM,
+data address, r/w + width, first/sequential transfer, data cacheable/DTCM, CP15
+timing epoch.
+
+## Implementation sequencing (separate commits)
+
+- **A — timestamp units + scheduler structure.** Validate the invariants below even
+  though firmware WILL still deadlock. Acceptance = scheduler invariants +
+  deterministic synthetic IPC ordering (NOT "reaches menu").
+- **B — ARM9 region timings + CP15/TCM map.**
+- **C — ARM9 instruction/data timing combination.**
+- **D — ARM7 timing correction.**
+- **E — enable all → firmware-boot acceptance.**
+
+Commit-A scheduler invariants:
+```
+ARM9 target = system target << 1
+ARM9 runs first
+ARM9 may atomically overshoot target
+ARM7 catches up to ARM9's actual normalized timestamp
+ARM7 may overshoot on its final instruction
+events run after catch-up
+iteration capped at 64 system cycles
+rescheduling may shorten an active target
+```
+
+## Success criteria (don't judge by global average CPI)
+
+1. Timestamp delta at the same retired index stops growing linearly.
+2. Per-instruction cycle deltas match by timing class.
+3. At every IPCSYNC/FIFO read+write, normalized CPU timestamps are close to the oracle.
+4. The merged IPC transcript has the same write/read observation order.
+5. ARM9 sends the missing FIFO word naturally.
+6. ARM7 receives it and exits the wait without any IPC-specific yielding.
