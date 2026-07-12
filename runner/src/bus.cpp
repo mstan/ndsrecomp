@@ -315,16 +315,66 @@ extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     else unmapped(addr, true, 1, val);
 }
 
-// Data-access memory timing (Commit C for the ARM9). ARM7 keeps the flat cost
-// (Commit D). Returns the MARGINAL data cost after the code/data overlap: melonDS
+// ARM7 (ARMv4T) region N/S bus timings, ported from melonDS's effective model
+// (NDS::InitTimings / NDS::SetARM7RegionTimings — third_party/melonDS/src/NDS.cpp).
+// Unlike the uncached ARM9, the ARM7 has NO +3 nonseq CPU penalty and (mostly)
+// no 32-bit-bus splitting: BIOS, shared+ARM7 WRAM and I/O are true 32-bit-bus
+// regions with N=S=1 ("fast", matches the recompiler's static ARMv4T cost table,
+// which was tuned against a uniform-speed GBA-style bus). Only main RAM (16-bit
+// bus, N16=8/S16=1) and VRAM (16-bit bus, N16=S16=1 but N32/S32 split) diverge
+// from "fast". `n16`/`s16` are the raw bus timings; `bus16` selects the 16-bit
+// N32/S32-splitting rule (melonDS: N32=N16+S16, S32=S16+S16) vs the 32-bit
+// rule (N32=N16, S32=S16).
+struct Arm7Region { uint32_t n16, s16; bool bus16; };
+inline Arm7Region arm7_region(uint32_t addr) {
+    if (addr >= 0x02000000u && addr < 0x03000000u)
+        return {8u, 1u, true};                              // main RAM, 16-bit bus
+    if (addr >= 0x06000000u && addr < 0x07000000u)
+        return {1u, 1u, true};                               // VRAM (ARM7 slot), 16-bit bus
+    return {1u, 1u, false};                                  // BIOS / WRAM / IO / void: 32-bit bus
+}
+
+// Data-access memory timing (Commit C for the ARM9; Commit D for the ARM7).
+// ARM9: returns the MARGINAL data cost after the code/data overlap: melonDS
 // combines them as max(code+data-6, max(code,data)), so the first ~6 data cycles
 // hide behind the code fetch already charged by runtime_code_cycles. Cost is in
 // the active CPU's cycle units (ARM9 = 2x system). Region costs are a first cut,
 // calibrated against the oracle's cyc9-at-equal-retired-index.
+//
+// ARM7: region-aware per melonDS's ARM7MemTimings (single 8/16-bit accesses are
+// always charged at the region's N — melonDS's DataRead8/16 always index the
+// nonseq slot; only 32-bit LDM/STM continuations use `sequential` for S). For
+// "fast" regions (BIOS/WRAM/IO) this reproduces melonDS's LDR/STR/LDM/STM cost
+// EXACTLY against the recompiler's static ARMv4T base table (verified by hand:
+// e.g. a fast-region LDR is base=2 + data=1 = 3, matching melonDS's
+// AddCycles_CDI numC(1)+numD(1)+1 = 3). The one place the static base table
+// CANNOT be matched is taken branches: melonDS charges a taken branch exactly
+// JumpTo's N+S of the TARGET region (2 in a fast region), but the recompiler's
+// static base is a flat, region-blind 3 ("2S+1N") for every branch — baked in
+// at codegen time (recompiler/armv4t/arm_ir.cpp instr_cycle_base), not
+// reachable from this bus-only hook (only bus.cpp is in scope for Commit D; see
+// docs/scheduler_design.md). runtime_code_cycles is called with the CURRENT
+// instruction's pc, before it's known whether/where it branches, so charging
+// the refill there would double-count against the branch's own static
+// "2S+1N" — see runtime_code_cycles below. kArm7DataDiscount is the resulting,
+// empirically-calibrated compensation: since branches are common (spin/poll
+// loops dominate early boot) and always overcosted by +1 in fast regions, and
+// this hook is the only ADDITIVE lever available (can't subtract from the
+// static base), a small uniform discount on the data-access cost nets the
+// windowed cyc7/insn average back to the oracle. See the calibration table in
+// the Commit-D changelist.
+constexpr uint32_t kArm7DataDiscount = 1u;
 extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
                                        uint32_t sequential) {
-    (void)sequential;
-    if (g_nds_active != NDS_ARM9) return 1u;               // ARM7: Commit D
+    if (g_nds_active != NDS_ARM9) {
+        Arm7Region r = arm7_region(addr);
+        uint32_t n32 = r.bus16 ? (r.n16 + r.s16) : r.n16;
+        uint32_t s32 = r.bus16 ? (r.s16 + r.s16) : r.s16;
+        // melonDS: single 8/16-bit transfers always cost N (DataRead8/16);
+        // only 32-bit transfers (LDR/STR/LDM/STM) see the sequential S rate.
+        uint32_t cost = (width >= 4u) ? (sequential ? s32 : n32) : r.n16;
+        return (cost > kArm7DataDiscount) ? (cost - kArm7DataDiscount) : 0u;
+    }
     uint32_t data;
     if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
         data = 2u;                                          // ITCM
@@ -341,17 +391,43 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
     return data > 6u ? data - 6u : 1u;
 }
 
-// Code-FETCH memory timing (Commit B — see docs/scheduler_design.md). Charged
-// per retired instruction on the active CPU, in that CPU's cycle units (ARM9 =
-// 2x system). The ARM9's naive ~1 cyc/insn undercount (measured -75% vs melonDS)
-// is almost entirely the missing code fetch: uncached BIOS fetch is 8 ARM9 cyc
-// ((32-bit nonseq base 1 + ARM9 nonseq penalty 3) x2). Uncached ARM9 has no
-// sequential-fetch speedup (it is cache-line based), so we charge the region's
-// fetch cost every instruction; the CP15 I-cache, once enabled, averages it down.
-// Constants are a first cut to be calibrated against the oracle's cyc9-at-equal-
-// retired-index; ARM7 (Commit D) returns 0 so its timing is unchanged.
+// Code-FETCH memory timing (Commit B for the ARM9 — see docs/scheduler_design.md
+// — Commit D for the ARM7). Charged per retired instruction on the active CPU,
+// on TOP of the static per-instruction base baked into the recompiler's ARMv4T
+// cost table (recompiler/armv4t/arm_ir.cpp instr_cycle_base), which already
+// assumes a 1-cycle sequential code fetch ("1S") for every op.
+//
+// ARM9: the naive ~1 cyc/insn undercount (measured -75% vs melonDS) is almost
+// entirely the missing code fetch: uncached BIOS fetch is 8 ARM9 cyc ((32-bit
+// nonseq base 1 + ARM9 nonseq penalty 3) x2). Uncached ARM9 has no sequential-
+// fetch speedup (it is cache-line based), so we charge the region's fetch cost
+// every instruction; the CP15 I-cache, once enabled, averages it down.
+// Constants are a first cut, calibrated against the oracle's cyc9-at-equal-
+// retired-index.
+//
+// ARM7: the static base's baked-in "1S" already matches melonDS's steady-state
+// AddCycles_C exactly for every region that is genuinely 1-cycle-sequential —
+// which is every ARM7 region EXCEPT main RAM / VRAM in ARM (32-bit) mode, where
+// the 16-bit bus splits S32=S16+S16=2. So the ONLY correction needed here is
+// that one region/width case (+1); everywhere else this returns 0 — adding a
+// naive flat code-fetch cost on top of the ARM7's already-fast base would only
+// overcharge further (measured starting point: native ~1.85 cyc/insn vs oracle
+// ~1.63, i.e. ALREADY over, not under). Taken branches are also mis-costed
+// (melonDS charges exactly the TARGET region's JumpTo N+S, e.g. 2 in a fast
+// region, vs the static base's flat region-blind 3) but that correction is NOT
+// applied here: this hook only sees the CURRENT pc, before the branch is taken
+// and its target is known, so there is no way to attribute the target-region
+// refill without double-counting the static base's own flat guess. See the
+// data-side kArm7DataDiscount (above) for how that residual is compensated.
 extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
-    if (g_nds_active != NDS_ARM9) return 0u;               // ARM7: Commit D
+    if (g_nds_active != NDS_ARM9) {
+        Arm7Region r = arm7_region(pc);
+        if (!r.bus16) return 0u;                            // 32-bit-bus region: S32=S16=1
+        const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
+        if (thumb) return 0u;                               // S16=1, matches the baked "1S"
+        uint32_t s32 = r.s16 + r.s16;
+        return (s32 > 1u) ? (s32 - 1u) : 0u;                 // ARM-mode S32 beyond the baked 1
+    }
     // Sequential (fall-through) vs non-sequential (branch/refill) code fetch;
     // the sequential access is cheaper on both the raw bus and the I-cache, so a
     // tight spin loop is far cheaper than data/branch-heavy early boot.
