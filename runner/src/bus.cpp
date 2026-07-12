@@ -163,7 +163,12 @@ void unmapped(uint32_t addr, bool write, uint32_t width, uint32_t value) {
 
 }  // namespace
 
+// Per-CPU last code-fetch PC, for the sequential/non-sequential distinction in
+// runtime_code_cycles (a sequential fetch is far cheaper than a branch/refill).
+uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+
 void bus_init() {
+    g_last_code_pc[0] = g_last_code_pc[1] = 0xFFFFFFFFu;
     g_main_ram.assign(4u * 1024 * 1024, 0);
     g_itcm.assign(32u * 1024, 0);
     g_dtcm.assign(16u * 1024, 0);
@@ -310,12 +315,30 @@ extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     else unmapped(addr, true, 1, val);
 }
 
-// Region-aware access cost. Real DS waitstates land with the timing pass;
-// for now charge a flat cost so the cycle clock advances monotonically.
+// Data-access memory timing (Commit C for the ARM9). ARM7 keeps the flat cost
+// (Commit D). Returns the MARGINAL data cost after the code/data overlap: melonDS
+// combines them as max(code+data-6, max(code,data)), so the first ~6 data cycles
+// hide behind the code fetch already charged by runtime_code_cycles. Cost is in
+// the active CPU's cycle units (ARM9 = 2x system). Region costs are a first cut,
+// calibrated against the oracle's cyc9-at-equal-retired-index.
 extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
                                        uint32_t sequential) {
-    (void)addr; (void)width; (void)sequential;
-    return 1u;
+    (void)sequential;
+    if (g_nds_active != NDS_ARM9) return 1u;               // ARM7: Commit D
+    uint32_t data;
+    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
+        data = 2u;                                          // ITCM
+    else if (g_cp15.dtcm_enable && addr >= g_cp15.dtcm_base &&
+             addr - g_cp15.dtcm_base < g_cp15.dtcm_size)
+        data = 2u;                                          // DTCM
+    else if (addr >= 0x02000000u && addr < 0x03000000u)
+        data = (width >= 4) ? 18u : 10u;                    // main RAM 16-bit bus
+    else if (addr >= 0x03000000u && addr < 0x04000000u)
+        data = 4u;                                          // shared / ARM7 WRAM 32-bit
+    else
+        data = 4u;                                          // I/O, VRAM, palette, ...
+    // Overlap: the first ~6 cycles hide behind the code fetch.
+    return data > 6u ? data - 6u : 1u;
 }
 
 // Code-FETCH memory timing (Commit B — see docs/scheduler_design.md). Charged
@@ -329,13 +352,16 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
 // retired-index; ARM7 (Commit D) returns 0 so its timing is unchanged.
 extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     if (g_nds_active != NDS_ARM9) return 0u;               // ARM7: Commit D
+    // Sequential (fall-through) vs non-sequential (branch/refill) code fetch;
+    // the sequential access is cheaper on both the raw bus and the I-cache, so a
+    // tight spin loop is far cheaper than data/branch-heavy early boot.
+    const bool seq = (pc == g_last_code_pc[0] + 2u || pc == g_last_code_pc[0] + 4u);
+    g_last_code_pc[0] = pc;
     if (g_cp15.itcm_enable && pc < g_cp15.itcm_size)
         return 1u;                                          // ITCM: no wait states
-    const bool icache = (g_cp15.control & (1u << 12)) != 0; // C1 bit12 = I-cache
-    if (pc >= 0xFFFF0000u) return 8u;                       // ARM9 BIOS 32-bit (uncached)
-    if (pc >= 0x02000000u && pc < 0x03000000u)              // main RAM, 16-bit bus
-        return icache ? 6u : 18u;                           // cached avg vs (8+1)x2 nonseq
-    if (pc >= 0x03000000u && pc < 0x04000000u)              // shared / ARM7 WRAM, 32-bit
-        return icache ? 6u : 8u;
-    return icache ? 6u : 8u;                                // default (I/O, VRAM, ...)
+    if (g_cp15.control & (1u << 12)) return seq ? 1u : 3u;  // C1 bit12 I-cache: cached
+    if (pc >= 0xFFFF0000u) return seq ? 2u : 8u;            // BIOS 32-bit
+    if (pc >= 0x02000000u && pc < 0x03000000u)              // main RAM 16-bit
+        return seq ? 5u : 16u;
+    return seq ? 2u : 8u;                                   // WRAM 32-bit / I/O / VRAM
 }
