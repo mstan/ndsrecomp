@@ -164,6 +164,8 @@ void tier3_run(uint32_t /*entry*/) {
         // recompiled-bank runtime_insn_fp hook: one bump per interpreted guest
         // instruction, counted as it begins (committed to execute).
         nds_note_insn_retired(g_nds_active);
+        // Code-fetch memory timing (Commit B), symmetric with runtime_insn_fp.
+        g_runtime_cycles += runtime_code_cycles(pc & ~1u);
 
         Instr in = thumb
             ? armv4t::ThumbDecoder::decode(g_bus.read16(pc & ~1u), pc & ~1u)

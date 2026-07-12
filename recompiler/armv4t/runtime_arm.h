@@ -112,6 +112,16 @@ uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
 uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
                             uint32_t extra);
 
+// Code-FETCH memory timing for the instruction at `pc` on the active CPU, in
+// that CPU's cycle units (ARM9 = 2x system). Charged per retired instruction on
+// TOP of the exec/data cost (which is what runtime_tick already accounts for),
+// from the always-on per-instruction path (runtime_insn_fp for banks, the Tier-3
+// loop). Models the ARM9's region N/S bus timing + ITCM + CP15 I-cache; the ARM9
+// has no sequential-fetch speedup when uncached, so the region's fetch cost is
+// charged per instruction. ARM7 returns 0 for now (its timing lands separately).
+// See docs/scheduler_design.md "Cycle-model design".
+uint32_t runtime_code_cycles(uint32_t pc);
+
 // ── Shifter helpers ────────────────────────────────────────────────
 // Generated code uses these for data-processing operand2 shifts and
 // for register-shifted-by-register cases. They update the shifter

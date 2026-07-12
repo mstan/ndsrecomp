@@ -181,7 +181,13 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
 // instruction (g_runtime_insn_trace on). Bumps the active CPU's retired-insn
 // counter so insn9/insn7 can anchor the fp-stream bisector. Tier-3 bumps the
 // same counters from its own step loop (tier3.cpp).
-extern "C" void runtime_insn_fp(void) { nds_note_insn_retired(g_nds_active); }
+extern "C" void runtime_insn_fp(void) {
+    nds_note_insn_retired(g_nds_active);
+    // Code-fetch memory timing (Commit B). R[15] is this instruction's PC
+    // (set by the generated code just before this hook), so charge its fetch
+    // cost on top of the baked exec/data cost. See runtime_code_cycles.
+    g_runtime_cycles += runtime_code_cycles(g_cpu.R[15] & ~1u);
+}
 extern "C" void runtime_fp_reset(void) {}
 extern "C" uint32_t runtime_fp_count(void) { return 0; }
 extern "C" uint32_t runtime_fp_save_file(const char*) { return 0; }

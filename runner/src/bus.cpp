@@ -317,3 +317,25 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
     (void)addr; (void)width; (void)sequential;
     return 1u;
 }
+
+// Code-FETCH memory timing (Commit B — see docs/scheduler_design.md). Charged
+// per retired instruction on the active CPU, in that CPU's cycle units (ARM9 =
+// 2x system). The ARM9's naive ~1 cyc/insn undercount (measured -75% vs melonDS)
+// is almost entirely the missing code fetch: uncached BIOS fetch is 8 ARM9 cyc
+// ((32-bit nonseq base 1 + ARM9 nonseq penalty 3) x2). Uncached ARM9 has no
+// sequential-fetch speedup (it is cache-line based), so we charge the region's
+// fetch cost every instruction; the CP15 I-cache, once enabled, averages it down.
+// Constants are a first cut to be calibrated against the oracle's cyc9-at-equal-
+// retired-index; ARM7 (Commit D) returns 0 so its timing is unchanged.
+extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
+    if (g_nds_active != NDS_ARM9) return 0u;               // ARM7: Commit D
+    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size)
+        return 1u;                                          // ITCM: no wait states
+    const bool icache = (g_cp15.control & (1u << 12)) != 0; // C1 bit12 = I-cache
+    if (pc >= 0xFFFF0000u) return 8u;                       // ARM9 BIOS 32-bit (uncached)
+    if (pc >= 0x02000000u && pc < 0x03000000u)              // main RAM, 16-bit bus
+        return icache ? 6u : 18u;                           // cached avg vs (8+1)x2 nonseq
+    if (pc >= 0x03000000u && pc < 0x04000000u)              // shared / ARM7 WRAM, 32-bit
+        return icache ? 6u : 8u;
+    return icache ? 6u : 8u;                                // default (I/O, VRAM, ...)
+}
