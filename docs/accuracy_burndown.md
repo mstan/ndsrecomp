@@ -68,7 +68,7 @@ Both are byte-identical to melonDS configured for the original DS/DS Lite
 overwritten, short, or out-of-order sample ranges.
 
 The complete eight-scenario cold-process matrix passed twice from clean commit
-`c871b0b`. Across the two runs, every scenario's machine-readable traversal
+`ed34103`. Across the two runs, every scenario's machine-readable traversal
 log, continuous-audio frame count/hash, and six static-coverage counters are
 identical. All requested frames matched; every static counter is zero. The
 retained identity and per-scenario evidence is

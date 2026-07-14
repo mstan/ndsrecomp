@@ -1,15 +1,15 @@
 {
   "format": 1,
   "status": "pass",
-  "commit": "c871b0b1fe36146b1f50c4140dc5fcb6231a234a",
+  "commit": "ed3410341ccae0f47883955f2962a17e08d2382c",
   "cold_matrix_runs": [
-    "20260714T212955Z",
-    "20260714T213622Z"
+    "20260714T222351Z",
+    "20260714T223049Z"
   ],
   "deterministic": true,
   "full_frame_scan": true,
   "identities": {
-    "runner_sha256": "557fe5531d4ae78e397d3973df7002d9c79ff458e5120d61aa923f3bcedd51e6",
+    "runner_sha256": "6f1d09f61527364cd04b06e70d57a3fe272cd7d6434800720a2f6bb3291d7db6",
     "oracle_sha256": "ad8f2b06a62c29c033eac334bda694376e40f823b94f1f51e9bdaf6daf2121bb",
     "traversal_manifest_sha256": "1ed5335de5dbf8f1149b1646855114b15263cc188527d996cbf7a629d4be0135",
     "bios9_sha256": "1693983a7707ae394786fa526c0552457888a51d4e410d715ef07acd5a540555",
