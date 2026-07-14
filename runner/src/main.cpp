@@ -310,10 +310,28 @@ int main(int argc, char** argv) {
     nds_gpu2d_profile(&gpu_profile);
     if (gpu_profile.scanlines) {
         std::fprintf(stderr,
-            "  GPU2D profile: %.3f seconds (OBJ %.3f) across %llu scanlines\n",
+            "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "
+            "across %llu scanlines\n",
             static_cast<double>(gpu_profile.render_ns) / 1.0e9,
+            static_cast<double>(gpu_profile.engine_ns[0]) / 1.0e9,
+            static_cast<double>(gpu_profile.engine_ns[1]) / 1.0e9,
             static_cast<double>(gpu_profile.obj_ns) / 1.0e9,
             static_cast<unsigned long long>(gpu_profile.scanlines));
+        std::fprintf(stderr,
+            "  GPU2D lines: A text[0..4]=%llu/%llu/%llu/%llu/%llu "
+            "no-effect=%llu; B=%llu/%llu/%llu/%llu/%llu no-effect=%llu\n",
+            (unsigned long long)gpu_profile.text_lines[0][0],
+            (unsigned long long)gpu_profile.text_lines[0][1],
+            (unsigned long long)gpu_profile.text_lines[0][2],
+            (unsigned long long)gpu_profile.text_lines[0][3],
+            (unsigned long long)gpu_profile.text_lines[0][4],
+            (unsigned long long)gpu_profile.no_effect_lines[0],
+            (unsigned long long)gpu_profile.text_lines[1][0],
+            (unsigned long long)gpu_profile.text_lines[1][1],
+            (unsigned long long)gpu_profile.text_lines[1][2],
+            (unsigned long long)gpu_profile.text_lines[1][3],
+            (unsigned long long)gpu_profile.text_lines[1][4],
+            (unsigned long long)gpu_profile.no_effect_lines[1]);
     }
     NdsSchedulerProfile scheduler_profile_data{};
     scheduler_profile(&scheduler_profile_data);

@@ -46,6 +46,9 @@ std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
 int g_front = 0;
 uint64_t g_render_ns = 0;
 uint64_t g_obj_ns = 0;
+uint64_t g_engine_ns[2] = {};
+uint64_t g_text_lines[2][5] = {};
+uint64_t g_no_effect_lines[2] = {};
 uint64_t g_render_scanlines = 0;
 
 bool profiling() {
@@ -372,11 +375,28 @@ void render_engine_line(int engine, int y) {
         if(text) text_lines[text_count++]=
             prepare_text_line(engine,bg,y,palette,&vram);
     }
+    auto text_ahead = [](const TextLine& a, const TextLine& b) {
+        const uint32_t ap = a.cnt & 3u;
+        const uint32_t bp = b.cnt & 3u;
+        return ap != bp ? ap < bp : a.bg < b.bg;
+    };
+    // Four elements maximum: insertion sort is smaller and avoids pulling a
+    // generic introsort into this scanline-hot function.
+    for (size_t i = 1; i < text_count; ++i) {
+        const TextLine line = text_lines[i];
+        size_t j = i;
+        while (j && text_ahead(line, text_lines[j - 1])) {
+            text_lines[j] = text_lines[j - 1];
+            --j;
+        }
+        text_lines[j] = line;
+    }
     const uint32_t mbmode=u.master_bright>>14;
     const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
     // Common firmware top-screen mode: OBJ over a backdrop, with no BG or
     // color effect enabled. There is no second layer to sort or blend.
     if (text_count == 0 && u.bldcnt == 0 && mbmode == 0) {
+        if (profiling()) ++g_text_lines[engine][0];
         for (int x = 0; x < 256; ++x)
             dst[x] = to_rgb32(obj[x].valid ? obj[x].color : backdrop.color);
         return;
@@ -385,20 +405,51 @@ void render_engine_line(int engine, int y) {
         return a.priority < b.priority ||
                (a.priority == b.priority && a.order < b.order);
     };
+    // With no color-effect mode, no second-target layers, and no master
+    // brightness, only the front pixel matters. Firmware uses this state for
+    // most menu scanlines; avoid maintaining a second candidate and running
+    // the general blender for every pixel.
+    if ((u.bldcnt & 0x3FC0u) == 0 && mbmode == 0) {
+        if (profiling()) {
+            ++g_text_lines[engine][text_count];
+            ++g_no_effect_lines[engine];
+        }
+        for (int x = 0; x < 256; ++x) {
+            Pixel top = backdrop;
+            for (size_t bg = 0; bg < text_count; ++bg) {
+                const Pixel pixel = text_pixel(text_lines[bg], x);
+                if (pixel.valid) {
+                    top = pixel;
+                    break;
+                }
+            }
+            if (obj[x].valid && ahead(obj[x], top)) top = obj[x];
+            dst[x] = to_rgb32(top.color);
+        }
+        return;
+    }
+    if (profiling()) ++g_text_lines[engine][text_count];
     for(int x=0;x<256;++x){
         Pixel top=backdrop, below=backdrop;
-        auto consider = [&](const Pixel& p) {
-            if (!p.valid) return;
-            if (ahead(p, top)) {
-                below=top;
-                top=p;
-            } else if (ahead(p, below)) {
-                below=p;
-            }
-        };
-        consider(obj[x]);
+        bool have_top = false;
         for(size_t bg=0;bg<text_count;++bg){
-            consider(text_pixel(text_lines[bg],x));
+            const Pixel pixel = text_pixel(text_lines[bg],x);
+            if (!pixel.valid) continue;
+            if (!have_top) {
+                top = pixel;
+                have_top = true;
+            } else {
+                below = pixel;
+                break;
+            }
+        }
+        if (obj[x].valid) {
+            if (ahead(obj[x], top)) {
+                below=top;
+                top=obj[x];
+            } else if (ahead(obj[x], below)) {
+                below=obj[x];
+            }
         }
         uint32_t c=compose(u,top,below);
         if(mbmode==1)c=brighten(c,mb,0u);else if(mbmode==2)c=darken(c,mb,15u);
@@ -528,6 +579,9 @@ void nds_gpu2d_reset(){
     g_front = 0;
     g_render_ns = 0;
     g_obj_ns = 0;
+    g_engine_ns[0] = g_engine_ns[1] = 0;
+    std::memset(g_text_lines, 0, sizeof(g_text_lines));
+    g_no_effect_lines[0] = g_no_effect_lines[1] = 0;
     g_render_scanlines = 0;
     for (auto& buffers : g_fb)
         for (auto& frame : buffers)
@@ -554,10 +608,16 @@ void nds_gpu2d_render_scanline(int line) {
     }
     const auto start = std::chrono::steady_clock::now();
     render_engine_line(0, line);
+    const auto middle = std::chrono::steady_clock::now();
     render_engine_line(1, line);
-    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto finish = std::chrono::steady_clock::now();
+    const auto elapsed = finish - start;
     g_render_ns += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    g_engine_ns[0] += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(middle - start).count());
+    g_engine_ns[1] += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(finish - middle).count());
     ++g_render_scanlines;
 }
 void nds_gpu2d_render_frame(){
@@ -574,5 +634,10 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     if (!out) return;
     out->render_ns = g_render_ns;
     out->obj_ns = g_obj_ns;
+    out->engine_ns[0] = g_engine_ns[0];
+    out->engine_ns[1] = g_engine_ns[1];
+    std::memcpy(out->text_lines, g_text_lines, sizeof(g_text_lines));
+    out->no_effect_lines[0] = g_no_effect_lines[0];
+    out->no_effect_lines[1] = g_no_effect_lines[1];
     out->scanlines = g_render_scanlines;
 }

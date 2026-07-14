@@ -16,6 +16,9 @@ const uint32_t* nds_gpu2d_framebuffer(int screen);
 struct NdsGpu2dProfile {
     uint64_t render_ns;
     uint64_t obj_ns;
+    uint64_t engine_ns[2];
+    uint64_t text_lines[2][5];
+    uint64_t no_effect_lines[2];
     uint64_t scanlines;
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);
