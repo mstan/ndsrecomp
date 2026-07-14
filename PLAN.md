@@ -99,9 +99,14 @@ S16 audio at the SPU's native `33,513,982 / 1,024` sample cadence. Profile-led
 software-renderer and static-dispatch work reduced the authoritative
 1,127-frame cold run from 47.403 seconds (23.77 FPS) to 18.185 seconds
 (61.97 FPS) at normal process priority while retaining exact frames and event
-counters. The remaining release work is a symmetric continuous-audio diff and
-soak, one isolated all-eight-scenario release matrix, repeated-run determinism,
-and any hardware-mode defect that those gates expose.
+counters. An ordinal-addressed, non-destructive audio trace now compares
+continuous stereo output independently of SDL playback. Cold
+`main_menu_controls` and `calibration_save` runs respectively prove 328,236
+and 656,472 consecutive stereo frames byte-identical to melonDS's
+original-hardware 10-bit DAC mode, including substantial non-silent output.
+The remaining release work is the isolated all-eight-scenario
+audio/video/static matrix, repeated-run determinism, the host audio/input soak,
+and any defect those gates expose.
 The runner (`runner/`) links the generated banks on a DS runtime
 (`docs/runner_bringup.md`). **Done:**
 - **M1 — ARM9 boots:** SHA-1-verify the 3 dumps, run the recompiled ARM9
@@ -115,16 +120,14 @@ The runner (`runner/`) links the generated banks on a DS runtime
   seeds call-return addresses) — the hard part, solved.
 - **Bus so far:** main RAM, accurate shared/ARM7 WRAM ownership, ITCM/DTCM,
   BIOS regions, physical VRAM A-I, palette/OAM, and always-on access rings.
-- **NEXT (release evidence):** add a symmetric, ordinal-based stereo sample
-  stream to both debug servers and prove continuous mixer output against
-  melonDS. Then run all eight scenarios from isolated cold processes with
-  every requested frame, static-coverage counters, and image/build identities
-  enforced in one machine-readable release report. Repeat the matrix to prove
-  determinism, perform the SDL input/audio soak, and repair only defects that
-  the evidence exposes.
-- Still ahead this phase: continuous audio comparison and host soak, the
-  combined eight-scenario cold-process release matrix, repeated determinism,
-  and closure of any unexercised mode reached by that firmware gate.
+- **NEXT (release evidence):** run all eight scenarios from isolated cold
+  processes with every requested frame, continuous audio, static-coverage
+  counters, and image/build identities enforced in one machine-readable
+  release report. Repeat the matrix to prove determinism, perform the SDL
+  input/audio soak, and repair only defects that the evidence exposes.
+- Still ahead this phase: host audio/input soak, the combined eight-scenario
+  cold-process release matrix, repeated determinism, and closure of any
+  unexercised mode reached by that firmware gate.
 
 ### Phase 3 — recompile BIOSes + firmware as banks, LLE boot
 Recompile both BIOSes + firmware ARM9/ARM7 parts as banks. LLE the BIOS

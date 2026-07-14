@@ -14,3 +14,11 @@ void nds_tick_spu(uint64_t system_cycles);
 
 // Stereo signed-16 output retained for the eventual SDL host. Returns frames.
 uint32_t nds_spu_read_output(int16_t* stereo, uint32_t frames);
+
+// Always-on, non-destructive sample trace for native/oracle comparison. Sample
+// ordinals start at zero after reset and are independent of the SDL reader.
+// A bounded history is retained; callers must request start >= oldest.
+uint64_t nds_spu_debug_output_produced();
+uint64_t nds_spu_debug_output_oldest();
+uint32_t nds_spu_debug_copy_output(uint64_t start, int16_t* stereo,
+                                   uint32_t frames);

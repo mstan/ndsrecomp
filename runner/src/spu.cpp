@@ -303,7 +303,19 @@ uint32_t g_output_read = 0;
 uint32_t g_output_write = 0;
 uint32_t g_output_count = 0;
 
+// Large enough to bridge the longest interval between traversal observations
+// while staying bounded if a diagnostic accidentally runs for hours.
+constexpr uint32_t kDebugOutputFrames = 1048576;
+std::array<int16_t, kDebugOutputFrames * 2> g_debug_output{};
+uint64_t g_debug_output_produced = 0;
+
 void output_push(int16_t left, int16_t right) {
+    const uint32_t debug_pos = static_cast<uint32_t>(
+        g_debug_output_produced % kDebugOutputFrames);
+    g_debug_output[debug_pos * 2] = left;
+    g_debug_output[debug_pos * 2 + 1] = right;
+    ++g_debug_output_produced;
+
     g_output[g_output_write * 2] = left;
     g_output[g_output_write * 2 + 1] = right;
     g_output_write = (g_output_write + 1) % kOutputFrames;
@@ -471,6 +483,7 @@ void nds_spu_reset() {
     g_capture = {};
     g_cnt = 0; g_master_volume = 0; g_bias = 0; g_mix_count = 0;
     g_output.fill(0); g_output_read = g_output_write = g_output_count = 0;
+    g_debug_output_produced = 0;
 }
 
 void nds_spu_stop() {
@@ -504,5 +517,30 @@ uint32_t nds_spu_read_output(int16_t* stereo, uint32_t frames) {
         g_output_read = (g_output_read + 1) % kOutputFrames;
     }
     g_output_count -= take;
+    return take;
+}
+
+uint64_t nds_spu_debug_output_produced() {
+    return g_debug_output_produced;
+}
+
+uint64_t nds_spu_debug_output_oldest() {
+    return g_debug_output_produced > kDebugOutputFrames
+        ? g_debug_output_produced - kDebugOutputFrames : 0u;
+}
+
+uint32_t nds_spu_debug_copy_output(uint64_t start, int16_t* stereo,
+                                   uint32_t frames) {
+    if (!stereo || start < nds_spu_debug_output_oldest() ||
+        start >= g_debug_output_produced)
+        return 0;
+    const uint32_t take = static_cast<uint32_t>(std::min<uint64_t>(
+        frames, g_debug_output_produced - start));
+    for (uint32_t i = 0; i < take; ++i) {
+        const uint32_t pos = static_cast<uint32_t>(
+            (start + i) % kDebugOutputFrames);
+        stereo[i * 2] = g_debug_output[pos * 2];
+        stereo[i * 2 + 1] = g_debug_output[pos * 2 + 1];
+    }
     return take;
 }

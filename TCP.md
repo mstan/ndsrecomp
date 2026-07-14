@@ -34,6 +34,7 @@ events** and only then read state:
 | `read_io` | `cpu`:9\|7,`addr`,`width`:8\|16\|32 | `{value}` — exact-width I/O register read |
 | `read_region` | `region` | raw region bytes (see below) |
 | `framebuffer` | `engine`:A\|B | `{w:256,h:192,rgb:<hex>}` |
+| `audio_samples` | `start`,`count` (max 4096) | Non-destructive ordinal trace: `{start,count,oldest,produced,pcm_s16le}` |
 | `touch` | `x`,`y`,`down` | injects a TSC touch (oracle + native both accept) |
 | `keys` | `mask` | sets the DS button state |
 

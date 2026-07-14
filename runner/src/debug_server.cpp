@@ -12,6 +12,7 @@
 #include "io.h"
 #include "gpu2d.h"
 #include "runtime_arm.h"
+#include "spu.h"
 #include "tier3.h"
 
 #ifdef _WIN32
@@ -166,6 +167,33 @@ std::string handle(const std::string& line) {
     }
 
     if (cmd == "event_counts") return counts_json();
+    if (cmd == "audio_samples") {
+        const uint64_t start = json_u64(line, "start", 0);
+        uint32_t count = static_cast<uint32_t>(json_u64(line, "count", 1024));
+        if (count > 4096u) count = 4096u;
+        const uint64_t produced = nds_spu_debug_output_produced();
+        const uint64_t oldest = nds_spu_debug_output_oldest();
+        if (start < oldest)
+            return "{\"error\":\"audio start is no longer retained\"}";
+        std::vector<int16_t> samples(count * 2u);
+        const uint32_t copied = nds_spu_debug_copy_output(
+            start, samples.data(), count);
+        std::string pcm;
+        pcm.reserve(copied * 8u);
+        for (uint32_t i = 0; i < copied * 2u; ++i) {
+            const uint16_t value = static_cast<uint16_t>(samples[i]);
+            const uint8_t bytes[2] = {
+                static_cast<uint8_t>(value),
+                static_cast<uint8_t>(value >> 8),
+            };
+            append_hex(pcm, bytes, sizeof(bytes));
+        }
+        return "{\"start\":" + std::to_string(start) +
+            ",\"count\":" + std::to_string(copied) +
+            ",\"oldest\":" + std::to_string(oldest) +
+            ",\"produced\":" + std::to_string(produced) +
+            ",\"pcm_s16le\":\"" + pcm + "\"}";
+    }
     if (cmd == "static_coverage") {
         const Tier3Stats s = tier3_stats();
         char buf[320];

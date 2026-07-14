@@ -235,10 +235,16 @@ def main() -> int:
                         f"traversal exit={completed.returncode} "
                         f"status={record.get('status')!r}"
                     )
+                audio = record.get("audio") or {}
+                if int(audio.get("compared_frames", 0)) <= 0:
+                    raise RuntimeError("traversal produced no compared audio")
+                if int(audio.get("nonzero_samples", 0)) <= 0:
+                    raise RuntimeError("traversal audio stream was entirely silent")
                 result.update({
                     "status": "pass",
                     "duration_seconds": round(time.monotonic() - started, 3),
                     "static_coverage": record.get("static_coverage"),
+                    "audio": audio,
                     "traversal_log": file_identity(traversal_log),
                 })
                 print(f"[{index}/{len(scenarios)}] {scenario}: PASS", flush=True)

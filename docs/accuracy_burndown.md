@@ -56,6 +56,17 @@ The first sound-capture proof is ARM7 `insn7=32,322,295`:
   `9376bffc96ee1984e686651587b112c8557d89c4389d1b262543288ff408bdee`.
 - The former missing sample at `0x0233264E` is `0xFFFD` on both sides.
 
+The continuous-output proof uses a non-destructive, ordinal-addressed S16LE
+stereo trace on both debug servers. The `main_menu_controls` cold run compares
+328,236 consecutive stereo frames (152,732 non-zero samples), with SHA-256
+`0aab2b2ae5d00154b55a5dd335edc0326e79f1d36bc809c7995551e6b1406d2e`.
+The independent `calibration_save` cold run compares 656,472 frames (385,418
+non-zero samples), with SHA-256
+`cfadd01c2afaf7aff89abd6540e115cedb6b67a61c24ddcee137cd7e6ad8c17d`.
+Both are byte-identical to melonDS configured for the original DS/DS Lite
+10-bit DAC. The trace is independent of SDL consumption and detects missing,
+overwritten, short, or out-of-order sample ranges.
+
 The first deterministic interactive ruler is the `calibration_save` scenario
 in `oracle/firmware_traversal.json`.  From a cold process it boots the real
 BIOS/firmware, enters Settings, completes all four touchscreen-calibration
@@ -145,7 +156,8 @@ python oracle/fp_diverge.py --cpu 7 --known-same 49074405 --max 53068580
 - [x] Always-on instruction, IRQ, FIFO, SPI, and bus/watch rings.
 - [x] Symmetric register, RAM, I/O, scheduler, CP15, and RTC checkpoints.
 - [x] Exact cycle/event counters on both servers.
-- [ ] Symmetric SPU channel/capture-state checkpoint and audio-sample diff.
+- [x] Symmetric ordinal-addressed continuous stereo sample diff.
+- [ ] Symmetric internal SPU channel/capture-state checkpoint.
 - [x] VRAM/palette/OAM state surfaces and dual-framebuffer RGB diff.
 - [x] Data-driven touch/key replay with strict stop checks, paired checkpoints,
   and a machine-readable action/result log (`firmware_traversal.py`).
@@ -153,7 +165,7 @@ python oracle/fp_diverge.py --cpu 7 --known-same 49074405 --max 53068580
   Play, main-menu brightness/clock controls, empty slots, and terminal/return
   actions reachable with the configured no-cartridge hardware state.
 - [ ] Automated cold-reset soak proving run-to-run determinism.
-- [ ] Release/static-coverage manifest with build and image identity.
+- [x] Release/static-coverage manifest tooling with build and image identity.
 
 ## Axis 1 - ARM instruction semantics and static BIOS banks
 
@@ -245,7 +257,8 @@ remain open.
 - [x] Both sound-capture units with exact 1024-system-cycle scheduling and RAM
   FIFO writes.
 - [x] Full 4 KiB capture buffer equality at the first exercised recording.
-- [ ] Symmetric channel-state and continuous stereo sample-stream comparator.
+- [x] Symmetric continuous stereo sample-stream comparator.
+- [ ] Symmetric internal channel/capture-state checkpoint.
 - [x] SDL stereo device and bounded queue pacing at the native production rate
   (`33,513,982 / 1,024` samples/second), without dropping queued blocks.
 - [ ] Objective underrun/overflow soak and audible interactive soak.

@@ -17,10 +17,13 @@
 #include "RTC.h"
 #include "GPU.h"
 #include "ARM.h"
+#include "SPU.h"
 
 #include "oracle_hooks.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -348,6 +351,64 @@ public:
     }
 };
 
+// The public melonDS SPU output FIFO is destructive and only receives a block
+// when a physical frame finishes. Drain it after every RunFrame call into a
+// separate ordinal trace so debug reads neither perturb nor lose audio.
+static constexpr uint32_t kAudioTraceFrames = 1048576;
+static std::array<int16_t, kAudioTraceFrames * 2> g_audio_trace{};
+static uint64_t g_audio_produced = 0;
+
+static void resetAudioTrace()
+{
+    g_audio_produced = 0;
+}
+
+static uint64_t oldestAudioOrdinal()
+{
+    return g_audio_produced > kAudioTraceFrames
+        ? g_audio_produced - kAudioTraceFrames : 0;
+}
+
+static void pushAudioTrace(const int16_t* samples, uint32_t frames)
+{
+    for (uint32_t i = 0; i < frames; ++i)
+    {
+        const uint32_t pos = static_cast<uint32_t>(
+            g_audio_produced % kAudioTraceFrames);
+        g_audio_trace[pos * 2] = samples[i * 2];
+        g_audio_trace[pos * 2 + 1] = samples[i * 2 + 1];
+        ++g_audio_produced;
+    }
+}
+
+static void drainOracleAudio(OracleNDS* nds)
+{
+    int16_t samples[1024 * 2];
+    for (;;)
+    {
+        const int frames = nds->SPU.ReadOutput(samples, 1024);
+        if (frames <= 0) break;
+        pushAudioTrace(samples, static_cast<uint32_t>(frames));
+    }
+}
+
+static uint32_t copyAudioTrace(uint64_t start, int16_t* samples,
+                               uint32_t frames)
+{
+    if (!samples || start < oldestAudioOrdinal() || start >= g_audio_produced)
+        return 0;
+    const uint32_t take = static_cast<uint32_t>(std::min<uint64_t>(
+        frames, g_audio_produced - start));
+    for (uint32_t i = 0; i < take; ++i)
+    {
+        const uint32_t pos = static_cast<uint32_t>(
+            (start + i) % kAudioTraceFrames);
+        samples[i * 2] = g_audio_trace[pos * 2];
+        samples[i * 2 + 1] = g_audio_trace[pos * 2 + 1];
+    }
+    return take;
+}
+
 // ──────────────────────────────────────────────────────────── small utils ───
 
 static bool readFile(const std::string& path, std::vector<uint8_t>& out)
@@ -542,6 +603,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         nds->RTC.SetDateTime(2024, 1, 1, 12, 0, 0);
         nds->SetLidClosed(false);
         nds->Start();
+        resetAudioTrace();
         g_oracle_counts = OracleCounters{};   // clear the event ring
         std::memset(g_spi_trace, 0, sizeof(g_spi_trace));
         std::memset(g_irq_trace, 0, sizeof(g_irq_trace));
@@ -585,6 +647,35 @@ static std::string handle(OracleNDS* nds, const std::string& line)
 
     if (cmd == "event_counts")
         return countsJson(nds);
+
+    if (cmd == "audio_samples")
+    {
+        drainOracleAudio(nds);
+        const uint64_t start = jsonU64(line, "start", 0);
+        uint32_t count = static_cast<uint32_t>(jsonU64(line, "count", 1024));
+        if (count > 4096) count = 4096;
+        const uint64_t oldest = oldestAudioOrdinal();
+        if (start < oldest)
+            return "{\"error\":\"audio start is no longer retained\"}";
+        std::vector<int16_t> samples(count * 2);
+        const uint32_t copied = copyAudioTrace(start, samples.data(), count);
+        std::string pcm;
+        pcm.reserve(copied * 8);
+        for (uint32_t i = 0; i < copied * 2; ++i)
+        {
+            const uint16_t value = static_cast<uint16_t>(samples[i]);
+            const uint8_t bytes[2] = {
+                static_cast<uint8_t>(value),
+                static_cast<uint8_t>(value >> 8),
+            };
+            appendHex(pcm, bytes, sizeof(bytes));
+        }
+        return "{\"start\":" + std::to_string(start)
+             + ",\"count\":" + std::to_string(copied)
+             + ",\"oldest\":" + std::to_string(oldest)
+             + ",\"produced\":" + std::to_string(g_audio_produced)
+             + ",\"pcm_s16le\":\"" + pcm + "\"}";
+    }
 
     if (cmd == "rtc_state")
     {
@@ -716,6 +807,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         {
             g_brk_hit = false;
             nds->RunFrame();
+            drainOracleAudio(nds);
             frames++;
             uint64_t v = eventValue(ev);
             if (v > lastVal) { lastVal = v; stale = 0; }
@@ -737,7 +829,11 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         uint64_t count = jsonU64(line, "count", 1);
         if (count > kMaxFrames) count = kMaxFrames;
         g_brk_ptr = nullptr; g_brk_hit = false;
-        for (uint64_t i = 0; i < count; i++) nds->RunFrame();
+        for (uint64_t i = 0; i < count; i++)
+        {
+            nds->RunFrame();
+            drainOracleAudio(nds);
+        }
         return std::string("{\"frames\":") + std::to_string(count)
              + ",\"counts\":" + countsJson(nds) + "}";
     }
@@ -955,6 +1051,10 @@ int main(int argc, char** argv)
     args.JIT = std::nullopt;  // deterministic interpreter; no JIT in the oracle
 
     OracleNDS* nds = new OracleNDS(std::move(args));
+    // Compare the original DS/DS Lite DAC, not melonDS's optional enhanced
+    // 16-bit host output. The native runtime models the hardware's 10-bit
+    // degradation before producing signed stereo samples.
+    nds->SPU.SetDegrade10Bit(AudioBitDepth::_10Bit);
     if (nds->NeedsDirectBoot())
     {
         // A bootable retail firmware (256 KB) drives the menu from BIOS reset.
@@ -976,6 +1076,7 @@ int main(int argc, char** argv)
     nds->SetLidClosed(false);
 
     nds->Start();
+    resetAudioTrace();
 
     serve(nds, port);
     return 0;

@@ -36,6 +36,10 @@ class PairedMachines:
         self.native = DebugClient(port=native_port, timeout=timeout)
         self.oracle = DebugClient(port=oracle_port, timeout=timeout)
         self.pool = ThreadPoolExecutor(max_workers=2)
+        self.audio_cursor = 0
+        self.audio_hash = hashlib.sha256()
+        self.audio_nonzero_samples = 0
+        self.audio_last_state: dict[str, int] = {}
 
     def close(self) -> None:
         self.native.close()
@@ -62,6 +66,97 @@ class PairedMachines:
                 f"native={native[:2]} oracle={oracle[:2]}"
             )
         return native[2], oracle[2]
+
+    def reset_audio_tracking(self) -> None:
+        self.audio_cursor = 0
+        self.audio_hash = hashlib.sha256()
+        self.audio_nonzero_samples = 0
+        self.audio_last_state = {}
+
+    def compare_audio(self, where: str) -> None:
+        native_info, oracle_info = self.command(
+            "audio_samples", start=self.audio_cursor, count=0
+        )
+        native_produced = int(native_info["produced"])
+        oracle_produced = int(oracle_info["produced"])
+        native_oldest = int(native_info["oldest"])
+        oracle_oldest = int(oracle_info["oldest"])
+        if self.audio_cursor < native_oldest or self.audio_cursor < oracle_oldest:
+            raise TraversalFailure(
+                f"{where}: continuous audio history was overwritten: "
+                f"cursor={self.audio_cursor} native_oldest={native_oldest} "
+                f"oracle_oldest={oracle_oldest}"
+            )
+        if oracle_produced < self.audio_cursor:
+            raise TraversalFailure(
+                f"{where}: oracle audio ordinal moved backwards: "
+                f"cursor={self.audio_cursor} produced={oracle_produced}"
+            )
+        if native_produced < oracle_produced:
+            raise TraversalFailure(
+                f"{where}: native audio is missing produced samples: "
+                f"native={native_produced} oracle={oracle_produced}"
+            )
+
+        while self.audio_cursor < oracle_produced:
+            count = min(4096, oracle_produced - self.audio_cursor)
+            native, oracle = self.command(
+                "audio_samples", start=self.audio_cursor, count=count
+            )
+            if int(native["count"]) != count or int(oracle["count"]) != count:
+                raise TraversalFailure(
+                    f"{where}: short audio read at ordinal {self.audio_cursor}: "
+                    f"native={native['count']} oracle={oracle['count']} "
+                    f"requested={count}"
+                )
+            native_pcm = bytes.fromhex(native["pcm_s16le"])
+            oracle_pcm = bytes.fromhex(oracle["pcm_s16le"])
+            differing = first_divergence(native_pcm, oracle_pcm)
+            if differing is not None:
+                byte_index = differing[0]
+                sample_index = byte_index // 2
+                frame = self.audio_cursor + sample_index // 2
+                channel = "left" if sample_index % 2 == 0 else "right"
+                offset = (sample_index // 2) * 4 + (sample_index % 2) * 2
+                native_value = int.from_bytes(
+                    native_pcm[offset:offset + 2], "little", signed=True
+                )
+                oracle_value = int.from_bytes(
+                    oracle_pcm[offset:offset + 2], "little", signed=True
+                )
+                raise TraversalFailure(
+                    f"{where}: audio differs at frame {frame} {channel}: "
+                    f"native={native_value} oracle={oracle_value}"
+                )
+            self.audio_hash.update(native_pcm)
+            self.audio_nonzero_samples += sum(
+                int.from_bytes(native_pcm[i:i + 2], "little", signed=True) != 0
+                for i in range(0, len(native_pcm), 2)
+            )
+            self.audio_cursor += count
+
+        # The oracle publishes audio only when a physical frame finishes;
+        # native may therefore have one partial frame not yet observable on the
+        # oracle side. A larger lead means output transfer stopped progressing.
+        pending = native_produced - oracle_produced
+        if pending > 1024:
+            raise TraversalFailure(
+                f"{where}: oracle audio publication lags by {pending} frames"
+            )
+        self.audio_last_state = {
+            "compared_frames": self.audio_cursor,
+            "native_produced": native_produced,
+            "oracle_produced": oracle_produced,
+            "native_pending": pending,
+        }
+
+    def audio_evidence(self) -> dict[str, Any]:
+        self.compare_audio("final audio checkpoint")
+        return {
+            **self.audio_last_state,
+            "nonzero_samples": self.audio_nonzero_samples,
+            "pcm_s16le_sha256": self.audio_hash.hexdigest(),
+        }
 
 
 def sha256(data: bytes) -> str:
@@ -249,6 +344,7 @@ def run_action(
         native, oracle = pair.command("reset")
         if not native.get("ok") or not oracle.get("ok"):
             raise TraversalFailure(f"{where}: reset failed: {native}, {oracle}")
+        pair.reset_audio_tracking()
         return None
 
     if kind == "keys":
@@ -356,6 +452,7 @@ def run_action(
                         f"{where}, vblank9={ordinal}: RTC differs: "
                         f"native={native_rtc} oracle={oracle_rtc}"
                     )
+            pair.compare_audio(f"{where}, vblank9={ordinal}")
         return {"first": first, "last": last, "frames": engines}
 
     raise TraversalFailure(f"{where}: unknown action {kind!r}")
@@ -398,6 +495,7 @@ def main() -> int:
     report: list[dict[str, Any]] = []
     capture_path: Path | None = None
     static_coverage: dict[str, Any] | None = None
+    audio_evidence: dict[str, Any] | None = None
     try:
         for index, action in enumerate(scenario["actions"], 1):
             if args.skip_frame_scan and action["action"] == "scan_vblank9":
@@ -410,10 +508,12 @@ def main() -> int:
                     "count": int(action["last"]),
                 }
             result = run_action(pair, action, ignored, index)
+            pair.compare_audio(f"action {index} ({action['action']})")
             if result is not None:
                 report.append({"index": index, "action": action["action"], **result})
             print(f"[{index:02d}] {action['action']}: ok", flush=True)
         static_coverage = pair.native.cmd("static_coverage")
+        audio_evidence = pair.audio_evidence()
         if args.require_zero_tier3:
             nonzero = {
                 key: int(value)
@@ -445,6 +545,7 @@ def main() -> int:
                 "description": scenario.get("description", ""),
                 "static_capture": str(capture_path) if capture_path else None,
                 "static_coverage": static_coverage,
+                "audio": audio_evidence,
                 "report": report,
             },
             sort_keys=True,
