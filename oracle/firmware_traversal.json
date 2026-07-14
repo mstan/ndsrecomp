@@ -1,0 +1,559 @@
+{
+  "version": 1,
+  "ignored_counter_differences": [
+    "dma_done"
+  ],
+  "scenarios": {
+    "calibration_save": {
+      "description": "Cold boot, enter Settings, complete all four touchscreen calibration stages, save, and return to the Settings root.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 127, "y": 180, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 127, "y": 180, "down": false},
+        {"action": "run", "event": "vblank9", "count": 600},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 202, "y": 143, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 202, "y": 143, "down": false},
+        {"action": "run", "event": "vblank9", "count": 660},
+
+        {"action": "touch", "x": 32, "y": 32, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "touch", "x": 32, "y": 32, "down": false},
+        {"action": "run", "event": "vblank9", "count": 700},
+
+        {"action": "touch", "x": 31, "y": 31, "down": true},
+        {"action": "run", "event": "vblank9", "count": 750},
+        {"action": "touch", "x": 31, "y": 31, "down": false},
+        {"action": "run", "event": "vblank9", "count": 790},
+
+        {"action": "touch", "x": 224, "y": 160, "down": true},
+        {"action": "run", "event": "vblank9", "count": 800},
+        {"action": "touch", "x": 224, "y": 160, "down": false},
+        {"action": "run", "event": "vblank9", "count": 840},
+
+        {"action": "touch", "x": 128, "y": 96, "down": true},
+        {"action": "run", "event": "vblank9", "count": 850},
+        {"action": "touch", "x": 128, "y": 96, "down": false},
+        {"action": "run", "event": "vblank9", "count": 900},
+
+        {"action": "touch", "x": 16, "y": 47, "down": true},
+        {"action": "run", "event": "vblank9", "count": 906},
+        {"action": "touch", "x": 16, "y": 47, "down": false},
+        {"action": "run", "event": "vblank9", "count": 930},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "keys", "mask": 4094},
+        {"action": "run", "event": "fifo9to7", "count": 2787},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "keys", "mask": 4095},
+        {"action": "run", "event": "vblank9", "count": 932},
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_frames": {
+            "A": "ff276fa64ca9e14e3bd185f6a5e2c731d70f2f20bace9775eb7b1c1e935f33a3",
+            "B": "967f85c6d14d478965e64213b80493850496b235ec49ffc69586ac93450c846c"
+          }
+        },
+        {"action": "scan_vblank9", "first": 933, "last": 1120, "frames": ["A", "B"]},
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_frames": {
+            "A": "45726356a3b21c52c707a5ecf467fd4f59343a1fb8202b00e385e1eb01f10763",
+            "B": "1eee5b5138b9a78a7d091f5841bf0be686d60fed6cb25920a724bc134fffef55"
+          }
+        }
+      ]
+    },
+    "date_alarm_save": {
+      "description": "Cold boot, commit a date change, enable and commit the alarm, and compare every transition frame.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 127, "y": 180, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 127, "y": 180, "down": false},
+        {"action": "run", "event": "vblank9", "count": 600},
+
+        {"action": "touch", "x": 105, "y": 143, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 105, "y": 143, "down": false},
+        {"action": "run", "event": "vblank9", "count": 660},
+
+        {"action": "touch", "x": 104, "y": 52, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "touch", "x": 104, "y": 52, "down": false},
+        {"action": "run", "event": "vblank9", "count": 720},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 40, "y": 43, "down": true},
+        {"action": "run", "event": "vblank9", "count": 722},
+        {"action": "touch", "x": 40, "y": 43, "down": false},
+        {"action": "run", "event": "vblank9", "count": 730},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 732},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 733, "last": 860, "frames": ["A", "B"]},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 862},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 863, "last": 940, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 104, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 942},
+        {"action": "touch", "x": 104, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 943, "last": 1020, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 188, "y": 11, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1022},
+        {"action": "touch", "x": 188, "y": 11, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1030},
+        {"action": "touch", "x": 167, "y": 43, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1032},
+        {"action": "touch", "x": 167, "y": 43, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1040},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1042},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 1043, "last": 1120, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1122},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 1123, "last": 1200, "frames": ["A", "B"]},
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_rtc": {"status2": 4}
+        }
+      ]
+    },
+    "profile_save": {
+      "description": "Cold boot and commit personal color, birthday, UTF-16 nickname, and message changes.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 127, "y": 180, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 127, "y": 180, "down": false},
+        {"action": "run", "event": "vblank9", "count": 600},
+
+        {"action": "touch", "x": 154, "y": 143, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 154, "y": 143, "down": false},
+        {"action": "run", "event": "vblank9", "count": 660},
+
+        {"action": "touch", "x": 152, "y": 52, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "touch", "x": 152, "y": 52, "down": false},
+        {"action": "scan_vblank9", "first": 663, "last": 760, "frames": ["A", "B"]},
+        {"action": "touch", "x": 72, "y": 144, "down": true},
+        {"action": "run", "event": "vblank9", "count": 762},
+        {"action": "touch", "x": 72, "y": 144, "down": false},
+        {"action": "run", "event": "vblank9", "count": 770},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 772},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 773, "last": 860, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 862},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 863, "last": 960, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 104, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 962},
+        {"action": "touch", "x": 104, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 963, "last": 1020, "frames": ["A", "B"]},
+        {"action": "touch", "x": 88, "y": 43, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1022},
+        {"action": "touch", "x": 88, "y": 43, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1030},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1032},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 1033, "last": 1120, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1122},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1123, "last": 1220, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 152, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1222},
+        {"action": "touch", "x": 152, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1223, "last": 1280, "frames": ["A", "B"]},
+        {"action": "touch", "x": 57, "y": 89, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1282},
+        {"action": "touch", "x": 57, "y": 89, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1290},
+        {"action": "touch", "x": 187, "y": 152, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1292},
+        {"action": "touch", "x": 187, "y": 152, "down": false},
+        {"action": "scan_vblank9", "first": 1293, "last": 1380, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1382},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1383, "last": 1480, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 200, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1482},
+        {"action": "touch", "x": 200, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1483, "last": 1540, "frames": ["A", "B"]},
+        {"action": "touch", "x": 73, "y": 89, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1542},
+        {"action": "touch", "x": 73, "y": 89, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1550},
+        {"action": "touch", "x": 187, "y": 152, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1552},
+        {"action": "touch", "x": 187, "y": 152, "down": false},
+        {"action": "scan_vblank9", "first": 1553, "last": 1640, "frames": ["A", "B"]},
+        {"action": "checkpoint", "frames": ["A", "B"]}
+      ]
+    },
+    "system_options_save": {
+      "description": "Cold boot and commit automatic startup, German language, and GBA display-screen settings.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 127, "y": 180, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 127, "y": 180, "down": false},
+        {"action": "run", "event": "vblank9", "count": 600},
+
+        {"action": "touch", "x": 55, "y": 143, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 55, "y": 143, "down": false},
+        {"action": "run", "event": "vblank9", "count": 660},
+
+        {"action": "touch", "x": 55, "y": 52, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "touch", "x": 55, "y": 52, "down": false},
+        {"action": "scan_vblank9", "first": 663, "last": 760, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 72, "down": true},
+        {"action": "run", "event": "vblank9", "count": 762},
+        {"action": "touch", "x": 128, "y": 72, "down": false},
+        {"action": "run", "event": "vblank9", "count": 770},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 772},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 773, "last": 860, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 862},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 863, "last": 960, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 55, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 962},
+        {"action": "touch", "x": 55, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 963, "last": 1060, "frames": ["A", "B"]},
+        {"action": "touch", "x": 192, "y": 48, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1062},
+        {"action": "touch", "x": 192, "y": 48, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1070},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1072},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 1073, "last": 1160, "frames": ["A", "B"]},
+        {"action": "touch", "x": 128, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1162},
+        {"action": "touch", "x": 128, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1163, "last": 1260, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 104, "y": 100, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1262},
+        {"action": "touch", "x": 104, "y": 100, "down": false},
+        {"action": "scan_vblank9", "first": 1263, "last": 1360, "frames": ["A", "B"]},
+        {"action": "touch", "x": 200, "y": 128, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1362},
+        {"action": "touch", "x": 200, "y": 128, "down": false},
+        {"action": "run", "event": "vblank9", "count": 1370},
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 1372},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 1373, "last": 1460, "frames": ["A", "B"]},
+        {"action": "checkpoint", "frames": ["A", "B"]}
+      ]
+    },
+    "main_menu_controls": {
+      "description": "Cold boot, cycle the main-menu brightness and clock controls, and prove both empty cartridge-slot targets remain inert.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 16, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 16, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 117, "last": 160, "frames": ["A", "B"]},
+        {"action": "touch", "x": 16, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 162},
+        {"action": "touch", "x": 16, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 163, "last": 200, "frames": ["A", "B"]},
+        {"action": "touch", "x": 16, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 202},
+        {"action": "touch", "x": 16, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 203, "last": 240, "frames": ["A", "B"]},
+        {"action": "touch", "x": 16, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 242},
+        {"action": "touch", "x": 16, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 243, "last": 280, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 240, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 282},
+        {"action": "touch", "x": 240, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 283, "last": 340, "frames": ["A", "B"]},
+        {"action": "touch", "x": 240, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 342},
+        {"action": "touch", "x": 240, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 343, "last": 400, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 55, "y": 43, "down": true},
+        {"action": "run", "event": "vblank9", "count": 402},
+        {"action": "touch", "x": 55, "y": 43, "down": false},
+        {"action": "scan_vblank9", "first": 403, "last": 460, "frames": ["A", "B"]},
+        {"action": "touch", "x": 55, "y": 143, "down": true},
+        {"action": "run", "event": "vblank9", "count": 462},
+        {"action": "touch", "x": 55, "y": 143, "down": false},
+        {"action": "scan_vblank9", "first": 463, "last": 520, "frames": ["A", "B"]},
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_frames": {
+            "A": "8919b3a2a552dc15e2204daf5916c092085b9392d67e1e23d5d5b0ffa06d1f50",
+            "B": "514d4ba9dac6f61dfed25680cbceacc5b8184686b0b36d0d0f52ce0ff5095e8a"
+          }
+        }
+      ]
+    },
+    "download_play_shutdown": {
+      "description": "Cold boot, run the Download Play search, cancel its shutdown dialog once, reopen it, and prove exact console power-off.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 175, "y": 82, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 175, "y": 82, "down": false},
+        {"action": "scan_vblank9", "first": 117, "last": 1000, "frames": ["A", "B"]},
+
+        {"action": "keys", "mask": 4093},
+        {"action": "run", "event": "vblank9", "count": 1002},
+        {"action": "keys", "mask": 4095},
+        {"action": "scan_vblank9", "first": 1003, "last": 1100, "frames": ["A", "B"]},
+        {"action": "keys", "mask": 4093},
+        {"action": "run", "event": "vblank9", "count": 1102},
+        {"action": "keys", "mask": 4095},
+        {"action": "scan_vblank9", "first": 1103, "last": 1150, "frames": ["A", "B"]},
+
+        {"action": "keys", "mask": 4093},
+        {"action": "run", "event": "vblank9", "count": 1152},
+        {"action": "keys", "mask": 4095},
+        {"action": "scan_vblank9", "first": 1153, "last": 1250, "frames": ["A", "B"]},
+        {"action": "keys", "mask": 4094},
+        {
+          "action": "run_until_stall",
+          "event": "vblank9",
+          "count": 1300,
+          "expected_counts": {
+            "vblank9": 1281,
+            "vblank7": 1289,
+            "ipcsync_w": 211,
+            "fifo9to7": 5132,
+            "fifo7to9": 4078,
+            "timer_ovf": 14341,
+            "spi_w": 269964,
+            "irq9": 5531,
+            "irq7": 18884,
+            "soundbias_w": 1024,
+            "soundbias_first": 1,
+            "soundbias_last": 0,
+            "insn9": 151803414,
+            "insn7": 109573682,
+            "cyc9": 1535549534,
+            "cyc7": 767774769
+          }
+        },
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_frames": {
+            "A": "8123c216413f82bbaa0339c27a43d9822c2a043e20662b27c97874429b996e9a",
+            "B": "8123c216413f82bbaa0339c27a43d9822c2a043e20662b27c97874429b996e9a"
+          }
+        }
+      ]
+    },
+    "pictochat_room_a": {
+      "description": "Cold boot, enter PictoChat, join Room A, send typed text and a stylus drawing, leave, cancel Quit once, then prove exact console power-off.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 80, "y": 96, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 80, "y": 96, "down": false},
+        {"action": "scan_vblank9", "first": 117, "last": 400, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 402},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 403, "last": 600, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 119, "y": 145, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 119, "y": 145, "down": false},
+        {"action": "scan_vblank9", "first": 603, "last": 610, "frames": ["A", "B"]},
+        {"action": "touch", "x": 143, "y": 127, "down": true},
+        {"action": "run", "event": "vblank9", "count": 612},
+        {"action": "touch", "x": 143, "y": 127, "down": false},
+        {"action": "scan_vblank9", "first": 613, "last": 620, "frames": ["A", "B"]},
+        {"action": "touch", "x": 240, "y": 112, "down": true},
+        {"action": "run", "event": "vblank9", "count": 622},
+        {"action": "touch", "x": 240, "y": 112, "down": false},
+        {"action": "scan_vblank9", "first": 623, "last": 650, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 70, "y": 52, "down": true},
+        {"action": "run", "event": "vblank9", "count": 652},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 82, "y": 57, "down": true},
+        {"action": "run", "event": "vblank9", "count": 654},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 94, "y": 63, "down": true},
+        {"action": "run", "event": "vblank9", "count": 656},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 106, "y": 68, "down": true},
+        {"action": "run", "event": "vblank9", "count": 658},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 118, "y": 62, "down": true},
+        {"action": "run", "event": "vblank9", "count": 660},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 130, "y": 55, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+        {"action": "touch", "x": 130, "y": 55, "down": false},
+        {"action": "scan_vblank9", "first": 663, "last": 666, "frames": ["A", "B"]},
+        {"action": "touch", "x": 240, "y": 112, "down": true},
+        {"action": "run", "event": "vblank9", "count": 668},
+        {"action": "touch", "x": 240, "y": 112, "down": false},
+        {"action": "scan_vblank9", "first": 669, "last": 700, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 250, "y": 5, "down": true},
+        {"action": "run", "event": "vblank9", "count": 702},
+        {"action": "touch", "x": 250, "y": 5, "down": false},
+        {"action": "scan_vblank9", "first": 703, "last": 850, "frames": ["A", "B"]},
+        {"action": "touch", "x": 70, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 852},
+        {"action": "touch", "x": 70, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 853, "last": 900, "frames": ["A", "B"]},
+        {"action": "touch", "x": 70, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 902},
+        {"action": "touch", "x": 70, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 903, "last": 950, "frames": ["A", "B"]},
+        {"action": "touch", "x": 70, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 952},
+        {"action": "touch", "x": 70, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 953, "last": 1100, "frames": ["A", "B"]},
+
+        {"action": "keys", "mask": 4094},
+        {
+          "action": "run_until_stall",
+          "event": "vblank9",
+          "count": 1101,
+          "expected_counts": {
+            "vblank9": 1100,
+            "vblank7": 1100,
+            "ipcsync_w": 211,
+            "fifo9to7": 3543,
+            "fifo7to9": 3534,
+            "timer_ovf": 12555,
+            "spi_w": 269365,
+            "irq9": 4861,
+            "irq7": 15798,
+            "soundbias_w": 1024,
+            "soundbias_first": 1,
+            "soundbias_last": 0,
+            "insn9": 140959620,
+            "insn7": 78923027,
+            "cyc9": 1323726999,
+            "cyc7": 661863502
+          }
+        },
+        {
+          "action": "checkpoint",
+          "frames": ["A", "B"],
+          "expected_frames": {
+            "A": "8123c216413f82bbaa0339c27a43d9822c2a043e20662b27c97874429b996e9a",
+            "B": "8123c216413f82bbaa0339c27a43d9822c2a043e20662b27c97874429b996e9a"
+          }
+        }
+      ]
+    },
+    "shutdown": {
+      "description": "Cold boot, enter Settings, confirm Quit, and prove both machines power off at the same terminal hardware state.",
+      "actions": [
+        {"action": "reset"},
+        {"action": "keys", "mask": 4095},
+        {"action": "touch", "x": 0, "y": 0, "down": false},
+        {"action": "run", "event": "insn9", "count": 42300000},
+        {"action": "checkpoint", "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 127, "y": 180, "down": true},
+        {"action": "run", "event": "vblank9", "count": 116},
+        {"action": "touch", "x": 127, "y": 180, "down": false},
+        {"action": "run", "event": "vblank9", "count": 600},
+        {"action": "touch", "x": 70, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 602},
+        {"action": "touch", "x": 70, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 603, "last": 660, "frames": ["A", "B"]},
+
+        {"action": "touch", "x": 184, "y": 181, "down": true},
+        {"action": "run", "event": "vblank9", "count": 662},
+        {"action": "touch", "x": 184, "y": 181, "down": false},
+        {"action": "scan_vblank9", "first": 663, "last": 693, "frames": ["A", "B"]},
+        {
+          "action": "run_until_stall",
+          "event": "vblank9",
+          "count": 700,
+          "expected_counts": {
+            "vblank9": 693,
+            "vblank7": 693,
+            "spi_w": 265541,
+            "soundbias_w": 1024,
+            "soundbias_last": 0
+          }
+        },
+        {"action": "checkpoint", "frames": ["A", "B"]}
+      ]
+    }
+  }
+}

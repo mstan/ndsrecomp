@@ -10,6 +10,7 @@
 #include "scheduler.h"
 #include "state.h"
 #include "io.h"
+#include "gpu2d.h"
 #include "runtime_arm.h"
 #include "tier3.h"
 
@@ -72,18 +73,31 @@ uint64_t json_u64(const std::string& s, const std::string& key,
     return (end == s.c_str() + p) ? def : v;
 }
 
+bool json_bool(const std::string& s, const std::string& key, bool def = false) {
+    size_t p;
+    if (!json_find(s, key, p)) return def;
+    if (s.compare(p, 4, "true") == 0) return true;
+    if (s.compare(p, 5, "false") == 0) return false;
+    if (p < s.size() && s[p] == '"') ++p;
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(s.c_str() + p, &end, 10);
+    return end == s.c_str() + p ? def : value != 0;
+}
+
 std::string counts_json() {
     const NdsEventCounts& c = nds_event_counts();
     char buf[640];
     std::snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
         "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
+        "\"spi_w\":%llu,\"irq9\":%llu,\"irq7\":%llu,"
         "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u,"
         "\"insn9\":%llu,\"insn7\":%llu,\"cyc9\":%llu,\"cyc7\":%llu}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
-        (unsigned long long)c.timer_ovf,
+        (unsigned long long)c.timer_ovf, (unsigned long long)c.spi_w,
+        (unsigned long long)c.irq9, (unsigned long long)c.irq7,
         (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
         (unsigned long long)c.insn9, (unsigned long long)c.insn7,
         (unsigned long long)scheduler_cpu_cycles(0),
@@ -152,7 +166,159 @@ std::string handle(const std::string& line) {
     }
 
     if (cmd == "event_counts") return counts_json();
+    if (cmd == "static_coverage") {
+        const Tier3Stats s = tier3_stats();
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"tier3_entries9\":%llu,\"tier3_entries7\":%llu,"
+            "\"tier3_insns9\":%llu,\"tier3_insns7\":%llu,"
+            "\"clean_ram_rejects9\":%llu,\"clean_ram_rejects7\":%llu}",
+            (unsigned long long)s.entries[0],
+            (unsigned long long)s.entries[1],
+            (unsigned long long)s.instructions[0],
+            (unsigned long long)s.instructions[1],
+            (unsigned long long)s.clean_ram_rejects[0],
+            (unsigned long long)s.clean_ram_rejects[1]);
+        return buf;
+    }
+    if (cmd == "exec_provenance") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 7 : 9;
+        const uint32_t addr = static_cast<uint32_t>(json_u64(line, "addr", 0));
+        const BusExecProvenance p = bus_debug_exec_provenance(cpu, addr);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+            "{\"cpu\":%d,\"addr\":%u,\"writable\":%s,"
+            "\"written\":%s,\"generation\":%u}",
+            cpu, addr, p.writable ? "true" : "false",
+            p.written ? "true" : "false", p.generation);
+        return buf;
+    }
+    if (cmd == "tier3_coverage") {
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "max", 65536));
+        if (max > 262144u) max = 262144u;
+        std::vector<Tier3CoverageEntry> entries(max);
+        const uint32_t count = tier3_coverage_copy(entries.data(), max);
+        std::string out = "{\"entries\":[";
+        for (uint32_t i = 0; i < count; ++i) {
+            char b[192];
+            std::snprintf(b, sizeof(b),
+                "%s{\"cpu\":%u,\"pc\":%u,\"thumb\":%u,"
+                "\"kind\":%u,\"caller\":%u,\"hits\":%llu}",
+                i ? "," : "", entries[i].cpu ? 7u : 9u,
+                entries[i].pc, entries[i].thumb, entries[i].kind,
+                entries[i].caller, (unsigned long long)entries[i].hits);
+            out += b;
+        }
+        out += "]}";
+        return out;
+    }
+    if (cmd == "rtc_state") {
+        NdsRtcDebugState s{};
+        nds_rtc_debug_state(&s);
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"io\":%u,\"status1\":%u,\"status2\":%u,"
+            "\"datetime\":[%u,%u,%u,%u,%u,%u,%u]}",
+            s.io, s.status1, s.status2,
+            s.datetime[0], s.datetime[1], s.datetime[2], s.datetime[3],
+            s.datetime[4], s.datetime[5], s.datetime[6]);
+        return buf;
+    }
+    if (cmd == "spi_sample") {
+        NdsSpiTraceEntry e{};
+        const uint64_t count = json_u64(line, "count", 0);
+        if (!nds_spi_trace_get(count, &e)) return "{\"found\":false}";
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn7\":%llu,\"pc\":%u,\"value\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn7, e.pc, e.value);
+        return buf;
+    }
+    if (cmd == "irq_sample") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const uint64_t count = json_u64(line, "count", 0);
+        NdsIrqTraceEntry e{};
+        if (!nds_irq_trace_get(cpu, count, &e)) return "{\"found\":false}";
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn\":%llu,\"return_address\":%u,"
+            "\"pending\":%u,\"wifi_if\":%u,\"wifi_ie\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn, e.return_address, e.pending,
+            e.wifi_if, e.wifi_ie);
+        return buf;
+    }
+    if (cmd == "insn_sample") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const uint64_t count = json_u64(line, "count", 0);
+        NdsInsnTraceEntry e{};
+        if (!nds_insn_trace_get(cpu, count, &e)) return "{\"found\":false}";
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cycles\":%llu,"
+            "\"pc\":%u,\"cpsr\":%u,\"pending\":%u,\"r\":[",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cycles, e.pc, e.cpsr, e.pending);
+        std::string out = buf;
+        for (int i = 0; i < 15; ++i) {
+            if (i) out += ',';
+            out += std::to_string(e.r[i]);
+        }
+        return out + "]}";
+    }
+    if (cmd == "fifo_sample") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const uint64_t count = json_u64(line, "count", 0);
+        NdsFifoTraceEntry e{};
+        if (!nds_fifo_trace_get(cpu, count, &e)) return "{\"found\":false}";
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn9\":%llu,\"insn7\":%llu,\"value\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn9, (unsigned long long)e.insn7, e.value);
+        return buf;
+    }
     if (cmd == "io_state") return io_state_json();
+    if (cmd == "sched_state") {
+        char buf[768];
+        std::snprintf(buf, sizeof(buf),
+            "{\"sys\":%llu,\"arm9\":%llu,\"arm7\":%llu,"
+            "\"next\":%llu,\"spi\":%llu,\"card\":%llu,"
+            "\"terminal9\":%s,\"terminal7\":%s,"
+            "\"reason9\":\"%s\",\"reason7\":\"%s\"}",
+            (unsigned long long)scheduler_system_timestamp(),
+            (unsigned long long)scheduler_cpu_cycles(0),
+            (unsigned long long)scheduler_cpu_cycles(1),
+            (unsigned long long)scheduler_next_event_timestamp(),
+            (unsigned long long)nds_debug_spi_deadline(),
+            (unsigned long long)nds_debug_card_deadline(),
+            scheduler_cpu_terminal_halted(0) ? "true" : "false",
+            scheduler_cpu_terminal_halted(1) ? "true" : "false",
+            scheduler_cpu_halt_reason(0), scheduler_cpu_halt_reason(1));
+        return buf;
+    }
+    if (cmd == "cp15_state") {
+        std::string out = "{\"control\":" + std::to_string(g_cp15.control) +
+                          ",\"regions\":[";
+        for (unsigned i = 0; i < 8; ++i) {
+            if (i) out += ',';
+            out += std::to_string(cp15_debug_mpu_region(i));
+        }
+        out += "],\"cache_cfg\":[";
+        for (unsigned i = 0; i < 8; ++i) {
+            if (i) out += ',';
+            out += std::to_string(cp15_debug_cache_cfg(i));
+        }
+        out += "]}";
+        return out;
+    }
 
     if (cmd == "run_to_event") {
         std::string ev = json_str(line, "event");
@@ -165,7 +331,12 @@ std::string handle(const std::string& line) {
         // guarantees we exit once the target is reached.
         nds_event_break_arm(ev.c_str(), target);
         uint64_t rounds = 0;
-        constexpr uint64_t kMaxRounds = 5000000;
+        // Long firmware-menu waits eventually exceed the original fixed 5M
+        // scheduler-round ceiling even though both CPUs and devices are still
+        // progressing. Keep a defensive cap, but make it an explicit protocol
+        // control so a failed run can never masquerade as a CPU divergence.
+        uint64_t max_rounds = json_u64(line, "max_rounds", 50000000);
+        if (max_rounds > 100000000u) max_rounds = 100000000u;
         // No-progress early-out: if the watched counter has not advanced for
         // this many consecutive rounds the boot has stalled (diverged into an
         // idle loop / halt that never reaches the Nth event), so bail with
@@ -174,19 +345,46 @@ std::string handle(const std::string& line) {
         // VBlank waits ~ hundreds of rounds); overridable via "stall".
         uint64_t stall_limit = json_u64(line, "stall", 300000);
         uint64_t last_val = nds_event_value(ev.c_str());
+        uint64_t last_sys = scheduler_system_timestamp();
+        uint64_t last_cyc9 = scheduler_cpu_cycles(0);
+        uint64_t last_cyc7 = scheduler_cpu_cycles(1);
         uint64_t stale = 0;
         bool stalled = false;
-        while (nds_event_value(ev.c_str()) < target && rounds < kMaxRounds) {
+        bool terminal = false;
+        while (nds_event_value(ev.c_str()) < target && rounds < max_rounds) {
             scheduler_run_round();
             ++rounds;
             uint64_t v = nds_event_value(ev.c_str());
-            if (v > last_val) { last_val = v; stale = 0; }
-            else if (++stale >= stall_limit) { stalled = true; break; }
+            const uint64_t sys = scheduler_system_timestamp();
+            const uint64_t cyc9 = scheduler_cpu_cycles(0);
+            const uint64_t cyc7 = scheduler_cpu_cycles(1);
+            if (scheduler_cpu_terminal_halted(0) ||
+                scheduler_cpu_terminal_halted(1)) {
+                terminal = true;
+                stalled = true;
+                break;
+            }
+            if (v > last_val || sys != last_sys ||
+                cyc9 != last_cyc9 || cyc7 != last_cyc7) {
+                last_val = v;
+                last_sys = sys;
+                last_cyc9 = cyc9;
+                last_cyc7 = cyc7;
+                stale = 0;
+            } else if (++stale >= stall_limit) {
+                stalled = true;
+                break;
+            }
         }
         nds_event_break_disarm();
         bool reached = nds_event_value(ev.c_str()) >= target;
+        bool exhausted = !reached && !stalled && rounds >= max_rounds;
         return std::string("{\"reached\":") + (reached ? "true" : "false") +
             ",\"stalled\":" + (stalled ? "true" : "false") +
+            ",\"terminal\":" + (terminal ? "true" : "false") +
+            ",\"reason9\":\"" + scheduler_cpu_halt_reason(0) + "\"" +
+            ",\"reason7\":\"" + scheduler_cpu_halt_reason(1) + "\"" +
+            ",\"exhausted\":" + (exhausted ? "true" : "false") +
             ",\"rounds\":" + std::to_string(rounds) +
             ",\"counts\":" + counts_json() + "}";
     }
@@ -268,12 +466,16 @@ std::string handle(const std::string& line) {
         uint32_t count = bus_debug_watch_copy(ev.data(), max);
         std::string out = "{\"events\":[";
         for (uint32_t i = 0; i < count; ++i) {
-            char b[160];
+            char b[240];
             std::snprintf(b, sizeof(b),
-                "%s{\"seq\":%llu,\"cpu\":%u,\"width\":%u,"
+                "%s{\"seq\":%llu,\"cycles\":%llu,\"insn\":%llu,"
+                "\"cpu\":%u,\"write\":%u,\"width\":%u,"
                 "\"pc\":%u,\"addr\":%u,\"value\":%u}",
                 i ? "," : "",
-                (unsigned long long)ev[i].seq, ev[i].cpu, ev[i].width,
+                (unsigned long long)ev[i].seq,
+                (unsigned long long)ev[i].cycles,
+                (unsigned long long)ev[i].insn,
+                ev[i].cpu, ev[i].write, ev[i].width,
                 ev[i].pc, ev[i].addr, ev[i].value);
             out += b;
         }
@@ -330,10 +532,34 @@ std::string handle(const std::string& line) {
         return out;
     }
 
-    if (cmd == "framebuffer")
-        return "{\"error\":\"framebuffer unavailable\"}";
-    if (cmd == "touch" || cmd == "keys")
+    if (cmd == "framebuffer") {
+        const std::string engine = json_str(line, "engine", "A");
+        const int screen = (engine == "B" || engine == "b") ? 1 : 0;
+        const uint32_t* fb = nds_gpu2d_framebuffer(screen);
+        if (!fb) return "{\"error\":\"framebuffer not ready\"}";
+        std::string rgb;
+        rgb.reserve(256u * 192u * 6u);
+        for (size_t i = 0; i < 256u * 192u; ++i) {
+            const uint32_t px = fb[i];
+            const uint8_t c[3] = {
+                static_cast<uint8_t>(px >> 16),
+                static_cast<uint8_t>(px >> 8),
+                static_cast<uint8_t>(px),
+            };
+            append_hex(rgb, c, sizeof(c));
+        }
+        return "{\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
+    }
+    if (cmd == "touch") {
+        const uint16_t x = static_cast<uint16_t>(json_u64(line, "x", 0));
+        const uint16_t y = static_cast<uint16_t>(json_u64(line, "y", 0));
+        nds_set_touch(x, y, json_bool(line, "down", true));
         return "{\"ok\":true}";
+    }
+    if (cmd == "keys") {
+        nds_set_key_mask(static_cast<uint32_t>(json_u64(line, "mask", 0x3FFu)));
+        return "{\"ok\":true}";
+    }
 
     return "{\"error\":\"unknown cmd\"}";
 }

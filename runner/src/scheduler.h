@@ -29,3 +29,7 @@ void scheduler_run_round();
 // Inspect a CPU's saved state after a run (for reporting).
 const struct ArmCpuState& scheduler_cpu_state(int cpu);
 uint64_t scheduler_cpu_cycles(int cpu);
+uint64_t scheduler_system_timestamp();
+uint64_t scheduler_next_event_timestamp();
+bool scheduler_cpu_terminal_halted(int cpu);
+const char* scheduler_cpu_halt_reason(int cpu);

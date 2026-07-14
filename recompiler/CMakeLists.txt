@@ -22,6 +22,11 @@ target_include_directories(nds_armv4t PUBLIC armv4t)
 add_executable(armv5te_decode_test tests/armv5te_decode_test.cpp)
 target_link_libraries(armv5te_decode_test PRIVATE nds_armv4t)
 
+add_executable(interpreter_cycle_test
+    tests/interpreter_cycle_test.cpp
+    armv4t/interpreter.cpp)
+target_link_libraries(interpreter_cycle_test PRIVATE nds_armv4t)
+
 # The recompiler driver: config + function finder + audit/emit.
 add_executable(nds_recompile
     src/main.cpp

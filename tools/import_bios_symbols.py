@@ -48,10 +48,17 @@ FUNC_START_RE = re.compile(
 # as lpad_FFFF0290). Declaring it would be redundant.
 EXTRA_ENTRIES = {
     "biosnds7": [
+        # Runtime-confirmed computed call from the BIOS IRQ dispatcher. The
+        # same bytes are reachable in both ARM (reset vector) and Thumb state.
+        (0x00000000, "runtime_thumb_00000000", "thumb", "runtime_confirmed"),
         # Exception vectors — entered by the CPU on SWI/IRQ, never by a static
         # branch, so the finder cannot see them.
         (0x00000008, "swi_vector_entry", "arm",   "exception_vector"),
         (0x00000018, "irq_vector_entry", "arm",   "exception_vector"),
+        # Oracle-validated interior landing: firmware computed branch from
+        # 0x037FAECE (LR 0x037FAED1) reaches Thumb 0x15A0. Verified at the
+        # identical retired-instruction boundary insn7=40,428,506.
+        (0x000015A0, "lpad_000015A0",     "thumb", "runtime_confirmed"),
         # IRQ handler entries reached only indirectly (installed-handler tables
         # / computed dispatch).
         (0x00001CAA, "irqh_00001CAA",    "thumb", "indirect_handler"),

@@ -169,9 +169,11 @@ void Interpreter::enter_irq(CPUState& cpu, uint32_t return_address) {
     // returns to `return_address`).
     cpu.R[14]     = return_address + 4u;
 
-    // CPSR for the handler: ARM state, IRQ disabled.
+    // CPSR for the handler: ARM state, IRQ and FIQ disabled (low byte 0xD2,
+    // matching melonDS ARM::TriggerIRQ and the hardware exception entry).
     cpu.cpsr.t = false;
     cpu.cpsr.i = true;
+    cpu.cpsr.f = true;
     cpu.thumb  = false;
 
     // Vector.
@@ -611,7 +613,8 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         }
         case IrOp::BLX_reg: {
             uint32_t target = read_reg(cpu, i.rm, i);
-            cpu.R[14] = i.pc + kArmInsnBytes;
+            uint32_t ret = i.pc + (i.thumb ? kThumbInsnBytes : kArmInsnBytes);
+            cpu.R[14] = i.thumb ? (ret | 1u) : ret;
             cpu.cpsr.t = (target & 1u) != 0;
             cpu.thumb = cpu.cpsr.t;
             cpu.R[15] = target & ~1u;
@@ -881,7 +884,12 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         // ── Multiply (32-bit) ──────────────────────────────────────
         case IrOp::MUL: {
             uint32_t wait_operand = i.thumb ? cpu.R[i.rm] : cpu.R[i.rs];
-            extra_cycles += mul_wait_cycles(wait_operand, /*signed=*/true, 0);
+            // ARM7 Thumb MUL uses the original destination as its multiplier
+            // timing operand, but unlike ARM-state MUL it does not signed-
+            // early-terminate 0xFFxxxxxx values. melonDS T_MUL_REG counts
+            // significant unsigned bytes, so 0xFFFFFF00 takes four I cycles.
+            extra_cycles += mul_wait_cycles(wait_operand,
+                                            /*signed=*/!i.thumb, 0);
             uint32_t r = cpu.R[i.rm] * cpu.R[i.rs];
             cpu.R[i.rd] = r;
             if (i.set_flags) {
@@ -1095,16 +1103,23 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         // ── Swap (atomic) ─────────────────────────────────────────
         case IrOp::SWP: {
             uint32_t addr = cpu.R[i.rn];
+            // ARM SWP performs two non-sequential bus transactions at the
+            // same address. melonDS saves the read DataCycles, performs a
+            // normal (nonseq) write, then adds the saved read cost.
+            mem_cycles += bus.access_cycles(addr & ~3u, 4, false);
             uint32_t orig = bus.read32(addr & ~3u);
             uint32_t rot = (addr & 3u) * 8u;
             orig = rotr32(orig, rot);
+            mem_cycles += bus.access_cycles(addr & ~3u, 4, false);
             bus.write32(addr & ~3u, cpu.R[i.rm]);
             cpu.R[i.rd] = orig;
             break;
         }
         case IrOp::SWPB: {
             uint32_t addr = cpu.R[i.rn];
+            mem_cycles += bus.access_cycles(addr, 1, false);
             uint8_t orig = bus.read8(addr);
+            mem_cycles += bus.access_cycles(addr, 1, false);
             bus.write8(addr, static_cast<uint8_t>(cpu.R[i.rm] & 0xFFu));
             cpu.R[i.rd] = orig;
             break;

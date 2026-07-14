@@ -23,6 +23,9 @@ struct OracleCounters
     uint64_t fifo7to9  = 0;  // ARM7 IPC FIFO sends
     uint64_t dma_done  = 0;  // SetIRQ(cpu, IRQ_DMA0..3)
     uint64_t timer_ovf = 0;  // SetIRQ(cpu, IRQ_Timer0..3)
+    uint64_t spi_w     = 0;  // ARM7 writes to SPIDATA (0x040001C2)
+    uint64_t irq9      = 0;  // accepted ARM9 IRQ exceptions
+    uint64_t irq7      = 0;  // accepted ARM7 IRQ exceptions
     // SOUNDBIAS (0x04000504) write stream — invariant for the ARM7 boot
     // sound-bias ramp. Symmetric with the native runtime's NdsEventCounts.
     uint64_t soundbias_w     = 0;  // total ARM7 writes to SOUNDBIAS

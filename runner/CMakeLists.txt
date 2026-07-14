@@ -15,16 +15,24 @@ endif()
 # trade warning-cleanliness for uniform emission — silence the expected
 # unused-temp warnings rather than touch generated/.
 set(GEN ${CMAKE_CURRENT_SOURCE_DIR}/../generated)
+file(GLOB FW_BANK_BODIES CONFIGURE_DEPENDS "${GEN}/fw_*_[0-9][0-9].c")
+file(GLOB FW_BANK_DISPATCH CONFIGURE_DEPENDS "${GEN}/fw_*_dispatch.c")
+list(SORT FW_BANK_BODIES)
+list(SORT FW_BANK_DISPATCH)
 add_library(nds_banks STATIC
     ${GEN}/arm9_bios.c
     ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c
-    ${GEN}/arm7_bios_dispatch.c)
+    ${GEN}/arm7_bios_dispatch.c
+    ${FW_BANK_BODIES}
+    ${FW_BANK_DISPATCH})
 target_include_directories(nds_banks PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
 set_source_files_properties(
     ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
+    ${FW_BANK_BODIES}
+    ${FW_BANK_DISPATCH}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
 
 # SHA-1 helper (reused from the recompiler support lib).
@@ -48,15 +56,29 @@ add_executable(nds_runner
     src/bus.cpp
     src/cp15.cpp
     src/io.cpp
+    src/wifi.cpp
+    src/spu.cpp
+    src/vram.cpp
+    src/gpu2d.cpp
     src/tier3.cpp
     src/scheduler.cpp
     src/debug_server.cpp
+    src/frontend.cpp
     src/main.cpp)
 target_include_directories(nds_runner PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
 target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
+
+# SDL is a host-only presentation layer. The runner remains buildable without
+# it for headless deterministic/oracle work; --interactive reports that the
+# configured binary has no frontend in that case.
+find_package(SDL2 CONFIG QUIET)
+if(TARGET SDL2::SDL2)
+    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
+    target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+endif()
 if(WIN32)
     target_link_libraries(nds_runner PRIVATE ws2_32)
 endif()

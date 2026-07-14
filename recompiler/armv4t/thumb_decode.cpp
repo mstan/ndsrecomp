@@ -180,7 +180,7 @@ Instr ThumbDecoder::fmt4_alu_reg(uint16_t hw, uint32_t pc) {
     return i;
 }
 
-// Format 5: 010001 OP H1 H2 Rs/Hs Rd/Hd  (hi-register ops + BX)
+// Format 5: 010001 OP H1 H2 Rs/Hs Rd/Hd  (hi-register ops + BX/BLX)
 Instr ThumbDecoder::fmt5_hi_reg(uint16_t hw, uint32_t pc) {
     Instr i; zero_instr(i, hw, pc);
     uint32_t op = bits(hw, 9, 8);
@@ -192,13 +192,15 @@ Instr ThumbDecoder::fmt5_hi_reg(uint16_t hw, uint32_t pc) {
         case 0b00: i.op = IrOp::ADD; i.set_flags = false; break;
         case 0b01: i.op = IrOp::CMP; i.set_flags = true;  break;
         case 0b10: i.op = IrOp::MOV; i.set_flags = false; break;
-        case 0b11: {  // BX
-            i.op = IrOp::BX;
+        case 0b11: {  // H1=0: BX; H1=1: BLX (register, ARMv5T)
+            i.op = h1 ? IrOp::BLX_reg : IrOp::BX;
             i.rm = rs;
+            i.branch_link = h1;
             i.branch_exchange = true;
             i.is_branch = true;
             i.is_indirect = true;
-            if (i.rm == 14) i.is_return = true;
+            i.is_call = h1;
+            if (!h1 && i.rm == 14) i.is_return = true;
             return i;
         }
     }

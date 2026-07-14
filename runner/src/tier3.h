@@ -36,3 +36,27 @@ struct Tier3TraceEvent {
 void tier3_run(uint32_t pc);
 
 uint32_t tier3_debug_trace_copy(Tier3TraceEvent* out, uint32_t max_entries);
+
+struct Tier3Stats {
+    uint64_t entries[2];
+    uint64_t instructions[2];
+    uint64_t clean_ram_rejects[2];
+};
+void tier3_reset();
+void tier3_note_clean_ram_reject();
+Tier3Stats tier3_stats();
+
+enum Tier3CoverageKind : uint8_t {
+    TIER3_COVERAGE_ROOT = 1,
+    TIER3_COVERAGE_CALL = 2,
+    TIER3_COVERAGE_INDIRECT = 3,
+};
+struct Tier3CoverageEntry {
+    uint64_t hits;
+    uint32_t pc;
+    uint32_t caller;
+    uint8_t cpu;
+    uint8_t thumb;
+    uint8_t kind;
+};
+uint32_t tier3_coverage_copy(Tier3CoverageEntry* out, uint32_t max_entries);

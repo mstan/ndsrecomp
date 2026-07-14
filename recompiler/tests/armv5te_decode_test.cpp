@@ -17,6 +17,7 @@
 #include "arm_decode.h"
 #include "arm_codegen.h"
 #include "arm_ir.h"
+#include "thumb_decode.h"
 
 using namespace armv4t;
 
@@ -72,6 +73,69 @@ void check_fields() {
     Instr blx = ArmDecoder::decode(0xFA000000u, 0x1000u);
     if (blx.cond != Cond::AL || !blx.branch_link || !blx.branch_exchange) {
         std::printf("  FAIL BLX(imm) cond/link/exchange flags\n");
+        ++g_failures;
+    }
+    // THUMB register-form BLX uses Format 5's H1 bit. It must not decode
+    // as plain BX: the link address is (PC+2)|1 and is visible when the
+    // callee saves LR.
+    Instr tblx = ThumbDecoder::decode(0x4798u, 0x1000u);  // BLX r3
+    if (tblx.op != IrOp::BLX_reg || tblx.rm != 3 || !tblx.branch_link ||
+        !tblx.branch_exchange || !tblx.is_call) {
+        std::printf("  FAIL THUMB BLX r3 decode/flags\n");
+        ++g_failures;
+    } else {
+        CodegenCtx ctx;
+        bool not_impl = false;
+        std::string c = ArmCodegen::emit_instr(tblx, ctx, &not_impl);
+        if (not_impl ||
+            c.find("g_cpu.R[14] = 0x00001003u") == std::string::npos) {
+            std::printf("  FAIL THUMB BLX r3 codegen link address\n");
+            ++g_failures;
+        }
+    }
+    // A taken branch tick may synchronously enter IRQ code which hands off
+    // from Tier 3 back to a static bank and requests a host-stack unwind.
+    // The branch must honor that unwind before executing its target. This is
+    // the ARM9 BIOS WaitByLoop/VBlank regression (0xFFFF07CE -> 0xFFFF07CC).
+    Instr loop = ThumbDecoder::decode(0xDCFDu, 0x1000u);  // BGT 0x0FFE
+    CodegenCtx loop_ctx;
+    loop_ctx.current_function_addr = 0x0F00u;
+    loop_ctx.current_function_end_addr = 0x1100u;
+    bool loop_ni = false;
+    std::string loop_c = ArmCodegen::emit_instr(loop, loop_ctx, &loop_ni);
+    size_t tick = loop_c.find("runtime_tick(");
+    size_t unwind = loop_c.find("if (runtime_unwinding()) return;", tick);
+    size_t yield = loop_c.find("runtime_slice_yield()", tick);
+    if (loop_ni || tick == std::string::npos || unwind == std::string::npos ||
+        yield == std::string::npos || !(tick < unwind && unwind < yield)) {
+        std::printf("  FAIL taken branch does not honor IRQ/Tier3 unwind\n");
+        ++g_failures;
+    }
+    // Thumb MOV pc,lr is a non-branch PC write. The ARM7 flat execution cost
+    // already contains its fixed +2 refill; only ARM9 may append a dynamic
+    // target-region refill. Doubling ARM7's term makes the BIOS return at
+    // 0x2FA2 cost 5 cycles instead of melonDS's 3.
+    Instr tmovpc = ThumbDecoder::decode(0x46F7u, 0x1000u);  // MOV pc,lr
+    CodegenCtx tmovpc_ctx;
+    bool tmovpc_ni = false;
+    std::string tmovpc_c = ArmCodegen::emit_instr(tmovpc, tmovpc_ctx,
+                                                  &tmovpc_ni);
+    if (tmovpc_ni ||
+        tmovpc_c.find("arm9_refill_cycles") == std::string::npos ||
+        tmovpc_c.find("arm7_refill_cycles") != std::string::npos) {
+        std::printf("  FAIL Thumb MOV pc,lr duplicates ARM7 refill\n");
+        ++g_failures;
+    }
+    // LDR-to-PC takes the data-combine path, which reconstructs the ARM7
+    // source/data cost and therefore needs the target refill appended.
+    Instr ldrpc = ArmDecoder::decode(0xE510F004u, 0x1000u);  // LDR pc,[r0,#-4]
+    CodegenCtx ldrpc_ctx;
+    bool ldrpc_ni = false;
+    std::string ldrpc_c = ArmCodegen::emit_instr(ldrpc, ldrpc_ctx, &ldrpc_ni);
+    if (ldrpc_ni ||
+        ldrpc_c.find("arm9_refill_cycles") == std::string::npos ||
+        ldrpc_c.find("arm7_refill_cycles") == std::string::npos) {
+        std::printf("  FAIL LDR pc omits ARM7 target refill\n");
         ++g_failures;
     }
     // SMLATB: x(bit5)=1 -> top half of Rm; y(bit6)=0 -> bottom of Rs.

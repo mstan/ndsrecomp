@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "state.h"
 #include "io.h"
@@ -30,34 +31,127 @@ extern "C" uint32_t g_runtime_break_pc = 0;
 NdsCpu      g_nds_active = NDS_ARM9;
 bool        g_nds_terminal = false;
 const char* g_nds_halt_reason = nullptr;
+bool        g_discover_static_misses = false;
 
 // ── Per-CPU dispatch registration ───────────────────────────────────────
 // DispatchEntry is declared in state.h (layout-matches the generated table).
 
 namespace {
-struct CpuCtx {
+struct DispatchBank {
     const DispatchEntry* table = nullptr;
     unsigned             len = 0;
+};
+struct CpuCtx {
+    std::vector<DispatchBank> banks;
     uint32_t             exc_base = 0;  // exception-vector base for this CPU
 };
 CpuCtx g_ctx[2];
 
+struct StaticLookup {
+    void (*fn)(void) = nullptr;
+    const NdsStaticValidation* validation = nullptr;
+};
+
+// Generated firmware functions are capped at 512 guest bytes, so a function
+// can overlap at most two 4 KiB executable pages. A larger future validation
+// is rejected safely instead of running without an active-code guard.
+struct StaticExecutionGuard {
+    const NdsStaticValidation* validation = nullptr;
+    uint32_t page_addr[2] = {};
+    uint32_t generation[2] = {};
+    uint32_t page_count = 0u;
+};
+StaticExecutionGuard g_static_guard;
+
 // Cycle budget for the run slice; runtime_should_yield trips when reached
 // so a guest spin loop can't hang the host.
 unsigned long long g_cycle_cap = 0;  // 0 = unlimited
+std::vector<uint64_t> g_discovery_seen;
 
-void (*lookup_in(const DispatchEntry* table, unsigned len,
-                 uint32_t pc, bool thumb))(void) {
-    if (!table) return nullptr;
+bool static_bios_pc(uint32_t pc) {
+    return (g_nds_active == NDS_ARM9)
+        ? (pc >= 0xFFFF0000u && pc < 0xFFFF1000u)
+        : (pc < 0x00004000u);
+}
+
+StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
+                       uint32_t pc, bool thumb) {
+    if (!table) return {};
     unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
         if (table[mid].addr < pc) lo = mid + 1u;
         else                       hi = mid;
     }
-    for (unsigned i = lo; i < len && table[i].addr == pc; ++i)
-        if ((table[i].thumb != 0) == thumb) return table[i].fn;
-    return nullptr;
+    for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
+        if ((table[i].thumb != 0) != thumb) continue;
+        const NdsStaticValidation* validation = table[i].validation;
+        if (validation) {
+            // Captured firmware variants are executable only after the LLE
+            // guest or one of its hardware bus masters has actually
+            // installed every backing page. Byte equality alone is not
+            // provenance: pristine zero-filled RAM can otherwise select a
+            // late all-zero variant before firmware boot has materialized it.
+            if (!bus_range_has_write_provenance(validation->addr,
+                                                validation->size) ||
+                !bus_live_bytes_equal(validation->addr,
+                                      validation->expected,
+                                      validation->size))
+                continue;
+        }
+        return {table[i].fn, validation};
+    }
+    return {};
+}
+
+StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb) {
+    for (const DispatchBank& bank : c.banks) {
+        StaticLookup hit = lookup_in(bank.table, bank.len, pc, thumb);
+        if (hit.fn) return hit;
+    }
+    return {};
+}
+
+bool arm_static_guard(const NdsStaticValidation* validation) {
+    g_static_guard = {};
+    if (!validation) return true;
+    const uint64_t begin = validation->addr;
+    const uint64_t end = begin + validation->size;
+    if (validation->size == 0u || end > 0x1'0000'0000ull) return false;
+    const uint32_t first_page = validation->addr & ~0xFFFu;
+    const uint32_t last_page =
+        static_cast<uint32_t>(end - 1u) & ~0xFFFu;
+    const uint32_t page_count = ((last_page - first_page) >> 12u) + 1u;
+    if (page_count > 2u) return false;
+    g_static_guard.validation = validation;
+    g_static_guard.page_count = page_count;
+    for (uint32_t i = 0; i < page_count; ++i) {
+        const uint32_t page = first_page + (i << 12u);
+        g_static_guard.page_addr[i] = page;
+        g_static_guard.generation[i] = bus_exec_page_generation(page);
+    }
+    return true;
+}
+
+bool active_static_code_changed() {
+    if (!g_static_guard.validation) return false;
+    for (uint32_t i = 0; i < g_static_guard.page_count; ++i)
+        if (bus_exec_page_generation(g_static_guard.page_addr[i]) !=
+            g_static_guard.generation[i])
+            return true;
+    return false;
+}
+
+struct StaticGuardScope {
+    StaticExecutionGuard saved;
+    StaticGuardScope() : saved(g_static_guard) { g_static_guard = {}; }
+    ~StaticGuardScope() { g_static_guard = saved; }
+};
+
+bool guarded_static_call(const StaticLookup& hit) {
+    if (!hit.fn || !arm_static_guard(hit.validation)) return false;
+    hit.fn();
+    return true;
 }
 
 // Bracket the static function range containing `pc` in a dispatch table
@@ -83,19 +177,25 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base) {
-    g_ctx[cpu & 1].table = t;
-    g_ctx[cpu & 1].len = len;
-    g_ctx[cpu & 1].exc_base = exc_base;
+    CpuCtx& ctx = g_ctx[cpu & 1];
+    ctx.banks.push_back({t, len});
+    ctx.exc_base = exc_base;
 }
 
 extern "C" void nds_set_cycle_cap(unsigned long long cap) { g_cycle_cap = cap; }
+extern "C" void nds_reschedule_slice(unsigned long long system_deadline) {
+    const unsigned long long cpu_deadline =
+        (g_nds_active == NDS_ARM9) ? (system_deadline << 1u) : system_deadline;
+    if (g_cycle_cap == 0 || cpu_deadline < g_cycle_cap)
+        g_cycle_cap = cpu_deadline;
+}
 
 // Tier-3 helpers: does the active CPU have a Tier-1 bank fn at (pc, thumb)?
 // And is this slice's cycle cap reached? (The interpreter uses these to
 // decide when to hand control back to the dispatcher / scheduler.)
 extern "C" int nds_has_bank(uint32_t pc, int thumb) {
     const CpuCtx& c = g_ctx[g_nds_active];
-    return lookup_in(c.table, c.len, pc & ~1u, thumb != 0) != nullptr ? 1 : 0;
+    return lookup_static(c, pc & ~1u, thumb != 0).fn ? 1 : 0;
 }
 extern "C" int nds_slice_over(void) {
     return (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) ? 1 : 0;
@@ -177,23 +277,23 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
     return max_entries;
 }
 
+namespace {
+// Pending melonDS ARM::Cycles debt carried across a HALT. This is distinct
+// from g_runtime_cycles (the committed CPU timestamp) and is saved/restored by
+// the dual-CPU scheduler just like the call-return stack.
+uint32_t g_deferred_cycles = 0;
+}
+
 // Per-instruction hook, fired once at the top of every recompiled-bank guest
 // instruction (g_runtime_insn_trace on). Bumps the active CPU's retired-insn
 // counter so insn9/insn7 can anchor the fp-stream bisector. Tier-3 bumps the
 // same counters from its own step loop (tier3.cpp).
 extern "C" void runtime_insn_fp(void) {
     nds_note_insn_retired(g_nds_active);
-    // Code-fetch memory timing (Commit B) — ARM7 ONLY. R[15] is this
-    // instruction's PC (set by the generated code just before this hook), so
-    // charge its fetch cost on top of the baked exec/data cost. See
-    // runtime_code_cycles. The ARM9's code-fetch cost is no longer added
-    // flat here: it is folded into the per-instruction cycle COMBINE
-    // (arm9_cycle_combine) at the generated bank's own runtime_tick site
-    // (arm_codegen.cpp emit_instr), together with that instruction's numD/
-    // numI, exactly matching melonDS's AddCycles_C/CI/CD/CDI. The ARM7 path
-    // is unchanged (byte-exact, cyc7 drift 0.1%) — this flat add is it.
-    if (g_nds_active != NDS_ARM9)
-        g_runtime_cycles += runtime_code_cycles(g_cpu.R[15] & ~1u);
+    // Timing belongs to each generated instruction's runtime_tick expression,
+    // not this observer. ARM7 AddCycles_CD/CDI reconstructs the complete
+    // nonsequential code cost; adding the sequential correction here too
+    // double-charges loads when ARM7 executes on the 16-bit main-RAM bus.
 }
 extern "C" void runtime_fp_reset(void) {}
 extern "C" uint32_t runtime_fp_count(void) { return 0; }
@@ -201,7 +301,10 @@ extern "C" uint32_t runtime_fp_save_file(const char*) { return 0; }
 
 // ── Tick / yield ────────────────────────────────────────────────────────
 extern "C" void runtime_tick(uint32_t cycles) {
-    g_runtime_cycles += cycles;
+    // Generated-code ticks are guest instruction boundaries. Commit any
+    // ARM::Cycles debt carried across HALT together with this instruction.
+    g_runtime_cycles += cycles + g_deferred_cycles;
+    g_deferred_cycles = 0;
     // Deliver a pending IRQ to the active CPU at this instruction boundary
     // (R15 already points at the next instruction = the return address).
     // runtime_irq masks CPSR.I before vectoring, so it cannot re-enter here
@@ -211,14 +314,43 @@ extern "C" void runtime_tick(uint32_t cycles) {
 }
 // Per-instruction unwind: terminal halts only (a guest spin waiting on the
 // other core is NOT a fault — it is preempted at a backward branch instead).
+namespace {
+bool g_unwinding = false;
+bool g_preserved_unwind_state_valid = false;
+ArmCpuState g_preserved_unwind_state{};
+}
+
 extern "C" bool runtime_should_yield(void) {
     // insn7/insn9 anchor reached → stop at this exact instruction (see io.cpp
     // g_nds_insn_stop). The bisector resets per K, so the mid-function unwind
     // (which does not preserve the call-return stack) is never resumed from.
-    if (g_nds_insn_stop) return true;
+    if (g_nds_insn_stop || nds_event_break_hit()) {
+        g_unwinding = true;
+        return true;
+    }
+    // HALTCNT/CP15 sleep is a resumable hardware state. Unwind the current
+    // static function before its next instruction; the scheduler owns wakeup
+    // and timestamp advancement while no guest instructions retire.
+    if (nds_cpu_halted(g_nds_active) || nds_dma_cpu_stalled(g_nds_active)) {
+        g_unwinding = true;
+        return true;
+    }
+    // A guest store touched a page containing the currently executing
+    // content-validated function. Stop before the next guest instruction;
+    // redispatch will either select a matching generation or enter Tier 3 for
+    // the guest's newly written bytes. Never continue stale native semantics.
+    if (active_static_code_changed()) {
+        g_unwinding = true;
+        return true;
+    }
     if (g_runtime_break_pc && (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u))
         nds_halt("break pc");
-    return g_nds_terminal;
+    if (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) {
+        g_unwinding = true;
+        return true;
+    }
+    if (g_nds_terminal) { g_unwinding = true; return true; }
+    return false;
 }
 // Cooperative slice preemption: trips once this slice's cycle cap is
 // reached. Checked only at backward branches (loop tops = dispatch
@@ -226,7 +358,6 @@ extern "C" bool runtime_should_yield(void) {
 // PRESERVE their pending returns as the host stack unwinds — the call-
 // return stack is saved/restored per-CPU by the scheduler, so a spin at
 // any call depth can be preempted and cleanly resumed.
-namespace { bool g_unwinding = false; }
 extern "C" bool runtime_slice_yield(void) {
     if (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) {
         g_unwinding = true;
@@ -235,7 +366,20 @@ extern "C" bool runtime_slice_yield(void) {
     return false;
 }
 extern "C" bool runtime_unwinding(void) { return g_unwinding; }
-extern "C" void nds_clear_unwinding(void) { g_unwinding = false; }
+extern "C" void nds_clear_unwinding(void) {
+    g_unwinding = false;
+    g_preserved_unwind_state_valid = false;
+}
+void nds_preserve_unwind_state() {
+    g_preserved_unwind_state = g_cpu;
+    g_preserved_unwind_state_valid = true;
+    g_unwinding = true;
+}
+void nds_restore_unwind_state() {
+    if (!g_preserved_unwind_state_valid) return;
+    g_cpu = g_preserved_unwind_state;
+    g_preserved_unwind_state_valid = false;
+}
 
 // ── Condition codes (verbatim) ──────────────────────────────────────────
 extern "C" int arm_cond_passes(unsigned cond) {
@@ -292,8 +436,35 @@ extern "C" uint32_t arm_shift_ror(uint32_t v, uint32_t n, int sc) {
 extern "C" uint32_t runtime_clz(uint32_t v) {
     return v ? static_cast<uint32_t>(__builtin_clz(v)) : 32u;
 }
-// Multiply operand wait — flat for now (DS ARM9 timing lands later).
-extern "C" uint32_t runtime_mul_cycles(uint32_t, uint32_t, uint32_t) { return 1u; }
+// ARM7TDMI early-termination multiply timing. ARM9 uses its separate static
+// numI combine, so this runtime value is ignored on that path.
+extern "C" uint32_t runtime_mul_cycles(uint32_t v, uint32_t signed_variant,
+                                        uint32_t extra) {
+    if (g_nds_active == NDS_ARM9) return 1u;
+    if (g_cpu.cpsr & CPSR_T_BIT) {
+        // melonDS T_MUL_REG tests the original destination operand by unsigned
+        // significant bytes and documents C as destroyed (modeled as clear).
+        g_cpu.cpsr &= ~CPSR_C_BIT;
+        if (v & 0xFF000000u) return 4u;
+        if (v & 0x00FF0000u) return 3u;
+        if (v & 0x0000FF00u) return 2u;
+        return 1u;
+    }
+
+    uint32_t m;
+    if (signed_variant) {
+        if ((v & 0xFFFFFF00u) == 0u || (v & 0xFFFFFF00u) == 0xFFFFFF00u) m = 1u;
+        else if ((v & 0xFFFF0000u) == 0u || (v & 0xFFFF0000u) == 0xFFFF0000u) m = 2u;
+        else if ((v & 0xFF000000u) == 0u || (v & 0xFF000000u) == 0xFF000000u) m = 3u;
+        else m = 4u;
+    } else {
+        if ((v & 0xFFFFFF00u) == 0u) m = 1u;
+        else if ((v & 0xFFFF0000u) == 0u) m = 2u;
+        else if ((v & 0xFF000000u) == 0u) m = 3u;
+        else m = 4u;
+    }
+    return m + extra;
+}
 
 // ── Flag updaters (verbatim) ────────────────────────────────────────────
 extern "C" void arm_set_nz(uint32_t r) {
@@ -341,16 +512,54 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     // has no backward-branch yield site. runtime_slice_yield() arms the
     // unwind so pending BL/BLX returns are preserved.
     if (runtime_slice_yield()) { g_cpu.R[15] = pc; return; }
+    // CPSR.T owns the instruction-set state. Some interpreted BX/POP paths
+    // preserve the interworking bit in their target value; generated bank
+    // prologues and the architectural register view require aligned R15.
+    g_cpu.R[15] = pc;
     runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     const CpuCtx& c = g_ctx[g_nds_active];
-    if (void (*fn)(void) = lookup_in(c.table, c.len, pc, thumb)) { fn(); return; }
+    StaticGuardScope guard_scope;
+    if (guarded_static_call(lookup_static(c, pc, thumb))) return;
+    if (g_discover_static_misses && static_bios_pc(pc)) {
+        runtime_discovery_note_static(pc, thumb ? 1u : 0u);
+        tier3_run(pc);
+        return;
+    }
     // Tier 3: code copied into RAM at runtime (firmware boot, menu, and the
     // ITCM-resident IRQ handler) has no static bank — run the guest's OWN
     // bytes through the interpreter (PRINCIPLES.md "the one exception"),
     // never an HLE model. The bus owns the memory map (covers ITCM mirror).
-    if (bus_addr_is_exec_ram(pc)) { tier3_run(pc); return; }
+    if (bus_range_has_write_provenance(pc, thumb ? 2u : 4u)) {
+        tier3_run(pc);
+        return;
+    }
+    if (bus_addr_is_writable_ram(pc)) tier3_note_clean_ram_reject();
     runtime_dispatch_miss(target_pc);
+}
+
+extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
+    pc &= ~1u;
+    if (!static_bios_pc(pc)) return;
+    const uint64_t key = (uint64_t(g_nds_active) << 33u) |
+                         (uint64_t(thumb != 0u) << 32u) | pc;
+    for (uint64_t seen : g_discovery_seen)
+        if (seen == key) return;
+    g_discovery_seen.push_back(key);
+
+    const char* cpu = (g_nds_active == NDS_ARM9) ? "arm9" : "arm7";
+    const char* mode = thumb ? "thumb" : "arm";
+    std::fprintf(stderr,
+        "[static-discovery] cpu=%s pc=0x%08X %s lr=0x%08X\n",
+        cpu, pc, mode, g_cpu.R[14]);
+    if (std::FILE* f = std::fopen("dispatch_candidates.log", "ab")) {
+        std::fprintf(f,
+            "# cpu=%s lr=0x%08X (discovery interpreter; validate before promotion)\n"
+            "[[entry_point]]\naddr = 0x%08X\nmode = \"%s\"\n"
+            "kind = \"runtime_candidate\"\n\n",
+            cpu, g_cpu.R[14], pc, mode);
+        std::fclose(f);
+    }
 }
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;
@@ -379,7 +588,13 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     // Localize the pad to its containing recompiled function.
     uint32_t rs = 0, re = 0;
     const CpuCtx& cc = g_ctx[g_nds_active];
-    const bool have_range = bracket_static_range(cc.table, cc.len, t, &rs, &re);
+    bool have_range = false;
+    for (const DispatchBank& bank : cc.banks) {
+        if (bracket_static_range(bank.table, bank.len, t, &rs, &re)) {
+            have_range = true;
+            break;
+        }
+    }
 
     if (in_static_rom) {
         std::fprintf(stderr,
@@ -418,7 +633,10 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 
     // RAM-resident target (copied firmware code): this is the Tier-3 dirty-RAM
     // case — dump the bytes there to show what would run.
-    if (t >= 0x02000000u && t < 0x04000000u) {
+    if (bus_addr_is_writable_ram(t)) {
+        std::fprintf(stderr, "  [ram-provenance] generation=%u (%s)\n",
+                     bus_exec_page_generation(t),
+                     bus_addr_has_write_provenance(t) ? "written" : "clean");
         std::fprintf(stderr, "  [ram@0x%08X]", t);
         for (int i = 0; i < 16; i += 4)
             std::fprintf(stderr, " %08X", bus_read_u32(t + i));
@@ -468,6 +686,17 @@ extern "C" const uint32_t* runtime_call_stack_data(void) { return g_crs; }
 extern "C" void runtime_call_stack_restore(const uint32_t* e, uint32_t d) {
     if (d > kCRS) d = kCRS; g_crs_depth = d;
     for (uint32_t i = 0; i < d; ++i) g_crs[i] = e[i];
+}
+extern "C" uint32_t runtime_deferred_cycles(void) {
+    return g_deferred_cycles;
+}
+extern "C" void runtime_deferred_cycles_set(uint32_t cycles) {
+    g_deferred_cycles = cycles;
+}
+extern "C" uint32_t runtime_deferred_cycles_take(void) {
+    const uint32_t cycles = g_deferred_cycles;
+    g_deferred_cycles = 0;
+    return cycles;
 }
 
 // ── PSR transfer + banking (verbatim) ───────────────────────────────────
@@ -558,19 +787,34 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     // was just cleared above (ARM mode, exception entry), so runtime_code_cycles
     // sees the correct target-mode state.
     runtime_tick(g_nds_active == NDS_ARM9
-                     ? 2u * runtime_code_cycles(base + 0x08u)
-                     : 3u);
+                     ? arm9_refill_cycles(base + 0x08u)
+                     : arm7_refill_cycles(base + 0x08u));
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
+    nds_note_irq_accept(g_nds_active, return_address);
     uint32_t saved = g_cpu.cpsr;
     runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, 0, saved, 0);
-    uint32_t nc = (saved & ~(0x1Fu | CPSR_T_BIT)) | 0x12u | CPSR_I_BIT;
+    // melonDS ARM::TriggerIRQ clears CPSR[7:0] then installs 0xD2: IRQ mode,
+    // ARM state, with both IRQ and FIQ masked.  Preserving the old F bit makes
+    // the BIOS IRQ prologue observably diverge on its first exception.
+    uint32_t nc = (saved & ~0xFFu) | 0xD2u;
     unsigned ob = mode_to_bank(saved), nb = mode_to_bank(nc);
     if (ob != nb) { bank_out(ob, saved); bank_in(nb, nc); }
     g_cpu.cpsr = nc; g_cpu.banked_spsr[nb] = saved; g_cpu.R[14] = return_address + 4u;
     uint32_t base = g_ctx[g_nds_active].exc_base;
     g_cpu.R[15] = base + 0x18u;
+    const uint32_t refill = g_nds_active == NDS_ARM9
+        ? arm9_refill_cycles(base + 0x18u)
+        : arm7_refill_cycles(base + 0x18u);
+    if (g_deferred_cycles) {
+        // IRQ accepted directly out of HALT: melonDS JumpTo appends the refill
+        // to the still-pending ARM::Cycles debt. The first vector instruction
+        // commits both; it must not become visible before that instruction.
+        g_deferred_cycles += refill;
+    } else {
+        runtime_tick(refill);
+    }
     runtime_dispatch(base + 0x18u);
 }
 
@@ -581,5 +825,18 @@ extern "C" void runtime_unimplemented_op(const char* op_name, uint32_t pc) {
     runtime_trace_dump_recent(12);
     nds_halt("unimplemented op");
 }
-extern "C" void runtime_init(void*) { g_crs_depth = 0; }
-extern "C" void runtime_shutdown(void) { g_crs_depth = 0; }
+extern "C" void runtime_init(void*) {
+    g_crs_depth = 0;
+    g_deferred_cycles = 0;
+    g_discovery_seen.clear();
+    for (CpuCtx& ctx : g_ctx) {
+        ctx.banks.clear();
+        ctx.exc_base = 0u;
+    }
+    g_static_guard = {};
+    tier3_reset();
+}
+extern "C" void runtime_shutdown(void) {
+    g_crs_depth = 0;
+    g_deferred_cycles = 0;
+}

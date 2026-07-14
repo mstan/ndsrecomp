@@ -32,6 +32,7 @@ third_party/
 # ── Build trees ────────────────────────────────────────────────────────────
 build/
 build-*/
+build_*/
 *.o
 *.obj
 *.exe
@@ -40,8 +41,17 @@ build-*/
 
 # ── Runtime artifacts ──────────────────────────────────────────────────────
 *.log
+*.out
+*.err
 *.bmp
 dispatch_misses.log
+
+# Ad-hoc framebuffer captures produced while converging against the oracle.
+# Curated documentation images should use descriptive names without the
+# leading underscore and may be tracked explicitly.
+oracle/_*.png
+oracle/_*.ppm
+oracle/_*.rgb
 
 # ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/

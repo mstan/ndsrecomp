@@ -12,6 +12,7 @@
 // Discipline: this surfaces what the REAL BIOS uses, instead of guessing
 // which instructions to implement. See docs/dispatch_architecture.md.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -89,6 +90,56 @@ BankNames bank_names(const std::string& bank) {
     return n;
 }
 
+std::vector<Function> split_functions_for_emission(
+        const std::vector<Function>& funcs, uint32_t max_bytes,
+        const uint8_t* rom, std::size_t rom_size, uint32_t rom_base) {
+    if (max_bytes == 0u) return funcs;
+    std::vector<Function> out;
+    for (const Function& fn : funcs) {
+        const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+        uint32_t limit = std::max(step, max_bytes - (max_bytes % step));
+        uint32_t at = fn.addr;
+        unsigned part_index = 0u;
+        while (at < fn.end_addr) {
+            uint32_t end = std::min(fn.end_addr, at + limit);
+            // A Thumb BL/BLX immediate is a prefix+suffix pair. Never place a
+            // host chunk boundary between its two halfwords.
+            if (fn.mode == CpuMode::Thumb && end < fn.end_addr &&
+                end >= fn.addr + 2u) {
+                const uint32_t original_source = fn.source_addr
+                    ? fn.source_addr : fn.addr;
+                const uint64_t source = uint64_t{original_source} +
+                                        (end - fn.addr) - 2u;
+                if (source >= rom_base && source - rom_base + 2u <= rom_size) {
+                    const std::size_t off = static_cast<std::size_t>(source - rom_base);
+                    const uint16_t hw = static_cast<uint16_t>(
+                        rom[off] | (uint16_t{rom[off + 1u]} << 8u));
+                    const armv4t::Instr ins =
+                        armv4t::ThumbDecoder::decode(hw, end - 2u);
+                    if (ins.op == armv4t::IrOp::BL_prefix) end += 2u;
+                }
+            }
+
+            Function part = fn;
+            part.addr = at;
+            part.end_addr = end;
+            if (fn.source_addr)
+                part.source_addr = fn.source_addr + (at - fn.addr);
+            if (part_index != 0u) {
+                char suffix[32];
+                std::snprintf(suffix, sizeof suffix, "_chunk_%u", part_index);
+                part.name += suffix;
+            }
+            part.has_indirect_transfer =
+                fn.has_indirect_transfer && end == fn.end_addr;
+            out.push_back(std::move(part));
+            at = end;
+            ++part_index;
+        }
+    }
+    return out;
+}
+
 // Emit one guest function's body. Decodes every word in [addr, end_addr)
 // and lowers it via the codegen, with a pre-pass that (1) marks
 // in-function backward branch targets so a `L_<pc>:` label is emitted for
@@ -106,6 +157,25 @@ void emit_function_body(std::FILE* f, const Function& fn,
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
+
+    // Every decoded instruction is a resumable static entry. Normal calls
+    // arrive at fn.addr and skip the switch; scheduler preemption or a real
+    // computed branch into the function arrives at an interior PC and jumps
+    // directly to that instruction. This keeps instruction-granular CPU
+    // interleaving entirely native (no static-ROM interpreter fallback).
+    std::fprintf(f,
+        "    if (g_cpu.R[15] != 0x%08Xu) {\n"
+        "        switch (g_cpu.R[15]) {\n",
+        fn.addr);
+    for (uint32_t resume_pc = fn.addr + step;
+         resume_pc < fn.end_addr; resume_pc += step) {
+        std::fprintf(f, "            case 0x%08Xu: goto L_%08X;\n",
+                     resume_pc, resume_pc);
+    }
+    std::fprintf(f,
+        "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
+        "        }\n"
+        "    }\n");
 
     auto source_offset_for = [&](uint32_t guest_pc, uint32_t len,
                                  std::size_t* out) -> bool {
@@ -261,7 +331,7 @@ void emit_function_body(std::FILE* f, const Function& fn,
         if (!source_offset_for(pc, step, &off)) break;
         armv4t::Instr ins = decode_at(pc, off);
 
-        if (backward_targets.count(pc) != 0) std::fprintf(f, "L_%08X:\n", pc);
+        std::fprintf(f, "L_%08X:\n", pc);
 
         std::fprintf(f, "    /* %08X  %s */\n", pc,
                      armv4t::format_ir(ins).c_str());
@@ -302,48 +372,122 @@ void write_bank_header(const std::string& dir,
 
 void write_bank_dispatch(const std::string& dir,
                          const std::vector<Function>& funcs,
-                         const BankNames& names) {
+                         const uint8_t* rom, std::size_t rom_size,
+                         uint32_t rom_base, const BankNames& names,
+                         bool validate_live_bytes) {
     std::FILE* f = std::fopen((dir + "/" + names.dispatch).c_str(), "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", names.dispatch.c_str()); return; }
     std::fprintf(f,
         "/* AUTO-GENERATED by nds_recompile. DO NOT EDIT. */\n"
         "/* {guest addr, thumb-bit, generated fn} sorted by address; the\n"
         "   runtime binary-searches by (addr, CPSR.T) per CPU. */\n"
-        "#include <stdint.h>\n#include \"%s\"\n\n"
-        "typedef struct { uint32_t addr; uint8_t thumb; void (*fn)(void); }"
-        " DispatchEntry;\n"
-        "const DispatchEntry %s[] = {\n",
-        names.header.c_str(), names.table_symbol.c_str());
-    for (const auto& fn : funcs)
-        std::fprintf(f, "    {0x%08Xu, %uu, %s%s},\n", fn.addr,
-                     fn.mode == CpuMode::Thumb ? 1u : 0u,
-                     names.fn_prefix.c_str(), fn.name.c_str());
+        "#include \"runtime_arm.h\"\n#include \"%s\"\n\n",
+        names.header.c_str());
+
+    std::vector<std::string> validation_symbols(funcs.size());
+    if (validate_live_bytes) {
+        for (std::size_t index = 0; index < funcs.size(); ++index) {
+            const Function& fn = funcs[index];
+            const uint32_t size = fn.end_addr - fn.addr;
+            const uint32_t source = fn.source_addr ? fn.source_addr : fn.addr;
+            if (source < rom_base || uint64_t(source - rom_base) + size > rom_size) {
+                std::fprintf(stderr,
+                    "[emit] validation source outside image: fn=0x%08X source=0x%08X size=%u\n",
+                    fn.addr, source, size);
+                std::fclose(f);
+                return;
+            }
+            char symbol[128];
+            std::snprintf(symbol, sizeof symbol, "g_validation_%s_%zu",
+                          names.fn_prefix.c_str(), index);
+            validation_symbols[index] = std::string{"&"} + symbol;
+            std::fprintf(f, "static const uint8_t %s_bytes[] = {", symbol);
+            const uint32_t offset = source - rom_base;
+            for (uint32_t i = 0; i < size; ++i) {
+                if ((i & 15u) == 0u) std::fputs("\n    ", f);
+                std::fprintf(f, "0x%02Xu,", unsigned(rom[offset + i]));
+            }
+            std::fprintf(f,
+                "\n};\nstatic const NdsStaticValidation %s = "
+                "{0x%08Xu, %uu, %s_bytes};\n\n",
+                symbol, fn.addr, size, symbol);
+        }
+    }
+
+    std::fprintf(f, "const NdsDispatchEntry %s[] = {\n",
+                 names.table_symbol.c_str());
+    struct Row {
+        uint32_t addr;
+        uint8_t thumb;
+        std::string fn;
+        std::string validation;
+    };
+    std::vector<Row> rows;
+    for (std::size_t index = 0; index < funcs.size(); ++index) {
+        const auto& fn = funcs[index];
+        const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
+        for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
+            rows.push_back({pc, fn.mode == CpuMode::Thumb ? uint8_t{1}
+                                                         : uint8_t{0},
+                            names.fn_prefix + fn.name,
+                            validate_live_bytes ? validation_symbols[index]
+                                                : "0"});
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+        if (a.addr != b.addr) return a.addr < b.addr;
+        if (a.thumb != b.thumb) return a.thumb < b.thumb;
+        return a.fn < b.fn;
+    });
+    rows.erase(std::unique(rows.begin(), rows.end(),
+                           [](const Row& a, const Row& b) {
+                               return a.addr == b.addr && a.thumb == b.thumb;
+                           }), rows.end());
+    for (const auto& row : rows)
+        std::fprintf(f, "    {0x%08Xu, %uu, %s, %s},\n", row.addr,
+                     unsigned(row.thumb), row.fn.c_str(),
+                     row.validation.c_str());
     std::fprintf(f, "};\nconst unsigned %s = %zuu;\n",
-                 names.table_len.c_str(), funcs.size());
+                 names.table_len.c_str(), rows.size());
     std::fclose(f);
 }
 
 void write_bank_body(const std::string& dir,
                      const std::vector<Function>& funcs,
                      const uint8_t* rom, std::size_t rom_size,
-                     uint32_t rom_base, const BankNames& names) {
+                     uint32_t rom_base, const BankNames& names,
+                     const std::string& output_name,
+                     std::size_t first, std::size_t last,
+                     bool allow_direct_calls) {
     std::unordered_map<uint64_t, std::string> name_by_key;
-    for (const auto& fn : funcs) {
-        uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
-            (fn.mode == CpuMode::Thumb ? 1u : 0u);
-        name_by_key[key] = names.fn_prefix + fn.name;
+    // Direct C calls stay within a body shard. Cross-shard transfers use the
+    // normal runtime dispatcher, which keeps shards independently compilable
+    // when the corpus grows and avoids an all-bank header dependency.
+    // Content-validated RAM variants must dispatch every inter-function edge:
+    // a direct host call would bypass the callee's live-byte/provenance check.
+    if (allow_direct_calls) {
+        for (std::size_t index = first; index < last; ++index) {
+            const auto& fn = funcs[index];
+            uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
+                (fn.mode == CpuMode::Thumb ? 1u : 0u);
+            name_by_key[key] = names.fn_prefix + fn.name;
+        }
     }
-    std::FILE* f = std::fopen((dir + "/" + names.body).c_str(), "wb");
-    if (!f) { std::fprintf(stderr, "cannot write %s\n", names.body.c_str()); return; }
+    std::FILE* f = std::fopen((dir + "/" + output_name).c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", output_name.c_str()); return; }
     std::fprintf(f,
         "/* AUTO-GENERATED by nds_recompile. DO NOT EDIT.\n"
         "   Each guest function lowers to a void C function over the recomp\n"
         "   ABI (g_cpu, bus_*, runtime_*; see runtime_arm.h). The interpreter\n"
         "   is never consulted at runtime — an unlowered op aborts via\n"
         "   runtime_unimplemented_op (PRINCIPLES.md). */\n"
-        "#include \"runtime_arm.h\"\n#include \"%s\"\n\n",
-        names.header.c_str());
-    for (const auto& fn : funcs) {
+        "#include \"runtime_arm.h\"\n\n");
+    for (std::size_t index = first; index < last; ++index)
+        std::fprintf(f, "void %s%s(void);\n", names.fn_prefix.c_str(),
+                     funcs[index].name.c_str());
+    std::fputs("\n", f);
+    for (std::size_t index = first; index < last; ++index) {
+        const auto& fn = funcs[index];
         std::fprintf(f,
             "/* 0x%08X  mode=%s  end=0x%08X  branches=%zu%s */\n"
             "void %s%s(void) {\n",
@@ -362,6 +506,11 @@ void write_bank_body(const std::string& dir,
 int main(int argc, char** argv) {
     std::string config_path, bin_path, out_dir, bank;
     bool audit = false;
+    bool validate_live_bytes = false;
+    bool dispatch_only = false;
+    bool stable_address_shards = false;
+    unsigned shards = 1u;
+    uint32_t max_function_bytes = 0u;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]{ return (i+1 < argc) ? argv[++i] : ""; };
@@ -370,6 +519,13 @@ int main(int argc, char** argv) {
         else if (a == "--out") out_dir = next();
         else if (a == "--bank") bank = next();
         else if (a == "--audit") audit = true;
+        else if (a == "--validate-live-bytes") validate_live_bytes = true;
+        else if (a == "--dispatch-only") dispatch_only = true;
+        else if (a == "--stable-address-shards") stable_address_shards = true;
+        else if (a == "--shards") shards = static_cast<unsigned>(
+            std::strtoul(next(), nullptr, 0));
+        else if (a == "--max-function-bytes") max_function_bytes =
+            static_cast<uint32_t>(std::strtoul(next(), nullptr, 0));
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
     if (config_path.empty() || bin_path.empty()) {
@@ -389,7 +545,14 @@ int main(int argc, char** argv) {
     Image img{bin.data(), bin.size(), cfg.program.load_address};
 
     FunctionFinder finder(bin.data(), bin.size(), cfg.program.load_address);
-    finder.add_seed({cfg.program.entry_pc, CpuMode::Arm, "entry", 0});
+    // Program entry historically defaulted to ARM. Runtime-materialized
+    // firmware may enter in Thumb, in which case an explicit entry_point at
+    // the same address is authoritative and must suppress the bogus ARM walk.
+    const bool explicit_program_entry = std::any_of(
+        cfg.extra_funcs.begin(), cfg.extra_funcs.end(),
+        [&](const auto& ef) { return ef.addr == cfg.program.entry_pc; });
+    if (!explicit_program_entry)
+        finder.add_seed({cfg.program.entry_pc, CpuMode::Arm, "entry", 0});
     for (const auto& ef : cfg.extra_funcs)
         finder.add_seed({ef.addr, ef.mode, ef.name, 0});
     for (const auto& dr : cfg.data_ranges)
@@ -449,14 +612,116 @@ int main(int argc, char** argv) {
             if (d != std::string::npos) stem = stem.substr(0, d);
             bank = stem.empty() ? "bank" : stem;
         }
-        const auto& funcs = finder.functions();
+        std::vector<Function> funcs = split_functions_for_emission(
+            finder.functions(), max_function_bytes, bin.data(), bin.size(),
+            cfg.program.load_address);
+        auto emission_addr = [](const Function& fn) {
+            return fn.source_addr ? fn.source_addr : fn.addr;
+        };
+        if (stable_address_shards) {
+            // Runtime code copies can be far outside the source image (for
+            // example ARM7 WRAM at 0x037F8000 whose captured bytes are
+            // appended after main RAM at 0x02400000). Fixed shards must be
+            // keyed by source-image address, otherwise every copied function
+            // falls past the final band and overwrites the last shard.
+            std::stable_sort(funcs.begin(), funcs.end(),
+                [&](const Function& a, const Function& b) {
+                    const uint32_t as = emission_addr(a);
+                    const uint32_t bs = emission_addr(b);
+                    if (as != bs) return as < bs;
+                    if (a.addr != b.addr) return a.addr < b.addr;
+                    return a.mode < b.mode;
+                });
+            const uint64_t source_begin = cfg.program.load_address;
+            const uint64_t source_end = source_begin + cfg.program.size;
+            for (const Function& fn : funcs) {
+                const uint64_t source = emission_addr(fn);
+                if (source < source_begin || source >= source_end) {
+                    std::fprintf(stderr,
+                        "[emit] stable shard source outside image: "
+                        "fn=0x%08X source=0x%08llX image=[0x%08llX,0x%08llX)\n",
+                        fn.addr, (unsigned long long)source,
+                        (unsigned long long)source_begin,
+                        (unsigned long long)source_end);
+                    return 1;
+                }
+            }
+        }
         BankNames names = bank_names(bank);
-        write_bank_header(out_dir, funcs, names);
-        write_bank_body(out_dir, funcs, bin.data(), bin.size(),
-                        cfg.program.load_address, names);
-        write_bank_dispatch(out_dir, funcs, names);
-        std::printf("\n[emit] bank '%s': %zu functions -> %s/{%s,%s,%s}\n",
-                    bank.c_str(), funcs.size(), out_dir.c_str(),
+        unsigned emitted_shards = 0u;
+        if (!dispatch_only) {
+            write_bank_header(out_dir, funcs, names);
+            if (shards == 0u) shards = 1u;
+            auto emit_shard = [&](unsigned shard, std::size_t first,
+                                  std::size_t last) {
+                std::string output_name = names.body;
+                if (shards > 1u) {
+                    char suffix[24];
+                    std::snprintf(suffix, sizeof suffix, "_%02u.c", shard);
+                    output_name.resize(output_name.size() - 2u);
+                    output_name += suffix;
+                }
+                write_bank_body(out_dir, funcs, bin.data(), bin.size(),
+                                cfg.program.load_address, names, output_name,
+                                first, last, !validate_live_bytes);
+                ++emitted_shards;
+            };
+            if (stable_address_shards) {
+                std::size_t first = 0u;
+                const uint64_t base = cfg.program.load_address;
+                const uint64_t span = cfg.program.size;
+                for (unsigned shard = 0; shard < shards; ++shard) {
+                    const uint64_t end = base +
+                        (span * uint64_t{shard + 1u}) / shards;
+                    std::size_t last = first;
+                    while (last < funcs.size() && emission_addr(funcs[last]) < end)
+                        ++last;
+                    // Emit empty bands too so an older non-empty shard at the
+                    // same stable index cannot survive a regeneration.
+                    emit_shard(shard, first, last);
+                    first = last;
+                }
+                if (first < funcs.size()) {
+                    std::fprintf(stderr,
+                        "[emit] internal error: %zu functions remained after "
+                        "stable source-address sharding\n",
+                        funcs.size() - first);
+                    return 1;
+                }
+            } else {
+                uint64_t remaining_weight = 0u;
+                for (const Function& fn : funcs)
+                    remaining_weight += std::max<uint32_t>(
+                        1u, fn.end_addr - fn.addr);
+                std::size_t first = 0u;
+                for (unsigned shard = 0; shard < shards; ++shard) {
+                    if (first >= funcs.size()) break;
+                    const uint64_t remaining_shards = shards - shard;
+                    const uint64_t target =
+                        (remaining_weight + remaining_shards - 1u) /
+                        remaining_shards;
+                    uint64_t weight = 0u;
+                    std::size_t last = first;
+                    while (last < funcs.size() &&
+                           (last == first || weight < target)) {
+                        weight += std::max<uint32_t>(
+                            1u, funcs[last].end_addr - funcs[last].addr);
+                        ++last;
+                    }
+                    emit_shard(shard, first, last);
+                    first = last;
+                    remaining_weight -= weight;
+                }
+            }
+        }
+        write_bank_dispatch(out_dir, funcs, bin.data(), bin.size(),
+                            cfg.program.load_address, names,
+                            validate_live_bytes);
+        std::printf("\n[emit] bank '%s': %zu functions (%u body shard%s%s) -> %s/{%s,%s,%s}\n",
+                    bank.c_str(), funcs.size(), emitted_shards,
+                    emitted_shards == 1u ? "" : "s",
+                    dispatch_only ? ", dispatch only" : "",
+                    out_dir.c_str(),
                     names.body.c_str(), names.header.c_str(),
                     names.dispatch.c_str());
         return 0;

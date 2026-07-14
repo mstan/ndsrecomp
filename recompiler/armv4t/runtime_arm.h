@@ -76,6 +76,23 @@ extern ArmCpuState g_cpu;
 typedef enum NdsCpu { NDS_ARM9 = 0, NDS_ARM7 = 1 } NdsCpu;
 extern NdsCpu g_nds_active;
 
+// Nintendo DS runner dispatch ABI.  Runtime-materialized firmware can reuse
+// the same virtual address for different code generations, so generated rows
+// may carry an exact byte validation for the function they enter.  Immutable
+// BIOS/game banks leave validation null.
+typedef struct NdsStaticValidation {
+    uint32_t addr;
+    uint32_t size;
+    const uint8_t* expected;
+} NdsStaticValidation;
+
+typedef struct NdsDispatchEntry {
+    uint32_t addr;
+    uint8_t thumb;
+    void (*fn)(void);
+    const NdsStaticValidation* validation;
+} NdsDispatchEntry;
+
 // Convenience accessors. CSR-bit constants follow ARM ARM A2.5.
 #define CPSR_N_BIT (1u << 31)
 #define CPSR_Z_BIT (1u << 30)
@@ -133,6 +150,11 @@ uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
 // See docs/scheduler_design.md "Cycle-model design".
 uint32_t runtime_code_cycles(uint32_t pc);
 
+// Taken-branch / PC-write pipeline refill. `target` includes the destination
+// ISA in bit 0 (Thumb when set); each helper returns its CPU's clock units.
+uint32_t arm7_refill_cycles(uint32_t target);
+uint32_t arm9_refill_cycles(uint32_t target);
+
 // ARM9 per-instruction cycle COMBINE — melonDS's exact AddCycles_C /
 // AddCycles_CI / AddCycles_CD / AddCycles_CDI model (ARM.h). Given this
 // instruction's numC (this instruction's OWN code-fetch cost, i.e.
@@ -143,10 +165,10 @@ uint32_t runtime_code_cycles(uint32_t pc);
 // MRC — computed at codegen time from the decoded instruction) and
 // has_data (nonzero for LDR/STR/LDM/STM/LDRD/STRD/SWP/SWPB), returns:
 //   has_data:  max(numC + numD - 6, max(numC, numD))   -- CD/CDI: loads
-//              and stores add NO internal cycles; the first ~6 cycles of
+//              and stores add NO internal cycles; the first ~6 ARM9 cycles of
 //              the data access overlap the code fetch already in flight.
 //   !has_data: numI ? numC + numI : numC                -- CI, else C.
-// A taken branch / any PC write additionally adds 2*numC(target region)
+// A taken branch / any PC write additionally adds arm9_refill_cycles(target)
 // for the pipeline refill — that term is NOT part of this function (it
 // depends on the branch target, which codegen adds separately at the
 // branch/PC-write tick sites); this returns only the instruction's own
@@ -154,6 +176,8 @@ uint32_t runtime_code_cycles(uint32_t pc);
 // ORIGINAL flat _cyc expression, verbatim; this is never called for ARM7.
 uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD, uint32_t numI,
                             uint32_t has_data);
+uint32_t arm7_cycle_combine(uint32_t flat_cycles, uint32_t numD,
+                            uint32_t is_load, uint32_t has_internal);
 
 // ── Shifter helpers ────────────────────────────────────────────────
 // Generated code uses these for data-processing operand2 shifts and
@@ -189,6 +213,7 @@ void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t c_in, uint32_t result);
 // Misses route to runtime_dispatch_miss for logging + fallback.
 
 void runtime_dispatch(uint32_t target_pc);
+void runtime_discovery_note_static(uint32_t pc, uint32_t thumb);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
@@ -209,6 +234,15 @@ uint32_t        runtime_call_stack_depth(void);
 const uint32_t* runtime_call_stack_data(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth);
+
+// melonDS normally commits ARM::Cycles at an instruction boundary, but HALT
+// exits ARM::Execute before that commit and carries the final instruction's
+// debt across sleep. The scheduler preserves this accumulator per CPU; Tier 3
+// consumes it when its next interpreted instruction retires. Generated banks
+// consume it from runtime_tick().
+uint32_t runtime_deferred_cycles(void);
+void     runtime_deferred_cycles_set(uint32_t cycles);
+uint32_t runtime_deferred_cycles_take(void);
 
 // Always-on structured execution trace. This records diagnostic state
 // only; it never routes execution or substitutes for missing codegen.

@@ -1,0 +1,442 @@
+#include "gpu2d.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+
+#include "io.h"
+#include "vram.h"
+
+namespace {
+
+struct Unit {
+    uint32_t dispcnt = 0;
+    uint16_t bgcnt[4]{};
+    uint16_t bgx[4]{};
+    uint16_t bgy[4]{};
+    int16_t pa[2]{}, pb[2]{}, pc[2]{}, pd[2]{};
+    int32_t refx[2]{}, refy[2]{};
+    uint8_t win[12]{};
+    uint8_t bg_mosaic_x = 0, bg_mosaic_y = 0;
+    uint8_t obj_mosaic_x = 0, obj_mosaic_y = 0;
+    uint16_t bldcnt = 0, bldalpha = 0;
+    uint8_t eva = 16, evb = 0, evy = 0;
+    uint32_t capture = 0;
+    uint16_t master_bright = 0;
+};
+
+struct Pixel {
+    uint32_t color = 0; // 6-bit R/G/B in bytes
+    uint8_t target = 0; // BLDCNT layer bit
+    uint8_t alpha = 0;  // 0=normal, 1..16=semi-transparent OBJ alpha
+    uint8_t priority = 4; // 0 is frontmost; backdrop is 4
+    uint8_t order = 0; // equal-priority order: OBJ, BG0, BG1, BG2, BG3
+    bool valid = false;
+};
+
+std::array<Unit,2> g_unit{};
+using Frame = std::array<uint32_t, 256 * 192>;
+// melonDS draws into the back buffer during the active frame and publishes it
+// only in GPU::FinishFrame, after VBlank. Keeping the same lifecycle matters
+// for instruction-precise framebuffer queries made while VCount is 192..262.
+std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
+int g_front = 0;
+
+uint16_t pal16(uint32_t offset) {
+    return static_cast<uint16_t>(nds_video_read(9, 0x05000000u + (offset & 0x7FFu), 2));
+}
+uint16_t oam16(uint32_t offset) {
+    return static_cast<uint16_t>(nds_video_read(9, 0x07000000u + (offset & 0x7FFu), 2));
+}
+uint32_t rgb6(uint16_t color) {
+    return ((color & 0x001Fu) << 1) |
+           (((color & 0x03E0u) >> 4) << 8) |
+           (((color & 0x7C00u) >> 9) << 16);
+}
+uint32_t to_rgb32(uint32_t color) {
+    const uint32_t r6 = color & 0x3Fu;
+    const uint32_t g6 = (color >> 8) & 0x3Fu;
+    const uint32_t b6 = (color >> 16) & 0x3Fu;
+    const uint32_t r = (r6 << 2) | (r6 >> 4);
+    const uint32_t g = (g6 << 2) | (g6 >> 4);
+    const uint32_t b = (b6 << 2) | (b6 >> 4);
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+uint32_t blend(uint32_t a, uint32_t b, uint32_t eva, uint32_t evb) {
+    uint32_t r = (((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8) >> 4;
+    uint32_t g = ((((a >> 8) & 0x3Fu) * eva) + (((b >> 8) & 0x3Fu) * evb) + 8) >> 4;
+    uint32_t bl = ((((a >> 16) & 0x3Fu) * eva) + (((b >> 16) & 0x3Fu) * evb) + 8) >> 4;
+    return std::min(r,63u) | (std::min(g,63u)<<8) | (std::min(bl,63u)<<16);
+}
+uint32_t brighten(uint32_t c, uint32_t f, uint32_t bias = 8u) {
+    const uint32_t r = (c & 0x3Fu) + ((((63u-(c&0x3Fu))*f)+bias)>>4);
+    const uint32_t g0 = (c>>8)&0x3Fu;
+    const uint32_t b0 = (c>>16)&0x3Fu;
+    const uint32_t g = g0 + ((((63u-g0)*f)+bias)>>4);
+    const uint32_t b = b0 + ((((63u-b0)*f)+bias)>>4);
+    return std::min(r,63u)|(std::min(g,63u)<<8)|(std::min(b,63u)<<16);
+}
+uint32_t darken(uint32_t c, uint32_t f, uint32_t bias = 7u) {
+    const uint32_t r0=c&0x3Fu,g0=(c>>8)&0x3Fu,b0=(c>>16)&0x3Fu;
+    return (r0-(((r0*f)+bias)>>4)) |
+           ((g0-(((g0*f)+bias)>>4))<<8) |
+           ((b0-(((b0*f)+bias)>>4))<<16);
+}
+
+Pixel text_pixel(int engine, int bg, int x, int y) {
+    Unit& u = g_unit[engine];
+    const uint16_t cnt = u.bgcnt[bg];
+    uint32_t sx = (u.bgx[bg] + x) & 0x1FFu;
+    uint32_t sy = (u.bgy[bg] + y) & 0x1FFu;
+    const uint32_t size = cnt >> 14;
+    if (!(size & 1u)) sx &= 0xFFu;
+    if (!(size & 2u)) sy &= 0xFFu;
+    if ((cnt & 0x40u) && u.bg_mosaic_x) sx -= x % (u.bg_mosaic_x + 1u);
+    if ((cnt & 0x40u) && u.bg_mosaic_y) sy -= y % (u.bg_mosaic_y + 1u);
+
+    uint32_t char_base = (cnt & 0x003Cu) << 12;
+    uint32_t map_base = (cnt & 0x1F00u) << 3;
+    if (!engine) {
+        char_base += (u.dispcnt & 0x07000000u) >> 8;
+        map_base += (u.dispcnt & 0x38000000u) >> 11;
+    }
+    uint32_t map_addr = map_base;
+    if (cnt & 0x8000u) {
+        map_addr += (sy & 0x1F8u) << 3;
+        if (cnt & 0x4000u) map_addr += (sy & 0x100u) << 3;
+    } else map_addr += (sy & 0xF8u) << 3;
+    const uint32_t width_extra = (cnt & 0x4000u) ? 0x100u : 0u;
+    map_addr += ((sx & 0xF8u) >> 2) + ((sx & width_extra) << 3);
+    const uint16_t tile = static_cast<uint16_t>(nds_vram_read_bg(engine,map_addr,2));
+    uint32_t tx = sx & 7u, ty = sy & 7u;
+    if (tile & 0x0400u) tx = 7u-tx;
+    if (tile & 0x0800u) ty = 7u-ty;
+    uint8_t index;
+    uint16_t color;
+    if (cnt & 0x0080u) {
+        index = static_cast<uint8_t>(nds_vram_read_bg(engine,char_base+((tile&0x3FFu)<<6)+(ty<<3)+tx,1));
+        if (!index) return {};
+        if (u.dispcnt & 0x40000000u) {
+            const uint32_t slot = (bg<2 && (cnt&0x2000u)) ? 2u+bg : static_cast<uint32_t>(bg);
+            color = static_cast<uint16_t>(nds_vram_read_bg_extpal(engine,(slot<<13)+((tile>>12)<<9)+(index<<1),2));
+        } else color = pal16((engine?0x400u:0u)+(index<<1));
+    } else {
+        const uint8_t packed = static_cast<uint8_t>(nds_vram_read_bg(engine,char_base+((tile&0x3FFu)<<5)+(ty<<2)+(tx>>1),1));
+        index = (tx&1u) ? packed>>4 : packed&0xFu;
+        if (!index) return {};
+        color = pal16((engine?0x400u:0u)+(((tile>>12)&0xFu)<<5)+(index<<1));
+    }
+    return {rgb6(color), static_cast<uint8_t>(1u << bg), 0,
+            static_cast<uint8_t>(cnt & 3u), static_cast<uint8_t>(bg + 1), true};
+}
+
+void put_obj(std::array<Pixel,256>& line, int x, const Pixel& p) {
+    if (x>=0 && x<256 && p.valid) line[x]=p;
+}
+
+void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
+    out.fill({});
+    const Unit& u=g_unit[engine];
+    if (!(u.dispcnt&0x1000u)) return;
+    static constexpr int widths[16]={8,16,8,8,16,32,8,8,32,32,16,8,64,64,32,8};
+    static constexpr int heights[16]={8,8,16,8,16,8,32,8,32,16,32,8,64,32,64,8};
+    const uint32_t oam_base=engine?0x400u:0u;
+    const uint32_t pal_base=engine?0x600u:0x200u;
+    for (int priority=3;priority>=0;--priority) {
+        for (int n=127;n>=0;--n) {
+            const uint16_t a0=oam16(oam_base+n*8), a1=oam16(oam_base+n*8+2), a2=oam16(oam_base+n*8+4);
+            if (((a2>>10)&3)!=priority) continue;
+            const int shape=(a0>>14)&3,size=(a1>>14)&3, sp=shape|(size<<2);
+            int w=widths[sp],h=heights[sp];
+            const bool affine=a0&0x0100u;
+            if (!affine && (a0&0x0200u)) continue;
+            int bw=w,bh=h;
+            if (affine && (a0&0x0200u)){bw*=2;bh*=2;}
+            const int sy=a0&0xFF;
+            int row=(line_y-sy)&0xFF;
+            if (row>=bh) continue;
+            int sx=static_cast<int16_t>(a1<<7)>>7;
+            if (sx<=-bw || sx>=256) continue;
+            const int mode=(a0>>10)&3;
+            if (mode==2) continue; // OBJ-window is handled when window modes land.
+            const bool color256=a0&0x2000u;
+            const uint32_t tile=a2&0x3FFu;
+            const uint8_t alpha=mode==1?0xFFu:0u;
+            for(int dx=0;dx<bw;++dx){
+                int px,py;
+                if(affine){
+                    const int group=(a1>>9)&0x1F;
+                    const int16_t pa=static_cast<int16_t>(oam16(oam_base+group*32+6));
+                    const int16_t pb=static_cast<int16_t>(oam16(oam_base+group*32+14));
+                    const int16_t pc=static_cast<int16_t>(oam16(oam_base+group*32+22));
+                    const int16_t pd=static_cast<int16_t>(oam16(oam_base+group*32+30));
+                    px=((dx-bw/2)*pa+(row-bh/2)*pb+(w<<7))>>8;
+                    py=((dx-bw/2)*pc+(row-bh/2)*pd+(h<<7))>>8;
+                    if(px<0||px>=w||py<0||py>=h) continue;
+                }else{
+                    px=(a1&0x1000u)?w-1-dx:dx;
+                    py=(a1&0x2000u)?h-1-row:row;
+                }
+                const int screen_x=sx+dx;if(screen_x<0||screen_x>=256)continue;
+                uint16_t color=0; uint8_t index=0;
+                if(mode==3){
+                    const uint32_t bitmap_alpha = (a2 >> 12) & 0xFu;
+                    if (!bitmap_alpha) continue;
+                    uint32_t base;
+                    if(u.dispcnt&0x40u){
+                        if(u.dispcnt&0x20u)continue;
+                        base=tile<<(7+((u.dispcnt>>22)&1u));
+                        base+=(py*w+px)*2;
+                    } else if (u.dispcnt & 0x20u) {
+                        base=((tile&0x1Fu)<<4)+((tile&0x3E0u)<<7)+(py*256u+px)*2;
+                    } else {
+                        base=((tile&0xFu)<<4)+((tile&0x3F0u)<<7)+(py*128u+px)*2;
+                    }
+                    color=static_cast<uint16_t>(nds_vram_read_obj(engine,base,2));
+                    if(!(color&0x8000u))continue;
+                }else{
+                    uint32_t tile_index=tile;
+                    if(u.dispcnt&0x10u) {
+                        tile_index <<= (u.dispcnt >> 20) & 3u;
+                        tile_index += (py>>3)*(w>>3)*(color256?2u:1u);
+                    } else {
+                        tile_index += (py>>3)*0x20u;
+                    }
+                    if(color256){
+                        const uint32_t addr=(tile_index<<5)+((py&7)<<3)+((px>>3)<<6)+(px&7);
+                        index=static_cast<uint8_t>(nds_vram_read_obj(engine,addr,1));if(!index)continue;
+                        if(u.dispcnt&0x80000000u)color=static_cast<uint16_t>(nds_vram_read_obj_extpal(engine,(((a2>>12)&0xFu)<<9)+(index<<1),2));
+                        else color=pal16(pal_base+(index<<1));
+                    }else{
+                        const uint32_t addr=(tile_index<<5)+((py&7)<<2)+((px>>3)<<5)+((px&7)>>1);
+                        const uint8_t v=static_cast<uint8_t>(nds_vram_read_obj(engine,addr,1));index=(px&1)?v>>4:v&0xFu;if(!index)continue;
+                        color=pal16(pal_base+(((a2>>12)&0xFu)<<5)+(index<<1));
+                    }
+                }
+                Pixel p{rgb6(color), 0x10u, alpha,
+                        static_cast<uint8_t>(priority), 0, true};
+                if(mode==3)p.alpha=static_cast<uint8_t>(std::min(16u,((a2>>12)&0xFu)+1u));
+                put_obj(out,screen_x,p);
+            }
+        }
+    }
+}
+
+uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
+    uint32_t c=top.color;
+    const uint16_t target2=static_cast<uint16_t>(below.target)<<8;
+    if(top.alpha && (u.bldcnt&target2)){
+        const uint32_t eva=top.alpha==0xFFu?u.eva:top.alpha;
+        c=blend(c,below.color,eva,top.alpha==0xFFu?u.evb:16u-eva);
+    }else if(u.bldcnt&top.target){
+        switch((u.bldcnt>>6)&3u){
+            case 1:if(u.bldcnt&target2)c=blend(c,below.color,u.eva,u.evb);break;
+            case 2:c=brighten(c,u.evy);break;
+            case 3:c=darken(c,u.evy);break;
+        }
+    }
+    return c;
+}
+
+void render_engine_line(int engine, int y) {
+    Unit& u=g_unit[engine];
+    Frame& fb = g_fb[g_front ^ 1][engine];
+    const bool enabled=nds_powercontrol9()&(engine?0x0200u:0x0002u);
+    std::array<Pixel,256> obj{}; render_obj_line(engine,y,obj);
+    for(int x=0;x<256;++x){
+        if(!enabled || (u.dispcnt&0x80u)){fb[y*256+x]=0xFFFFFFFFu;continue;}
+        const uint32_t mode=(u.dispcnt>>16)&(engine?1u:3u);
+        if(mode==0){fb[y*256+x]=0xFFFFFFFFu;continue;}
+        if(mode==2){
+            const uint32_t bank=(u.dispcnt>>18)&3u;
+            const uint16_t c=static_cast<uint16_t>(nds_video_read(9,0x06800000u+(bank<<17)+(y*256+x)*2,2));
+            fb[y*256+x]=to_rgb32(rgb6(c));continue;
+        }
+        std::array<Pixel,6> layers{};
+        size_t count = 0;
+        if (obj[x].valid) layers[count++] = obj[x];
+        for(int bg=0;bg<4;++bg){
+            if(!(u.dispcnt&(0x100u<<bg)))continue;
+            const uint32_t bgmode=u.dispcnt&7u;
+            const bool text=(bg<2)||(bgmode==0)||(bg==2&&(bgmode==1||bgmode==3))||(bg==3&&bgmode==0);
+            if(!text)continue;
+            Pixel p=text_pixel(engine,bg,x,y);if(p.valid)layers[count++]=p;
+        }
+        // There are at most five candidate layers (OBJ + BG0..BG3).
+        // An explicit bounded insertion sort avoids turning this very hot
+        // path into a general-purpose std::sort and makes the ordering
+        // invariant obvious.
+        for (size_t i = 1; i < count; ++i) {
+            const Pixel key = layers[i];
+            size_t j = i;
+            while (j > 0 &&
+                   (key.priority < layers[j - 1].priority ||
+                    (key.priority == layers[j - 1].priority &&
+                     key.order < layers[j - 1].order))) {
+                layers[j] = layers[j - 1];
+                --j;
+            }
+            layers[j] = key;
+        }
+        Pixel backdrop{rgb6(pal16(engine?0x400u:0u)),0x20u,0,4,5,true};
+        if(count<6)layers[count++]=backdrop;
+        uint32_t c=compose(u,layers[0],layers[count > 1 ? 1 : 0]);
+        const uint32_t mbmode=u.master_bright>>14;
+        const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
+        if(mbmode==1)c=brighten(c,mb,0u);else if(mbmode==2)c=darken(c,mb,15u);
+        fb[y*256+x]=to_rgb32(c);
+    }
+}
+
+bool enabled(int engine){return (nds_powercontrol9()&(engine?0x0200u:0x0002u))!=0;}
+
+uint32_t reg_read(const Unit& u,uint32_t off,uint32_t width){
+    if(width==4){if(off==0)return u.dispcnt;if(off==0x64)return u.capture;return reg_read(u,off,2)|(reg_read(u,off+2,2)<<16);}
+    if(width==2){
+        if(off==0)return u.dispcnt&0xFFFFu;
+        if(off==2)return u.dispcnt>>16;
+        if(off>=8&&off<16&&!(off&1))return u.bgcnt[(off-8)>>1];
+        if(off==0x48)return u.win[8]|(u.win[9]<<8);
+        if(off==0x4A)return u.win[10]|(u.win[11]<<8);
+        if(off==0x50)return u.bldcnt;
+        if(off==0x52)return u.bldalpha;
+        if(off==0x64)return u.capture&0xFFFFu;
+        if(off==0x66)return u.capture>>16;
+        if(off==0x6C)return u.master_bright;
+        return 0;
+    }
+    if(off<4)return(u.dispcnt>>(off*8))&0xFFu;
+    if(off>=8&&off<16)return(u.bgcnt[(off-8)>>1]>>((off&1)*8))&0xFFu;
+    if(off>=0x48&&off<=0x4B)return u.win[8+(off-0x48)];
+    return 0;
+}
+
+void reg_write16(Unit&u,int engine,uint32_t off,uint16_t v){
+    if(off==0){u.dispcnt=(u.dispcnt&0xFFFF0000u)|v;if(engine)u.dispcnt&=0xC0B1FFF7u;return;}
+    if(off==2){u.dispcnt=(u.dispcnt&0xFFFFu)|(uint32_t{v}<<16);if(engine)u.dispcnt&=0xC0B1FFF7u;return;}
+    if(off==0x64){u.capture=(u.capture&0xFFFF0000u)|(v&0x1F1Fu);return;}
+    if(off==0x66){u.capture=(u.capture&0xFFFFu)|((uint32_t{v}<<16)&0xEF3F0000u);return;}
+    if(off==0x6C){u.master_bright=v;return;}
+    if(!enabled(engine))return;
+    if(off>=8&&off<16){u.bgcnt[(off-8)>>1]=v;return;}
+    if(off>=0x10&&off<0x20){uint16_t* p=((off-0x10)&2)?u.bgy:u.bgx;p[(off-0x10)>>2]=v;return;}
+    if(off>=0x20&&off<0x40){
+        int n=(off>=0x30);
+        uint32_t sub=(off-(n?0x30:0x20));
+        if(sub==0)u.pa[n]=v;
+        else if(sub==2)u.pb[n]=v;
+        else if(sub==4)u.pc[n]=v;
+        else if(sub==6)u.pd[n]=v;
+        else if(sub==8)u.refx[n]=(u.refx[n]&0xFFFF0000)|v;
+        else if(sub==0xA){
+            if(v&0x800)v|=0xF000;
+            u.refx[n]=(u.refx[n]&0xFFFF)|(uint32_t{v}<<16);
+        } else if(sub==0xC)u.refy[n]=(u.refy[n]&0xFFFF0000)|v;
+        else if(sub==0xE){
+            if(v&0x800)v|=0xF000;
+            u.refy[n]=(u.refy[n]&0xFFFF)|(uint32_t{v}<<16);
+        }
+        return;
+    }
+    if(off>=0x40&&off<=0x4A){u.win[off-0x40]=v&0xFF;u.win[off-0x3F]=v>>8;return;}
+    if(off==0x4C){u.bg_mosaic_x=v&0xF;u.bg_mosaic_y=(v>>4)&0xF;u.obj_mosaic_x=(v>>8)&0xF;u.obj_mosaic_y=v>>12;return;}
+    if(off==0x50){u.bldcnt=v&0x3FFF;return;}if(off==0x52){u.bldalpha=v&0x1F1F;u.eva=std::min<uint8_t>(16,v&0x1F);u.evb=std::min<uint8_t>(16,(v>>8)&0x1F);return;}
+    if(off==0x54){u.evy=std::min<uint8_t>(16,v&0x1F);return;}
+}
+
+void reg_write8(Unit& u, int engine, uint32_t off, uint8_t v) {
+    if (off < 4) {
+        const uint32_t shift = off * 8u;
+        u.dispcnt = (u.dispcnt & ~(0xFFu << shift)) | (uint32_t{v} << shift);
+        if (engine) u.dispcnt &= 0xC0B1FFF7u;
+        return;
+    }
+    if (!enabled(engine)) return;
+    if (off >= 8 && off < 16) {
+        uint16_t& reg = u.bgcnt[(off - 8) >> 1];
+        const uint32_t shift = (off & 1u) * 8u;
+        reg = static_cast<uint16_t>((reg & ~(0xFFu << shift)) |
+                                    (uint16_t{v} << shift));
+        return;
+    }
+    if (off >= 0x10 && off < 0x20) {
+        uint16_t* reg = ((off - 0x10) & 2u) ? u.bgy : u.bgx;
+        uint16_t& value = reg[(off - 0x10) >> 2];
+        const uint32_t shift = (off & 1u) * 8u;
+        value = static_cast<uint16_t>((value & ~(0xFFu << shift)) |
+                                      (uint16_t{v} << shift));
+        return;
+    }
+    if (off >= 0x40 && off <= 0x4B) {
+        u.win[off - 0x40] = v;
+        return;
+    }
+    if (off == 0x4C) {
+        u.bg_mosaic_x = v & 0xFu;
+        u.bg_mosaic_y = v >> 4;
+        return;
+    }
+    if (off == 0x4D) {
+        u.obj_mosaic_x = v & 0xFu;
+        u.obj_mosaic_y = v >> 4;
+        return;
+    }
+    if (off == 0x50) {
+        u.bldcnt = (u.bldcnt & 0x3F00u) | v;
+        return;
+    }
+    if (off == 0x51) {
+        u.bldcnt = (u.bldcnt & 0x00FFu) | (uint16_t{v} << 8);
+        return;
+    }
+    if (off == 0x52) {
+        u.bldalpha = (u.bldalpha & 0x1F00u) | (v & 0x1Fu);
+        u.eva = std::min<uint8_t>(16, v & 0x1Fu);
+        return;
+    }
+    if (off == 0x53) {
+        u.bldalpha = static_cast<uint16_t>((u.bldalpha & 0x001Fu) |
+                                           ((uint16_t{v} & 0x1Fu) << 8));
+        u.evb = std::min<uint8_t>(16, v & 0x1Fu);
+        return;
+    }
+    if (off == 0x54) u.evy = std::min<uint8_t>(16, v & 0x1Fu);
+}
+
+} // namespace
+
+void nds_gpu2d_reset(){
+    g_unit={};
+    g_front = 0;
+    for (auto& buffers : g_fb)
+        for (auto& frame : buffers)
+            frame.fill(0xFFFFFFFFu);
+}
+void nds_gpu2d_stop(){
+    for (auto& buffers : g_fb)
+        for (auto& frame : buffers)
+            frame.fill(0u);
+}
+uint32_t nds_gpu2d_read(uint32_t addr,uint32_t width){const int e=(addr&0x1000u)?1:0;return reg_read(g_unit[e],addr&0xFFFu,width);}
+void nds_gpu2d_write(uint32_t addr,uint32_t value,uint32_t width){
+    const int e=(addr&0x1000u)?1:0;Unit&u=g_unit[e];const uint32_t off=addr&0xFFFu;
+    if(width==4){if(off==0){u.dispcnt=value;if(e)u.dispcnt&=0xC0B1FFF7u;return;}if(off==0x64){u.capture=value&0xEF3F1F1Fu;return;}reg_write16(u,e,off,value);reg_write16(u,e,off+2,value>>16);return;}
+    if(width==2){reg_write16(u,e,off,value);return;}
+    reg_write8(u, e, off, static_cast<uint8_t>(value));
+}
+void nds_gpu2d_render_scanline(int line) {
+    if (line < 0 || line >= 192) return;
+    render_engine_line(0, line);
+    render_engine_line(1, line);
+}
+void nds_gpu2d_render_frame(){
+    for (int line = 0; line < 192; ++line)
+        nds_gpu2d_render_scanline(line);
+}
+void nds_gpu2d_finish_frame(){g_front ^= 1;}
+const uint32_t* nds_gpu2d_framebuffer(int screen){
+    const bool normal=(nds_powercontrol9()&0x8000u)!=0;
+    const int engine=normal?screen:(screen^1);
+    return g_fb[g_front][engine&1].data();
+}

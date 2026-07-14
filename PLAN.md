@@ -70,6 +70,28 @@ execution-driven gap list (`docs/phase1_audit.md`). All NEXT items done:
    (CP15 *model* landed in Phase 2, where the bus consumes it.)
 
 ### Phase 2 — dual-CPU runtime ⟳ IN PROGRESS
+
+**Current convergence checkpoint (2026-07-14):** the historical IPCSYNC
+blocker is resolved. LLE firmware execution is exact against melonDS through
+ARM9 instruction 120,000,000 / ARM7 instruction 53,068,580 (VBlank 1,127),
+including CPU cycles and all shared event counters. RTC progression and the
+full SPU mixer/sound-capture path exercised by firmware are implemented; the
+first 4 KiB capture buffer is byte-identical. WRAMCNT, VRAM A-I, palette, OAM,
+and both published RGB framebuffers are also byte-identical at that ruler; the
+top-screen proof includes an animated affine-OBJ frame and the exact
+VBlank-to-frame-finish front/back lifecycle. See
+`docs/accuracy_burndown.md` for the live evidence and remaining axes.
+All editable Settings pages and their save paths are now deterministic
+every-frame scenarios. PictoChat is likewise exact through lobby entry,
+joining Room A, typed and drawn messages, room exit, Quit cancellation, and
+console power-off; its exercised WiFi power/beacon/TX behavior and terminal
+GPU/SPU stop boundary match melonDS.
+Download Play, the main-menu brightness/clock controls, both empty cartridge
+targets, and their cancel/terminal paths are also covered by full per-VBlank
+scenarios. This closes the navigable firmware surface for the configured
+no-cartridge state; the remaining release work is static provenance/banking,
+continuous host audio/SDL integration, unexercised hardware-mode closure, and
+performance/determinism gates.
 The runner (`runner/`) links the generated banks on a DS runtime
 (`docs/runner_bringup.md`). **Done:**
 - **M1 — ARM9 boots:** SHA-1-verify the 3 dumps, run the recompiled ARM9
@@ -81,15 +103,17 @@ The runner (`runner/`) links the generated banks on a DS runtime
   dispatch misses**. Cooperative preemption (preempt only at backward
   branches; preserve + per-CPU save/restore the call-return stack; finder
   seeds call-return addresses) — the hard part, solved.
-- **Bus so far:** main RAM, shared WRAM, ARM7 WRAM (mirrored), ITCM/DTCM,
-  BIOS regions, I/O stub + always-on access ring.
-- **NEXT (execution-driven):** both cores are blocked polling **IPCSYNC
-  (0x04000180)**, so model the IPC sync/FIFO + POSTFLG + IME/IE/IF
-  handshake FIRST, THEN the SPI firmware-flash device for the ARM7 LLE
-  firmware boot. Then the dirty-RAM interpreter (Tier 3) for the copied
-  firmware menu code, and the melonDS oracle (task #8).
-- Still ahead this phase: WRAMCNT split, VRAM banks A–I, palette/OAM, the
-  2D engines, the SDL host shell.
+- **Bus so far:** main RAM, accurate shared/ARM7 WRAM ownership, ITCM/DTCM,
+  BIOS regions, physical VRAM A-I, palette/OAM, and always-on access rings.
+- **NEXT (execution-driven):** complete the unexercised 2D modes and
+  per-scanline state lifecycle, then add deterministic touch/key scripting so
+  the first-divergence ruler can traverse every firmware page. Profile and
+  flatten renderer VRAM access: the first exact 1,208-frame soak is only
+  ~26 FPS and does not meet the release performance gate. In parallel, promote
+  validated firmware code to static ARM9/ARM7 banks and harden Tier 3 with
+  dirty-page provenance; do not begin game work before the menu release gate.
+- Still ahead this phase: complete 2D coverage, SDL video/audio/input,
+  scripted menu traversal, static firmware promotion, and release soak.
 
 ### Phase 3 — recompile BIOSes + firmware as banks, LLE boot
 Recompile both BIOSes + firmware ARM9/ARM7 parts as banks. LLE the BIOS

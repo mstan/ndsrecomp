@@ -1,0 +1,69 @@
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -2085,6 +2085,10 @@ u32 NDS::ARM9Read32(u32 addr)
+ 
+ void NDS::ARM9Write8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 0, addr, val, 8);
++#endif
+     switch (addr & 0xFF000000)
+     {
+     case 0x02000000:
+@@ -2125,6 +2129,10 @@ void NDS::ARM9Write8(u32 addr, u8 val)
+ void NDS::ARM9Write16(u32 addr, u16 val)
+ {
+     addr &= ~0x1;
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 0, addr, val, 16);
++#endif
+ 
+     switch (addr & 0xFF000000)
+     {
+@@ -2185,6 +2193,10 @@ void NDS::ARM9Write16(u32 addr, u16 val)
+ void NDS::ARM9Write32(u32 addr, u32 val)
+ {
+     addr &= ~0x3;
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 0, addr, val, 32);
++#endif
+ 
+     switch (addr & 0xFF000000)
+     {
+@@ -2480,6 +2492,10 @@ u32 NDS::ARM7Read32(u32 addr)
+ 
+ void NDS::ARM7Write8(u32 addr, u8 val)
+ {
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 1, addr, val, 8);
++#endif
+     switch (addr & 0xFF800000)
+     {
+     case 0x02000000:
+@@ -2538,6 +2554,10 @@ void NDS::ARM7Write8(u32 addr, u8 val)
+ void NDS::ARM7Write16(u32 addr, u16 val)
+ {
+     addr &= ~0x1;
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 1, addr, val, 16);
++#endif
+ 
+     switch (addr & 0xFF800000)
+     {
+@@ -2608,6 +2628,10 @@ void NDS::ARM7Write16(u32 addr, u16 val)
+ void NDS::ARM7Write32(u32 addr, u32 val)
+ {
+     addr &= ~0x3;
++#ifdef MELONDS_ORACLE_HOOKS
++    extern void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width);
++    Oracle_OnMemWrite(this, 1, addr, val, 32);
++#endif
+ 
+     switch (addr & 0xFF800000)
+     {

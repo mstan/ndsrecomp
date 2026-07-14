@@ -749,6 +749,12 @@ name = "FUN_000033C0"
 # cannot reach. See EXTRA_ENTRIES in import_bios_symbols.py.
 
 [[entry_point]]
+addr = 0x00000000
+mode = "thumb"
+name = "runtime_thumb_00000000"
+kind = "runtime_confirmed"
+
+[[entry_point]]
 addr = 0x00000008
 mode = "arm"
 name = "swi_vector_entry"
@@ -759,6 +765,12 @@ addr = 0x00000018
 mode = "arm"
 name = "irq_vector_entry"
 kind = "exception_vector"
+
+[[entry_point]]
+addr = 0x000015A0
+mode = "thumb"
+name = "lpad_000015A0"
+kind = "runtime_confirmed"
 
 [[entry_point]]
 addr = 0x00001CAA
@@ -795,4 +807,3 @@ count        = 34
 format       = "abs32"
 entries_mode = "auto"  # bit 0 of each entry encodes Thumb/ARM
 name         = "swi_jump_table"
-

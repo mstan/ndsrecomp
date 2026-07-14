@@ -52,6 +52,81 @@ using namespace melonDS;
 // the OracleNDS IO-write overrides bump the register-write counters.
 OracleCounters g_oracle_counts;
 
+struct OracleSpiTraceEntry {
+    uint64_t count;
+    uint64_t sys;
+    uint64_t cyc9;
+    uint64_t cyc7;
+    uint64_t insn7;
+    uint32_t pc;
+    uint32_t value;
+};
+static constexpr uint32_t kSpiTraceSize = 2048;
+static OracleSpiTraceEntry g_spi_trace[kSpiTraceSize] = {};
+
+struct OracleIrqTraceEntry {
+    uint64_t count;
+    uint64_t sys;
+    uint64_t cyc9;
+    uint64_t cyc7;
+    uint64_t insn;
+    uint32_t return_address;
+    uint32_t pending;
+    uint16_t wifi_if;
+    uint16_t wifi_ie;
+};
+static constexpr uint32_t kIrqTraceSize = 256;
+static OracleIrqTraceEntry g_irq_trace[2][kIrqTraceSize] = {};
+
+struct OracleInsnTraceEntry {
+    uint64_t count;
+    uint64_t sys;
+    uint64_t cycles;
+    uint32_t pc;
+    uint32_t cpsr;
+    uint32_t pending;
+    uint32_t r[15];
+};
+// Match the native observer: one full firmware frame must remain queryable so
+// the first producer predating a VBlank checkpoint is not evicted.
+static constexpr uint32_t kInsnTraceSize = 262144;
+static OracleInsnTraceEntry g_insn_trace[2][kInsnTraceSize] = {};
+
+struct OracleFifoTraceEntry {
+    uint64_t count;
+    uint64_t sys;
+    uint64_t cyc9;
+    uint64_t cyc7;
+    uint64_t insn9;
+    uint64_t insn7;
+    uint32_t value;
+};
+static constexpr uint32_t kFifoTraceSize = 64;
+static OracleFifoTraceEntry g_fifo_trace[2][kFifoTraceSize] = {};
+
+struct OracleWatchEntry {
+    uint64_t seq;
+    uint64_t cycles;
+    uint64_t insn;
+    uint32_t pc;
+    uint32_t addr;
+    uint32_t value;
+    uint8_t cpu;
+    uint8_t write;
+    uint8_t width;
+};
+static constexpr uint32_t kWatchSize = 512;
+static OracleWatchEntry g_watch[kWatchSize] = {};
+static uint32_t g_watch_w = 0;
+static uint32_t g_watch_count = 0;
+static uint64_t g_watch_seq = 0;
+
+static bool oracleWatchRange(u32 addr, u32 width, u32 lo, u32 hi)
+{
+    const u32 bytes = width >> 3;
+    return addr < hi && addr + bytes > lo;
+}
+
 // ── sub-frame event break ───────────────────────────────────────────────
 // run_to_event arms a watched counter + target here; the event hooks call
 // oracle_brk_check() right after each bump, and the patched RunFrame loop
@@ -62,6 +137,7 @@ OracleCounters g_oracle_counts;
 static const uint64_t* g_brk_ptr    = nullptr;
 static uint64_t        g_brk_target = 0;
 static bool            g_brk_hit    = false;
+static bool            g_frame_in_progress = false;
 static inline void oracle_brk_check(melonDS::NDS* nds)
 {
     if (g_brk_ptr && *g_brk_ptr >= g_brk_target && !g_brk_hit)
@@ -83,6 +159,8 @@ namespace melonDS
 // Polled by the patched RunFrame loop. External linkage in namespace melonDS
 // to match the `extern bool Oracle_BreakRequested();` declaration in NDS.cpp.
 bool Oracle_BreakRequested() { return g_brk_hit; }
+bool Oracle_FrameInProgress() { return g_frame_in_progress; }
+void Oracle_SetFrameInProgress(bool inProgress) { g_frame_in_progress = inProgress; }
 
 // Resolved at link time by the patched NDS::SetIRQ. Must live in namespace
 // melonDS to match the unqualified extern declaration inside SetIRQ.
@@ -113,8 +191,31 @@ void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width)
     if (addr == 0x04000180) {
         if (width == 16) g_oracle_counts.ipcsync_w++;
     } else if (addr == 0x04000188) {
-        if (width == 32) (cpu == 0 ? g_oracle_counts.fifo9to7
-                                   : g_oracle_counts.fifo7to9)++;
+        if (width == 32) {
+            uint64_t& count = cpu == 0 ? g_oracle_counts.fifo9to7
+                                        : g_oracle_counts.fifo7to9;
+            ++count;
+            g_fifo_trace[cpu][(count - 1) % kFifoTraceSize] = {
+                count,
+                nds->OracleSysTimestamp(),
+                nds->ARM9Timestamp,
+                nds->ARM7Timestamp,
+                g_oracle_counts.insn9 + (cpu == 0 ? 1u : 0u),
+                g_oracle_counts.insn7 + (cpu == 1 ? 1u : 0u),
+                val,
+            };
+        }
+    } else if (addr == 0x040001C2 && cpu == 1 && (width == 8 || width == 16)) {
+        g_oracle_counts.spi_w++;
+        g_spi_trace[(g_oracle_counts.spi_w - 1) % kSpiTraceSize] = {
+            g_oracle_counts.spi_w,
+            nds->OracleSysTimestamp(),
+            nds->ARM9Timestamp,
+            nds->ARM7Timestamp,
+            g_oracle_counts.insn7,
+            nds->ARM7.R[15],
+            val & 0xFFu,
+        };
     } else if (addr == 0x04000504 && cpu == 1) {
         u32 v = val & 0x3FF;
         if (g_oracle_counts.soundbias_w == 0) g_oracle_counts.soundbias_first = v;
@@ -122,6 +223,29 @@ void Oracle_OnIOWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width)
         g_oracle_counts.soundbias_last = v;
     }
     oracle_brk_check(nds);
+}
+
+// Always-on firmware settings control-block write history. The hook sits in
+// the base ARMxWriteN paths, so it remains independent of the CPU execution
+// backend and cannot be armed after the fact.
+void Oracle_OnMemWrite(NDS* nds, u32 cpu, u32 addr, u32 val, u32 width)
+{
+    if (!oracleWatchRange(addr, width, 0x02356000u, 0x02356200u)) return;
+    OracleWatchEntry& e = g_watch[g_watch_w];
+    e.seq = ++g_watch_seq;
+    e.cycles = cpu == 0 ? nds->ARM9Timestamp : nds->ARM7Timestamp;
+    e.insn = cpu == 0 ? g_oracle_counts.insn9 : g_oracle_counts.insn7;
+    ARM* arm = cpu == 0 ? static_cast<ARM*>(&nds->ARM9)
+                        : static_cast<ARM*>(&nds->ARM7);
+    const bool thumb = (arm->CPSR & 0x20u) != 0u;
+    e.pc = arm->R[15] - (thumb ? 4u : 8u);
+    e.addr = addr;
+    e.value = val;
+    e.cpu = static_cast<uint8_t>(cpu);
+    e.write = 1u;
+    e.width = static_cast<uint8_t>(width >> 3);
+    g_watch_w = (g_watch_w + 1u) % kWatchSize;
+    if (g_watch_count < kWatchSize) ++g_watch_count;
 }
 
 // Always-on per-CPU retired-instruction ring. Called once per architectural
@@ -136,6 +260,46 @@ void Oracle_OnInsnRetire(NDS* nds, u32 cpu)
     (cpu == 0 ? g_oracle_counts.insn9 : g_oracle_counts.insn7)++;
     oracle_brk_check(nds);
 }
+
+void Oracle_OnInsnBegin(NDS* nds, u32 cpu, u32 pc, u32 cpsr)
+{
+    const uint64_t count = (cpu == 0 ? g_oracle_counts.insn9
+                                      : g_oracle_counts.insn7) + 1u;
+    OracleInsnTraceEntry& e =
+        g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
+    e = {
+        count,
+        nds->OracleSysTimestamp(),
+        cpu == 0 ? nds->ARM9Timestamp : nds->ARM7Timestamp,
+        pc,
+        cpsr,
+        static_cast<uint32_t>(cpu == 0 ? nds->ARM9.Cycles : nds->ARM7.Cycles),
+    };
+    const u32* regs = cpu == 0 ? nds->ARM9.R : nds->ARM7.R;
+    std::memcpy(e.r, regs, sizeof(e.r));
+}
+
+// Called by ARM::TriggerIRQ after the mask check and before JumpTo adds the
+// exception refill. `instruction_cycles` is the just-retired instruction's
+// pending cost, which melonDS commits after TriggerIRQ returns. Including it
+// makes this timestamp directly comparable to native runtime_irq entry.
+void Oracle_OnIRQAccept(NDS* nds, u32 cpu, u32 return_address,
+                        u32 instruction_cycles)
+{
+    uint64_t& count = cpu == 0 ? g_oracle_counts.irq9 : g_oracle_counts.irq7;
+    ++count;
+    g_irq_trace[cpu][(count - 1) % kIrqTraceSize] = {
+        count,
+        nds->OracleSysTimestamp(),
+        nds->ARM9Timestamp + (cpu == 0 ? instruction_cycles : 0),
+        nds->ARM7Timestamp + (cpu == 1 ? instruction_cycles : 0),
+        cpu == 0 ? g_oracle_counts.insn9 : g_oracle_counts.insn7,
+        return_address,
+        nds->IE[cpu] & nds->IF[cpu],
+        cpu == 1 ? nds->Wifi.Read(0x04800010u) : 0u,
+        cpu == 1 ? nds->Wifi.Read(0x04800012u) : 0u,
+    };
+}
 }
 
 // ─────────────────────────────────────────────────────── the NDS subclass ───
@@ -149,6 +313,22 @@ class OracleNDS : public NDS
 {
 public:
     explicit OracleNDS(NDSArgs&& args) : NDS(std::move(args)) {}
+
+    u8 DebugMemRead(u32 cpu, u32 addr)
+    {
+        if (cpu == 9)
+        {
+            // ARM9's TCMs are private CPU memories and never reach the NDS
+            // bus accessors.  Mirror ARMv5's debugger view here so TCP memory
+            // inspection sees the same bytes as guest data loads.
+            if (addr < ARM9.ITCMSize)
+                return ARM9.ITCM[addr & (ITCMPhysicalSize - 1)];
+            if ((addr & ARM9.DTCMMask) == ARM9.DTCMBase)
+                return ARM9.DTCM[addr & (DTCMPhysicalSize - 1)];
+            return ARM9Read8(addr);
+        }
+        return ARM7Read8(addr);
+    }
 
     u32 DebugIORead(u32 cpu, u32 addr, u32 width)
     {
@@ -271,6 +451,7 @@ static uint64_t eventValue(const std::string& ev)
     if (ev == "fifo7to9")  return c.fifo7to9;
     if (ev == "dma_done")  return c.dma_done;
     if (ev == "timer_ovf") return c.timer_ovf;
+    if (ev == "spi_w")     return c.spi_w;
     if (ev == "soundbias_w") return c.soundbias_w;
     if (ev == "insn9")     return c.insn9;
     if (ev == "insn7")     return c.insn7;
@@ -289,6 +470,7 @@ static const uint64_t* eventPtr(const std::string& ev)
     if (ev == "fifo7to9")    return &c.fifo7to9;
     if (ev == "dma_done")    return &c.dma_done;
     if (ev == "timer_ovf")   return &c.timer_ovf;
+    if (ev == "spi_w")       return &c.spi_w;
     if (ev == "soundbias_w") return &c.soundbias_w;
     if (ev == "insn9")       return &c.insn9;
     if (ev == "insn7")       return &c.insn7;
@@ -306,12 +488,14 @@ static std::string countsJson(OracleNDS* nds)
     snprintf(buf, sizeof(buf),
         "{\"vblank9\":%llu,\"vblank7\":%llu,\"ipcsync_w\":%llu,"
         "\"fifo9to7\":%llu,\"fifo7to9\":%llu,\"dma_done\":%llu,\"timer_ovf\":%llu,"
+        "\"spi_w\":%llu,\"irq9\":%llu,\"irq7\":%llu,"
         "\"soundbias_w\":%llu,\"soundbias_first\":%u,\"soundbias_last\":%u,"
         "\"insn9\":%llu,\"insn7\":%llu,\"cyc9\":%llu,\"cyc7\":%llu}",
         (unsigned long long)c.vblank9, (unsigned long long)c.vblank7,
         (unsigned long long)c.ipcsync_w, (unsigned long long)c.fifo9to7,
         (unsigned long long)c.fifo7to9, (unsigned long long)c.dma_done,
-        (unsigned long long)c.timer_ovf,
+        (unsigned long long)c.timer_ovf, (unsigned long long)c.spi_w,
+        (unsigned long long)c.irq9, (unsigned long long)c.irq7,
         (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
         (unsigned long long)c.insn9, (unsigned long long)c.insn7,
         (unsigned long long)nds->ARM9Timestamp,
@@ -359,7 +543,14 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         nds->SetLidClosed(false);
         nds->Start();
         g_oracle_counts = OracleCounters{};   // clear the event ring
+        std::memset(g_spi_trace, 0, sizeof(g_spi_trace));
+        std::memset(g_irq_trace, 0, sizeof(g_irq_trace));
+        std::memset(g_insn_trace, 0, sizeof(g_insn_trace));
+        std::memset(g_fifo_trace, 0, sizeof(g_fifo_trace));
+        std::memset(g_watch, 0, sizeof(g_watch));
+        g_watch_w = 0; g_watch_count = 0; g_watch_seq = 0;
         g_brk_ptr = nullptr; g_brk_target = 0; g_brk_hit = false;
+        g_frame_in_progress = false;
         return "{\"ok\":true}";
     }
 
@@ -395,8 +586,112 @@ static std::string handle(OracleNDS* nds, const std::string& line)
     if (cmd == "event_counts")
         return countsJson(nds);
 
+    if (cmd == "rtc_state")
+    {
+        RTC::StateData s{};
+        nds->RTC.GetState(s);
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "{\"io\":%u,\"status1\":%u,\"status2\":%u,"
+            "\"datetime\":[%u,%u,%u,%u,%u,%u,%u]}",
+            nds->RTC.Read(), s.StatusReg1, s.StatusReg2,
+            s.DateTime[0], s.DateTime[1], s.DateTime[2], s.DateTime[3],
+            s.DateTime[4], s.DateTime[5], s.DateTime[6]);
+        return buf;
+    }
+
+    if (cmd == "spi_sample")
+    {
+        uint64_t count = jsonU64(line, "count", 0);
+        if (count == 0) return "{\"found\":false}";
+        const OracleSpiTraceEntry& e = g_spi_trace[(count - 1) % kSpiTraceSize];
+        if (e.count != count) return "{\"found\":false}";
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn7\":%llu,\"pc\":%u,\"value\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn7, e.pc, e.value);
+        return buf;
+    }
+
+    if (cmd == "irq_sample")
+    {
+        uint32_t cpu = jsonU64(line, "cpu", 9) == 7 ? 1u : 0u;
+        uint64_t count = jsonU64(line, "count", 0);
+        if (count == 0) return "{\"found\":false}";
+        const OracleIrqTraceEntry& e = g_irq_trace[cpu][(count - 1) % kIrqTraceSize];
+        if (e.count != count) return "{\"found\":false}";
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn\":%llu,\"return_address\":%u,"
+            "\"pending\":%u,\"wifi_if\":%u,\"wifi_ie\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn, e.return_address, e.pending,
+            e.wifi_if, e.wifi_ie);
+        return buf;
+    }
+
+    if (cmd == "insn_sample")
+    {
+        uint32_t cpu = jsonU64(line, "cpu", 9) == 7 ? 1u : 0u;
+        uint64_t count = jsonU64(line, "count", 0);
+        if (count == 0) return "{\"found\":false}";
+        const OracleInsnTraceEntry& e = g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
+        if (e.count != count) return "{\"found\":false}";
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cycles\":%llu,"
+            "\"pc\":%u,\"cpsr\":%u,\"pending\":%u,\"r\":[",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cycles, e.pc, e.cpsr, e.pending);
+        std::string out = buf;
+        for (int i = 0; i < 15; i++)
+        {
+            if (i) out += ',';
+            out += std::to_string(e.r[i]);
+        }
+        return out + "]}";
+    }
+
+    if (cmd == "fifo_sample")
+    {
+        uint32_t cpu = jsonU64(line, "cpu", 9) == 7 ? 1u : 0u;
+        uint64_t count = jsonU64(line, "count", 0);
+        if (count == 0) return "{\"found\":false}";
+        const OracleFifoTraceEntry& e = g_fifo_trace[cpu][(count - 1) % kFifoTraceSize];
+        if (e.count != count) return "{\"found\":false}";
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn9\":%llu,\"insn7\":%llu,\"value\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn9, (unsigned long long)e.insn7, e.value);
+        return buf;
+    }
+
     if (cmd == "io_state")
         return ioStateJson(nds);
+
+    if (cmd == "sched_state")
+    {
+        std::string out = "{\"sys\":" + std::to_string(nds->OracleSysTimestamp())
+            + ",\"arm9\":" + std::to_string(nds->ARM9Timestamp)
+            + ",\"arm7\":" + std::to_string(nds->ARM7Timestamp)
+            + ",\"mask\":" + std::to_string(nds->OracleSchedListMask())
+            + ",\"events\":[";
+        for (uint32_t i = 0; i < Event_MAX; ++i)
+        {
+            if (i) out += ',';
+            out += std::to_string(nds->SchedList[i].Timestamp);
+        }
+        out += "]}";
+        return out;
+    }
 
     if (cmd == "run_to_event")
     {
@@ -455,7 +750,7 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         std::string hex;
         std::vector<uint8_t> tmp(len);
         for (uint32_t i = 0; i < len; i++)
-            tmp[i] = (cpu == 7) ? nds->ARM7Read8(addr + i) : nds->ARM9Read8(addr + i);
+            tmp[i] = nds->DebugMemRead(static_cast<uint32_t>(cpu), addr + i);
         appendHex(hex, tmp.data(), tmp.size());
         return "{\"hex\":\"" + hex + "\"}";
     }
@@ -481,6 +776,29 @@ static std::string handle(OracleNDS* nds, const std::string& line)
         std::string hex;
         appendHex(hex, reg.ptr, reg.len);
         return "{\"hex\":\"" + hex + "\"}";
+    }
+
+    if (cmd == "watch")
+    {
+        uint32_t max = (uint32_t)jsonU64(line, "max", 128);
+        if (max > kWatchSize) max = kWatchSize;
+        uint32_t count = g_watch_count < max ? g_watch_count : max;
+        uint32_t start = (g_watch_w + kWatchSize - count) % kWatchSize;
+        std::string out = "{\"events\":[";
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const OracleWatchEntry& e = g_watch[(start + i) % kWatchSize];
+            char b[240];
+            std::snprintf(b, sizeof(b),
+                "%s{\"seq\":%llu,\"cycles\":%llu,\"insn\":%llu,"
+                "\"cpu\":%u,\"write\":%u,\"width\":%u,"
+                "\"pc\":%u,\"addr\":%u,\"value\":%u}",
+                i ? "," : "", (unsigned long long)e.seq,
+                (unsigned long long)e.cycles, (unsigned long long)e.insn,
+                e.cpu, e.write, e.width, e.pc, e.addr, e.value);
+            out += b;
+        }
+        return out + "]}";
     }
 
     if (cmd == "framebuffer")

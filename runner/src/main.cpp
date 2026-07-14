@@ -19,6 +19,7 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
+#include "frontend.h"
 #include "sha1.h"
 
 // Generated per-CPU dispatch tables (C linkage).
@@ -26,6 +27,46 @@ extern "C" const DispatchEntry g_dispatch_arm9_bios[];
 extern "C" const unsigned g_dispatch_arm9_bios_len;
 extern "C" const DispatchEntry g_dispatch_arm7_bios[];
 extern "C" const unsigned g_dispatch_arm7_bios_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_early[];
+extern "C" const unsigned g_dispatch_fw_arm9_early_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_menu[];
+extern "C" const unsigned g_dispatch_fw_arm9_menu_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_calibration_save[];
+extern "C" const unsigned g_dispatch_fw_arm9_calibration_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_profile_save[];
+extern "C" const unsigned g_dispatch_fw_arm9_profile_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_system_options_save[];
+extern "C" const unsigned g_dispatch_fw_arm9_system_options_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_date_alarm_save[];
+extern "C" const unsigned g_dispatch_fw_arm9_date_alarm_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_main_menu_controls[];
+extern "C" const unsigned g_dispatch_fw_arm9_main_menu_controls_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_download_play_shutdown[];
+extern "C" const unsigned g_dispatch_fw_arm9_download_play_shutdown_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_pictochat_room_a[];
+extern "C" const unsigned g_dispatch_fw_arm9_pictochat_room_a_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm9_shutdown[];
+extern "C" const unsigned g_dispatch_fw_arm9_shutdown_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_early[];
+extern "C" const unsigned g_dispatch_fw_arm7_early_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_intermediate[];
+extern "C" const unsigned g_dispatch_fw_arm7_intermediate_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_shared_ready[];
+extern "C" const unsigned g_dispatch_fw_arm7_shared_ready_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_irq_ready[];
+extern "C" const unsigned g_dispatch_fw_arm7_irq_ready_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_menu[];
+extern "C" const unsigned g_dispatch_fw_arm7_menu_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_calibration_save[];
+extern "C" const unsigned g_dispatch_fw_arm7_calibration_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_date_alarm_save[];
+extern "C" const unsigned g_dispatch_fw_arm7_date_alarm_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_main_menu_controls[];
+extern "C" const unsigned g_dispatch_fw_arm7_main_menu_controls_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_download_play_shutdown[];
+extern "C" const unsigned g_dispatch_fw_arm7_download_play_shutdown_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_pictochat_room_a[];
+extern "C" const unsigned g_dispatch_fw_arm7_pictochat_room_a_len;
 
 namespace {
 
@@ -49,6 +90,54 @@ bool verify(const std::vector<uint8_t>& data, const char* want,
     return true;
 }
 
+uint16_t firmware_crc16(const uint8_t* data, size_t len, uint32_t start) {
+    static constexpr uint16_t kPoly[8] = {
+        0xC0C1u, 0xC181u, 0xC301u, 0xC601u,
+        0xCC01u, 0xD801u, 0xF001u, 0xA001u,
+    };
+    for (size_t i = 0; i < len; ++i) {
+        start ^= data[i];
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            if (start & 1u)
+                start = (start >> 1u) ^ (uint32_t{kPoly[bit]} << (7u - bit));
+            else
+                start >>= 1u;
+        }
+    }
+    return static_cast<uint16_t>(start);
+}
+
+// melonDS exposes host screen pixels through a deterministic, ideal DS touch
+// calibration. It applies this to both redundant user-settings blocks before
+// the firmware CPU reads them. Mirror that in our private in-memory image so
+// an input coordinate means the same thing on both sides; never alter the dump
+// on disk (the SHA-1 above always verifies the original bytes).
+bool normalize_touch_calibration(std::vector<uint8_t>& fw) {
+    if (fw.size() < 0x22u) return false;
+    const size_t user = size_t{fw[0x20]} << 3u |
+                        size_t{fw[0x21]} << 11u;
+    if (user + 0x200u > fw.size()) return false;
+
+    auto put16 = [&](size_t off, uint16_t value) {
+        fw[off] = static_cast<uint8_t>(value);
+        fw[off + 1u] = static_cast<uint8_t>(value >> 8u);
+    };
+    for (unsigned copy = 0; copy < 2; ++copy) {
+        const size_t base = user + size_t{copy} * 0x100u;
+        put16(base + 0x58u, 0u);          // ADC1 X
+        put16(base + 0x5Au, 0u);          // ADC1 Y
+        fw[base + 0x5Cu] = 0u;            // pixel1 X
+        fw[base + 0x5Du] = 0u;            // pixel1 Y
+        put16(base + 0x5Eu, 255u << 4u);  // ADC2 X
+        put16(base + 0x60u, 191u << 4u);  // ADC2 Y
+        fw[base + 0x62u] = 255u;          // pixel2 X
+        fw[base + 0x63u] = 191u;          // pixel2 Y
+        put16(base + 0x72u,
+              firmware_crc16(fw.data() + base, 0x70u, 0xFFFFu));
+    }
+    return true;
+}
+
 void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
     std::fprintf(stderr, "  %s: PC=%08X CPSR=%08X SP=%08X LR=%08X "
                  "R0=%08X R12=%08X  cycles=%llu\n",
@@ -62,17 +151,24 @@ int main(int argc, char** argv) {
     std::string dir = "bios";
     uint64_t budget = 4000000ull;
     bool serve = false;
+    bool interactive = false;
+    bool discover_static_misses = false;
     uint16_t port = 19842;
     int positional = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--serve") {
             serve = true;
+        } else if (a == "--interactive") {
+            interactive = true;
+        } else if (a == "--discover-static-misses") {
+            discover_static_misses = true;
         } else if (a == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
-                "usage: %s [bios-dir] [cycle-budget] [--serve] [--port 19842]\n",
+                "usage: %s [bios-dir] [cycle-budget] [--serve|--interactive] [--port 19842] "
+                "[--discover-static-misses]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
@@ -87,6 +183,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    g_discover_static_misses = discover_static_misses;
+
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
     auto fw = read_file(dir + "/firmware.bin");
@@ -94,6 +192,10 @@ int main(int argc, char** argv) {
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
     if (!ok) { std::fprintf(stderr, "refusing to start: dump verification failed\n"); return 1; }
+    if (!normalize_touch_calibration(fw)) {
+        std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
+        return 1;
+    }
 
     // Full power-on init, reusable so the debug server can honour `reset`
     // (the bisector compares fresh-from-reset at each event count).
@@ -111,6 +213,61 @@ int main(int argc, char** argv) {
                               g_dispatch_arm9_bios_len, 0xFFFF0000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
                               g_dispatch_arm7_bios_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_early,
+                              g_dispatch_fw_arm9_early_len, 0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_menu,
+                              g_dispatch_fw_arm9_menu_len, 0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_calibration_save,
+                              g_dispatch_fw_arm9_calibration_save_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_profile_save,
+                              g_dispatch_fw_arm9_profile_save_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_system_options_save,
+                              g_dispatch_fw_arm9_system_options_save_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_date_alarm_save,
+                              g_dispatch_fw_arm9_date_alarm_save_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_main_menu_controls,
+                              g_dispatch_fw_arm9_main_menu_controls_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9,
+                              g_dispatch_fw_arm9_download_play_shutdown,
+                              g_dispatch_fw_arm9_download_play_shutdown_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_pictochat_room_a,
+                              g_dispatch_fw_arm9_pictochat_room_a_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_shutdown,
+                              g_dispatch_fw_arm9_shutdown_len,
+                              0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_early,
+                              g_dispatch_fw_arm7_early_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_intermediate,
+                              g_dispatch_fw_arm7_intermediate_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_shared_ready,
+                              g_dispatch_fw_arm7_shared_ready_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_irq_ready,
+                              g_dispatch_fw_arm7_irq_ready_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_menu,
+                              g_dispatch_fw_arm7_menu_len, 0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_calibration_save,
+                              g_dispatch_fw_arm7_calibration_save_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_date_alarm_save,
+                              g_dispatch_fw_arm7_date_alarm_save_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_main_menu_controls,
+                              g_dispatch_fw_arm7_main_menu_controls_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7,
+                              g_dispatch_fw_arm7_download_play_shutdown,
+                              g_dispatch_fw_arm7_download_play_shutdown_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_pictochat_room_a,
+                              g_dispatch_fw_arm7_pictochat_room_a_len,
+                              0x00000000u);
 
         // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
         const uint32_t reset_cpsr = 0x13u | CPSR_I_BIT | CPSR_F_BIT;
@@ -119,6 +276,11 @@ int main(int argc, char** argv) {
         scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
     };
     boot();
+
+    if (interactive) {
+        std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
+        return nds_run_interactive_frontend();
+    }
 
     if (serve) {
         std::fprintf(stderr, "[run] debug server mode from reset\n");

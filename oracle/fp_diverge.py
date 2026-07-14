@@ -38,14 +38,17 @@ def state(c, cpu, K):
 
 
 def same(a, b):
-    """a,b = (regs16, cpsr, reached, insn). Compare PIPELINE-INDEPENDENT state:
-    r0..r14 + cpsr. r15 (PC) is EXCLUDED from the equality test — melonDS keeps
-    R15 pipeline-ahead (oracle_R15 = native_R15 + 4 in ARM), so a raw r15 compare
-    would flag a constant non-divergence. A branch-target divergence still shows
-    up here one instruction later (the divergent branch's *target* executes a
-    different instruction, which then perturbs r0..r14/cpsr). Both raw PCs are
-    reported at the boundary so the branch site is still visible."""
-    return a[0][:15] == b[0][:15] and a[1] == b[1]
+    """Compare full architectural state at an exact instruction index.
+
+    melonDS stores R15 pipeline-ahead, so normalize its raw value by 4 in ARM
+    state or 2 in Thumb state before comparing it with the runner's next-PC.
+    A failed/short run is a coverage ceiling, never evidence of agreement.
+    """
+    if not (a[2] and b[2]) or a[3] != b[3]:
+        return False
+    oracle_pc = (b[0][15] - (2 if (b[1] & 0x20) else 4)) & 0xFFFFFFFF
+    return (a[0][:15] == b[0][:15] and a[1] == b[1]
+            and a[0][15] == oracle_pc)
 
 
 def diff_report(a, b):
@@ -56,9 +59,9 @@ def diff_report(a, b):
             out.append(f"    {nm:>3}: native={a[0][i]:08x} oracle={b[0][i]:08x}")
     if a[1] != b[1]:
         out.append(f"   cpsr: native={a[1]:08x} oracle={b[1]:08x}")
-    # r15 always shown (raw) for context — offset by the pipeline, not compared.
-    out.append(f"    pc*: native={a[0][15]:08x} oracle={b[0][15]:08x}"
-               f"   (*raw; oracle is pipeline-ahead, not part of the diff)")
+    oracle_pc = (b[0][15] - (2 if (b[1] & 0x20) else 4)) & 0xFFFFFFFF
+    out.append(f"     pc: native={a[0][15]:08x} oracle={oracle_pc:08x}"
+               f"   (oracle raw R15={b[0][15]:08x})")
     return "\n".join(out)
 
 
@@ -69,6 +72,8 @@ def main():
     ap.add_argument("--oracle-port", type=int, default=19843)
     ap.add_argument("--max", type=int, default=8_000_000,
                     help="upper cap on instruction index to search")
+    ap.add_argument("--known-same", type=int, default=0,
+                    help="previously verified identical lower bound; validate it, then bisect directly to --max")
     args = ap.parse_args()
     cpu = args.cpu
     n = DebugClient(port=args.native_port, timeout=600.0)
@@ -97,17 +102,31 @@ def main():
               "   Reconcile the counters before trusting the bisection.")
 
     # 2) Geometric probe upward for the first K that differs.
-    lo_same = 0
+    lo_same = args.known_same
     hi_diff = None
-    K = 1
-    while K <= args.max:
-        sn, so = cmp_at(K)
+    if lo_same:
+        if lo_same >= args.max:
+            ap.error("--known-same must be lower than --max")
+        sn, so = cmp_at(lo_same)
+        if not same(sn, so):
+            raise SystemExit(f"--known-same={lo_same} is not identical on this build")
+        sn, so = cmp_at(args.max)
         if same(sn, so):
-            lo_same = K
-            K *= 4
+            lo_same = args.max
         else:
-            hi_diff = K
-            break
+            hi_diff = args.max
+    else:
+        K = 1
+        while True:
+            sn, so = cmp_at(K)
+            if same(sn, so):
+                lo_same = K
+                if K == args.max:
+                    break
+                K = min(K * 4, args.max)
+            else:
+                hi_diff = K
+                break
     if hi_diff is None:
         print(f"\nNo ARM{cpu} state divergence up to insn{cpu}={args.max}. "
               f"The first divergence is elsewhere (other CPU / IPC / later).")
