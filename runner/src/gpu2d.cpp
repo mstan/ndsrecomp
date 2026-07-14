@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include "io.h"
@@ -42,12 +44,53 @@ using Frame = std::array<uint32_t, 256 * 192>;
 // for instruction-precise framebuffer queries made while VCount is 192..262.
 std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
 int g_front = 0;
+uint64_t g_render_ns = 0;
+uint64_t g_obj_ns = 0;
+uint64_t g_render_scanlines = 0;
 
-uint16_t pal16(uint32_t offset) {
-    return static_cast<uint16_t>(nds_video_read(9, 0x05000000u + (offset & 0x7FFu), 2));
+bool profiling() {
+    static const bool enabled = std::getenv("NDS_PROFILE_GPU") != nullptr;
+    return enabled;
 }
-uint16_t oam16(uint32_t offset) {
-    return static_cast<uint16_t>(nds_video_read(9, 0x07000000u + (offset & 0x7FFu), 2));
+
+uint16_t view16(const uint8_t* view, uint32_t offset) {
+    uint16_t value = 0;
+    std::memcpy(&value, view + (offset & 0x3FFu), sizeof(value));
+    return value;
+}
+uint8_t bg_view8(const NdsVramRendererView& view, int engine,
+                 uint32_t addr) {
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 31u);
+    if (const uint8_t* direct = view.bg[chunk])
+        return direct[addr & 0x3FFFu];
+    return static_cast<uint8_t>(nds_vram_read_bg(engine, addr, 1));
+}
+uint16_t bg_view16(const NdsVramRendererView& view, int engine,
+                   uint32_t addr) {
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 31u);
+    if (const uint8_t* direct = view.bg[chunk]) {
+        uint16_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return static_cast<uint16_t>(nds_vram_read_bg(engine, addr, 2));
+}
+uint8_t obj_view8(const NdsVramRendererView& view, int engine,
+                  uint32_t addr) {
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 15u);
+    if (const uint8_t* direct = view.obj[chunk])
+        return direct[addr & 0x3FFFu];
+    return static_cast<uint8_t>(nds_vram_read_obj(engine, addr, 1));
+}
+uint16_t obj_view16(const NdsVramRendererView& view, int engine,
+                    uint32_t addr) {
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 15u);
+    if (const uint8_t* direct = view.obj[chunk]) {
+        uint16_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return static_cast<uint16_t>(nds_vram_read_obj(engine, addr, 2));
 }
 uint32_t rgb6(uint16_t color) {
     return ((color & 0x001Fu) << 1) |
@@ -84,69 +127,110 @@ uint32_t darken(uint32_t c, uint32_t f, uint32_t bias = 7u) {
            ((b0-(((b0*f)+bias)>>4))<<16);
 }
 
-Pixel text_pixel(int engine, int bg, int x, int y) {
+struct TextLine {
+    int engine = 0;
+    int bg = 0;
+    const uint8_t* palette = nullptr;
+    const NdsVramRendererView* vram = nullptr;
+    uint16_t cnt = 0;
+    uint32_t sy = 0;
+    uint32_t char_base = 0;
+    uint32_t map_base = 0;
+    uint32_t width_extra = 0;
+    uint32_t cached_map_addr = UINT32_MAX;
+    uint16_t cached_tile = 0;
+};
+
+TextLine prepare_text_line(int engine, int bg, int y,
+                           const uint8_t* palette,
+                           const NdsVramRendererView* vram) {
     Unit& u = g_unit[engine];
-    const uint16_t cnt = u.bgcnt[bg];
+    TextLine line{};
+    line.engine = engine;
+    line.bg = bg;
+    line.palette = palette;
+    line.vram = vram;
+    line.cnt = u.bgcnt[bg];
+    const uint32_t size = line.cnt >> 14;
+    line.sy = (u.bgy[bg] + y) & 0x1FFu;
+    if (!(size & 2u)) line.sy &= 0xFFu;
+    if ((line.cnt & 0x40u) && u.bg_mosaic_y)
+        line.sy -= y % (u.bg_mosaic_y + 1u);
+    line.char_base = (line.cnt & 0x003Cu) << 12;
+    line.map_base = (line.cnt & 0x1F00u) << 3;
+    if (!engine) {
+        line.char_base += (u.dispcnt & 0x07000000u) >> 8;
+        line.map_base += (u.dispcnt & 0x38000000u) >> 11;
+    }
+    line.width_extra = (line.cnt & 0x4000u) ? 0x100u : 0u;
+    return line;
+}
+
+Pixel text_pixel(TextLine& line, int x) {
+    Unit& u = g_unit[line.engine];
+    const uint16_t cnt = line.cnt;
+    const int bg = line.bg;
     uint32_t sx = (u.bgx[bg] + x) & 0x1FFu;
-    uint32_t sy = (u.bgy[bg] + y) & 0x1FFu;
     const uint32_t size = cnt >> 14;
     if (!(size & 1u)) sx &= 0xFFu;
-    if (!(size & 2u)) sy &= 0xFFu;
     if ((cnt & 0x40u) && u.bg_mosaic_x) sx -= x % (u.bg_mosaic_x + 1u);
-    if ((cnt & 0x40u) && u.bg_mosaic_y) sy -= y % (u.bg_mosaic_y + 1u);
-
-    uint32_t char_base = (cnt & 0x003Cu) << 12;
-    uint32_t map_base = (cnt & 0x1F00u) << 3;
-    if (!engine) {
-        char_base += (u.dispcnt & 0x07000000u) >> 8;
-        map_base += (u.dispcnt & 0x38000000u) >> 11;
-    }
-    uint32_t map_addr = map_base;
+    uint32_t map_addr = line.map_base;
     if (cnt & 0x8000u) {
-        map_addr += (sy & 0x1F8u) << 3;
-        if (cnt & 0x4000u) map_addr += (sy & 0x100u) << 3;
-    } else map_addr += (sy & 0xF8u) << 3;
-    const uint32_t width_extra = (cnt & 0x4000u) ? 0x100u : 0u;
-    map_addr += ((sx & 0xF8u) >> 2) + ((sx & width_extra) << 3);
-    const uint16_t tile = static_cast<uint16_t>(nds_vram_read_bg(engine,map_addr,2));
-    uint32_t tx = sx & 7u, ty = sy & 7u;
+        map_addr += (line.sy & 0x1F8u) << 3;
+        if (cnt & 0x4000u) map_addr += (line.sy & 0x100u) << 3;
+    } else map_addr += (line.sy & 0xF8u) << 3;
+    map_addr += ((sx & 0xF8u) >> 2) + ((sx & line.width_extra) << 3);
+    if (map_addr != line.cached_map_addr) {
+        line.cached_map_addr = map_addr;
+        line.cached_tile = static_cast<uint16_t>(
+            bg_view16(*line.vram, line.engine, map_addr));
+    }
+    const uint16_t tile = line.cached_tile;
+    uint32_t tx = sx & 7u, ty = line.sy & 7u;
     if (tile & 0x0400u) tx = 7u-tx;
     if (tile & 0x0800u) ty = 7u-ty;
     uint8_t index;
     uint16_t color;
     if (cnt & 0x0080u) {
-        index = static_cast<uint8_t>(nds_vram_read_bg(engine,char_base+((tile&0x3FFu)<<6)+(ty<<3)+tx,1));
+        index = bg_view8(*line.vram, line.engine,
+            line.char_base+((tile&0x3FFu)<<6)+(ty<<3)+tx);
         if (!index) return {};
         if (u.dispcnt & 0x40000000u) {
             const uint32_t slot = (bg<2 && (cnt&0x2000u)) ? 2u+bg : static_cast<uint32_t>(bg);
-            color = static_cast<uint16_t>(nds_vram_read_bg_extpal(engine,(slot<<13)+((tile>>12)<<9)+(index<<1),2));
-        } else color = pal16((engine?0x400u:0u)+(index<<1));
+            color = static_cast<uint16_t>(nds_vram_read_bg_extpal(line.engine,(slot<<13)+((tile>>12)<<9)+(index<<1),2));
+        } else color = view16(line.palette,index<<1);
     } else {
-        const uint8_t packed = static_cast<uint8_t>(nds_vram_read_bg(engine,char_base+((tile&0x3FFu)<<5)+(ty<<2)+(tx>>1),1));
+        const uint8_t packed = bg_view8(*line.vram, line.engine,
+            line.char_base+((tile&0x3FFu)<<5)+(ty<<2)+(tx>>1));
         index = (tx&1u) ? packed>>4 : packed&0xFu;
         if (!index) return {};
-        color = pal16((engine?0x400u:0u)+(((tile>>12)&0xFu)<<5)+(index<<1));
+        color = view16(line.palette,(((tile>>12)&0xFu)<<5)+(index<<1));
     }
     return {rgb6(color), static_cast<uint8_t>(1u << bg), 0,
             static_cast<uint8_t>(cnt & 3u), static_cast<uint8_t>(bg + 1), true};
 }
 
 void put_obj(std::array<Pixel,256>& line, int x, const Pixel& p) {
-    if (x>=0 && x<256 && p.valid) line[x]=p;
+    if (x < 0 || x >= 256 || !p.valid) return;
+    // OAM index is resolved by visiting entries from 127 down to 0: an equal
+    // priority pixel written later therefore has the lower (winning) index.
+    // A numerically worse priority must not replace an existing front pixel.
+    if (!line[x].valid || p.priority <= line[x].priority) line[x]=p;
 }
 
-void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
+void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
+                     const uint8_t* oam, const uint8_t* palette,
+                     const NdsVramRendererView& vram) {
     out.fill({});
     const Unit& u=g_unit[engine];
     if (!(u.dispcnt&0x1000u)) return;
     static constexpr int widths[16]={8,16,8,8,16,32,8,8,32,32,16,8,64,64,32,8};
     static constexpr int heights[16]={8,8,16,8,16,8,32,8,32,16,32,8,64,32,64,8};
-    const uint32_t oam_base=engine?0x400u:0u;
-    const uint32_t pal_base=engine?0x600u:0x200u;
-    for (int priority=3;priority>=0;--priority) {
-        for (int n=127;n>=0;--n) {
-            const uint16_t a0=oam16(oam_base+n*8), a1=oam16(oam_base+n*8+2), a2=oam16(oam_base+n*8+4);
-            if (((a2>>10)&3)!=priority) continue;
+    const uint32_t oam_base=0;
+    const uint32_t pal_base=0x200u;
+    for (int n=127;n>=0;--n) {
+            const uint16_t a0=view16(oam,oam_base+n*8), a1=view16(oam,oam_base+n*8+2), a2=view16(oam,oam_base+n*8+4);
+            const int priority=(a2>>10)&3;
             const int shape=(a0>>14)&3,size=(a1>>14)&3, sp=shape|(size<<2);
             int w=widths[sp],h=heights[sp];
             const bool affine=a0&0x0100u;
@@ -163,14 +247,17 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
             const bool color256=a0&0x2000u;
             const uint32_t tile=a2&0x3FFu;
             const uint8_t alpha=mode==1?0xFFu:0u;
+            int16_t pa=0,pb=0,pc=0,pd=0;
+            if(affine){
+                const int group=(a1>>9)&0x1F;
+                pa=static_cast<int16_t>(view16(oam,oam_base+group*32+6));
+                pb=static_cast<int16_t>(view16(oam,oam_base+group*32+14));
+                pc=static_cast<int16_t>(view16(oam,oam_base+group*32+22));
+                pd=static_cast<int16_t>(view16(oam,oam_base+group*32+30));
+            }
             for(int dx=0;dx<bw;++dx){
                 int px,py;
                 if(affine){
-                    const int group=(a1>>9)&0x1F;
-                    const int16_t pa=static_cast<int16_t>(oam16(oam_base+group*32+6));
-                    const int16_t pb=static_cast<int16_t>(oam16(oam_base+group*32+14));
-                    const int16_t pc=static_cast<int16_t>(oam16(oam_base+group*32+22));
-                    const int16_t pd=static_cast<int16_t>(oam16(oam_base+group*32+30));
                     px=((dx-bw/2)*pa+(row-bh/2)*pb+(w<<7))>>8;
                     py=((dx-bw/2)*pc+(row-bh/2)*pd+(h<<7))>>8;
                     if(px<0||px>=w||py<0||py>=h) continue;
@@ -193,7 +280,7 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
                     } else {
                         base=((tile&0xFu)<<4)+((tile&0x3F0u)<<7)+(py*128u+px)*2;
                     }
-                    color=static_cast<uint16_t>(nds_vram_read_obj(engine,base,2));
+                    color=obj_view16(vram,engine,base);
                     if(!(color&0x8000u))continue;
                 }else{
                     uint32_t tile_index=tile;
@@ -205,13 +292,13 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
                     }
                     if(color256){
                         const uint32_t addr=(tile_index<<5)+((py&7)<<3)+((px>>3)<<6)+(px&7);
-                        index=static_cast<uint8_t>(nds_vram_read_obj(engine,addr,1));if(!index)continue;
+                        index=obj_view8(vram,engine,addr);if(!index)continue;
                         if(u.dispcnt&0x80000000u)color=static_cast<uint16_t>(nds_vram_read_obj_extpal(engine,(((a2>>12)&0xFu)<<9)+(index<<1),2));
-                        else color=pal16(pal_base+(index<<1));
+                        else color=view16(palette,pal_base+(index<<1));
                     }else{
                         const uint32_t addr=(tile_index<<5)+((py&7)<<2)+((px>>3)<<5)+((px&7)>>1);
-                        const uint8_t v=static_cast<uint8_t>(nds_vram_read_obj(engine,addr,1));index=(px&1)?v>>4:v&0xFu;if(!index)continue;
-                        color=pal16(pal_base+(((a2>>12)&0xFu)<<5)+(index<<1));
+                        const uint8_t v=obj_view8(vram,engine,addr);index=(px&1)?v>>4:v&0xFu;if(!index)continue;
+                        color=view16(palette,pal_base+(((a2>>12)&0xFu)<<5)+(index<<1));
                     }
                 }
                 Pixel p{rgb6(color), 0x10u, alpha,
@@ -219,7 +306,6 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out) {
                 if(mode==3)p.alpha=static_cast<uint8_t>(std::min(16u,((a2>>12)&0xFu)+1u));
                 put_obj(out,screen_x,p);
             }
-        }
     }
 }
 
@@ -242,50 +328,81 @@ uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
 void render_engine_line(int engine, int y) {
     Unit& u=g_unit[engine];
     Frame& fb = g_fb[g_front ^ 1][engine];
-    const bool enabled=nds_powercontrol9()&(engine?0x0200u:0x0002u);
-    std::array<Pixel,256> obj{}; render_obj_line(engine,y,obj);
+    uint32_t* const dst = fb.data() + y * 256;
+    const uint8_t* const palette = nds_vram_renderer_palette(engine);
+    const uint8_t* const oam = nds_vram_renderer_oam(engine);
+    const NdsVramRendererView& vram = *nds_vram_renderer_view(engine);
+    if (!palette || !oam || (u.dispcnt & 0x80u)) {
+        std::fill_n(dst, 256, 0xFFFFFFFFu);
+        return;
+    }
+    const uint32_t mode=(u.dispcnt>>16)&(engine?1u:3u);
+    if(mode==0){
+        std::fill_n(dst, 256, 0xFFFFFFFFu);
+        return;
+    }
+    if(mode==2){
+        const uint32_t bank=(u.dispcnt>>18)&3u;
+        const uint32_t base=0x06800000u+(bank<<17)+(y*256u)*2u;
+        for(int x=0;x<256;++x){
+            const uint16_t c=static_cast<uint16_t>(
+                nds_video_read(9,base+x*2u,2));
+            dst[x]=to_rgb32(rgb6(c));
+        }
+        return;
+    }
+
+    std::array<Pixel,256> obj{};
+    const auto obj_start = profiling() ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+    render_obj_line(engine,y,obj,oam,palette,vram);
+    if (profiling()) {
+        g_obj_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - obj_start).count());
+    }
+    const Pixel backdrop{rgb6(view16(palette,0)),0x20u,0,4,5,true};
+    std::array<TextLine,4> text_lines{};
+    size_t text_count=0;
+    const uint32_t bgmode=u.dispcnt&7u;
+    for(int bg=0;bg<4;++bg){
+        if(!(u.dispcnt&(0x100u<<bg)))continue;
+        const bool text=(bg<2)||(bgmode==0)||
+            (bg==2&&(bgmode==1||bgmode==3))||(bg==3&&bgmode==0);
+        if(text) text_lines[text_count++]=
+            prepare_text_line(engine,bg,y,palette,&vram);
+    }
+    const uint32_t mbmode=u.master_bright>>14;
+    const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
+    // Common firmware top-screen mode: OBJ over a backdrop, with no BG or
+    // color effect enabled. There is no second layer to sort or blend.
+    if (text_count == 0 && u.bldcnt == 0 && mbmode == 0) {
+        for (int x = 0; x < 256; ++x)
+            dst[x] = to_rgb32(obj[x].valid ? obj[x].color : backdrop.color);
+        return;
+    }
+    auto ahead = [](const Pixel& a, const Pixel& b) {
+        return a.priority < b.priority ||
+               (a.priority == b.priority && a.order < b.order);
+    };
     for(int x=0;x<256;++x){
-        if(!enabled || (u.dispcnt&0x80u)){fb[y*256+x]=0xFFFFFFFFu;continue;}
-        const uint32_t mode=(u.dispcnt>>16)&(engine?1u:3u);
-        if(mode==0){fb[y*256+x]=0xFFFFFFFFu;continue;}
-        if(mode==2){
-            const uint32_t bank=(u.dispcnt>>18)&3u;
-            const uint16_t c=static_cast<uint16_t>(nds_video_read(9,0x06800000u+(bank<<17)+(y*256+x)*2,2));
-            fb[y*256+x]=to_rgb32(rgb6(c));continue;
-        }
-        std::array<Pixel,6> layers{};
-        size_t count = 0;
-        if (obj[x].valid) layers[count++] = obj[x];
-        for(int bg=0;bg<4;++bg){
-            if(!(u.dispcnt&(0x100u<<bg)))continue;
-            const uint32_t bgmode=u.dispcnt&7u;
-            const bool text=(bg<2)||(bgmode==0)||(bg==2&&(bgmode==1||bgmode==3))||(bg==3&&bgmode==0);
-            if(!text)continue;
-            Pixel p=text_pixel(engine,bg,x,y);if(p.valid)layers[count++]=p;
-        }
-        // There are at most five candidate layers (OBJ + BG0..BG3).
-        // An explicit bounded insertion sort avoids turning this very hot
-        // path into a general-purpose std::sort and makes the ordering
-        // invariant obvious.
-        for (size_t i = 1; i < count; ++i) {
-            const Pixel key = layers[i];
-            size_t j = i;
-            while (j > 0 &&
-                   (key.priority < layers[j - 1].priority ||
-                    (key.priority == layers[j - 1].priority &&
-                     key.order < layers[j - 1].order))) {
-                layers[j] = layers[j - 1];
-                --j;
+        Pixel top=backdrop, below=backdrop;
+        auto consider = [&](const Pixel& p) {
+            if (!p.valid) return;
+            if (ahead(p, top)) {
+                below=top;
+                top=p;
+            } else if (ahead(p, below)) {
+                below=p;
             }
-            layers[j] = key;
+        };
+        consider(obj[x]);
+        for(size_t bg=0;bg<text_count;++bg){
+            consider(text_pixel(text_lines[bg],x));
         }
-        Pixel backdrop{rgb6(pal16(engine?0x400u:0u)),0x20u,0,4,5,true};
-        if(count<6)layers[count++]=backdrop;
-        uint32_t c=compose(u,layers[0],layers[count > 1 ? 1 : 0]);
-        const uint32_t mbmode=u.master_bright>>14;
-        const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
+        uint32_t c=compose(u,top,below);
         if(mbmode==1)c=brighten(c,mb,0u);else if(mbmode==2)c=darken(c,mb,15u);
-        fb[y*256+x]=to_rgb32(c);
+        dst[x]=to_rgb32(c);
     }
 }
 
@@ -409,6 +526,9 @@ void reg_write8(Unit& u, int engine, uint32_t off, uint8_t v) {
 void nds_gpu2d_reset(){
     g_unit={};
     g_front = 0;
+    g_render_ns = 0;
+    g_obj_ns = 0;
+    g_render_scanlines = 0;
     for (auto& buffers : g_fb)
         for (auto& frame : buffers)
             frame.fill(0xFFFFFFFFu);
@@ -427,8 +547,18 @@ void nds_gpu2d_write(uint32_t addr,uint32_t value,uint32_t width){
 }
 void nds_gpu2d_render_scanline(int line) {
     if (line < 0 || line >= 192) return;
+    if (!profiling()) {
+        render_engine_line(0, line);
+        render_engine_line(1, line);
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
     render_engine_line(0, line);
     render_engine_line(1, line);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    g_render_ns += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    ++g_render_scanlines;
 }
 void nds_gpu2d_render_frame(){
     for (int line = 0; line < 192; ++line)
@@ -439,4 +569,10 @@ const uint32_t* nds_gpu2d_framebuffer(int screen){
     const bool normal=(nds_powercontrol9()&0x8000u)!=0;
     const int engine=normal?screen:(screen^1);
     return g_fb[g_front][engine&1].data();
+}
+void nds_gpu2d_profile(NdsGpu2dProfile* out) {
+    if (!out) return;
+    out->render_ns = g_render_ns;
+    out->obj_ns = g_obj_ns;
+    out->scanlines = g_render_scanlines;
 }

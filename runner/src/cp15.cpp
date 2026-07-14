@@ -18,6 +18,7 @@
 #include "io.h"
 
 Cp15State g_cp15 = {};
+uint32_t g_cp15_timing_generation = 1u;
 
 namespace {
 
@@ -63,6 +64,7 @@ void cp15_reset() {
     // at 0xFFFF0000); the BIOS reasserts this via the control register.
     g_cp15.high_vectors = true;
     g_cp15.control = (1u << 13);
+    if (++g_cp15_timing_generation == 0u) g_cp15_timing_generation = 1u;
 }
 
 // True if code fetches from `addr` are served by the ARM9 instruction cache:
@@ -116,6 +118,9 @@ extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
         nds_cpu_enter_halt(0);
         return;
     }
+    if (crn == 1u || crn == 2u || crn == 6u || crn == 9u)
+        if (++g_cp15_timing_generation == 0u)
+            g_cp15_timing_generation = 1u;
     switch (crn) {
         case 1:  // control register (c1,c0,0)
             if (crm == 0 && op2 == 0) apply_control(value);

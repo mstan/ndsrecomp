@@ -21,6 +21,22 @@ struct SchedResult {
     uint64_t    rounds;
 };
 
+struct NdsSchedulerProfile {
+    uint64_t next_event_ns;
+    uint64_t arm9_ns;
+    uint64_t arm7_ns;
+    uint64_t devices_ns;
+    uint64_t sampled_round_ns;
+    uint64_t sampled_rounds;
+};
+
+// Opt-in coarse sampler used by the release profiler. It samples one complete
+// scheduler round out of every 1009 so profiling does not materially change
+// the 64-cycle interleave it is measuring. Zeroes are returned unless
+// NDS_PROFILE_SCHED is present in the environment.
+void scheduler_profile_reset();
+void scheduler_profile(NdsSchedulerProfile* out);
+
 // Interleave both CPUs until ARM9 reaches `arm9_cycle_budget` or both CPUs
 // have terminally halted. ARM9 runs ~2× the cycles per round (clock ratio).
 SchedResult scheduler_run(uint64_t arm9_cycle_budget);

@@ -40,6 +40,7 @@ struct Cp15State {
     uint32_t dtcm_size;        // bytes
 };
 extern Cp15State g_cp15;
+extern uint32_t g_cp15_timing_generation;
 uint32_t cp15_debug_mpu_region(unsigned index);
 uint32_t cp15_debug_cache_cfg(unsigned index);
 
@@ -94,6 +95,10 @@ bool bus_addr_is_writable_ram(uint32_t addr);
 bool bus_addr_has_write_provenance(uint32_t addr);
 bool bus_range_has_write_provenance(uint32_t addr, uint32_t size);
 uint32_t bus_exec_page_generation(uint32_t addr);
+// Called after any writable backing generation changes. The static runtime
+// uses this to invalidate the currently executing provenance-validated bank
+// without polling page vectors at every guest instruction.
+void runtime_note_code_write();
 // Compare generated source bytes with the active CPU's live executable view
 // without producing bus events or consuming guest cycles.
 bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,

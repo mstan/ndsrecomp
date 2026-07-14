@@ -21,6 +21,8 @@ constexpr int kScreenWidth = 256;
 constexpr int kScreenHeight = 192;
 constexpr int kWindowScale = 2;
 constexpr uint64_t kSystemCyclesPerFrame = 2130ull * 263ull;
+constexpr int kAudioFrequency = 33513982 / 1024;
+constexpr uint32_t kAudioQueueFrames = 2048;
 
 uint16_t key_bit(SDL_Scancode key) {
     // KEYINPUT/EXTKEYIN are active-low. This layout follows the common DS
@@ -42,11 +44,13 @@ uint16_t key_bit(SDL_Scancode key) {
     }
 }
 
-void set_touch_from_mouse(SDL_Renderer* renderer, int window_x, int window_y,
-                          bool down) {
-    float x = 0.0f;
-    float y = 0.0f;
-    SDL_RenderWindowToLogical(renderer, window_x, window_y, &x, &y);
+void set_touch_from_mouse(int window_x, int window_y, bool down) {
+    // SDL_RenderSetLogicalSize also maps absolute mouse events into the
+    // renderer's logical coordinate system. Calling RenderWindowToLogical a
+    // second time halves coordinates at 2x scale (and turns bottom-screen
+    // clicks into top-screen clicks), so consume the event coordinates as-is.
+    const float x = static_cast<float>(window_x);
+    const float y = static_cast<float>(window_y);
     if (!down || x < 0.0f || x >= kScreenWidth ||
         y < kScreenHeight || y >= kScreenHeight * 2) {
         nds_set_touch(0, 0, false);
@@ -67,10 +71,13 @@ void drain_audio(SDL_AudioDeviceID device) {
         if (!frames) break;
         SDL_QueueAudio(device, samples.data(), frames * 2u * sizeof(int16_t));
     }
-    // Do not let a temporarily faster host accumulate seconds of input/audio
-    // latency. A cold reset naturally produces silence before firmware audio.
-    if (SDL_GetQueuedAudioSize(device) > 32768u * 2u * sizeof(int16_t))
-        SDL_ClearQueuedAudio(device);
+    // Audio is a second real-time clock alongside display VSync. Never drop a
+    // queued block: if the host is faster than the DS cadence, let SDL consume
+    // the small bounded backlog before emulating another frame.
+    const uint32_t high_water =
+        kAudioQueueFrames * 2u * sizeof(int16_t);
+    while (SDL_GetQueuedAudioSize(device) > high_water)
+        SDL_Delay(1);
 }
 
 } // namespace
@@ -122,7 +129,10 @@ int nds_run_interactive_frontend() {
     }
 
     SDL_AudioSpec want{};
-    want.freq = 32768;
+    // The mixer runs once per 1024 DS system cycles. Request its integer host
+    // rate directly; the sub-sample remainder is absorbed by the bounded queue
+    // instead of producing a roughly once-per-second underrun at 32768 Hz.
+    want.freq = kAudioFrequency;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.samples = 1024;
@@ -170,7 +180,7 @@ int nds_run_interactive_frontend() {
                 mouse_down = true;
                 touch_release_pending = false;
                 touch_frames_held = 0;
-                set_touch_from_mouse(renderer, event.button.x, event.button.y, true);
+                set_touch_from_mouse(event.button.x, event.button.y, true);
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
                 event.button.button == SDL_BUTTON_LEFT) {
@@ -181,11 +191,10 @@ int nds_run_interactive_frontend() {
                 if (touch_frames_held < 2)
                     touch_release_pending = true;
                 else
-                    set_touch_from_mouse(renderer, event.button.x,
-                                         event.button.y, false);
+                    set_touch_from_mouse(event.button.x, event.button.y, false);
             }
             if (event.type == SDL_MOUSEMOTION && mouse_down)
-                set_touch_from_mouse(renderer, event.motion.x, event.motion.y, true);
+                set_touch_from_mouse(event.motion.x, event.motion.y, true);
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down) {
                 mouse_down = false;

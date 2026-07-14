@@ -35,6 +35,23 @@ set_source_files_properties(
     ${FW_BANK_DISPATCH}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
 
+# Every immutable bank is CPU-specific even though both use one runtime ABI.
+# Tell the C compiler which core owns each source so it can fold the emitted
+# timing selection without changing generated C or the two-CPU scheduler.
+set(ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c)
+set(ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c)
+foreach(src IN LISTS FW_BANK_BODIES FW_BANK_DISPATCH)
+    if(src MATCHES "/fw_arm9_")
+        list(APPEND ARM9_BANK_SOURCES ${src})
+    elseif(src MATCHES "/fw_arm7_")
+        list(APPEND ARM7_BANK_SOURCES ${src})
+    endif()
+endforeach()
+set_source_files_properties(${ARM9_BANK_SOURCES}
+    PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=0")
+set_source_files_properties(${ARM7_BANK_SOURCES}
+    PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=1")
+
 # SHA-1 helper (reused from the recompiler support lib).
 add_library(nds_support STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support/sha1.cpp)

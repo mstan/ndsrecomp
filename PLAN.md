@@ -89,9 +89,19 @@ GPU/SPU stop boundary match melonDS.
 Download Play, the main-menu brightness/clock controls, both empty cartridge
 targets, and their cancel/terminal paths are also covered by full per-VBlank
 scenarios. This closes the navigable firmware surface for the configured
-no-cartridge state; the remaining release work is static provenance/banking,
-continuous host audio/SDL integration, unexercised hardware-mode closure, and
-performance/determinism gates.
+no-cartridge state. All eight scenarios now execute from provenance-validated
+ARM9/ARM7 firmware banks with zero immutable dispatch misses, invalid targets,
+or Tier-3 instructions at their checkpoints.
+
+The SDL host now presents the stacked screens, maps logical mouse coordinates
+to the bottom-screen touchscreen, maps keyboard buttons, and queues stereo
+S16 audio at the SPU's native `33,513,982 / 1,024` sample cadence. Profile-led
+software-renderer and static-dispatch work reduced the authoritative
+1,127-frame cold run from 47.403 seconds (23.77 FPS) to 18.185 seconds
+(61.97 FPS) at normal process priority while retaining exact frames and event
+counters. The remaining release work is a symmetric continuous-audio diff and
+soak, one isolated all-eight-scenario release matrix, repeated-run determinism,
+and any hardware-mode defect that those gates expose.
 The runner (`runner/`) links the generated banks on a DS runtime
 (`docs/runner_bringup.md`). **Done:**
 - **M1 — ARM9 boots:** SHA-1-verify the 3 dumps, run the recompiled ARM9
@@ -105,15 +115,16 @@ The runner (`runner/`) links the generated banks on a DS runtime
   seeds call-return addresses) — the hard part, solved.
 - **Bus so far:** main RAM, accurate shared/ARM7 WRAM ownership, ITCM/DTCM,
   BIOS regions, physical VRAM A-I, palette/OAM, and always-on access rings.
-- **NEXT (execution-driven):** complete the unexercised 2D modes and
-  per-scanline state lifecycle, then add deterministic touch/key scripting so
-  the first-divergence ruler can traverse every firmware page. Profile and
-  flatten renderer VRAM access: the first exact 1,208-frame soak is only
-  ~26 FPS and does not meet the release performance gate. In parallel, promote
-  validated firmware code to static ARM9/ARM7 banks and harden Tier 3 with
-  dirty-page provenance; do not begin game work before the menu release gate.
-- Still ahead this phase: complete 2D coverage, SDL video/audio/input,
-  scripted menu traversal, static firmware promotion, and release soak.
+- **NEXT (release evidence):** add a symmetric, ordinal-based stereo sample
+  stream to both debug servers and prove continuous mixer output against
+  melonDS. Then run all eight scenarios from isolated cold processes with
+  every requested frame, static-coverage counters, and image/build identities
+  enforced in one machine-readable release report. Repeat the matrix to prove
+  determinism, perform the SDL input/audio soak, and repair only defects that
+  the evidence exposes.
+- Still ahead this phase: continuous audio comparison and host soak, the
+  combined eight-scenario cold-process release matrix, repeated determinism,
+  and closure of any unexercised mode reached by that firmware gate.
 
 ### Phase 3 — recompile BIOSes + firmware as banks, LLE boot
 Recompile both BIOSes + firmware ARM9/ARM7 parts as banks. LLE the BIOS

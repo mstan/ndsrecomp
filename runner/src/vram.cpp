@@ -1,6 +1,7 @@
 #include "vram.h"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 
@@ -34,6 +35,30 @@ uint16_t g_bobj_ext = 0;
 std::array<uint16_t, 4> g_texture{};
 std::array<uint16_t, 8> g_texpal{};
 std::array<uint16_t, 2> g_arm7{};
+std::array<NdsVramRendererView, 2> g_renderer_view{};
+
+const uint8_t* direct_chunk(uint16_t mask, uint32_t virtual_base) {
+    if (!mask || (mask & (mask - 1u))) return nullptr;
+    const unsigned bank = std::countr_zero(static_cast<unsigned>(mask));
+    return g_vram.data() + kBankOffset[bank] +
+           (virtual_base & (kBankSize[bank] - 1u));
+}
+
+void refresh_renderer_views() {
+    g_renderer_view = {};
+    for (uint32_t chunk = 0; chunk < 32; ++chunk)
+        g_renderer_view[0].bg[chunk] =
+            direct_chunk(g_abg[chunk], chunk << 14u);
+    for (uint32_t chunk = 0; chunk < 16; ++chunk)
+        g_renderer_view[0].obj[chunk] =
+            direct_chunk(g_aobj[chunk], chunk << 14u);
+    for (uint32_t chunk = 0; chunk < 8; ++chunk) {
+        g_renderer_view[1].bg[chunk] =
+            direct_chunk(g_bbg[chunk], chunk << 14u);
+        g_renderer_view[1].obj[chunk] =
+            direct_chunk(g_bobj[chunk], chunk << 14u);
+    }
+}
 
 template<size_t N>
 void range_map(std::array<uint16_t, N>& map, uint32_t base, uint32_t count,
@@ -63,6 +88,12 @@ void bank_write(unsigned bank, uint32_t addr, uint32_t value, uint32_t width) {
     store(&g_vram[kBankOffset[bank] + off], value, width);
 }
 uint32_t mapped_read(uint16_t mask, uint32_t addr, uint32_t width) {
+    // The normal DS mapping has one physical bank behind each renderer view.
+    // Avoid scanning all nine banks on every tile/pixel fetch; preserve the
+    // slow OR path for the legal overlapping-bank case.
+    if (mask && !(mask & (mask - 1u)))
+        return bank_read(std::countr_zero(static_cast<unsigned>(mask)),
+                         addr, width);
     uint32_t value = 0;
     for (unsigned bank = 0; bank < 9; ++bank)
         if (mask & (1u << bank)) value |= bank_read(bank, addr, width);
@@ -215,6 +246,7 @@ void nds_vram_reset() {
     g_lcdc = 0; g_abg.fill(0); g_aobj.fill(0); g_bbg.fill(0); g_bobj.fill(0);
     g_abg_ext.fill(0); g_aobj_ext = 0; g_bbg_ext.fill(0); g_bobj_ext = 0;
     g_texture.fill(0); g_texpal.fill(0); g_arm7.fill(0);
+    refresh_renderer_views();
 }
 
 void nds_vram_map(unsigned bank, uint8_t value) {
@@ -224,6 +256,7 @@ void nds_vram_map(unsigned bank, uint8_t value) {
     apply_map(bank, g_cnt[bank], false);
     g_cnt[bank] = next;
     apply_map(bank, next, true);
+    refresh_renderer_views();
 }
 uint8_t nds_vramcnt(unsigned bank) { return bank < 9 ? g_cnt[bank] : 0; }
 uint8_t nds_vramstat() {
@@ -304,4 +337,19 @@ uint32_t nds_vram_read_bg_extpal(int engine, uint32_t addr, uint32_t width) {
 }
 uint32_t nds_vram_read_obj_extpal(int engine, uint32_t addr, uint32_t width) {
     return mapped_read(engine ? g_bobj_ext : g_aobj_ext, addr, width);
+}
+const uint8_t* nds_vram_renderer_palette(int engine) {
+    engine &= 1;
+    const uint16_t bit = engine ? 0x0200u : 0x0002u;
+    return (nds_powercontrol9() & bit) ? g_palette.data() + engine * 0x400u
+                                     : nullptr;
+}
+const uint8_t* nds_vram_renderer_oam(int engine) {
+    engine &= 1;
+    const uint16_t bit = engine ? 0x0200u : 0x0002u;
+    return (nds_powercontrol9() & bit) ? g_oam.data() + engine * 0x400u
+                                     : nullptr;
+}
+const NdsVramRendererView* nds_vram_renderer_view(int engine) {
+    return &g_renderer_view[engine & 1];
 }

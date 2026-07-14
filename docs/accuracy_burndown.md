@@ -177,9 +177,8 @@ Status: exact through the current ruler.
 - [x] One scheduler for both CPUs with event-based rendezvous.
 - [x] HALT/WFI and DMA pending-cycle debt, including IRQ wake.
 - [x] Exact-instruction HALT observers preserve melonDS's uncommitted debt.
-- [ ] Continue the ruler beyond 120M ARM9 instructions and across scripted
-  input transitions until the full
-  menu traversal completes.
+- [x] Continue the ruler beyond 120M ARM9 instructions and across scripted
+  input transitions through every no-cartridge firmware branch.
 - [ ] Exercise all wait-state regions, cache/TCM transitions, and DMA modes.
 
 ## Axis 3 - Memory map and bus ownership
@@ -196,7 +195,8 @@ execution-driven coverage.
 - [x] Palette RAM and OAM with ARM9 power and byte-write behavior.
 - [ ] Display FIFO, remaining mapping modes, open-bus, and remaining MMIO
   semantics.
-- [ ] Dirty/executable page provenance and generation tracking.
+- [x] Dirty/executable page provenance and generation tracking, including
+  alias-aware write invalidation and generation-validated static dispatch.
 
 ## Axis 4 - IRQ, IPC, DMA, timers, and system events
 
@@ -236,8 +236,9 @@ with the configured no-cartridge hardware state.
 
 ## Axis 6 - SPU and audio
 
-Status: internal mixer/capture implemented and capture-validated; host audio is
-not yet complete.
+Status: internal mixer/capture implemented and capture-validated; SDL output
+and bounded pacing are implemented, while stream comparison and soak evidence
+remain open.
 
 - [x] Sixteen channels with PCM8, PCM16, ADPCM, PSG, and noise generation.
 - [x] Channel timers, looping, volume, panning, and master routing.
@@ -245,13 +246,15 @@ not yet complete.
   FIFO writes.
 - [x] Full 4 KiB capture buffer equality at the first exercised recording.
 - [ ] Symmetric channel-state and continuous stereo sample-stream comparator.
-- [ ] SDL audio device, pacing, underrun/overflow policy, and audible soak.
+- [x] SDL stereo device and bounded queue pacing at the native production rate
+  (`33,513,982 / 1,024` samples/second), without dropping queued blocks.
+- [ ] Objective underrun/overflow soak and audible interactive soak.
 - [ ] Validate capture source/addition modes and hardware overflow quirks.
 
 ## Axis 7 - 2D graphics and display
 
-Status: pixel-exact on the exercised firmware mode-0 path, not yet complete by
-feature coverage or performance.
+Status: pixel-exact and full speed on the exercised firmware paths; not yet
+complete by unexercised feature coverage.
 
 - [x] VRAM bank controller and display ownership on the exercised mappings.
 - [x] Engines A and B text backgrounds, normal/affine/bitmap OBJ, priority,
@@ -269,42 +272,52 @@ feature coverage or performance.
 - [x] Extend every-frame comparison across all firmware branches reachable in
   the configured no-cartridge state, including sustained wireless searches
   and terminal fades.
+- [x] Profile-driven software-renderer fast paths: flattened direct VRAM,
+  palette, and OAM views; one-pass OBJ evaluation; prepared text scanlines;
+  mode/blank specialization; and a top-two-layer compositor. Exact mapping
+  fallbacks retain the pixel-exact software reference semantics.
 
 ## Axis 8 - Static coverage and Tier 3
 
-Status: discovery-capable, not release-safe.
+Status: static and provenance-safe across all eight no-cartridge scenarios;
+the combined release manifest and repeated-run gate remain open.
 
 - [x] Native dispatch first, with an opt-in interpreter-assisted discovery
   mode that logs nested immutable targets.
 - [x] Guest-byte Tier 3 can hand off back to native banks.
-- [ ] Tier 3 must be restricted to pages proven written/loaded by the guest.
-- [ ] Structured miss classifications, counts, caller/mode/bytes, run epoch,
+- [x] Tier 3 is restricted to pages proven written/loaded by the guest.
+- [x] Structured miss classifications, counts, caller/mode/bytes, run epoch,
   image hashes, and build identity.
-- [ ] Firmware extraction/capture to ARM9/ARM7 native banks with live-byte
+- [x] Firmware extraction/capture to ARM9/ARM7 native banks with live-byte
   verification.
-- [ ] Candidate folding that handles interior aliases without truncating a
+- [x] Candidate folding that handles interior aliases without truncating a
   containing function.
-- [ ] Release run: zero immutable/static misses, zero invalid targets, and zero
-  Tier-3 instructions during the deterministic firmware traversal.
+- [x] Each of the eight deterministic firmware scenarios has a checkpoint
+  proof with zero immutable/static misses, zero invalid targets, and zero
+  Tier-3 instructions on both CPUs.
 
 ## Axis 9 - SDL host, interaction, and performance
 
-Status: not started to the final gate.
+Status: SDL video/input/audio is integrated and the exercised firmware paths
+run at full speed; host/audio soak and the combined release matrix remain.
 
-- [ ] SDL2 stacked 256x384 window.
-- [ ] Mouse-to-touch, keyboard-to-buttons, and deterministic input scripting.
+- [x] SDL2 stacked 256x384 window.
+- [x] Mouse-to-touch, keyboard-to-buttons, and deterministic input scripting.
 - [x] Health-and-Safety, main menu, Settings, PictoChat, Download Play, empty
   slots, and terminal/return paths navigable end to end under deterministic
   debug input.
 - [ ] No visible frame mismatch, audible sample mismatch, input fault, or host
   audio/video slowdown against melonDS.
-- [ ] Sustained high frame rate with profiling proving no interpreter hot path.
+- [x] Sustained native cadence with profiling proving no interpreter hot path.
 
-The first 120M-instruction framebuffer soak rendered 1,208 physical frames in
-about 46.5 seconds natively (~26 FPS) while the concurrently-run melonDS oracle
-took about 8.4 seconds. This is diagnostic evidence, not a final benchmark, but
-it proves the current per-pixel VRAM lookup renderer misses the high-frame-rate
-gate and must be profiled/flattened before release.
+The authoritative pre-optimization 1,127-frame cold run took 47.403 seconds
+(23.77 FPS). After profiling and specializing the renderer, adding direct
+flattened views with exact overlap fallbacks, and caching provenance-validated
+static dispatch, the same cold run takes 18.185 seconds (61.97 FPS) at normal
+process priority. It reaches ARM9/ARM7 instruction counts
+`1,353,204,097 / 676,602,048` in 11,417,369 scheduler rounds. The complete
+`main_menu_controls` every-frame oracle still passes after these changes, with
+all six Tier-3/clean-RAM rejection counters at zero.
 
 ## Release gate: ready for a game project
 

@@ -19,3 +19,17 @@ uint32_t nds_vram_read_bg(int engine, uint32_t addr, uint32_t width);
 uint32_t nds_vram_read_obj(int engine, uint32_t addr, uint32_t width);
 uint32_t nds_vram_read_bg_extpal(int engine, uint32_t addr, uint32_t width);
 uint32_t nds_vram_read_obj_extpal(int engine, uint32_t addr, uint32_t width);
+
+// Direct physical palette/OAM views for the software renderer. These remain
+// power-gated and are only valid until the next device reset.
+const uint8_t* nds_vram_renderer_palette(int engine);
+const uint8_t* nds_vram_renderer_oam(int engine);
+
+// Renderer-only flattened address views. A non-null chunk points directly at
+// the physical bank backing that 16 KiB virtual window. Legal overlapping
+// bank mappings stay null and use the exact OR-combining fallback.
+struct NdsVramRendererView {
+    const uint8_t* bg[32];
+    const uint8_t* obj[16];
+};
+const NdsVramRendererView* nds_vram_renderer_view(int engine);

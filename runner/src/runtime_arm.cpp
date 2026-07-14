@@ -9,6 +9,7 @@
 
 #include "runtime_arm.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,8 +61,21 @@ struct StaticExecutionGuard {
     uint32_t page_addr[2] = {};
     uint32_t generation[2] = {};
     uint32_t page_count = 0u;
+    bool invalidated = false;
 };
 StaticExecutionGuard g_static_guard;
+
+constexpr uint32_t kDispatchCacheSize = 4096u;
+struct CachedStaticLookup {
+    uint32_t pc = 0u;
+    uint32_t generation[2]{};
+    StaticLookup hit{};
+    uint8_t page_count = 0u;
+    uint8_t thumb = 0u;
+    uint8_t occupied = 0u;
+};
+std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
+    g_dispatch_cache{};
 
 // Cycle budget for the run slice; runtime_should_yield trips when reached
 // so a guest spin loop can't hang the host.
@@ -112,6 +126,51 @@ StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb) {
     return {};
 }
 
+bool cached_lookup_live(const CachedStaticLookup& cached) {
+    if (!cached.hit.validation) return true;
+    const uint32_t first_page = cached.hit.validation->addr & ~0xFFFu;
+    for (uint32_t i = 0; i < cached.page_count; ++i)
+        if (bus_exec_page_generation(first_page + (i << 12u)) !=
+            cached.generation[i])
+            return false;
+    return true;
+}
+
+StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
+    auto& cache = g_dispatch_cache[g_nds_active];
+    CachedStaticLookup& slot =
+        cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
+              (kDispatchCacheSize - 1u)];
+    if (slot.occupied && slot.pc == pc && slot.thumb == uint8_t{thumb} &&
+        cached_lookup_live(slot))
+        return slot.hit;
+
+    const StaticLookup hit = lookup_static(c, pc, thumb);
+    if (!hit.fn) return {};
+    slot = {};
+    slot.pc = pc;
+    slot.thumb = static_cast<uint8_t>(thumb);
+    slot.hit = hit;
+    slot.occupied = 1u;
+    if (hit.validation) {
+        const uint64_t end = uint64_t{hit.validation->addr} +
+                             hit.validation->size;
+        const uint32_t first_page = hit.validation->addr & ~0xFFFu;
+        const uint32_t last_page =
+            static_cast<uint32_t>(end - 1u) & ~0xFFFu;
+        slot.page_count = static_cast<uint8_t>(
+            ((last_page - first_page) >> 12u) + 1u);
+        if (slot.page_count > 2u) {
+            slot = {};
+            return hit;
+        }
+        for (uint32_t i = 0; i < slot.page_count; ++i)
+            slot.generation[i] =
+                bus_exec_page_generation(first_page + (i << 12u));
+    }
+    return hit;
+}
+
 bool arm_static_guard(const NdsStaticValidation* validation) {
     g_static_guard = {};
     if (!validation) return true;
@@ -133,19 +192,30 @@ bool arm_static_guard(const NdsStaticValidation* validation) {
     return true;
 }
 
-bool active_static_code_changed() {
-    if (!g_static_guard.validation) return false;
-    for (uint32_t i = 0; i < g_static_guard.page_count; ++i)
-        if (bus_exec_page_generation(g_static_guard.page_addr[i]) !=
-            g_static_guard.generation[i])
+bool guard_generation_changed(const StaticExecutionGuard& guard) {
+    if (!guard.validation) return false;
+    for (uint32_t i = 0; i < guard.page_count; ++i)
+        if (bus_exec_page_generation(guard.page_addr[i]) !=
+            guard.generation[i])
             return true;
     return false;
+}
+
+bool active_static_code_changed() {
+    return g_static_guard.invalidated;
 }
 
 struct StaticGuardScope {
     StaticExecutionGuard saved;
     StaticGuardScope() : saved(g_static_guard) { g_static_guard = {}; }
-    ~StaticGuardScope() { g_static_guard = saved; }
+    ~StaticGuardScope() {
+        // A nested static call may write through an alias of its caller's
+        // backing page. Revalidate the saved guard once on unwind so that
+        // write cannot be lost when the outer guard becomes active again.
+        if (!saved.invalidated && guard_generation_changed(saved))
+            saved.invalidated = true;
+        g_static_guard = saved;
+    }
 };
 
 bool guarded_static_call(const StaticLookup& hit) {
@@ -175,6 +245,12 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 }
 }  // namespace
 
+void runtime_note_code_write() {
+    if (!g_static_guard.invalidated &&
+        guard_generation_changed(g_static_guard))
+        g_static_guard.invalidated = true;
+}
+
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base) {
     CpuCtx& ctx = g_ctx[cpu & 1];
@@ -195,7 +271,7 @@ extern "C" void nds_reschedule_slice(unsigned long long system_deadline) {
 // decide when to hand control back to the dispatcher / scheduler.)
 extern "C" int nds_has_bank(uint32_t pc, int thumb) {
     const CpuCtx& c = g_ctx[g_nds_active];
-    return lookup_static(c, pc & ~1u, thumb != 0).fn ? 1 : 0;
+    return lookup_static_cached(c, pc & ~1u, thumb != 0).fn ? 1 : 0;
 }
 extern "C" int nds_slice_over(void) {
     return (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) ? 1 : 0;
@@ -251,6 +327,7 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
 extern "C" void runtime_trace_reset(void) {
     g_trace_w = g_trace_count = g_trace_seq = 0;
     g_runtime_cycles = 0;
+    g_runtime_insn_trace = 1u;
 }
 
 extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
@@ -520,7 +597,7 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     const CpuCtx& c = g_ctx[g_nds_active];
     StaticGuardScope guard_scope;
-    if (guarded_static_call(lookup_static(c, pc, thumb))) return;
+    if (guarded_static_call(lookup_static_cached(c, pc, thumb))) return;
     if (g_discover_static_misses && static_bios_pc(pc)) {
         runtime_discovery_note_static(pc, thumb ? 1u : 0u);
         tier3_run(pc);
@@ -834,6 +911,7 @@ extern "C" void runtime_init(void*) {
         ctx.exc_base = 0u;
     }
     g_static_guard = {};
+    g_dispatch_cache = {};
     tier3_reset();
 }
 extern "C" void runtime_shutdown(void) {

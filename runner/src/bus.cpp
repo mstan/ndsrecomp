@@ -82,6 +82,7 @@ void note_ram_write(uint8_t* ptr, uint32_t width) {
         uint32_t& generation = (*generations)[page];
         if (++generation == 0u) generation = 1u;
     }
+    runtime_note_code_write();
     uint32_t written_offset = 0u;
     if (std::vector<uint8_t>* written =
             written_for_ptr(ptr, &written_offset)) {
@@ -660,6 +661,32 @@ inline uint32_t arm7_s32(const Arm7Region& r) {
                               : 4u * r.s16;
 }
 
+enum class Arm9CodeTiming : uint8_t { Itcm, Cached, MainRam, Other };
+struct Arm9CodeTimingCache {
+    uint32_t page = 0xFFFFFFFFu;
+    uint32_t cp15_generation = 0u;
+    Arm9CodeTiming timing = Arm9CodeTiming::Other;
+};
+Arm9CodeTimingCache g_arm9_code_timing{};
+
+Arm9CodeTiming arm9_code_timing(uint32_t addr) {
+    const uint32_t page = addr & ~0xFFFu;
+    if (g_arm9_code_timing.page == page &&
+        g_arm9_code_timing.cp15_generation == g_cp15_timing_generation)
+        return g_arm9_code_timing.timing;
+    Arm9CodeTiming timing;
+    if (g_cp15.itcm_enable && page < g_cp15.itcm_size)
+        timing = Arm9CodeTiming::Itcm;
+    else if (cp15_code_cacheable(page))
+        timing = Arm9CodeTiming::Cached;
+    else if (page >= 0x02000000u && page < 0x03000000u)
+        timing = Arm9CodeTiming::MainRam;
+    else
+        timing = Arm9CodeTiming::Other;
+    g_arm9_code_timing = {page, g_cp15_timing_generation, timing};
+    return timing;
+}
+
 // ARM9 GBA-slot timings are selected dynamically by EXMEMCNT.  melonDS feeds
 // these through SetARM9RegionTimings(), including the ARM946E-S three-cycle
 // non-sequential CPU penalty, and then shifts bus timings into the ARM9's 2x
@@ -801,11 +828,12 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // a true raw-zero (not a baseline absorption) — kept as-is.
     const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
     if (thumb && (pc & 2u)) return 0u;
-    if (g_cp15.itcm_enable && pc < g_cp15.itcm_size) return 1u;   // ITCM
+    const Arm9CodeTiming timing = arm9_code_timing(pc);
+    if (timing == Arm9CodeTiming::Itcm) return 1u;   // ITCM
     // I-cache-served region: melonDS degrades the fetch to a flat averaged cost
     // (kCodeCacheTiming=3 at a 32-byte line boundary, else 1; un-shifted). This
     // is what makes the firmware's BIOS spin loop cheap during the IPC handshake.
-    if (cp15_code_cacheable(pc)) {
+    if (timing == Arm9CodeTiming::Cached) {
         // Execute prefetches ahead of the instruction being retired.  The
         // CodeCycles consumed by this instruction were set by CodeRead32 at
         // current+4 in Thumb or current+8 in ARM state; cache-line timing is
@@ -813,8 +841,7 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
         const uint32_t fetch_addr = pc + (thumb ? 4u : 8u);
         return (fetch_addr & 0x1Fu) ? 1u : 3u;
     }
-    if (pc >= 0xFFFF0000u)                           return 8u;   // BIOS 32-bit: (1+3)x2
-    if (pc >= 0x02000000u && pc < 0x03000000u)       return 18u;  // main RAM N32=(8+1), x2
+    if (timing == Arm9CodeTiming::MainRam)           return 18u;  // main RAM N32=(8+1), x2
     return 8u;                                                    // WRAM/IO/OAM 32-bit: (1+3)x2
 }
 
@@ -839,9 +866,10 @@ extern "C" uint32_t arm9_refill_cycles(uint32_t target) {
     const bool thumb = (target & 1u) != 0u;
     const uint32_t addr = target & ~1u;
     const uint32_t words = (thumb && !(addr & 2u)) ? 1u : 2u;
-    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
+    const Arm9CodeTiming timing = arm9_code_timing(addr);
+    if (timing == Arm9CodeTiming::Itcm)
         return words;
-    if (cp15_code_cacheable(addr)) {
+    if (timing == Arm9CodeTiming::Cached) {
         uint32_t cycles = 3u;                              // branch fetch
         if (words == 2u) {
             const uint32_t second = addr + (thumb ? 2u : 4u);
@@ -849,8 +877,7 @@ extern "C" uint32_t arm9_refill_cycles(uint32_t target) {
         }
         return cycles;
     }
-    const uint32_t cc = (addr >= 0x02000000u && addr < 0x03000000u)
-                            ? 18u : 8u;
+    const uint32_t cc = timing == Arm9CodeTiming::MainRam ? 18u : 8u;
     return words * cc;
 }
 

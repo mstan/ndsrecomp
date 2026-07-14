@@ -20,6 +20,7 @@
 #include "io.h"
 #include "debug_server.h"
 #include "frontend.h"
+#include "gpu2d.h"
 #include "sha1.h"
 
 // Generated per-CPU dispatch tables (C linkage).
@@ -305,6 +306,29 @@ int main(int argc, char** argv) {
                  g_cp15.control, g_cp15.dtcm_enable, g_cp15.dtcm_base,
                  g_cp15.dtcm_size);
     nds_dump_irq();
+    NdsGpu2dProfile gpu_profile{};
+    nds_gpu2d_profile(&gpu_profile);
+    if (gpu_profile.scanlines) {
+        std::fprintf(stderr,
+            "  GPU2D profile: %.3f seconds (OBJ %.3f) across %llu scanlines\n",
+            static_cast<double>(gpu_profile.render_ns) / 1.0e9,
+            static_cast<double>(gpu_profile.obj_ns) / 1.0e9,
+            static_cast<unsigned long long>(gpu_profile.scanlines));
+    }
+    NdsSchedulerProfile scheduler_profile_data{};
+    scheduler_profile(&scheduler_profile_data);
+    if (scheduler_profile_data.sampled_rounds != 0) {
+        const double scale = 1.0e-6 / scheduler_profile_data.sampled_rounds;
+        std::fprintf(stderr,
+            "  Scheduler profile: %.3f ms/1000 rounds "
+            "(next %.3f, ARM9 %.3f, ARM7 %.3f, devices %.3f; %llu samples)\n",
+            scheduler_profile_data.sampled_round_ns * scale * 1000.0,
+            scheduler_profile_data.next_event_ns * scale * 1000.0,
+            scheduler_profile_data.arm9_ns * scale * 1000.0,
+            scheduler_profile_data.arm7_ns * scale * 1000.0,
+            scheduler_profile_data.devices_ns * scale * 1000.0,
+            static_cast<unsigned long long>(scheduler_profile_data.sampled_rounds));
+    }
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
     return 0;

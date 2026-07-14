@@ -12,3 +12,10 @@ void nds_gpu2d_render_scanline(int line);
 void nds_gpu2d_render_frame();
 void nds_gpu2d_finish_frame();
 const uint32_t* nds_gpu2d_framebuffer(int screen);
+
+struct NdsGpu2dProfile {
+    uint64_t render_ns;
+    uint64_t obj_ns;
+    uint64_t scanlines;
+};
+void nds_gpu2d_profile(NdsGpu2dProfile* out);

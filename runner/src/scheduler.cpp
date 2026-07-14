@@ -3,7 +3,9 @@
 #include "scheduler.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "state.h"
@@ -27,6 +29,22 @@ struct CpuSlot {
 
 CpuSlot g_slot[2];
 int     g_cur = -1;           // currently-loaded CPU (-1 = none)
+
+NdsSchedulerProfile g_profile{};
+uint64_t g_profile_rounds = 0;
+
+bool profiling() {
+    static const bool enabled = std::getenv("NDS_PROFILE_SCHED") != nullptr;
+    return enabled;
+}
+
+using ProfileClock = std::chrono::steady_clock;
+
+void profile_add(uint64_t& dst, ProfileClock::time_point start) {
+    dst += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            ProfileClock::now() - start).count());
+}
 
 // melonDS-faithful timeline (docs/scheduler_design.md, Commit A). g_sys_timestamp
 // is in SYSTEM cycles (= ARM7 cycles = ARM9 cycles >> kArm9ClockShift).
@@ -194,6 +212,7 @@ void scheduler_init() {
     g_slot[1] = CpuSlot{};
     g_cur = -1;
     g_sys_timestamp = 0;
+    scheduler_profile_reset();
 }
 
 void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr) {
@@ -226,17 +245,25 @@ void scheduler_run_round() {
     // cyc/insn) the ARM9 still retires too many instructions per iteration, so
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
+    const bool sample = profiling() && ((g_profile_rounds++ % 1009u) == 0u);
+    const auto round_start = sample ? ProfileClock::now()
+                                    : ProfileClock::time_point{};
+    auto phase_start = round_start;
+
     uint64_t planned = g_sys_timestamp + kIterCap;
     const uint64_t ev = next_scheduled_event_time();
+    if (sample) profile_add(g_profile.next_event_ns, phase_start);
     // melonDS deliberately snaps to an event up to seven cycles beyond the
     // normal 64-cycle cap (kIterationCycleMargin=8).
     if (ev < planned + 8u) planned = ev;
 
     // ARM9 first, to its target in ARM9 cycles; do NOT clamp its overshoot.
     const uint64_t arm9_target = planned << kArm9ClockShift;
+    if (sample) phase_start = ProfileClock::now();
     if (g_slot[0].started && !g_slot[0].halted && g_slot[0].cycles < arm9_target)
         run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
     nds_tick_timers(0, g_slot[0].cycles);
+    if (sample) profile_add(g_profile.arm9_ns, phase_start);
 
     // Rendezvous = ARM9's ACTUAL (possibly overshot) timestamp, normalized to
     // system cycles. The ARM7 catches up to THIS, not to `planned`.
@@ -245,6 +272,7 @@ void scheduler_run_round() {
     // ARM7 catches up to the rendezvous (run-until->=; it too may overshoot its
     // final instruction). Bail if it makes no progress (terminally halted or a
     // debug/insn break is armed) to avoid a busy spin.
+    if (sample) phase_start = ProfileClock::now();
     while (g_slot[1].started && !g_slot[1].halted &&
            !nds_event_break_hit() && g_slot[1].cycles < rendezvous) {
         const uint64_t before = g_slot[1].cycles;
@@ -252,6 +280,7 @@ void scheduler_run_round() {
         nds_tick_timers(1, g_slot[1].cycles);
         if (g_slot[1].cycles == before) break;
     }
+    if (sample) profile_add(g_profile.arm7_ns, phase_start);
 
     // PowerMan register 0 bit 6 stops the entire console immediately from the
     // ARM7 SPI write. melonDS exits RunFrame without running any later system
@@ -266,17 +295,32 @@ void scheduler_run_round() {
         return;
     }
 
+    if (sample) phase_start = ProfileClock::now();
     nds_tick_display(rendezvous);
     nds_tick_spu(rendezvous);
     nds_wifi_run_events(rendezvous);
     nds_tick_rtc(rendezvous);
     nds_run_system_events(rendezvous);
+    if (sample) {
+        profile_add(g_profile.devices_ns, phase_start);
+        profile_add(g_profile.sampled_round_ns, round_start);
+        ++g_profile.sampled_rounds;
+    }
 
     // melonDS overwrites its local target with ARM9Timestamp>>shift before
     // ARM7 catch-up, then RunSystem(target) advances SysTimestamp to that
     // ACTUAL normalized rendezvous (including one-instruction overshoot).
     g_sys_timestamp = rendezvous;
     // run_due_system_events(rendezvous);  // Commit B+
+}
+
+void scheduler_profile_reset() {
+    g_profile = NdsSchedulerProfile{};
+    g_profile_rounds = 0;
+}
+
+void scheduler_profile(NdsSchedulerProfile* out) {
+    if (out) *out = g_profile;
 }
 
 SchedResult scheduler_run(uint64_t budget) {

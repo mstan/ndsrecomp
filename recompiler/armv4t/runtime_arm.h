@@ -74,7 +74,14 @@ extern ArmCpuState g_cpu;
 // runner/src/state.h includes this header for the C++-side runtime
 // rather than redeclaring the enum, so there is exactly one definition.
 typedef enum NdsCpu { NDS_ARM9 = 0, NDS_ARM7 = 1 } NdsCpu;
+#ifdef NDS_STATIC_CPU
+// A generated bank belongs permanently to one DS CPU. Per-source build
+// specialization folds the hot ARM9/ARM7 timing ternaries at compile time;
+// runner/device code still observes the live scheduler-owned selector.
+#define g_nds_active ((NdsCpu)(NDS_STATIC_CPU))
+#else
 extern NdsCpu g_nds_active;
+#endif
 
 // Nintendo DS runner dispatch ABI.  Runtime-materialized firmware can reuse
 // the same virtual address for different code generations, so generated rows
