@@ -104,9 +104,10 @@ continuous stereo output independently of SDL playback. Cold
 `main_menu_controls` and `calibration_save` runs respectively prove 328,236
 and 656,472 consecutive stereo frames byte-identical to melonDS's
 original-hardware 10-bit DAC mode, including substantial non-silent output.
-The remaining release work is the isolated all-eight-scenario
-audio/video/static matrix, repeated-run determinism, the host audio/input soak,
-and any defect those gates expose.
+Two clean, isolated all-eight-scenario matrices now pass with identical
+per-scenario traversal logs, audio hashes/counts, and zero static counters;
+the retained summary is `docs/firmware_release_evidence.json`. The remaining
+release work is the host SDL audio/input soak and any defect that gate exposes.
 The runner (`runner/`) links the generated banks on a DS runtime
 (`docs/runner_bringup.md`). **Done:**
 - **M1 — ARM9 boots:** SHA-1-verify the 3 dumps, run the recompiled ARM9
@@ -120,14 +121,12 @@ The runner (`runner/`) links the generated banks on a DS runtime
   seeds call-return addresses) — the hard part, solved.
 - **Bus so far:** main RAM, accurate shared/ARM7 WRAM ownership, ITCM/DTCM,
   BIOS regions, physical VRAM A-I, palette/OAM, and always-on access rings.
-- **NEXT (release evidence):** run all eight scenarios from isolated cold
-  processes with every requested frame, continuous audio, static-coverage
-  counters, and image/build identities enforced in one machine-readable
-  release report. Repeat the matrix to prove determinism, perform the SDL
-  input/audio soak, and repair only defects that the evidence exposes.
-- Still ahead this phase: host audio/input soak, the combined eight-scenario
-  cold-process release matrix, repeated determinism, and closure of any
-  unexercised mode reached by that firmware gate.
+- **NEXT (final host gate):** perform an instrumented SDL audio/input soak at
+  native cadence, prove the playback queue neither underruns nor drops data,
+  and confirm end-to-end mouse/keyboard menu navigation. Repair only defects
+  that this host evidence exposes.
+- Still ahead this phase: the final host audio/input soak and closure of any
+  defect it reaches.
 
 ### Phase 3 — recompile BIOSes + firmware as banks, LLE boot
 Recompile both BIOSes + firmware ARM9/ARM7 parts as banks. LLE the BIOS

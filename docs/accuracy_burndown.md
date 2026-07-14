@@ -67,6 +67,13 @@ Both are byte-identical to melonDS configured for the original DS/DS Lite
 10-bit DAC. The trace is independent of SDL consumption and detects missing,
 overwritten, short, or out-of-order sample ranges.
 
+The complete eight-scenario cold-process matrix passed twice from clean commit
+`c871b0b`. Across the two runs, every scenario's machine-readable traversal
+log, continuous-audio frame count/hash, and six static-coverage counters are
+identical. All requested frames matched; every static counter is zero. The
+retained identity and per-scenario evidence is
+`docs/firmware_release_evidence.json`.
+
 The first deterministic interactive ruler is the `calibration_save` scenario
 in `oracle/firmware_traversal.json`.  From a cold process it boots the real
 BIOS/firmware, enters Settings, completes all four touchscreen-calibration
@@ -164,7 +171,8 @@ python oracle/fp_diverge.py --cpu 7 --known-same 49074405 --max 53068580
 - [x] Extend the manifest across complete Settings, PictoChat Room A, Download
   Play, main-menu brightness/clock controls, empty slots, and terminal/return
   actions reachable with the configured no-cartridge hardware state.
-- [ ] Automated cold-reset soak proving run-to-run determinism.
+- [x] Automated cold-reset soak proving run-to-run determinism across two
+  complete eight-scenario matrices.
 - [x] Release/static-coverage manifest tooling with build and image identity.
 
 ## Axis 1 - ARM instruction semantics and static BIOS banks
@@ -292,8 +300,8 @@ complete by unexercised feature coverage.
 
 ## Axis 8 - Static coverage and Tier 3
 
-Status: static and provenance-safe across all eight no-cartridge scenarios;
-the combined release manifest and repeated-run gate remain open.
+Status: static and provenance-safe across two deterministic, isolated
+all-eight no-cartridge release matrices.
 
 - [x] Native dispatch first, with an opt-in interpreter-assisted discovery
   mode that logs nested immutable targets.

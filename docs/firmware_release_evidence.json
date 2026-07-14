@@ -1,0 +1,85 @@
+{
+  "format": 1,
+  "status": "pass",
+  "commit": "c871b0b1fe36146b1f50c4140dc5fcb6231a234a",
+  "cold_matrix_runs": [
+    "20260714T212955Z",
+    "20260714T213622Z"
+  ],
+  "deterministic": true,
+  "full_frame_scan": true,
+  "identities": {
+    "runner_sha256": "557fe5531d4ae78e397d3973df7002d9c79ff458e5120d61aa923f3bcedd51e6",
+    "oracle_sha256": "ad8f2b06a62c29c033eac334bda694376e40f823b94f1f51e9bdaf6daf2121bb",
+    "traversal_manifest_sha256": "1ed5335de5dbf8f1149b1646855114b15263cc188527d996cbf7a629d4be0135",
+    "bios9_sha256": "1693983a7707ae394786fa526c0552457888a51d4e410d715ef07acd5a540555",
+    "bios7_sha256": "ba65f690eb04ec92db67c0e299e21ad71de087d6d5de8a9cb17a62eaab563c17",
+    "firmware_sha256": "dda30945f375dcefa14127a4924f7c8757e56c7c2fb0b61f80302ef586a8da45"
+  },
+  "static_coverage": {
+    "clean_ram_rejects7": 0,
+    "clean_ram_rejects9": 0,
+    "tier3_entries7": 0,
+    "tier3_entries9": 0,
+    "tier3_insns7": 0,
+    "tier3_insns9": 0
+  },
+  "scenarios": [
+    {
+      "scenario": "calibration_save",
+      "traversal_sha256": "e2a94796c679b57efc724efd27571ad12532ba6f1d7e1e712f2ed4c489595c02",
+      "audio_frames": 656472,
+      "nonzero_samples": 385418,
+      "audio_sha256": "cfadd01c2afaf7aff89abd6540e115cedb6b67a61c24ddcee137cd7e6ad8c17d"
+    },
+    {
+      "scenario": "date_alarm_save",
+      "traversal_sha256": "20addb62f8a843a9e2c91ef749fe0089afcfb7b399342cc08d6fe2bd68b1ddad",
+      "audio_frames": 700237,
+      "nonzero_samples": 538563,
+      "audio_sha256": "729a08d3a3dd5b7ea3f21a506a3fb9fe44cfe7fb4a1e42b88e8dba180f99ebd3"
+    },
+    {
+      "scenario": "profile_save",
+      "traversal_sha256": "35a768aa0345697f2345d2c30fcb7c51d07e9b6bafe132a722bddef9ea9bda7e",
+      "audio_frames": 940944,
+      "nonzero_samples": 395180,
+      "audio_sha256": "e2d979cbf9698d86267d8d836cf29186cb862c8ad77ca81785d4d6de17c54e3e"
+    },
+    {
+      "scenario": "system_options_save",
+      "traversal_sha256": "93dca31835cea27938ff6593298d4022c5378bac1c960907d850c8532402cf41",
+      "audio_frames": 842473,
+      "nonzero_samples": 470664,
+      "audio_sha256": "fc3feb333e1c16be214bb369452c3d5087b71526b9b1eb0c64dd26fcff94953f"
+    },
+    {
+      "scenario": "main_menu_controls",
+      "traversal_sha256": "e1760460745c4827e12100b115cb60f4ac630b60aef9a437f082313a10cbf59e",
+      "audio_frames": 328236,
+      "nonzero_samples": 152732,
+      "audio_sha256": "0aab2b2ae5d00154b55a5dd335edc0326e79f1d36bc809c7995551e6b1406d2e"
+    },
+    {
+      "scenario": "download_play_shutdown",
+      "traversal_sha256": "f5f8878ce6b6b07a1f7b633d6b9c283bdcb3726499ebf8f7165de71de2b0e532",
+      "audio_frames": 749472,
+      "nonzero_samples": 949756,
+      "audio_sha256": "de97fcdd8aa6c47fc961d09d34d277cf5d01c5e7b94a454ee0ffe2799852d102"
+    },
+    {
+      "scenario": "pictochat_room_a",
+      "traversal_sha256": "99e76570f256b00c73378ed444034409b66412f824ec8f29e0f2319497f21a98",
+      "audio_frames": 646078,
+      "nonzero_samples": 450173,
+      "audio_sha256": "0ef5cbe1fe3fe420b706ea9776900c92c6072e27cbf30cccafebd0553d016d9e"
+    },
+    {
+      "scenario": "shutdown",
+      "traversal_sha256": "24467351ed9947a9e1175a1cc147e781b7f8729f793dfb7eb7b68e0fa5a777e9",
+      "audio_frames": 423424,
+      "nonzero_samples": 248790,
+      "audio_sha256": "22691f2717b003b7f483ac9cc67f5e172144ba6446bef6660d22844be61a6fd3"
+    }
+  ]
+}
