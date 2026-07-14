@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string>
 
 #include "gpu2d.h"
@@ -23,6 +27,37 @@ constexpr int kWindowScale = 2;
 constexpr uint64_t kSystemCyclesPerFrame = 2130ull * 263ull;
 constexpr int kAudioFrequency = 33513982 / 1024;
 constexpr uint32_t kAudioQueueFrames = 2048;
+constexpr uint32_t kAudioStartFrames = 2048;
+constexpr uint32_t kAudioFrameBytes = 2u * sizeof(int16_t);
+constexpr uint32_t kAudioCapacityFrames = 8192;
+
+struct AudioQueue {
+    std::array<int16_t, kAudioCapacityFrames * 2> samples{};
+    uint32_t read = 0;
+    uint32_t write = 0;
+    uint32_t count = 0;
+    std::atomic<uint64_t> underruns{0};
+    std::atomic<bool> started{false};
+};
+
+void SDLCALL audio_callback(void* userdata, Uint8* stream, int len) {
+    auto* queue = static_cast<AudioQueue*>(userdata);
+    std::memset(stream, 0, static_cast<size_t>(len));
+    if (!queue || len <= 0) return;
+    const uint32_t requested = static_cast<uint32_t>(len) / kAudioFrameBytes;
+    const uint32_t take = std::min(requested, queue->count);
+    auto* output = reinterpret_cast<int16_t*>(stream);
+    const uint32_t first = std::min(take, kAudioCapacityFrames - queue->read);
+    std::memcpy(output, queue->samples.data() + queue->read * 2u,
+                first * kAudioFrameBytes);
+    if (first < take)
+        std::memcpy(output + first * 2u, queue->samples.data(),
+                    (take - first) * kAudioFrameBytes);
+    queue->read = (queue->read + take) % kAudioCapacityFrames;
+    queue->count -= take;
+    if (take < requested && queue->started.load(std::memory_order_relaxed))
+        queue->underruns.fetch_add(1, std::memory_order_relaxed);
+}
 
 uint16_t key_bit(SDL_Scancode key) {
     // KEYINPUT/EXTKEYIN are active-low. This layout follows the common DS
@@ -63,21 +98,82 @@ void set_touch_from_mouse(int window_x, int window_y, bool down) {
     nds_set_touch(touch_x, touch_y, true);
 }
 
-void drain_audio(SDL_AudioDeviceID device) {
-    if (!device) return;
+uint32_t audio_queue_count(SDL_AudioDeviceID device, AudioQueue& queue) {
+    if (!device) return 0;
+    SDL_LockAudioDevice(device);
+    const uint32_t count = queue.count;
+    SDL_UnlockAudioDevice(device);
+    return count;
+}
+
+uint32_t drain_audio(SDL_AudioDeviceID device, AudioQueue& queue,
+                     bool throttle, bool& queue_error) {
+    if (!device) return 0;
     std::array<int16_t, 2048> samples{};
     for (;;) {
         const uint32_t frames = nds_spu_read_output(samples.data(), 1024);
         if (!frames) break;
-        SDL_QueueAudio(device, samples.data(), frames * 2u * sizeof(int16_t));
+        bool pushed = false;
+        while (!pushed) {
+            SDL_LockAudioDevice(device);
+            if (kAudioCapacityFrames - queue.count >= frames) {
+                const uint32_t first = std::min(
+                    frames, kAudioCapacityFrames - queue.write);
+                std::memcpy(queue.samples.data() + queue.write * 2u,
+                            samples.data(), first * kAudioFrameBytes);
+                if (first < frames)
+                    std::memcpy(queue.samples.data(),
+                                samples.data() + first * 2u,
+                                (frames - first) * kAudioFrameBytes);
+                queue.write = (queue.write + frames) % kAudioCapacityFrames;
+                queue.count += frames;
+                pushed = true;
+            }
+            SDL_UnlockAudioDevice(device);
+            if (!pushed) {
+                if (!throttle) {
+                    queue_error = true;
+                    return audio_queue_count(device, queue);
+                }
+                SDL_Delay(1);
+            }
+        }
     }
-    // Audio is a second real-time clock alongside display VSync. Never drop a
-    // queued block: if the host is faster than the DS cadence, let SDL consume
-    // the small bounded backlog before emulating another frame.
-    const uint32_t high_water =
-        kAudioQueueFrames * 2u * sizeof(int16_t);
-    while (SDL_GetQueuedAudioSize(device) > high_water)
+    // Audio is the host's real-time clock. Never drop a produced block: if the
+    // emulator is faster than the DS cadence, let SDL consume the small
+    // bounded backlog before emulating another frame.
+    uint32_t queued = audio_queue_count(device, queue);
+    while (throttle && queued > kAudioQueueFrames) {
         SDL_Delay(1);
+        queued = audio_queue_count(device, queue);
+    }
+    return queued;
+}
+
+uint64_t environment_u64(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    return end == value ? 0 : static_cast<uint64_t>(parsed);
+}
+
+uint64_t framebuffer_rgb_fnv(int screen) {
+    const uint32_t* framebuffer = nds_gpu2d_framebuffer(screen);
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < 256u * 192u; ++i) {
+        const uint32_t pixel = framebuffer[i];
+        const uint8_t rgb[3] = {
+            static_cast<uint8_t>(pixel >> 16),
+            static_cast<uint8_t>(pixel >> 8),
+            static_cast<uint8_t>(pixel),
+        };
+        for (const uint8_t byte : rgb) {
+            hash ^= byte;
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
 }
 
 } // namespace
@@ -88,6 +184,9 @@ int nds_run_interactive_frontend() {
         std::fprintf(stderr, "[sdl] init failed: %s\n", SDL_GetError());
         return 1;
     }
+    if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH) != 0)
+        std::fprintf(stderr, "[sdl] thread priority unchanged: %s\n",
+                     SDL_GetError());
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     SDL_Window* window = SDL_CreateWindow(
@@ -102,7 +201,7 @@ int nds_run_interactive_frontend() {
     }
 
     SDL_Renderer* renderer = SDL_CreateRenderer(
-        window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer)
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
@@ -128,6 +227,7 @@ int nds_run_interactive_frontend() {
         return 1;
     }
 
+    AudioQueue audio_queue{};
     SDL_AudioSpec want{};
     // The mixer runs once per 1024 DS system cycles. Request its integer host
     // rate directly; the sub-sample remainder is absorbed by the bounded queue
@@ -136,10 +236,23 @@ int nds_run_interactive_frontend() {
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.samples = 1024;
-    const SDL_AudioDeviceID audio = SDL_OpenAudioDevice(
-        nullptr, 0, &want, nullptr, 0);
-    if (audio) SDL_PauseAudioDevice(audio, 0);
-    else std::fprintf(stderr, "[sdl] audio unavailable: %s\n", SDL_GetError());
+    want.callback = audio_callback;
+    want.userdata = &audio_queue;
+    SDL_AudioSpec got{};
+    SDL_AudioDeviceID audio = SDL_OpenAudioDevice(
+        nullptr, 0, &want, &got, 0);
+    if (audio && (got.freq != want.freq || got.format != want.format ||
+                  got.channels != want.channels)) {
+        std::fprintf(stderr,
+            "[sdl] refusing mismatched audio format: want=%d/%u/%u "
+            "got=%d/%u/%u\n",
+            want.freq, want.format, want.channels,
+            got.freq, got.format, got.channels);
+        SDL_CloseAudioDevice(audio);
+        audio = 0;
+    }
+    if (!audio)
+        std::fprintf(stderr, "[sdl] audio unavailable: %s\n", SDL_GetError());
 
     std::fprintf(stderr,
         "[sdl] controls: mouse=touch | arrows=D-pad | Z=A X=B | "
@@ -156,8 +269,64 @@ int nds_run_interactive_frontend() {
     uint64_t fps_frames = 0;
     uint64_t fps_start = SDL_GetPerformanceCounter();
     const uint64_t frequency = SDL_GetPerformanceFrequency();
+    const uint64_t soak_frames = environment_u64("NDS_FRONTEND_MAX_FRAMES");
+    const bool print_stats = std::getenv("NDS_FRONTEND_STATS") != nullptr;
+    const bool require_audio =
+        std::getenv("NDS_FRONTEND_REQUIRE_AUDIO") != nullptr;
+    const bool selftest_menu =
+        std::getenv("NDS_FRONTEND_SELFTEST_MENU") != nullptr;
+    bool audio_started = false;
+    bool audio_queue_error = false;
+    uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
+    uint32_t audio_max_queue = 0;
+    uint64_t host_key_presses = 0;
+    uint64_t host_touch_presses = 0;
+    int last_touch_event_x = -1;
+    int last_touch_event_y = -1;
+    bool selftest_key_down = false;
+    bool selftest_key_up = false;
+    bool selftest_touch_down = false;
+    bool selftest_touch_up = false;
+    bool selftest_event_error = false;
+    const uint64_t soak_start = SDL_GetPerformanceCounter();
 
     while (running) {
+        if (selftest_menu) {
+            const NdsEventCounts& counts = nds_event_counts();
+            SDL_Event injected{};
+            if (!selftest_key_down && counts.vblank9 >= 10) {
+                injected.type = SDL_KEYDOWN;
+                injected.key.keysym.scancode = SDL_SCANCODE_Q;
+                injected.key.repeat = 0;
+                selftest_event_error |= SDL_PushEvent(&injected) < 0;
+                selftest_key_down = true;
+            } else if (selftest_key_down && !selftest_key_up &&
+                       counts.vblank9 >= 12) {
+                injected.type = SDL_KEYUP;
+                injected.key.keysym.scancode = SDL_SCANCODE_Q;
+                injected.key.repeat = 0;
+                selftest_event_error |= SDL_PushEvent(&injected) < 0;
+                selftest_key_up = true;
+            }
+            if (!selftest_touch_down && counts.insn9 >= 42300000) {
+                injected = {};
+                injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.button = SDL_BUTTON_LEFT;
+                injected.button.x = 127;
+                injected.button.y = 192 + 180;
+                selftest_event_error |= SDL_PushEvent(&injected) < 0;
+                selftest_touch_down = true;
+            } else if (selftest_touch_down && !selftest_touch_up &&
+                       counts.vblank9 >= 116) {
+                injected = {};
+                injected.type = SDL_MOUSEBUTTONUP;
+                injected.button.button = SDL_BUTTON_LEFT;
+                injected.button.x = 127;
+                injected.button.y = 192 + 180;
+                selftest_event_error |= SDL_PushEvent(&injected) < 0;
+                selftest_touch_up = true;
+            }
+        }
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) running = false;
@@ -165,6 +334,7 @@ int nds_run_interactive_frontend() {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     running = false;
                 } else if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
+                    ++host_key_presses;
                     keys &= static_cast<uint16_t>(~bit);
                     nds_set_key_mask(keys);
                 }
@@ -178,6 +348,9 @@ int nds_run_interactive_frontend() {
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT) {
                 mouse_down = true;
+                ++host_touch_presses;
+                last_touch_event_x = event.button.x;
+                last_touch_event_y = event.button.y;
                 touch_release_pending = false;
                 touch_frames_held = 0;
                 set_touch_from_mouse(event.button.x, event.button.y, true);
@@ -232,7 +405,21 @@ int nds_run_interactive_frontend() {
         SDL_RenderCopy(renderer, top, nullptr, &top_rect);
         SDL_RenderCopy(renderer, bottom, nullptr, &bottom_rect);
         SDL_RenderPresent(renderer);
-        drain_audio(audio);
+        if (audio && audio_started) {
+            const uint32_t queued = audio_queue_count(audio, audio_queue);
+            audio_min_queue = std::min(audio_min_queue, queued);
+        }
+        const uint32_t queued = drain_audio(
+            audio, audio_queue, audio_started, audio_queue_error);
+        audio_max_queue = std::max(audio_max_queue, queued);
+        if (audio && !audio_started && queued >= kAudioStartFrames) {
+            // Opening paused and prebuffering avoids the guaranteed startup
+            // underrun produced by unpausing an empty SDL queue.
+            audio_queue.started.store(true, std::memory_order_relaxed);
+            SDL_PauseAudioDevice(audio, 0);
+            audio_started = true;
+            audio_min_queue = queued;
+        }
 
         ++shown_frames;
         ++fps_frames;
@@ -248,6 +435,12 @@ int nds_run_interactive_frontend() {
             fps_start = counter;
         }
 
+        if (soak_frames && shown_frames >= soak_frames)
+            running = false;
+        if (selftest_menu && selftest_touch_up &&
+            nds_event_counts().vblank9 >= 600)
+            running = false;
+
         if (scheduler_cpu_terminal_halted(0) &&
             scheduler_cpu_terminal_halted(1)) {
             SDL_Delay(8);
@@ -256,6 +449,14 @@ int nds_run_interactive_frontend() {
 
     nds_set_touch(0, 0, false);
     nds_set_key_mask(0x0FFFu);
+    const double soak_seconds = static_cast<double>(
+        SDL_GetPerformanceCounter() - soak_start) /
+        static_cast<double>(frequency);
+    const uint64_t top_hash = framebuffer_rgb_fnv(0);
+    const uint64_t bottom_hash = framebuffer_rgb_fnv(1);
+    if (audio) SDL_PauseAudioDevice(audio, 1);
+    const uint64_t audio_underruns =
+        audio_queue.underruns.load(std::memory_order_relaxed);
     if (audio) SDL_CloseAudioDevice(audio);
     SDL_DestroyTexture(bottom);
     SDL_DestroyTexture(top);
@@ -264,7 +465,38 @@ int nds_run_interactive_frontend() {
     SDL_Quit();
     std::fprintf(stderr, "[sdl] closed after %llu presented frames\n",
                  static_cast<unsigned long long>(shown_frames));
-    return 0;
+    if (print_stats || soak_frames || selftest_menu) {
+        std::fprintf(stderr,
+            "[sdl] soak: frames=%llu seconds=%.3f fps=%.3f "
+            "audio_started=%u queue_errors=%u underruns=%llu "
+            "min_queue_frames=%u max_queue_frames=%u "
+            "key_presses=%llu touch_presses=%llu last_touch=(%d,%d) "
+            "frame_fnv=(%016llx,%016llx)\n",
+            static_cast<unsigned long long>(shown_frames), soak_seconds,
+            soak_seconds > 0.0 ? shown_frames / soak_seconds : 0.0,
+            audio_started ? 1u : 0u, audio_queue_error ? 1u : 0u,
+            static_cast<unsigned long long>(audio_underruns),
+            audio_min_queue == std::numeric_limits<uint32_t>::max()
+                ? 0u : audio_min_queue,
+            audio_max_queue,
+            static_cast<unsigned long long>(host_key_presses),
+            static_cast<unsigned long long>(host_touch_presses),
+            last_touch_event_x, last_touch_event_y,
+            static_cast<unsigned long long>(top_hash),
+            static_cast<unsigned long long>(bottom_hash));
+    }
+    const bool audio_failed = audio_queue_error ||
+        (require_audio && (audio_underruns != 0 || !audio || !audio_started));
+    const bool selftest_failed = selftest_menu &&
+        (selftest_event_error || !selftest_key_up || !selftest_touch_up ||
+         host_key_presses != 1 || host_touch_presses != 1 ||
+         last_touch_event_x != 127 || last_touch_event_y != 372 ||
+         top_hash != 0xa0f41b93e4eefa55ull ||
+         bottom_hash != 0x6c43b370e9cda730ull);
+    if (selftest_menu)
+        std::fprintf(stderr, "[sdl] menu self-test: %s\n",
+                     selftest_failed ? "FAIL" : "PASS");
+    return (audio_failed || selftest_failed) ? 1 : 0;
 }
 
 #else
