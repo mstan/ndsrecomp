@@ -18,7 +18,7 @@ Decoded by `tools/fw_inspect.py`.
 | 0x12 ARM7 boot ROM addr | `0x0008` |
 | 0x14 shift amounts | `0x0C71` |
 | 0x24 user settings offset | `0x0DB3` → flash `0x6D98` |
-| 0x36 MAC | `REDACTED_DEVICE_MAC` (Nintendo OUI ✓) |
+| 0x36 MAC | device-specific value (redacted; Nintendo OUI verified) |
 
 Genuine retail firmware (real Nintendo MAC, 256 KB, per-console
 settings). Not a synthesized/homebrew image.

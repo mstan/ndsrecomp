@@ -1,6 +1,8 @@
 # ndsrecomp 0.0.1
 
-Initial private source release of the Nintendo DS static-recompiler ecosystem.
+Very early pre-alpha source snapshot of the Nintendo DS static-recompiler
+ecosystem. This release is intended for developers following active bring-up;
+it is not a stable or turnkey end-user release.
 
 Highlights:
 
@@ -17,3 +19,7 @@ This is a source-only release. It does not include Nintendo BIOS or firmware
 dumps, ROMs, generated recompiled code, screenshots, save data, or binaries
 embedding copyrighted Nintendo code or assets. Users must supply their own
 hash-verified dumps locally.
+
+There is no commercial game target, stable API, compatibility promise, or
+turnkey clean-clone runner bootstrap yet. See `README.md` for the current build
+boundary and `THIRD_PARTY_ATTRIBUTION.md` for provenance and licensing notes.
