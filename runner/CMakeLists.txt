@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nds_runner C CXX)
+project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)

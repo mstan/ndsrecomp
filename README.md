@@ -1,5 +1,7 @@
 # ndsrecomp
 
+Current source release: **0.0.1**.
+
 Static recompiler for the **Nintendo DS**. In the same family as
 `nesrecomp`, `snesrecomp`, `psxrecomp`, `segagenesisrecomp`, and
 `gbarecomp` — it lifts the console's real code to C and runs it
@@ -69,3 +71,22 @@ See `PRINCIPLES.md`, `CLAUDE.md`, `DEBUG.md`. In short: no HLE BIOS,
 no stubs, never edit generated C (fix the recompiler and regen),
 always-on ring buffers (never arm-then-capture), dispatch-miss log
 clean every run.
+
+## Build from source
+
+The repository intentionally contains no Nintendo BIOS, firmware, ROM,
+generated recompiled code, or binaries embedding that code. Supply your own
+hash-verified dumps as described in `bios/README.md`, then configure the two
+native components with CMake and Ninja:
+
+```sh
+cmake -G Ninja -B recompiler/build recompiler
+cmake --build recompiler/build
+
+# Generate the BIOS/firmware banks from your own dumps before building this.
+cmake -G Ninja -B runner/build runner
+cmake --build runner/build
+```
+
+The separate melonDS-backed accuracy oracle is optional and is documented in
+`oracle/README.md`. It is not linked into the native runner.
