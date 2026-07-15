@@ -750,6 +750,12 @@ name = "FUN_000033C0"
 
 [[entry_point]]
 addr = 0x00000000
+mode = "arm"
+name = "reset_vector_00000000"
+kind = "reset_vector"
+
+[[entry_point]]
+addr = 0x00000000
 mode = "thumb"
 name = "runtime_thumb_00000000"
 kind = "runtime_confirmed"
@@ -767,6 +773,42 @@ name = "irq_vector_entry"
 kind = "exception_vector"
 
 [[entry_point]]
+addr = 0x00001498
+mode = "thumb"
+name = "lpad_00001498"
+kind = "runtime_confirmed"
+
+[[entry_point]]
+addr = 0x000014DE
+mode = "thumb"
+name = "lpad_000014DE"
+kind = "runtime_confirmed"
+
+[[entry_point]]
+addr = 0x000014EC
+mode = "thumb"
+name = "lpad_000014EC"
+kind = "runtime_confirmed"
+
+[[entry_point]]
+addr = 0x0000153A
+mode = "thumb"
+name = "lpad_0000153A"
+kind = "runtime_confirmed"
+
+[[entry_point]]
+addr = 0x00001548
+mode = "thumb"
+name = "lpad_00001548"
+kind = "computed_case"
+
+[[entry_point]]
+addr = 0x00001592
+mode = "thumb"
+name = "lpad_00001592"
+kind = "computed_case"
+
+[[entry_point]]
 addr = 0x000015A0
 mode = "thumb"
 name = "lpad_000015A0"
@@ -777,6 +819,12 @@ addr = 0x00001CAA
 mode = "thumb"
 name = "irqh_00001CAA"
 kind = "indirect_handler"
+
+[[entry_point]]
+addr = 0x00001CB6
+mode = "thumb"
+name = "lpad_00001CB6"
+kind = "runtime_confirmed"
 
 [[entry_point]]
 addr = 0x00001D1A

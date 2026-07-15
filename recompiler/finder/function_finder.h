@@ -42,6 +42,7 @@ struct FunctionSeed {
     CpuMode  mode;
     std::string name;   // empty → finder generates "func_XXXXXXXX"
     uint32_t source_addr = 0;  // 0 => decode from addr or code_copy map
+    uint32_t exact_size = 0;   // 0 => discover; otherwise hard body boundary
 };
 
 // Output: one entry per discovered function.
@@ -143,6 +144,13 @@ public:
     // seed's mode + name wins.
     void add_seed(const FunctionSeed& seed);
 
+    // Treat the supplied exact-size seed list as the complete function
+    // registry. Control-flow targets are still recorded for labels and
+    // auditing, but are not promoted into overlapping Function records.
+    void set_authoritative_seeds(bool authoritative) {
+        authoritative_seeds_ = authoritative;
+    }
+
     // Register a byte range as data — the finder will hard-error
     // if control flow ever enters it. Caller supplies `note` for
     // the diagnostic; `origin_kind` is "data_range" for explicit
@@ -206,6 +214,7 @@ private:
     struct SeedBound { uint8_t reg; uint32_t max_index; };
     std::unordered_map<uint32_t, SeedBound> branch_target_bounds_;
     FinderStats stats_{};
+    bool authoritative_seeds_ = false;
 
     std::vector<DataRange>           data_ranges_;
     std::vector<CodeCopyRange>       code_copies_;
@@ -236,7 +245,8 @@ private:
     uint16_t read_u16(uint32_t addr) const;
     void discover_one(uint32_t addr, CpuMode mode,
                       const std::string& name,
-                      uint32_t source_addr = 0);
+                      uint32_t source_addr = 0,
+                      uint32_t exact_size = 0);
 };
 
 }  // namespace ndsrecomp

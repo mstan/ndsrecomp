@@ -28,10 +28,28 @@ extern "C" const DispatchEntry g_dispatch_arm9_bios[];
 extern "C" const unsigned g_dispatch_arm9_bios_len;
 extern "C" const DispatchEntry g_dispatch_arm7_bios[];
 extern "C" const unsigned g_dispatch_arm7_bios_len;
+#ifdef NDS_HAVE_SM64DS_BANKS
+extern "C" const DispatchEntry g_dispatch_sm64ds_arm9[];
+extern "C" const unsigned g_dispatch_sm64ds_arm9_len;
+extern "C" const DispatchEntry g_dispatch_sm64ds_arm7[];
+extern "C" const unsigned g_dispatch_sm64ds_arm7_len;
+#endif
+#ifndef NDS_BOOTSTRAP_FIRMWARE
 extern "C" const DispatchEntry g_dispatch_fw_arm9_early[];
 extern "C" const unsigned g_dispatch_fw_arm9_early_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm9_menu[];
 extern "C" const unsigned g_dispatch_fw_arm9_menu_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_early[];
+extern "C" const unsigned g_dispatch_fw_arm7_early_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_intermediate[];
+extern "C" const unsigned g_dispatch_fw_arm7_intermediate_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_shared_ready[];
+extern "C" const unsigned g_dispatch_fw_arm7_shared_ready_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_irq_ready[];
+extern "C" const unsigned g_dispatch_fw_arm7_irq_ready_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_menu[];
+extern "C" const unsigned g_dispatch_fw_arm7_menu_len;
+#ifdef NDS_HAVE_FW_EXTENDED_BANKS
 extern "C" const DispatchEntry g_dispatch_fw_arm9_calibration_save[];
 extern "C" const unsigned g_dispatch_fw_arm9_calibration_save_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm9_profile_save[];
@@ -48,16 +66,6 @@ extern "C" const DispatchEntry g_dispatch_fw_arm9_pictochat_room_a[];
 extern "C" const unsigned g_dispatch_fw_arm9_pictochat_room_a_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm9_shutdown[];
 extern "C" const unsigned g_dispatch_fw_arm9_shutdown_len;
-extern "C" const DispatchEntry g_dispatch_fw_arm7_early[];
-extern "C" const unsigned g_dispatch_fw_arm7_early_len;
-extern "C" const DispatchEntry g_dispatch_fw_arm7_intermediate[];
-extern "C" const unsigned g_dispatch_fw_arm7_intermediate_len;
-extern "C" const DispatchEntry g_dispatch_fw_arm7_shared_ready[];
-extern "C" const unsigned g_dispatch_fw_arm7_shared_ready_len;
-extern "C" const DispatchEntry g_dispatch_fw_arm7_irq_ready[];
-extern "C" const unsigned g_dispatch_fw_arm7_irq_ready_len;
-extern "C" const DispatchEntry g_dispatch_fw_arm7_menu[];
-extern "C" const unsigned g_dispatch_fw_arm7_menu_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_calibration_save[];
 extern "C" const unsigned g_dispatch_fw_arm7_calibration_save_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_date_alarm_save[];
@@ -68,6 +76,8 @@ extern "C" const DispatchEntry g_dispatch_fw_arm7_download_play_shutdown[];
 extern "C" const unsigned g_dispatch_fw_arm7_download_play_shutdown_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_pictochat_room_a[];
 extern "C" const unsigned g_dispatch_fw_arm7_pictochat_room_a_len;
+#endif
+#endif
 
 namespace {
 
@@ -150,6 +160,7 @@ void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
 
 int main(int argc, char** argv) {
     std::string dir = "bios";
+    std::string rom_path;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -166,9 +177,12 @@ int main(int argc, char** argv) {
             discover_static_misses = true;
         } else if (a == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (a == "--rom" && i + 1 < argc) {
+            rom_path = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
-                "usage: %s [bios-dir] [cycle-budget] [--serve|--interactive] [--port 19842] "
+                "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
+                "[--serve|--interactive] [--port 19842] "
                 "[--discover-static-misses]\n",
                 argv[0]);
             return 0;
@@ -189,10 +203,20 @@ int main(int argc, char** argv) {
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
     auto fw = read_file(dir + "/firmware.bin");
+    auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
     if (!ok) { std::fprintf(stderr, "refusing to start: dump verification failed\n"); return 1; }
+    if (!rom_path.empty()) {
+        if (rom.size() < 0x200u) {
+            std::fprintf(stderr, "refusing to start: cartridge image is missing or truncated\n");
+            return 1;
+        }
+        const std::string rom_sha1 = gba::sha1(rom.data(), rom.size()).hex();
+        std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
+                     rom.size(), rom_sha1.c_str());
+    }
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
@@ -207,6 +231,12 @@ int main(int argc, char** argv) {
         cp15_reset();
         nds_io_reset();
         nds_io_load_firmware(fw.data(), (uint32_t)fw.size());
+        if (!rom.empty() && !nds_io_load_cartridge(
+                rom.data(), static_cast<uint32_t>(rom.size()),
+                a7.data(), static_cast<uint32_t>(a7.size()))) {
+            std::fprintf(stderr, "refusing to boot: cartridge initialization failed\n");
+            std::exit(1);
+        }
         runtime_init(nullptr);
         runtime_trace_reset();
 
@@ -214,10 +244,12 @@ int main(int argc, char** argv) {
                               g_dispatch_arm9_bios_len, 0xFFFF0000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
                               g_dispatch_arm7_bios_len, 0x00000000u);
+#ifndef NDS_BOOTSTRAP_FIRMWARE
         nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_early,
                               g_dispatch_fw_arm9_early_len, 0xFFFF0000u);
         nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_menu,
                               g_dispatch_fw_arm9_menu_len, 0xFFFF0000u);
+#ifdef NDS_HAVE_FW_EXTENDED_BANKS
         nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_calibration_save,
                               g_dispatch_fw_arm9_calibration_save_len,
                               0xFFFF0000u);
@@ -243,6 +275,7 @@ int main(int argc, char** argv) {
         nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_shutdown,
                               g_dispatch_fw_arm9_shutdown_len,
                               0xFFFF0000u);
+#endif
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_early,
                               g_dispatch_fw_arm7_early_len, 0x00000000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_intermediate,
@@ -253,6 +286,7 @@ int main(int argc, char** argv) {
                               g_dispatch_fw_arm7_irq_ready_len, 0x00000000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_menu,
                               g_dispatch_fw_arm7_menu_len, 0x00000000u);
+#ifdef NDS_HAVE_FW_EXTENDED_BANKS
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_calibration_save,
                               g_dispatch_fw_arm7_calibration_save_len,
                               0x00000000u);
@@ -269,6 +303,14 @@ int main(int argc, char** argv) {
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_pictochat_room_a,
                               g_dispatch_fw_arm7_pictochat_room_a_len,
                               0x00000000u);
+#endif
+#endif
+#ifdef NDS_HAVE_SM64DS_BANKS
+        nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
+                              g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
+                              g_dispatch_sm64ds_arm7_len, 0x00000000u);
+#endif
 
         // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
         const uint32_t reset_cpsr = 0x13u | CPSR_I_BIT | CPSR_F_BIT;

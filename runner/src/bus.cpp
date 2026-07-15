@@ -331,10 +331,12 @@ void unmapped(uint32_t addr, bool write, uint32_t width, uint32_t value) {
 // runtime_code_cycles (a sequential fetch is far cheaper than a branch/refill).
 uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
 uint32_t g_last_data_addr[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+static void reset_arm9_code_timing();
 
 void bus_init() {
     g_last_code_pc[0] = g_last_code_pc[1] = 0xFFFFFFFFu;
     g_last_data_addr[0] = g_last_data_addr[1] = 0xFFFFFFFFu;
+    reset_arm9_code_timing();
     g_main_ram.assign(4u * 1024 * 1024, 0);
     g_itcm.assign(32u * 1024, 0);
     g_dtcm.assign(16u * 1024, 0);
@@ -668,6 +670,14 @@ struct Arm9CodeTimingCache {
     Arm9CodeTiming timing = Arm9CodeTiming::Other;
 };
 Arm9CodeTimingCache g_arm9_code_timing{};
+Arm9CodeTiming g_arm9_region_code_timing = Arm9CodeTiming::Other;
+bool g_arm9_region_code_timing_valid = false;
+
+static void reset_arm9_code_timing() {
+    g_arm9_code_timing = {};
+    g_arm9_region_code_timing = Arm9CodeTiming::Other;
+    g_arm9_region_code_timing_valid = false;
+}
 
 Arm9CodeTiming arm9_code_timing(uint32_t addr) {
     const uint32_t page = addr & ~0xFFFu;
@@ -675,9 +685,7 @@ Arm9CodeTiming arm9_code_timing(uint32_t addr) {
         g_arm9_code_timing.cp15_generation == g_cp15_timing_generation)
         return g_arm9_code_timing.timing;
     Arm9CodeTiming timing;
-    if (g_cp15.itcm_enable && page < g_cp15.itcm_size)
-        timing = Arm9CodeTiming::Itcm;
-    else if (cp15_code_cacheable(page))
+    if (cp15_code_cacheable(page))
         timing = Arm9CodeTiming::Cached;
     else if (page >= 0x02000000u && page < 0x03000000u)
         timing = Arm9CodeTiming::MainRam;
@@ -685,6 +693,31 @@ Arm9CodeTiming arm9_code_timing(uint32_t addr) {
         timing = Arm9CodeTiming::Other;
     g_arm9_code_timing = {page, g_cp15_timing_generation, timing};
     return timing;
+}
+
+// melonDS snapshots MemTimings[addr>>12][0] into ARMv5::RegionCodeCycles in
+// JumpTo(). CP15 writes update MemTimings, but a straight-line prefetch stream
+// keeps using that snapshot until the next control transfer refills the
+// pipeline. Preserve the same distinction between the live CP15 map above and
+// the timing latched for the currently executing code region.
+Arm9CodeTiming arm9_current_code_timing(uint32_t addr) {
+    // CodeRead32 checks the live ITCM mapping before RegionCodeCycles, so TCM
+    // placement/enabling takes effect without waiting for a branch.
+    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
+        return Arm9CodeTiming::Itcm;
+    if (!g_arm9_region_code_timing_valid) {
+        g_arm9_region_code_timing = arm9_code_timing(addr);
+        g_arm9_region_code_timing_valid = true;
+    }
+    return g_arm9_region_code_timing;
+}
+
+Arm9CodeTiming arm9_latch_code_timing(uint32_t addr) {
+    g_arm9_region_code_timing = arm9_code_timing(addr);
+    g_arm9_region_code_timing_valid = true;
+    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
+        return Arm9CodeTiming::Itcm;
+    return g_arm9_region_code_timing;
 }
 
 // ARM9 GBA-slot timings are selected dynamically by EXMEMCNT.  melonDS feeds
@@ -828,7 +861,7 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // a true raw-zero (not a baseline absorption) — kept as-is.
     const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
     if (thumb && (pc & 2u)) return 0u;
-    const Arm9CodeTiming timing = arm9_code_timing(pc);
+    const Arm9CodeTiming timing = arm9_current_code_timing(pc);
     if (timing == Arm9CodeTiming::Itcm) return 1u;   // ITCM
     // I-cache-served region: melonDS degrades the fetch to a flat averaged cost
     // (kCodeCacheTiming=3 at a 32-byte line boundary, else 1; un-shifted). This
@@ -866,7 +899,10 @@ extern "C" uint32_t arm9_refill_cycles(uint32_t target) {
     const bool thumb = (target & 1u) != 0u;
     const uint32_t addr = target & ~1u;
     const uint32_t words = (thumb && !(addr & 2u)) ? 1u : 2u;
-    const Arm9CodeTiming timing = arm9_code_timing(addr);
+    // JumpTo snapshots the target region's current timing before fetching the
+    // replacement pipeline. Subsequent straight-line fetches retain it even if
+    // CP15 changes the underlying memory-timing map.
+    const Arm9CodeTiming timing = arm9_latch_code_timing(addr);
     if (timing == Arm9CodeTiming::Itcm)
         return words;
     if (timing == Arm9CodeTiming::Cached) {

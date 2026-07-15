@@ -50,11 +50,23 @@ EXTRA_ENTRIES = {
     "biosnds7": [
         # Runtime-confirmed computed call from the BIOS IRQ dispatcher. The
         # same bytes are reachable in both ARM (reset vector) and Thumb state.
+        (0x00000000, "reset_vector_00000000", "arm", "reset_vector"),
         (0x00000000, "runtime_thumb_00000000", "thumb", "runtime_confirmed"),
         # Exception vectors — entered by the CPU on SWI/IRQ, never by a static
         # branch, so the finder cannot see them.
         (0x00000008, "swi_vector_entry", "arm",   "exception_vector"),
         (0x00000018, "irq_vector_entry", "arm",   "exception_vector"),
+        # Firmware cartridge detection calls this interior Thumb helper from
+        # RAM (LR 0x037FAE5D); it is not a global ndsbios symbol.
+        (0x00001498, "lpad_00001498",     "thumb", "runtime_confirmed"),
+        # Static emission of the 0x1498 helper can return through this
+        # computed interior continuation.
+        (0x000014DE, "lpad_000014DE",     "thumb", "runtime_confirmed"),
+        (0x000014EC, "lpad_000014EC",     "thumb", "runtime_confirmed"),
+        (0x0000153A, "lpad_0000153A",     "thumb", "runtime_confirmed"),
+        # Remaining cases in the same BIOS jump table at 0x148C.
+        (0x00001548, "lpad_00001548",     "thumb", "computed_case"),
+        (0x00001592, "lpad_00001592",     "thumb", "computed_case"),
         # Oracle-validated interior landing: firmware computed branch from
         # 0x037FAECE (LR 0x037FAED1) reaches Thumb 0x15A0. Verified at the
         # identical retired-instruction boundary insn7=40,428,506.
@@ -62,6 +74,9 @@ EXTRA_ENTRIES = {
         # IRQ handler entries reached only indirectly (installed-handler tables
         # / computed dispatch).
         (0x00001CAA, "irqh_00001CAA",    "thumb", "indirect_handler"),
+        # Cartridge-transfer IRQ path branches into the middle of the shared
+        # handler body after acknowledging IF bit 19.
+        (0x00001CB6, "lpad_00001CB6",    "thumb", "runtime_confirmed"),
         (0x00001D1A, "irqh_00001D1A",    "thumb", "indirect_handler"),
         (0x0000201A, "irqh_0000201A",    "thumb", "indirect_handler"),
         (0x00002DD4, "irqh_00002DD4",    "arm",   "indirect_handler"),

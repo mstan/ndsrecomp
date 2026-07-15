@@ -35,7 +35,10 @@ uint8_t  g_postflg[2] = {0, 0};
 // 7 = VCount-compare MSB, 15..8 = VCount-compare low 8 (LYC).
 uint16_t g_dispstat[2] = {0, 0};   // writable bits (3,4,5,7,15..8), per CPU
 uint16_t g_vcount = 0;             // current scanline 0..262
-bool     g_in_vblank = false;      // current line >= 192
+uint16_t g_next_vcount = 0;        // guest write, latched at next scanline
+bool     g_next_vcount_valid = false;
+bool     g_vcount_match[2] = {false, false};
+bool     g_in_vblank = false;      // DISPSTAT VBlank flag latch
 
 // Interrupt registers, per CPU.
 uint32_t g_ime[2] = {0, 0};           // 0x208 master enable (bit0)
@@ -50,15 +53,228 @@ uint8_t g_wramcnt = 0;
 uint16_t g_wifiwaitcnt = 0;            // 0x206, visible only while Wi-Fi is on
 
 // Gamecard (no cartridge inserted → data reads back 0xFFFFFFFF). The boot
-// probes the slot; we let the transfer "complete" immediately so the
-// poll (ROMCTRL bit 23 data-ready / bit 31 busy) clears and the BIOS sees
-// an empty slot. ROMCTRL = 0x040001A4; data port = 0x04100010.
+// sees empty-slot all-ones behavior when no image is installed; an installed
+// image follows the raw/KEY1/normal command phases. ROMCTRL is
+// 0x040001A4 and the data port is 0x04100010.
 uint32_t g_romctrl = 0;
 uint32_t g_card_transfer_pos = 0;   // bytes prepared so far
 uint32_t g_card_transfer_len = 0;   // bytes in this block
 uint64_t g_card_deadline = UINT64_MAX;
 bool     g_card_end_event = false;
 int      g_card_irq_cpu = 0;
+std::vector<uint8_t> g_card_rom;
+std::vector<uint8_t> g_card_response;
+uint8_t  g_card_command[8] = {};
+uint32_t g_card_chip_id = 0;
+uint32_t g_key1_base[0x412] = {};
+uint32_t g_key1_schedule[0x412] = {};
+bool     g_key1_available = false;
+
+enum class CardCommandMode : uint8_t { Raw, Key1, Normal };
+CardCommandMode g_card_mode = CardCommandMode::Raw;
+uint32_t g_card_data_mode = 0;
+
+uint32_t load_le32(const uint8_t* p) {
+    return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
+           (uint32_t{p[2]} << 16u) | (uint32_t{p[3]} << 24u);
+}
+
+uint32_t load_be32(const uint8_t* p) {
+    return (uint32_t{p[0]} << 24u) | (uint32_t{p[1]} << 16u) |
+           (uint32_t{p[2]} << 8u) | uint32_t{p[3]};
+}
+
+void store_le32(uint8_t* p, uint32_t value) {
+    p[0] = static_cast<uint8_t>(value);
+    p[1] = static_cast<uint8_t>(value >> 8u);
+    p[2] = static_cast<uint8_t>(value >> 16u);
+    p[3] = static_cast<uint8_t>(value >> 24u);
+}
+
+uint32_t byte_swap32(uint32_t value) {
+    return (value >> 24u) | ((value >> 8u) & 0x0000FF00u) |
+           ((value << 8u) & 0x00FF0000u) | (value << 24u);
+}
+
+uint32_t key1_f(uint32_t value) {
+    uint32_t out = g_key1_schedule[0x012u + (value >> 24u)];
+    out += g_key1_schedule[0x112u + ((value >> 16u) & 0xFFu)];
+    out ^= g_key1_schedule[0x212u + ((value >> 8u) & 0xFFu)];
+    out += g_key1_schedule[0x312u + (value & 0xFFu)];
+    return out;
+}
+
+void key1_encrypt(uint32_t words[2]) {
+    uint32_t left = words[0];
+    uint32_t right = words[1];
+    for (uint32_t round = 0; round < 16u; ++round) {
+        const uint32_t mixed = right ^ g_key1_schedule[round];
+        right = key1_f(mixed) ^ left;
+        left = mixed;
+    }
+    words[0] = right ^ g_key1_schedule[16];
+    words[1] = left ^ g_key1_schedule[17];
+}
+
+void key1_decrypt(uint32_t words[2]) {
+    uint32_t left = words[0];
+    uint32_t right = words[1];
+    for (uint32_t round = 17; round >= 2u; --round) {
+        const uint32_t mixed = right ^ g_key1_schedule[round];
+        right = key1_f(mixed) ^ left;
+        left = mixed;
+    }
+    words[0] = right ^ g_key1_schedule[1];
+    words[1] = left ^ g_key1_schedule[0];
+}
+
+void key1_apply(uint32_t keycode[3], uint32_t modulus) {
+    key1_encrypt(&keycode[1]);
+    key1_encrypt(&keycode[0]);
+    for (uint32_t i = 0; i < 18u; ++i)
+        g_key1_schedule[i] ^= byte_swap32(keycode[i % modulus]);
+    uint32_t block[2] = {};
+    for (uint32_t i = 0; i < 0x412u; i += 2u) {
+        key1_encrypt(block);
+        g_key1_schedule[i] = block[1];
+        g_key1_schedule[i + 1u] = block[0];
+    }
+}
+
+void key1_init(uint32_t game_code, uint32_t level = 2u) {
+    std::memcpy(g_key1_schedule, g_key1_base, sizeof(g_key1_schedule));
+    uint32_t keycode[3] = {game_code, game_code >> 1u, game_code << 1u};
+    if (level >= 1u) key1_apply(keycode, 2u);
+    if (level >= 2u) key1_apply(keycode, 2u);
+    if (level >= 3u) {
+        keycode[1] <<= 1u;
+        keycode[2] >>= 1u;
+        key1_apply(keycode, 2u);
+    }
+}
+
+void key1_encrypt_bytes(uint8_t* bytes) {
+    uint32_t block[2] = {load_le32(bytes), load_le32(bytes + 4u)};
+    key1_encrypt(block);
+    store_le32(bytes, block[0]);
+    store_le32(bytes + 4u, block[1]);
+}
+
+// Most .nds dumps store the secure area already decrypted: its first two
+// words are the post-decryption marker while the remainder contains plaintext
+// code. A physical card exposes that area in KEY1-encrypted form and the ARM7
+// BIOS decrypts it during boot. Normalize decrypted dumps back to the card-side
+// representation so LLE firmware neither double-decrypts nor rejects them.
+void card_reencrypt_secure_area_if_needed() {
+    constexpr uint32_t kMarker = 0xE7FFDEFFu;
+    constexpr uint32_t kSecureSize = 0x800u;
+    if (!g_key1_available || g_card_rom.size() < 0x24u) return;
+
+    const uint32_t arm9_rom_offset = load_le32(g_card_rom.data() + 0x20u);
+    if (arm9_rom_offset < 0x4000u || arm9_rom_offset >= 0x8000u ||
+        uint64_t{arm9_rom_offset} + kSecureSize > g_card_rom.size() ||
+        load_le32(g_card_rom.data() + arm9_rom_offset) != kMarker ||
+        load_le32(g_card_rom.data() + arm9_rom_offset + 0x10u) == kMarker)
+        return;
+
+    uint8_t* secure = g_card_rom.data() + arm9_rom_offset;
+    static constexpr uint8_t kSecureMagic[8] = {
+        'e', 'n', 'c', 'r', 'y', 'O', 'b', 'j'
+    };
+    std::memcpy(secure, kSecureMagic, sizeof(kSecureMagic));
+
+    const uint32_t game_code = load_le32(g_card_rom.data() + 0x0Cu);
+    key1_init(game_code, 3u);
+    for (uint32_t pos = 0; pos < kSecureSize; pos += 8u)
+        key1_encrypt_bytes(secure + pos);
+
+    key1_init(game_code, 2u);
+    key1_encrypt_bytes(secure);
+}
+
+void key1_decode_command(const uint8_t encrypted[8], uint8_t decoded[8]) {
+    uint32_t block[2] = {load_be32(encrypted + 4), load_be32(encrypted)};
+    key1_decrypt(block);
+    store_le32(decoded, byte_swap32(block[1]));
+    store_le32(decoded + 4, byte_swap32(block[0]));
+}
+
+void card_copy_rom(uint32_t address, uint32_t length, uint32_t destination) {
+    if (address >= g_card_rom.size() || destination >= g_card_response.size()) return;
+    const size_t available = std::min<size_t>(length, g_card_rom.size() - address);
+    const size_t room = g_card_response.size() - destination;
+    std::memcpy(g_card_response.data() + destination,
+                g_card_rom.data() + address, std::min(available, room));
+}
+
+void card_fill_chip_id() {
+    for (uint32_t pos = 0; pos + 4u <= g_card_response.size(); pos += 4u)
+        store_le32(g_card_response.data() + pos, g_card_chip_id);
+}
+
+void card_prepare_response() {
+    g_card_response.assign(g_card_transfer_len, 0);
+    if (g_card_rom.empty()) {
+        std::fill(g_card_response.begin(), g_card_response.end(), 0xFFu);
+        return;
+    }
+
+    if (g_card_mode == CardCommandMode::Raw) {
+        switch (g_card_command[0]) {
+            case 0x9F:
+                std::fill(g_card_response.begin(), g_card_response.end(), 0xFFu);
+                break;
+            case 0x00:
+                for (uint32_t pos = 0; pos < g_card_transfer_len; pos += 0x1000u)
+                    card_copy_rom(0, std::min(0x1000u, g_card_transfer_len - pos), pos);
+                break;
+            case 0x90:
+                card_fill_chip_id();
+                break;
+            case 0x3C:
+                if (g_key1_available && g_card_rom.size() >= 0x10u) {
+                    key1_init(load_le32(g_card_rom.data() + 0x0Cu), 2u);
+                    g_card_mode = CardCommandMode::Key1;
+                }
+                break;
+            default:
+                break;
+        }
+        return;
+    }
+
+    if (g_card_mode == CardCommandMode::Key1) {
+        uint8_t decoded[8] = {};
+        key1_decode_command(g_card_command, decoded);
+        switch (decoded[0] & 0xF0u) {
+            case 0x40:
+                g_card_data_mode = 2;
+                break; // KEY2 is transparent at the command/data-port boundary.
+            case 0x10:
+                card_fill_chip_id();
+                break;
+            case 0x20:
+                card_copy_rom((decoded[2] & 0xF0u) << 8u,
+                              std::min(0x1000u, g_card_transfer_len), 0);
+                break;
+            case 0xA0:
+                g_card_mode = CardCommandMode::Normal;
+                break;
+            default:
+                break;
+        }
+        return;
+    }
+
+    if (g_card_command[0] == 0xB8u) {
+        card_fill_chip_id();
+    } else if (g_card_command[0] == 0xB7u && !g_card_rom.empty()) {
+        uint32_t address = load_be32(g_card_command + 1u);
+        address &= static_cast<uint32_t>(g_card_rom.size() - 1u);
+        if (address < 0x8000u) address = 0x8000u + (address & 0x1FFu);
+        card_copy_rom(address, g_card_transfer_len, 0);
+    }
+}
 
 // ARM9 integer math coprocessor. DIV/SQRT are asynchronous hardware units:
 // every control/operand write restarts a completion event, BUSY remains set
@@ -79,6 +295,15 @@ uint32_t card_block_words(uint32_t romctrl) {
     if (n == 0) return 0;                     // no transfer
     if (n == 7) return 1;                     // 4 bytes
     return (0x100u << n) / 4u;                // 0x200..0x4000 bytes
+}
+
+bool card_owned_by(int cpu) {
+    return static_cast<int>((g_exmemcnt[0] >> 11u) & 1u) == (cpu & 1);
+}
+
+bool card_register_address(uint32_t addr) {
+    return (addr >= 0x040001A0u && addr < 0x040001C0u) ||
+           (addr >= 0x04100010u && addr < 0x04100014u);
 }
 
 uint64_t active_system_timestamp() {
@@ -260,6 +485,57 @@ constexpr uint32_t kInsnTraceSize = 262144;
 NdsInsnTraceEntry g_insn_trace[2][kInsnTraceSize] = {};
 constexpr uint32_t kFifoTraceSize = 64;
 NdsFifoTraceEntry g_fifo_trace[2][kFifoTraceSize] = {};
+
+// Large enough to retain two maximum-size (0x4000-byte) blocks including
+// their causal ROMCTRL/command/completion markers.
+constexpr uint32_t kCardTraceSize = 8192;
+NdsCardTraceEntry g_card_trace[kCardTraceSize] = {};
+uint32_t g_card_trace_w = 0;
+uint32_t g_card_trace_count = 0;
+uint64_t g_card_trace_seq = 0;
+
+uint32_t card_response_word(uint32_t position) {
+    uint32_t word = 0;
+    for (uint32_t byte = 0; byte < 4u; ++byte) {
+        const uint32_t pos = position + byte;
+        const uint8_t value = pos < g_card_response.size()
+            ? g_card_response[pos] : 0xFFu;
+        word |= uint32_t{value} << (byte * 8u);
+    }
+    return word;
+}
+
+void card_trace_push(uint8_t kind, int owner, const uint8_t* command,
+                     uint32_t requested_romctrl, uint32_t auxspicnt,
+                     uint32_t word, uint32_t command_mode_before,
+                     uint32_t command_mode_after, uint32_t data_mode_before,
+                     uint32_t data_mode_after, bool start) {
+    NdsCardTraceEntry& e = g_card_trace[g_card_trace_w];
+    e = {};
+    e.seq = ++g_card_trace_seq;
+    e.sys = scheduler_system_timestamp();
+    e.cyc9 = scheduler_cpu_cycles(0);
+    e.cyc7 = scheduler_cpu_cycles(1);
+    e.insn9 = g_counts.insn9;
+    e.insn7 = g_counts.insn7;
+    e.kind = kind;
+    e.owner = static_cast<uint8_t>(owner & 1);
+    if (command) std::memcpy(e.command, command, sizeof(e.command));
+    e.requested_romctrl = requested_romctrl;
+    e.romctrl = g_romctrl;
+    e.auxspicnt = auxspicnt;
+    e.transfer_pos = g_card_transfer_pos;
+    e.transfer_len = g_card_transfer_len;
+    e.transfer_dir = 0;
+    e.word = word;
+    e.command_mode_before = command_mode_before;
+    e.command_mode_after = command_mode_after;
+    e.data_mode_before = data_mode_before;
+    e.data_mode_after = data_mode_after;
+    e.start = start ? 1u : 0u;
+    g_card_trace_w = (g_card_trace_w + 1u) % kCardTraceSize;
+    if (g_card_trace_count < kCardTraceSize) ++g_card_trace_count;
+}
 
 // ── sub-event break (debug-server anchoring) ────────────────────────────
 // Armed by nds_event_break_arm; brk_check() (called right after every counter
@@ -554,9 +830,13 @@ void dma_start(int cpu, int ch) {
                               : ch == 3 ? 0x0000FFFFu : 0x00003FFFu;
         d.remaining = d.cnt & mask;
         if (!d.remaining) d.remaining = mask + 1u;
+        // Increment/reload addressing reloads at the beginning of a DMA
+        // transaction, not at every hardware request within that transaction.
+        // This matters for gamecard DMA, which is requested once per ready
+        // word and therefore resumes the same transaction many times.
+        if ((d.cnt & 0x01800000u) == 0x01800000u) d.cur_src = d.src;
+        if ((d.cnt & 0x00600000u) == 0x00600000u) d.cur_dst = d.dst;
     }
-    if ((d.cnt & 0x01800000u) == 0x01800000u) d.cur_src = d.src;
-    if ((d.cnt & 0x00600000u) == 0x00600000u) d.cur_dst = d.dst;
     d.burst_index = 0;
     d.burst_start = true;
     d.running = true;
@@ -1237,9 +1517,11 @@ void nds_io_reset() {
         g_cpu_halted[i] = false;
         g_halt_entry_cycle[i] = 0;
         g_dispstat[i] = 0;
+        g_vcount_match[i] = false;
         g_keycnt[i] = 0;
     }
-    g_vcount = 0; g_in_vblank = false;
+    g_vcount = 0; g_next_vcount = 0; g_next_vcount_valid = false;
+    g_in_vblank = false;
     g_counts = {};
     std::memset(g_dma, 0, sizeof(g_dma));
     g_dma_entry_cycle[0] = g_dma_entry_cycle[1] = 0;
@@ -1247,8 +1529,14 @@ void nds_io_reset() {
     std::memset(g_irq_trace, 0, sizeof(g_irq_trace));
     std::memset(g_insn_trace, 0, sizeof(g_insn_trace));
     std::memset(g_fifo_trace, 0, sizeof(g_fifo_trace));
+    std::memset(g_card_trace, 0, sizeof(g_card_trace));
+    g_card_trace_w = 0; g_card_trace_count = 0; g_card_trace_seq = 0;
     g_romctrl = 0; g_card_transfer_pos = 0; g_card_transfer_len = 0;
     g_card_deadline = UINT64_MAX; g_card_end_event = false; g_card_irq_cpu = 0;
+    g_card_response.clear();
+    std::memset(g_card_command, 0, sizeof(g_card_command));
+    g_card_mode = CardCommandMode::Raw;
+    g_card_data_mode = 0;
     g_divcnt = 0; g_div_deadline = UINT64_MAX;
     std::memset(g_div_numer, 0, sizeof(g_div_numer));
     std::memset(g_div_denom, 0, sizeof(g_div_denom));
@@ -1304,6 +1592,32 @@ void nds_io_reset() {
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     g_fw.assign(p, p + n);
     nds_wifi_load_firmware(p, n);
+}
+
+bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
+                           const uint8_t* arm7_bios, uint32_t bios_size) {
+    constexpr uint32_t kKeyOffset = 0x30u;
+    constexpr uint32_t kKeyBytes = 0x412u * 4u;
+    if (!rom || rom_size < 0x200u || !arm7_bios ||
+        bios_size < kKeyOffset + kKeyBytes) {
+        g_card_rom.clear();
+        g_key1_available = false;
+        return false;
+    }
+
+    g_card_rom.assign(rom, rom + rom_size);
+    for (uint32_t i = 0; i < 0x412u; ++i)
+        g_key1_base[i] = load_le32(arm7_bios + kKeyOffset + i * 4u);
+    g_key1_available = true;
+    card_reencrypt_secure_area_if_needed();
+    g_card_mode = CardCommandMode::Raw;
+    g_card_data_mode = 0;
+    g_card_response.clear();
+    std::memset(g_card_command, 0, sizeof(g_card_command));
+
+    const uint32_t megabytes = std::max(1u, rom_size >> 20u);
+    g_card_chip_id = 0x000000C2u | ((megabytes - 1u) << 8u);
+    return true;
 }
 
 void nds_set_touch(uint16_t x, uint16_t y, bool down) {
@@ -1385,6 +1699,49 @@ bool nds_fifo_trace_get(int source_cpu, uint64_t count, NdsFifoTraceEntry* out) 
     return true;
 }
 
+void nds_card_debug_state(NdsCardDebugState* out) {
+    if (!out) return;
+    *out = {};
+    out->present = g_card_rom.empty() ? 0u : 1u;
+    out->owner = static_cast<uint8_t>((g_exmemcnt[0] >> 11u) & 1u);
+    for (uint32_t i = 0; i < 8u; ++i)
+        out->command[i] = static_cast<uint8_t>(
+            io_mem_read(0x040001A8u + i, 1));
+    if (g_card_rom.size() >= 0x10u)
+        std::memcpy(out->game_code, g_card_rom.data() + 0x0Cu,
+                    sizeof(out->game_code));
+    out->chip_id = g_card_chip_id;
+    out->rom_size = static_cast<uint32_t>(g_card_rom.size());
+    out->auxspicnt = io_mem_read(0x040001A0u, 2);
+    out->romctrl = g_romctrl;
+    out->transfer_pos = g_card_transfer_pos;
+    out->transfer_len = g_card_transfer_len;
+    out->transfer_dir = 0;
+    out->command_mode = static_cast<uint32_t>(g_card_mode);
+    out->data_mode = g_card_data_mode;
+    out->produced = g_card_trace_seq;
+    out->capacity = kCardTraceSize;
+    if (g_card_trace_count) {
+        const uint32_t first =
+            (g_card_trace_w + kCardTraceSize - g_card_trace_count) %
+            kCardTraceSize;
+        out->oldest = g_card_trace[first].seq;
+    } else {
+        out->oldest = g_card_trace_seq + 1u;
+    }
+}
+
+uint32_t nds_card_debug_trace_copy(NdsCardTraceEntry* out,
+                                   uint32_t max_entries) {
+    if (!out || max_entries == 0u) return 0u;
+    const uint32_t count = std::min(g_card_trace_count, max_entries);
+    const uint32_t start =
+        (g_card_trace_w + kCardTraceSize - count) % kCardTraceSize;
+    for (uint32_t i = 0; i < count; ++i)
+        out[i] = g_card_trace[(start + i) % kCardTraceSize];
+    return count;
+}
+
 uint64_t nds_next_system_event_time() {
     return std::min(std::min(g_card_deadline, g_spi_deadline),
                     std::min(g_div_deadline, g_sqrt_deadline));
@@ -1398,17 +1755,33 @@ void nds_run_system_events(uint64_t timestamp) {
     if (g_spi_deadline <= timestamp) {
         g_spi_deadline = UINT64_MAX;
         g_spicnt &= ~0x0080u;
+        if (g_spicnt & 0x4000u)
+            nds_raise_irq(1, 0x00800000u); // ARM7 IRQ_SPI
     }
     if (g_card_deadline <= timestamp) {
         const bool end_event = g_card_end_event;
         g_card_deadline = UINT64_MAX;
         if (end_event) {
             g_romctrl &= ~0x80000000u;
-            if (io_mem_read(0x040001A0u, 2) & 0x4000u)
+            const uint32_t auxspicnt = io_mem_read(0x040001A0u, 2);
+            if (auxspicnt & 0x4000u)
                 nds_raise_irq(g_card_irq_cpu, 0x00080000u);
+            const uint32_t mode = static_cast<uint32_t>(g_card_mode);
+            card_trace_push(NDS_CARD_TRACE_COMPLETE, g_card_irq_cpu,
+                            g_card_command, g_romctrl, auxspicnt, 0,
+                            mode, mode, g_card_data_mode, g_card_data_mode,
+                            false);
         } else {
-            g_card_transfer_pos += 4u;
             g_romctrl |= 0x00800000u;
+            const uint32_t mode = static_cast<uint32_t>(g_card_mode);
+            card_trace_push(NDS_CARD_TRACE_DATA_READY, g_card_irq_cpu,
+                            g_card_command, g_romctrl,
+                            io_mem_read(0x040001A0u, 2),
+                            card_response_word(g_card_transfer_pos),
+                            mode, mode, g_card_data_mode, g_card_data_mode,
+                            false);
+            nds_dma_trigger(g_card_irq_cpu,
+                            g_card_irq_cpu == 0 ? 5u : 0x12u);
         }
     }
     if (g_div_deadline <= timestamp) {
@@ -1601,6 +1974,8 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
         DmaChannel& d = g_dma[cpu][ch];
         if (!d.running || g_runtime_cycles >= target_cycles) continue;
         const uint32_t width = (d.cnt & 0x04000000u) ? 4u : 2u;
+        const bool gamecard = d.start_mode == (cpu == 0 ? 5u : 0x12u);
+        uint32_t request_units = gamecard ? 1u : UINT32_MAX;
         while (d.remaining && g_runtime_cycles < target_cycles) {
             const uint32_t unit = dma_unit_cycles(cpu, d, width);
             g_runtime_cycles += uint64_t{unit} << (cpu == 0 ? 1u : 0u);
@@ -1617,8 +1992,17 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
                 int64_t{d.cur_dst} + int64_t{d.dst_inc} * width);
             --d.remaining;
             d.burst_start = false;
+            if (--request_units == 0u) break;
         }
-        if (d.remaining) continue;
+        if (d.remaining) {
+            if (gamecard) {
+                // The card asserts a distinct DMA request for each 32-bit word.
+                // Suspend this channel without completing or reloading it; the
+                // next data-ready event resumes the pending transaction.
+                d.running = false;
+            }
+            continue;
+        }
 
         if (!(d.cnt & 0x02000000u)) d.cnt &= ~0x80000000u;
         if (d.cnt & 0x40000000u) nds_raise_irq(cpu, 1u << (8 + ch));
@@ -1634,24 +2018,16 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
 // numbers land with the melonDS oracle. VBlank (IF bit 0) fires once per
 // frame. Both cores see it (a display event).
 void nds_tick_display(unsigned long long cyc) {
-    // Display VBlank (IF bit 0): exactly once per frame at scanline 192, both
-    // cores. The DS display runs on the 33.51 MHz
-    // system clock (2130 cycles/scanline, 263 lines = 560190 cyc/frame).
-    // VBlank begins at line 192. Count by absolute vblank index so a delta that
-    // spans the line-192 boundary fires once (and a delta > 1 frame fires per
-    // frame) — the old code double-fired (frame-wrap AND line-192) and used the
-    // system-clock period against ARM9 cycles, making VBlank 4x too fast.
+    // The raster advances on the 33.51 MHz system clock
+    // (2130 cycles/scanline, 263 physical lines = 560190 cyc/frame). VCOUNT is
+    // normally incremented at each scanline start, but is independently
+    // writable: hardware/melonDS apply a write at the next physical scanline.
+    // Firmware uses this to resynchronise the logical display counter during
+    // the handoff to a game, so deriving VCOUNT only from absolute time loses
+    // several scanlines and wakes the ARM7 service on the wrong interrupt.
     static const unsigned long long SCAN = 2130, LINES = 263;
     static const unsigned long long FRAME = SCAN * LINES;
     static const unsigned long long HBLANK_START = 1584;
-    static const unsigned long long VB_START = 192ull * SCAN;
-    auto vb_index = [](unsigned long long c) -> unsigned long long {
-        return c < VB_START ? 0ull : (c - VB_START) / FRAME + 1ull;
-    };
-    // Current scanline, for DISPSTAT/VCOUNT reads (round-granular; the precise
-    // sub-scanline position lands with finer display timing if a poll needs it).
-    g_vcount = static_cast<uint16_t>((cyc / SCAN) % LINES);
-    g_in_vblank = (g_vcount >= 192);
     auto hblank_index = [](unsigned long long c) -> unsigned long long {
         return c < HBLANK_START ? 0ull
                                 : (c - HBLANK_START) / SCAN + 1ull;
@@ -1663,19 +2039,48 @@ void nds_tick_display(unsigned long long cyc) {
         if (line < 192) nds_gpu2d_render_scanline(line);
     }
 
-    unsigned long long pv = vb_index(g_display_last), cv = vb_index(cyc);
+    const unsigned long long previous_scanline = g_display_last / SCAN;
+    const unsigned long long current_scanline = cyc / SCAN;
     const unsigned long long previous_frame = g_display_last / FRAME;
     const unsigned long long current_frame = cyc / FRAME;
     g_display_last = cyc;
-    for (unsigned long long i = pv; i < cv; ++i) {
-        // VBlank IRQ fires (and is counted) per CPU ONLY when that CPU enabled
-        // it via DISPSTAT bit 3 — matching melonDS/GBATEK. Previously native
-        // raised IF bit0 on both cores every frame unconditionally, a spurious
-        // pending IRQ vs the oracle. Counting it the same way also makes
-        // vblank9/vblank7 mean "delivered VBlank IRQs" (the oracle's semantics),
-        // so they become valid cross-impl anchors once the guest enables VBlank.
-        if (g_dispstat[0] & 0x0008u) { ++g_counts.vblank9; nds_raise_irq(0, 0x1u); }
-        if (g_dispstat[1] & 0x0008u) { ++g_counts.vblank7; nds_raise_irq(1, 0x1u); }
+
+    for (unsigned long long i = previous_scanline + 1u;
+         i <= current_scanline; ++i) {
+        const uint32_t physical_line = static_cast<uint32_t>(i % LINES);
+        if (physical_line == 0u) {
+            g_vcount = 0;
+        } else if (g_next_vcount_valid) {
+            g_vcount = g_next_vcount;
+        } else {
+            ++g_vcount;
+        }
+        // A pending write is consumed even when physical line zero forces the
+        // counter to zero, matching GPU::StartScanline.
+        g_next_vcount_valid = false;
+
+        for (int cpu = 0; cpu < 2; ++cpu) {
+            const uint16_t match = static_cast<uint16_t>(
+                ((g_dispstat[cpu] & 0x0080u) << 1u) |
+                (g_dispstat[cpu] >> 8u));
+            g_vcount_match[cpu] = g_vcount == match;
+            if (g_vcount_match[cpu] && (g_dispstat[cpu] & 0x0020u))
+                nds_raise_irq(cpu, 0x00000004u);
+        }
+
+        if (g_vcount == 262u) {
+            g_in_vblank = false;
+        } else if (g_vcount == 192u) {
+            g_in_vblank = true;
+            if (g_dispstat[0] & 0x0008u) {
+                ++g_counts.vblank9;
+                nds_raise_irq(0, 0x00000001u);
+            }
+            if (g_dispstat[1] & 0x0008u) {
+                ++g_counts.vblank7;
+                nds_raise_irq(1, 0x00000001u);
+            }
+        }
         brk_check();
     }
 
@@ -1732,6 +2137,7 @@ void nds_tick_timers(int cpu, unsigned long long cpu_cycles) {
 uint32_t nds_io_read(uint32_t addr, uint32_t width) {
     const int cpu = active();
     const uint32_t m = mask_for(width);
+    if (card_register_address(addr) && !card_owned_by(cpu)) return 0;
     if (cpu == 0 && gpu2d_reg_addr(addr))
         return nds_gpu2d_read(addr, width) & m;
     if (addr >= 0x04000130u && addr < 0x04000134u) {
@@ -1788,9 +2194,9 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
         case 0x04000004: case 0x04000005: {  // DISPSTAT (per CPU)
             uint16_t v = g_dispstat[cpu] & 0xFFB8u;        // enable + LYC bits
             if (g_in_vblank) v |= 0x0001u;                  // VBlank flag
-            uint16_t lyc = static_cast<uint16_t>(
-                ((g_dispstat[cpu] & 0x0080u) << 1) | (g_dispstat[cpu] >> 8));
-            if (lyc == g_vcount) v |= 0x0004u;              // VCount-match flag
+            if (g_vcount_match[cpu]) v |= 0x0004u;          // latched at line start
+            if (addr == 0x04000004u && width == 4u)
+                return uint32_t{v} | (uint32_t{g_vcount} << 16u);
             return (v >> ((addr & 1u) * 8)) & m;
         }
         case 0x04000006: case 0x04000007:    // VCOUNT (current scanline)
@@ -1830,9 +2236,12 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             return spi_read_data() & m;
         case 0x04000138: case 0x04000139:  // RTC register (bit-banged serial)
             return (rtc_read() >> ((addr & 1u) * 8)) & m;
-        case 0x04100010:  // gamecard data — empty slot reads all-ones
+        case 0x04100010: { // gamecard data port
+            uint32_t word = 0xFFFFFFFFu;
             if (!(g_romctrl & 0x40000000u) && (g_romctrl & 0x00800000u)) {
+                word = card_response_word(g_card_transfer_pos);
                 g_romctrl &= ~0x00800000u;
+                g_card_transfer_pos += 4u;
                 if (g_card_transfer_pos < g_card_transfer_len) {
                     const uint32_t xfercycle =
                         (g_romctrl & 0x08000000u) ? 8u : 5u;
@@ -1842,11 +2251,18 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
                     schedule_card_event(uint64_t{xfercycle} * delay, false);
                 } else {
                     g_romctrl &= ~0x80000000u;
-                    if (io_mem_read(0x040001A0u, 2) & 0x4000u)
+                    const uint32_t auxspicnt = io_mem_read(0x040001A0u, 2);
+                    if (auxspicnt & 0x4000u)
                         nds_raise_irq(g_card_irq_cpu, 0x00080000u);
+                    const uint32_t mode = static_cast<uint32_t>(g_card_mode);
+                    card_trace_push(NDS_CARD_TRACE_COMPLETE, g_card_irq_cpu,
+                                    g_card_command, g_romctrl, auxspicnt, 0,
+                                    mode, mode, g_card_data_mode,
+                                    g_card_data_mode, false);
                 }
             }
-            return 0xFFFFFFFFu & m;
+            return word & m;
+        }
         default:
             if (io_backed(addr)) return io_mem_read(addr, width) & m;
             if (g_warned < 64) {
@@ -1860,6 +2276,7 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
 
 void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
     const int cpu = active();
+    if (card_register_address(addr) && !card_owned_by(cpu)) return;
     if (cpu == 0 && gpu2d_reg_addr(addr)) {
         nds_gpu2d_write(addr, value, width);
         return;
@@ -1939,14 +2356,34 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
     }
     switch (addr) {
         case 0x04000004: case 0x04000005: {  // DISPSTAT (per CPU)
+            if (width == 1u) return;
             uint32_t shift = (addr & 1u) * 8;
             uint32_t wmask = mask_for(width) << shift;
             uint32_t merged = (g_dispstat[cpu] & ~wmask) | ((value << shift) & wmask);
             g_dispstat[cpu] = static_cast<uint16_t>(merged & 0xFFB8u);  // writable bits
+            if (addr == 0x04000004u && width == 4u) {
+                g_next_vcount = static_cast<uint16_t>(value >> 16u);
+                g_next_vcount_valid = true;
+            }
+            return;
+        }
+        case 0x04000006: { // VCOUNT write takes effect at next scanline
+            if (width == 2u) {
+                g_next_vcount = static_cast<uint16_t>(value);
+                g_next_vcount_valid = true;
+            }
             return;
         }
         case 0x04000180:
-            ipcsync_write(cpu, static_cast<uint16_t>(value));
+            // IPCSYNC's writable fields live in the high byte.  An 8-bit
+            // write to the low byte is ignored; melonDS/hardware route byte
+            // writes through 0x04000181 instead.
+            if (width != 1u)
+                ipcsync_write(cpu, static_cast<uint16_t>(value));
+            return;
+        case 0x04000181:
+            if (width == 1u)
+                ipcsync_write(cpu, static_cast<uint16_t>(value << 8u));
             return;
         case 0x04000208:
             g_ime[cpu] = value & 0x1u;
@@ -2062,12 +2499,28 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             g_romctrl = (value & 0xFF7F7FFFu) | (g_romctrl & 0x20800000u);
             const uint16_t aux = static_cast<uint16_t>(
                 io_mem_read(0x040001A0u, 2));
+            uint8_t pending_command[8] = {};
+            for (uint32_t i = 0; i < 8u; ++i)
+                pending_command[i] = static_cast<uint8_t>(
+                    io_mem_read(0x040001A8u + i, 1));
+            const uint32_t mode_before = static_cast<uint32_t>(g_card_mode);
+            const uint32_t data_mode_before = g_card_data_mode;
+            card_trace_push(NDS_CARD_TRACE_ROMCTRL, cpu, pending_command,
+                            value, aux, 0, mode_before, mode_before,
+                            data_mode_before, data_mode_before, start);
             if (!start || !(aux & 0x8000u) || (aux & 0x2000u)) return;
 
             g_card_transfer_pos = 0;
             g_card_transfer_len = card_block_words(g_romctrl) * 4u;
             g_card_irq_cpu = cpu;
             g_romctrl &= ~0x00800000u;
+            std::memcpy(g_card_command, pending_command,
+                        sizeof(g_card_command));
+            card_prepare_response();
+            card_trace_push(NDS_CARD_TRACE_COMMAND, cpu, g_card_command,
+                            g_romctrl, aux, 0, mode_before,
+                            static_cast<uint32_t>(g_card_mode),
+                            data_mode_before, g_card_data_mode, true);
             const uint32_t xfercycle =
                 (g_romctrl & 0x08000000u) ? 8u : 5u;
             uint32_t command_delay = 8u;

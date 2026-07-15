@@ -99,6 +99,61 @@ struct NdsFifoTraceEntry {
     uint32_t value;
 };
 bool nds_fifo_trace_get(int source_cpu, uint64_t count, NdsFifoTraceEntry* out);
+
+enum NdsCardTraceKind : uint8_t {
+    NDS_CARD_TRACE_ROMCTRL = 0,
+    NDS_CARD_TRACE_COMMAND = 1,
+    NDS_CARD_TRACE_DATA_READY = 2,
+    NDS_CARD_TRACE_COMPLETE = 3,
+};
+
+// Passive gamecard protocol observer. No accessor reads ROMDATA or advances a
+// transfer; data words are copied from the already-prepared response buffer.
+struct NdsCardTraceEntry {
+    uint64_t seq;
+    uint64_t sys;
+    uint64_t cyc9;
+    uint64_t cyc7;
+    uint64_t insn9;
+    uint64_t insn7;
+    uint8_t kind;
+    uint8_t owner; // 0 = ARM9, 1 = ARM7
+    uint8_t command[8];
+    uint32_t requested_romctrl;
+    uint32_t romctrl;
+    uint32_t auxspicnt;
+    uint32_t transfer_pos;
+    uint32_t transfer_len;
+    uint32_t transfer_dir;
+    uint32_t word;
+    uint32_t command_mode_before;
+    uint32_t command_mode_after;
+    uint32_t data_mode_before;
+    uint32_t data_mode_after;
+    uint8_t start;
+};
+
+struct NdsCardDebugState {
+    uint8_t present;
+    uint8_t owner;
+    uint8_t command[8];
+    uint8_t game_code[4];
+    uint32_t chip_id;
+    uint32_t rom_size;
+    uint32_t auxspicnt;
+    uint32_t romctrl;
+    uint32_t transfer_pos;
+    uint32_t transfer_len;
+    uint32_t transfer_dir;
+    uint32_t command_mode;
+    uint32_t data_mode;
+    uint64_t produced;
+    uint64_t oldest;
+    uint32_t capacity;
+};
+void nds_card_debug_state(NdsCardDebugState* out);
+uint32_t nds_card_debug_trace_copy(NdsCardTraceEntry* out,
+                                   uint32_t max_entries);
 // Bump the active CPU's retired-instruction counter (+break-check). Called
 // once per retired guest instruction from BOTH the recompiled banks (via
 // runtime_insn_fp, g_runtime_insn_trace on) and the Tier-3 interpreter.
@@ -173,3 +228,7 @@ void     nds_tick_display(unsigned long long system_cycles);
 void     nds_tick_rtc(unsigned long long system_cycles);
 void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
+// Installs user-provided cartridge data and derives KEY1 from the user's
+// ARM7 BIOS at runtime. Neither input is compiled into native objects.
+bool     nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
+                               const uint8_t* arm7_bios, uint32_t bios_size);

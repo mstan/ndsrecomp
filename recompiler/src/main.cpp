@@ -545,6 +545,7 @@ int main(int argc, char** argv) {
     Image img{bin.data(), bin.size(), cfg.program.load_address};
 
     FunctionFinder finder(bin.data(), bin.size(), cfg.program.load_address);
+    finder.set_authoritative_seeds(cfg.program.authoritative_entry_points);
     // Program entry historically defaulted to ARM. Runtime-materialized
     // firmware may enter in Thumb, in which case an explicit entry_point at
     // the same address is authoritative and must suppress the bogus ARM walk.
@@ -552,9 +553,9 @@ int main(int argc, char** argv) {
         cfg.extra_funcs.begin(), cfg.extra_funcs.end(),
         [&](const auto& ef) { return ef.addr == cfg.program.entry_pc; });
     if (!explicit_program_entry)
-        finder.add_seed({cfg.program.entry_pc, CpuMode::Arm, "entry", 0});
+        finder.add_seed({cfg.program.entry_pc, CpuMode::Arm, "entry", 0, 0});
     for (const auto& ef : cfg.extra_funcs)
-        finder.add_seed({ef.addr, ef.mode, ef.name, 0});
+        finder.add_seed({ef.addr, ef.mode, ef.name, 0, ef.size});
     for (const auto& dr : cfg.data_ranges)
         finder.add_data_range(dr.start, dr.end, dr.note);
     for (const auto& cc : cfg.code_copies)

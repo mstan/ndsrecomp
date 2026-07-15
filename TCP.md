@@ -32,6 +32,7 @@ events** and only then read state:
 | `run_to_event` | `event`,`count` | advances until the named counter reaches `count`; `{reached,counts}` |
 | `read_mem` | `cpu`:9\|7,`addr`,`len` | `{hex}` — the **CPU's** memory view (ARM9 and ARM7 differ) |
 | `read_io` | `cpu`:9\|7,`addr`,`width`:8\|16\|32 | `{value}` — exact-width I/O register read |
+| `cartridge` | `max` (default 128, maximum 8192) | Cartridge presence/current controller state plus a passive chronological ring of ROMCTRL, command, data-ready, and completion events |
 | `read_region` | `region` | raw region bytes (see below) |
 | `framebuffer` | `engine`:A\|B | `{w:256,h:192,rgb:<hex>}` |
 | `audio_samples` | `start`,`count` (max 4096) | Non-destructive ordinal trace: `{start,count,oldest,produced,pcm_s16le}` |

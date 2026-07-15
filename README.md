@@ -4,10 +4,10 @@
 >
 > This is an experimental developer snapshot, not a ready-to-use emulator or
 > a stable framework. It has demonstrated one specific, hash-verified Nintendo
-> DS firmware path through the Health & Safety screen to an interactive menu,
-> but it has no commercial game target, no compatibility promise, no stable
-> API, and no turnkey clean-clone runner build yet. Internals and instructions
-> may change without notice.
+> DS firmware path and an experimental local Super Mario 64 DS target through
+> its title flow. It has no compatibility promise, no stable API, and no
+> turnkey clean-clone game build yet. Internals and instructions may change
+> without notice.
 
 ndsrecomp is a static recompiler for the **Nintendo DS**. In the same family
 as `nesrecomp`, `snesrecomp`, `psxrecomp`, `segagenesisrecomp`, and
@@ -20,11 +20,14 @@ copied into RAM by the guest currently uses a bounded interpreter tier.
 
 ## Current demonstrated target
 
-There is no commercial game in scope. The current milestone is the original
-DS firmware menu: boot through the ARM7 and ARM9 BIOSes, pass the Health &
-Safety screen, reach the main menu, and interact with it through mouse-driven
-touch input. The retained release evidence covers only the tested dump hashes
-and scripted paths; it is not a general firmware-compatibility claim.
+The original DS firmware menu remains the baseline target: boot through the
+ARM7 and ARM9 BIOSes, pass the Health & Safety screen, reach the main menu, and
+interact with it through mouse-driven touch input.
+
+The first experimental game target is a locally supplied European revision-0
+Super Mario 64 DS dump. The authentic firmware/cartridge path now launches the
+game, accepts its title-screen touch input, and reaches the main title flow.
+This is narrow bring-up evidence, not a compatibility or gameplay claim.
 
 Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
 
@@ -32,7 +35,9 @@ Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/t
 
 - ARM7TDMI (ARMv4T) and ARM946E-S (ARMv5TE) decode and C emission.
 - A dual-CPU, event-aligned scheduler and the hardware paths exercised by the
-  tested firmware-menu traversal.
+  tested firmware-menu and SM64DS title traversals.
+- Physical-card-style command, secure-area/KEY1, DMA, and firmware launch
+  behavior for the demonstrated local game dump.
 - Interactive SDL video, touch, keyboard, and paced stereo audio in the tested
   developer build.
 - A separate melonDS-based accuracy oracle and machine-readable traversal
@@ -40,12 +45,14 @@ Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/t
 
 Important limitations:
 
-- No DS game is supported or currently targeted.
+- SM64DS reaches its title flow, but gameplay is not supported. Lower-screen
+  Engine B/3D composition is incomplete and currently renders incorrectly.
+- No other DS game is supported or claimed compatible.
 - The checked-in tree intentionally omits generated recompiled banks, because
   they contain code derived from user-provided Nintendo dumps.
-- Building the full firmware-menu runner requires local RAM captures and a
-  developer-oriented capture/regeneration workflow that is not yet turnkey
-  from a clean clone.
+- Building the demonstrated targets requires local BIOS, firmware, ROM, and
+  generated-bank inputs. The developer-oriented regeneration workflow is not
+  yet turnkey from a clean clone.
 - Documentation outside this README is primarily internal development material.
 
 ## The DS is two CPUs

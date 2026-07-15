@@ -15,6 +15,8 @@
 #include "spu.h"
 #include "tier3.h"
 
+extern "C" uint32_t g_runtime_break_pc;
+
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -70,7 +72,7 @@ uint64_t json_u64(const std::string& s, const std::string& key,
     if (!json_find(s, key, p)) return def;
     if (p < s.size() && s[p] == '"') ++p;
     char* end = nullptr;
-    uint64_t v = std::strtoull(s.c_str() + p, &end, 10);
+    uint64_t v = std::strtoull(s.c_str() + p, &end, 0);
     return (end == s.c_str() + p) ? def : v;
 }
 
@@ -127,6 +129,91 @@ std::string io_state_json() {
     return buf;
 }
 
+const char* card_event_name(uint8_t kind) {
+    switch (kind) {
+        case NDS_CARD_TRACE_ROMCTRL: return "romctrl";
+        case NDS_CARD_TRACE_COMMAND: return "command";
+        case NDS_CARD_TRACE_DATA_READY: return "data_ready";
+        case NDS_CARD_TRACE_COMPLETE: return "complete";
+        default: return "unknown";
+    }
+}
+
+const char* card_phase_name(uint32_t mode) {
+    switch (mode) {
+        case 0: return "raw";
+        case 1: return "key1";
+        case 2: return "normal";
+        default: return "unknown";
+    }
+}
+
+std::string cartridge_json(uint32_t max_entries) {
+    NdsCardDebugState state{};
+    nds_card_debug_state(&state);
+    if (max_entries > state.capacity) max_entries = state.capacity;
+    std::vector<NdsCardTraceEntry> events(max_entries);
+    const uint32_t count = nds_card_debug_trace_copy(
+        events.data(), max_entries);
+
+    std::string command;
+    append_hex(command, state.command, sizeof(state.command));
+    std::string game_code(reinterpret_cast<const char*>(state.game_code), 4);
+    char header[1024];
+    std::snprintf(header, sizeof(header),
+        "{\"present\":%s,\"cart_type\":%u,\"chip_id\":%u,"
+        "\"rom_size\":%u,\"game_code\":\"%s\",\"owner\":%u,"
+        "\"auxspicnt\":%u,\"romctrl\":%u,\"busy\":%s,"
+        "\"data_ready\":%s,\"command\":\"%s\","
+        "\"transfer_pos\":%u,\"transfer_len\":%u,\"transfer_dir\":%u,"
+        "\"command_phase\":\"%s\",\"command_phase_id\":%u,"
+        "\"data_phase_id\":%u,\"produced\":%llu,\"oldest\":%llu,"
+        "\"capacity\":%u,\"events\":[",
+        state.present ? "true" : "false", state.present ? 257u : 0u,
+        state.chip_id, state.rom_size, game_code.c_str(),
+        state.owner ? 7u : 9u, state.auxspicnt, state.romctrl,
+        (state.romctrl & 0x80000000u) ? "true" : "false",
+        (state.romctrl & 0x00800000u) ? "true" : "false",
+        command.c_str(), state.transfer_pos, state.transfer_len,
+        state.transfer_dir, card_phase_name(state.command_mode),
+        state.command_mode, state.data_mode,
+        (unsigned long long)state.produced,
+        (unsigned long long)state.oldest, state.capacity);
+    std::string out = header;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const NdsCardTraceEntry& e = events[i];
+        std::string event_command;
+        append_hex(event_command, e.command, sizeof(e.command));
+        char item[1024];
+        std::snprintf(item, sizeof(item),
+            "%s{\"seq\":%llu,\"kind\":\"%s\",\"sys\":%llu,"
+            "\"cyc9\":%llu,\"cyc7\":%llu,\"insn9\":%llu,"
+            "\"insn7\":%llu,\"owner\":%u,\"command\":\"%s\","
+            "\"requested_romctrl\":%u,\"romctrl\":%u,\"auxspicnt\":%u,"
+            "\"transfer_pos\":%u,\"transfer_len\":%u,\"transfer_dir\":%u,"
+            "\"word\":%u,\"start\":%s,"
+            "\"command_phase_before\":\"%s\","
+            "\"command_phase_after\":\"%s\","
+            "\"command_phase_before_id\":%u,\"command_phase_after_id\":%u,"
+            "\"data_phase_before_id\":%u,\"data_phase_after_id\":%u}",
+            i ? "," : "", (unsigned long long)e.seq,
+            card_event_name(e.kind), (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn9, (unsigned long long)e.insn7,
+            e.owner ? 7u : 9u, event_command.c_str(),
+            e.requested_romctrl, e.romctrl, e.auxspicnt,
+            e.transfer_pos, e.transfer_len, e.transfer_dir, e.word,
+            e.start ? "true" : "false",
+            card_phase_name(e.command_mode_before),
+            card_phase_name(e.command_mode_after),
+            e.command_mode_before, e.command_mode_after,
+            e.data_mode_before, e.data_mode_after);
+        out += item;
+    }
+    return out + "]}";
+}
+
 uint32_t spsr_for_mode(const ArmCpuState& c, uint32_t mode) {
     switch (mode) {
         case 0x11: return c.banked_spsr[ARM_BANK_FIQ];
@@ -167,6 +254,10 @@ std::string handle(const std::string& line) {
     }
 
     if (cmd == "event_counts") return counts_json();
+    if (cmd == "cartridge") {
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "max", 128));
+        return cartridge_json(max);
+    }
     if (cmd == "audio_samples") {
         const uint64_t start = json_u64(line, "start", 0);
         uint32_t count = static_cast<uint32_t>(json_u64(line, "count", 1024));
@@ -331,6 +422,27 @@ std::string handle(const std::string& line) {
             scheduler_cpu_terminal_halted(1) ? "true" : "false",
             scheduler_cpu_halt_reason(0), scheduler_cpu_halt_reason(1));
         return buf;
+    }
+    if (cmd == "run_to_pc") {
+        const uint32_t pc = static_cast<uint32_t>(json_u64(line, "pc", 0));
+        uint64_t max_rounds = json_u64(line, "max_rounds", 50000000);
+        if (!pc) return "{\"error\":\"pc must be nonzero\"}";
+        if (max_rounds > 100000000u) max_rounds = 100000000u;
+        g_runtime_break_pc = pc;
+        uint64_t rounds = 0;
+        while (!scheduler_cpu_terminal_halted(0) &&
+               !scheduler_cpu_terminal_halted(1) && rounds < max_rounds) {
+            scheduler_run_round();
+            ++rounds;
+        }
+        g_runtime_break_pc = 0;
+        const bool reached = ((g_cpu.R[15] & ~1u) == (pc & ~1u)) &&
+            (scheduler_cpu_terminal_halted(0) || scheduler_cpu_terminal_halted(1));
+        return std::string("{\"reached\":") + (reached ? "true" : "false") +
+            ",\"rounds\":" + std::to_string(rounds) +
+            ",\"reason9\":\"" + scheduler_cpu_halt_reason(0) + "\"" +
+            ",\"reason7\":\"" + scheduler_cpu_halt_reason(1) + "\"" +
+            ",\"counts\":" + counts_json() + "}";
     }
     if (cmd == "cp15_state") {
         std::string out = "{\"control\":" + std::to_string(g_cp15.control) +

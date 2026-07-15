@@ -11,29 +11,60 @@ if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+option(NDS_BOOTSTRAP_FIRMWARE
+    "Build with BIOS banks only so guest-produced firmware RAM can be captured"
+    OFF)
+set(NDS_SM64DS_BANK_DIR "" CACHE PATH
+    "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
+
 # The recompiled ARM9 BIOS bank (generated; compiled as C). Generated TUs
 # trade warning-cleanliness for uniform emission — silence the expected
 # unused-temp warnings rather than touch generated/.
 set(GEN ${CMAKE_CURRENT_SOURCE_DIR}/../generated)
-file(GLOB FW_BANK_BODIES CONFIGURE_DEPENDS "${GEN}/fw_*_[0-9][0-9].c")
-file(GLOB FW_BANK_DISPATCH CONFIGURE_DEPENDS "${GEN}/fw_*_dispatch.c")
+if(NDS_BOOTSTRAP_FIRMWARE)
+    set(FW_BANK_BODIES)
+    set(FW_BANK_DISPATCH)
+else()
+    file(GLOB FW_BANK_BODIES CONFIGURE_DEPENDS "${GEN}/fw_*_[0-9][0-9].c")
+    file(GLOB FW_BANK_DISPATCH CONFIGURE_DEPENDS "${GEN}/fw_*_dispatch.c")
+endif()
 list(SORT FW_BANK_BODIES)
 list(SORT FW_BANK_DISPATCH)
+set(SM64DS_BANK_SOURCES)
+if(NDS_SM64DS_BANK_DIR)
+    file(GLOB SM64DS_BANK_SOURCES CONFIGURE_DEPENDS
+        "${NDS_SM64DS_BANK_DIR}/sm64ds_arm7_*.c"
+        "${NDS_SM64DS_BANK_DIR}/sm64ds_arm9_*.c")
+    list(SORT SM64DS_BANK_SOURCES)
+    if(NOT SM64DS_BANK_SOURCES)
+        message(FATAL_ERROR
+            "NDS_SM64DS_BANK_DIR has no generated sm64ds bank sources")
+    endif()
+endif()
 add_library(nds_banks STATIC
     ${GEN}/arm9_bios.c
     ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c
     ${GEN}/arm7_bios_dispatch.c
     ${FW_BANK_BODIES}
-    ${FW_BANK_DISPATCH})
+    ${FW_BANK_DISPATCH}
+    ${SM64DS_BANK_SOURCES})
 target_include_directories(nds_banks PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+    ${NDS_SM64DS_BANK_DIR})
 set_source_files_properties(
     ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
+    ${SM64DS_BANK_SOURCES}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
+if(SM64DS_BANK_SOURCES AND NOT MSVC)
+    # Initial game banks are large and still pre-alpha; keep iteration builds
+    # inexpensive until boot correctness is established.
+    set_source_files_properties(${SM64DS_BANK_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "-w;-O0;-g0")
+endif()
 
 # Every immutable bank is CPU-specific even though both use one runtime ABI.
 # Tell the C compiler which core owns each source so it can fold the emitted
@@ -44,6 +75,13 @@ foreach(src IN LISTS FW_BANK_BODIES FW_BANK_DISPATCH)
     if(src MATCHES "/fw_arm9_")
         list(APPEND ARM9_BANK_SOURCES ${src})
     elseif(src MATCHES "/fw_arm7_")
+        list(APPEND ARM7_BANK_SOURCES ${src})
+    endif()
+endforeach()
+foreach(src IN LISTS SM64DS_BANK_SOURCES)
+    if(src MATCHES "sm64ds_arm9_")
+        list(APPEND ARM9_BANK_SOURCES ${src})
+    elseif(src MATCHES "sm64ds_arm7_")
         list(APPEND ARM7_BANK_SOURCES ${src})
     endif()
 endforeach()
@@ -87,6 +125,17 @@ target_include_directories(nds_runner PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
 target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
+if(NDS_BOOTSTRAP_FIRMWARE)
+    target_compile_definitions(nds_runner PRIVATE NDS_BOOTSTRAP_FIRMWARE=1)
+elseif(EXISTS "${GEN}/fw_arm9_calibration_save_dispatch.c")
+    # The seven core captures are enough for an authentic reset-to-menu/game
+    # boot.  Interaction-specific captures are optional and are registered
+    # only when the complete extended set has been generated locally.
+    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_FW_EXTENDED_BANKS=1)
+endif()
+if(SM64DS_BANK_SOURCES)
+    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SM64DS_BANKS=1)
+endif()
 
 # SDL is a host-only presentation layer. The runner remains buildable without
 # it for headless deterministic/oracle work; --interactive reports that the

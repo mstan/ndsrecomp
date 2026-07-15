@@ -40,6 +40,7 @@ struct ConfigProgram {
     uint32_t    load_address = 0;
     uint32_t    size = 0;
     uint32_t    entry_pc = 0;
+    bool        authoritative_entry_points = false;
 };
 
 struct ConfigIdentity {
@@ -54,6 +55,7 @@ struct ConfigIdentity {
 // pad (e.g. the IRQ epilogue) reached only by a runtime-computed branch.
 struct ConfigExtraFunc {
     uint32_t    addr = 0;
+    uint32_t    size = 0;       // optional exact byte size; 0 = discover
     CpuMode     mode = CpuMode::Arm;
     std::string name;       // optional; finder generates one if empty
     std::string kind;       // optional; documentation (e.g. "bios_irq_epilogue")

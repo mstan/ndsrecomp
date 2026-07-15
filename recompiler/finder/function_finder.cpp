@@ -177,7 +177,8 @@ uint16_t FunctionFinder::read_u16(uint32_t addr) const {
 
 void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                                    const std::string& seed_name,
-                                   uint32_t seed_source_addr) {
+                                   uint32_t seed_source_addr,
+                                   uint32_t exact_size) {
     uint32_t entry_source = 0;
     if (seed_source_addr != 0) {
         entry_source = seed_source_addr;
@@ -200,6 +201,14 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
 
     uint32_t pc = entry_addr;
     const uint32_t step = (entry_mode == CpuMode::Thumb) ? 2u : 4u;
+    const uint64_t exact_end64 = static_cast<uint64_t>(entry_addr) + exact_size;
+    if (exact_size != 0u &&
+        (exact_end64 >= 0x100000000ull ||
+         !can_read_at(static_cast<uint32_t>(exact_end64 - step), step))) {
+        return;
+    }
+    const uint32_t exact_end = exact_size == 0u
+        ? 0u : static_cast<uint32_t>(exact_end64);
     constexpr std::size_t kMaxInstrs = 4096;
     std::size_t count = 0;
 
@@ -746,7 +755,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         return true;
     };
 
-    while (count++ < kMaxInstrs && can_read_at(pc, step)) {
+    while (count++ < kMaxInstrs && can_read_at(pc, step) &&
+           (exact_end == 0u || pc < exact_end)) {
         // If we ever decode from inside a data_range, that's a hard
         // error — TOML asserted "no code here" but our walk got here
         // anyway. Recorded; finder continues so multiple collisions
@@ -1608,10 +1618,13 @@ void FunctionFinder::run(std::size_t max_functions) {
             if (s.source_addr == 0) {
                 s.source_addr = seed_it->second.source_addr;
             }
+            if (s.exact_size == 0) {
+                s.exact_size = seed_it->second.exact_size;
+            }
         }
 
         std::size_t before = functions_.size();
-        discover_one(s.addr, s.mode, s.name, s.source_addr);
+        discover_one(s.addr, s.mode, s.name, s.source_addr, s.exact_size);
         if (functions_.size() == before) continue;
 
         // The function we just added is at the end of functions_.
@@ -1622,6 +1635,7 @@ void FunctionFinder::run(std::size_t max_functions) {
         // mode (control flow within a function doesn't switch
         // ARM/THUMB without a BX, which is indirect).
         for (uint32_t t : fn.direct_branch_targets) {
+            if (authoritative_seeds_) break;
             uint64_t k = visit_key(t, fn.mode);
             // Mark walk-origin. If this address was ALSO a seed,
             // it now has both bits set (redundant_manual).
@@ -1637,6 +1651,7 @@ void FunctionFinder::run(std::size_t max_functions) {
         // function's walk (BX Rm to a tracked-constant THUMB
         // target from ARM code, and vice versa).
         for (const auto& ms : mode_switch_seeds_) {
+            if (authoritative_seeds_) break;
             uint64_t k = visit_key(ms.addr, ms.mode);
             origin_mask[k] |= 2u;
             if (!enqueued.insert(k).second) continue;  // already queued

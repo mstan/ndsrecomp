@@ -126,12 +126,27 @@ bool parse_entry_points(const toml::array& arr, const char* label,
                 kAbortHeader, label, i, err.c_str());
             return false;
         }
+        e.size = get_u32_field(*t, "size", false, ok, err);
+        if (!ok) {
+            std::fprintf(stderr,
+                "%s%s entry %zu: %s\n",
+                kAbortHeader, label, i, err.c_str());
+            return false;
+        }
         std::string mode_s = get_string_field(*t, "mode", true, ok, err);
         if (!ok || !parse_mode(mode_s, e.mode)) {
             std::fprintf(stderr,
                 "%s%s entry %zu: mode must be \"arm\" or "
                 "\"thumb\" (got %s)\n",
                 kAbortHeader, label, i, mode_s.c_str());
+            return false;
+        }
+        const uint32_t alignment = e.mode == CpuMode::Thumb ? 2u : 4u;
+        if (e.size != 0u && (e.size < alignment || e.size % alignment != 0u)) {
+            std::fprintf(stderr,
+                "%s%s entry %zu: size 0x%X is not a non-zero multiple "
+                "of the %u-byte instruction width\n",
+                kAbortHeader, label, i, e.size, alignment);
             return false;
         }
         e.name = get_string_field(*t, "name", false, ok, err);
@@ -315,6 +330,34 @@ bool parse_exclude_funcs(const toml::array& arr,
 // Cross-section structural validation. See docs/TOML_SCHEMA.md
 // "Precedence and conflict resolution" step 2.
 bool validate_cross_section(const Config& cfg) {
+    const uint64_t program_start = cfg.program.load_address;
+    const uint64_t program_end = program_start + cfg.program.size;
+    if (cfg.program.authoritative_entry_points && cfg.extra_funcs.empty()) {
+        std::fprintf(stderr,
+            "%s[program].authoritative_entry_points requires at least one "
+            "[[entry_point]]\n",
+            kAbortHeader);
+        return false;
+    }
+    for (const auto& ef : cfg.extra_funcs) {
+        if (cfg.program.authoritative_entry_points && ef.size == 0u) {
+            std::fprintf(stderr,
+                "%s[program].authoritative_entry_points requires an exact "
+                "size for [[entry_point]] 0x%08X\n",
+                kAbortHeader, ef.addr);
+            return false;
+        }
+        if (ef.size != 0u &&
+            (ef.addr < program_start ||
+             static_cast<uint64_t>(ef.addr) + ef.size > program_end)) {
+            std::fprintf(stderr,
+                "%s[[entry_point]] 0x%08X size 0x%X lies outside the "
+                "program image [0x%08X, 0x%08llX)\n",
+                kAbortHeader, ef.addr, ef.size, cfg.program.load_address,
+                static_cast<unsigned long long>(program_end));
+            return false;
+        }
+    }
     // exclude_func + extra_func at the same addr is contradictory.
     for (const auto& ex : cfg.exclude_funcs) {
         for (const auto& ef : cfg.extra_funcs) {
@@ -387,6 +430,16 @@ bool load_config(const std::string& path, Config& out) {
             std::fprintf(stderr, "%s[program]: %s\n",
                          kAbortHeader, err.c_str());
             return false;
+        }
+        if (const auto* node = t.get("authoritative_entry_points")) {
+            const auto value = node->value<bool>();
+            if (!value) {
+                std::fprintf(stderr,
+                    "%s[program]: key 'authoritative_entry_points' must be a boolean\n",
+                    kAbortHeader);
+                return false;
+            }
+            out.program.authoritative_entry_points = *value;
         }
     }
 
@@ -490,6 +543,8 @@ void print_config_summary(const Config& cfg) {
     std::printf("  size:                  0x%08X (%u bytes)\n",
                 cfg.program.size, cfg.program.size);
     std::printf("  entry_pc:              0x%08X\n", cfg.program.entry_pc);
+    std::printf("  authoritative entries: %s\n",
+                cfg.program.authoritative_entry_points ? "yes" : "no");
     std::printf("  identity sha1:         %s (verified)\n",
                 hex_lower(cfg.identity.sha1).c_str());
     std::printf("  entry_point entries:   %zu\n", cfg.extra_funcs.size());
