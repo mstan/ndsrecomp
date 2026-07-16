@@ -69,79 +69,160 @@ execution-driven gap list (`docs/phase1_audit.md`). All NEXT items done:
 4. Both BIOS audits: **zero codegen gaps**.
    (CP15 *model* landed in Phase 2, where the bus consumes it.)
 
-### Phase 2 — dual-CPU runtime ⟳ IN PROGRESS
+### Phases 2-6 — dual-CPU runtime through the firmware menu ✅ DONE
+The runner links the generated banks on a full DS runtime
+(`docs/runner_bringup.md`, `docs/scheduler_design.md`): dual-CPU
+melonDS-faithful scheduler, CP15/TCM, complete bus, IPC, IRQ/timers/DMA,
+SPI (flash/TSC/power), RTC, 2D engines A+B, SPU with capture, Wi-Fi
+power/beacon surface, SDL host (stacked screens, mouse→TSC, native-cadence
+audio). All eight firmware scenarios execute from provenance-validated
+firmware banks, byte-identical to melonDS per VBlank including audio
+(`docs/accuracy_burndown.md`, `docs/firmware_release_evidence.json`).
+The host audio/input soak gate passed 2026-07-16 (prebuffered start +
+glide-floor pacing; `NDS_FRONTEND_REQUIRE_AUDIO=1`, underruns=0, frame
+FNV pair pinned).
 
-**Current convergence checkpoint (2026-07-14):** the historical IPCSYNC
-blocker is resolved. LLE firmware execution is exact against melonDS through
-ARM9 instruction 120,000,000 / ARM7 instruction 53,068,580 (VBlank 1,127),
-including CPU cycles and all shared event counters. RTC progression and the
-full SPU mixer/sound-capture path exercised by firmware are implemented; the
-first 4 KiB capture buffer is byte-identical. WRAMCNT, VRAM A-I, palette, OAM,
-and both published RGB framebuffers are also byte-identical at that ruler; the
-top-screen proof includes an animated affine-OBJ frame and the exact
-VBlank-to-frame-finish front/back lifecycle. See
-`docs/accuracy_burndown.md` for the live evidence and remaining axes.
-All editable Settings pages and their save paths are now deterministic
-every-frame scenarios. PictoChat is likewise exact through lobby entry,
-joining Room A, typed and drawn messages, room exit, Quit cancellation, and
-console power-off; its exercised WiFi power/beacon/TX behavior and terminal
-GPU/SPU stop boundary match melonDS.
-Download Play, the main-menu brightness/clock controls, both empty cartridge
-targets, and their cancel/terminal paths are also covered by full per-VBlank
-scenarios. This closes the navigable firmware surface for the configured
-no-cartridge state. All eight scenarios now execute from provenance-validated
-ARM9/ARM7 firmware banks with zero immutable dispatch misses, invalid targets,
-or Tier-3 instructions at their checkpoints.
+### Phase 7 — SM64DS bring-up: cartridge, game boot, 3D ✅ DONE (2026-07-16)
+Physical-card LLE boot (KEY1, secure area) into the recompiled game banks
+(sibling repo `supermario64dsrecomp`: 3,090 ARM9 fns + ARM7 boot closure).
+The melonDS 1.0rc GPU3D geometry engine + software rasterizer are vendored
+as the runner's 3D device model (`runner/vendor/melonds/`, GPL — see
+`THIRD_PARTY_ATTRIBUTION.md`), driven from the scheduler exactly as
+melonDS's RunSystem drives it; BG0-as-3D compositing, DISPCAPCNT display
+capture, GXFIFO DMA/stall/IRQ, and the AUXSPI backup chip (8 KiB EEPROM)
+are implemented. **Gate: SM64DS boot→title→attract runs byte-locked vs a
+fresh ndsref through insn9=700M — every event/cycle counter, GXSTAT, and
+BOTH framebuffers pixel-identical.** User-confirmed interactively playable
+into the castle grounds. Key invariants discovered (enforced in code
+comments): melonDS `ARM9Timestamp` is live per-instruction and GXSTAT
+reads run the engine against it; the engine's drain state is
+Run()-cadence-dependent, so cross-implementation comparison uses the
+`gx_run_sample` cadence rings; fine-grained `run_to_event` stepping
+perturbs that cadence (compare free-running or coarse-stop runs only).
 
-The SDL host now presents the stacked screens, maps logical mouse coordinates
-to the bottom-screen touchscreen, maps keyboard buttons, and queues stereo
-S16 audio at the SPU's native `33,513,982 / 1,024` sample cadence. Profile-led
-software-renderer and static-dispatch work reduced the authoritative
-1,127-frame cold run from 47.403 seconds (23.77 FPS) to 18.185 seconds
-(61.97 FPS) at normal process priority while retaining exact frames and event
-counters. An ordinal-addressed, non-destructive audio trace now compares
-continuous stereo output independently of SDL playback. Cold
-`main_menu_controls` and `calibration_save` runs respectively prove 328,236
-and 656,472 consecutive stereo frames byte-identical to melonDS's
-original-hardware 10-bit DAC mode, including substantial non-silent output.
-Two clean, isolated all-eight-scenario matrices now pass with identical
-per-scenario traversal logs, audio hashes/counts, and zero static counters;
-the retained summary is `docs/firmware_release_evidence.json`. The remaining
-release work is the host SDL audio/input soak and any defect that gate exposes.
-The runner (`runner/`) links the generated banks on a DS runtime
-(`docs/runner_bringup.md`). **Done:**
-- **M1 — ARM9 boots:** SHA-1-verify the 3 dumps, run the recompiled ARM9
-  BIOS from reset through CP15/TCM setup + hardware init to the ARM7-wait
-  idle. Zero gaps. CP15 model (control / ITCM / DTCM / MPU) in
-  `runner/src/cp15.cpp`; the bus honors TCM placement.
-- **M2 — dual-CPU:** both banks link (bank-prefixed symbols), scheduler
-  interleaves two `ArmCpuState` (ARM9 ~2× ARM7), 7434 rounds, **zero
-  dispatch misses**. Cooperative preemption (preempt only at backward
-  branches; preserve + per-CPU save/restore the call-return stack; finder
-  seeds call-return addresses) — the hard part, solved.
-- **Bus so far:** main RAM, accurate shared/ARM7 WRAM ownership, ITCM/DTCM,
-  BIOS regions, physical VRAM A-I, palette/OAM, and always-on access rings.
-- **NEXT (final host gate):** perform an instrumented SDL audio/input soak at
-  native cadence, prove the playback queue neither underruns nor drops data,
-  and confirm end-to-end mouse/keyboard menu navigation. Repair only defects
-  that this host evidence exposes.
-- Still ahead this phase: the final host audio/input soak and closure of any
-  defect it reaches.
+## Roadmap forward
 
-### Phase 3 — recompile BIOSes + firmware as banks, LLE boot
-Recompile both BIOSes + firmware ARM9/ARM7 parts as banks. LLE the BIOS
-firmware-boot copy path.
+Priority order set 2026-07-16. Every work item ends at the same regression
+floor — the three standing gates — plus its own acceptance test:
 
-### Phase 4 — minimum hardware for the menu
-IPC FIFO/SYNC, both IRQ controllers, timers, DMA. SPI: firmware flash,
-touchscreen TSC, power mgmt. RTC. 2D engines A&B (text/affine/extended
-BG + OAM) software-rendered to two 256×192 framebuffers via VRAM bank
-mapping + vblank/hblank.
+- **G1 firmware traversal:** `oracle/firmware_traversal.py` all scenarios
+  pass vs fresh ndsref (audio sample-exact).
+- **G2 host soak:** 2400-frame `NDS_FRONTEND_REQUIRE_AUDIO=1` run,
+  underruns=0, frame FNV pair unchanged (unless explained).
+- **G3 SM64DS parity:** boot→title→attract byte-locked vs ndsref at
+  insn9 ordinals incl. both framebuffers
+  (`oracle/probe_gx_state.py --nav sm64ds-title` + the wide-parity probe).
 
-### Phase 5+6 — host shell + reach/verify the menu
-SDL2 stacked window, mouse→TSC, keyboard→KEYINPUT. Boot to Health&Safety
-→ main menu, touch navigates settings. Frame-diff vs melonDS; dispatch
-miss log clean.
+Delegability tags for farming work out (Codex / parallel agents / future
+sessions): **[MECH]** mechanical, fully specified, gates catch mistakes;
+**[SPEC]** well-specified device mirroring with melonDS source as the
+reference; **[JUDG]** oracle-driven debugging judgment — keep in a
+first-divergence-disciplined session.
+
+### WS-A — static coverage promotion (priority 1a)
+Measured at SM64DS boot→title (insn9=200M): ARM9 93.5% static / 6.5%
+tier-3; ARM7 68.7% / 31.3%. The interpreter is the correctness floor, not
+the performance plan.
+- **A1 [MECH→SPEC] ARM7 game payload → static banks.** The whole SM64DS
+  ARM7 program (sound engine, cart/input services) is copied to RAM at
+  boot and runs tier-3 (~18.5M insns by 200M). Pipeline: run with
+  `--discover-static-misses` through boot + representative gameplay →
+  `tier3_coverage` regions → finder over the RAM image (the game repo's
+  bank pipeline; per-title config lives in `supermario64dsrecomp`) →
+  regen → gates. Acceptance: `tier3_insns7 ≈ 0` through the G3 window;
+  gameplay spot-checks clean. Judgment part: multi-entry/landing-pad
+  config for the sound engine's dispatch style.
+- **A2 [MECH] ARM9 overlays → static banks.** Same pipeline for the ~6.5%
+  copied ARM9 code. Overlays may be region-swapped: bank per overlay ID,
+  provenance-validated like the firmware banks.
+- **A3 [MECH] 12 extended firmware bank sets.** The menu-interaction
+  tier-3 debt (824k/536k insns). The promotion runbook already exists;
+  needs `--discover-static-misses` runs per scenario, regen, G1.
+- **A4 [MECH] re-pin `supermario64dsrecomp`** to the current framework
+  HEAD once A1/A2 land (it pins 87f7ad4, many commits behind).
+
+### WS-B — throughput to a locked 60 FPS (priority 1b)
+Boot is ~1.3× realtime (masked by the audio prebuffer); gameplay budget
+will tighten with 3D scenes. Measurement discipline is mandatory: the
+machine's wall clock varies 2× — interleaved A/B, min-of-N, or the soak's
+phase/underrun stats; never single boot-window runs.
+- **B1 [MECH] profile first.** `NDS_PROFILE_SCHED`, `NDS_PROFILE_GPU`,
+  soak phase stats before/after every change; keep numbers in commits.
+- **B2 [SPEC] inline the per-insn counter in emission.** The
+  `runtime_insn_fp` call chain is the largest per-instruction constant;
+  fold counting/timing into emitted code. Recompiler change → regen all
+  (~156 bank TUs) → full gates. High leverage, medium risk.
+- **B3 [SPEC] bus fast paths.** Inline main-RAM/WRAM load-store fast
+  paths ahead of the general bus dispatch.
+- **B4 [MECH] GPU2D remaining passes.** OBJ line pass is next (~2.6s of
+  the 2400-frame boot's GPU time); same per-tile treatment as the text-BG
+  work (commit 984ac08 as the template). FNV pins the output.
+- **B5 [JUDG] scheduler round overhead.** Round-granular costs (per-round
+  Run(), timer catch-up) if B1 shows them material.
+- Acceptance: sustained 60 FPS interactive through title+attract with
+  underruns=0 at normal process priority; boot ≤1× realtime.
+
+### WS-C — in-game audio validation (priority 2)
+- **C1 [MECH harness / JUDG divergences] gameplay audio traversal.**
+  Extend the traversal manifest pattern with scripted input scenarios
+  (file-select → castle grounds …) comparing `audio_samples` sample-exact
+  vs ndsref at matched ordinals, like the firmware scenarios.
+- **C2 [SPEC] SPU capture completion.** SNDCAPxCNT source-select/add-mode
+  bits are stored but inert (`spu.cpp` set_cnt vs run/flush); SM64DS-era
+  games route reverb/echo through capture. Mirror melonDS SPU.cpp.
+- **C3 [MECH] gameplay host soak** with music+SFX heavy scenes.
+
+### WS-D — correctness backlog (scheduled opportunistically; all gate-safe)
+- **D1 [SPEC] 2D windows.** Win0/Win1/OBJ-window/WINOUT masks are
+  unimplemented (`CalculateWindowMask` in melonDS GPU2D.cpp is the
+  reference; the 3D layer already routes its window bit). First game that
+  uses windows will show in G3-style framebuffer diffs.
+- **D2 [SPEC] main-memory display FIFO.** 0x04000068 feed + DMA start
+  mode 4 + FIFO as capture source B (currently zero-filled).
+- **D3 [SPEC] save persistence + chip types.** Host `.sav` read/write
+  (melonDS `Platform::WriteNDSSave` analog), and per-game chip selection
+  (vendor melonDS ROMList or per-game TOML). Today: fixed 8 KiB EEPROM,
+  RAM-only.
+- **D4 [MECH] small fidelity items.** Engine-B 0x04001064 latch vs
+  melonDS drop; io.cpp pre-existing -Wnarrowing/init warnings; TCP.md
+  full 30+ command reference.
+- **D5 [JUDG] GXFIFO stall stress.** The stall path (CPUStop_GXStall
+  analog) is implemented but SM64DS's title window never fills the FIFO;
+  validate against a GXFIFO-heavy title before trusting it.
+
+### WS-E — enhancements (priority 3; strictly opt-in, parity default)
+All enhancements live behind flags, default off; gates always run in
+parity mode. Enhancement builds must never alter guest-visible state.
+- **E1 [SPEC] widescreen 3D.** Wider aspect via GPU3D projection/viewport
+  adjustment at the device-model boundary (16:9 render + 2D letterboxing
+  policy). Straightforward in the vendored soft renderer.
+- **E2 [JUDG] increased 3D internal resolution.** The vendored soft
+  rasterizer is 256×192-wired; 2× requires scanline-width generalization
+  (melonDS's GL renderer is the alternative but drags in a GL stack and
+  the compositor split). Scope carefully before committing.
+- **E3** (later) texture filtering/replacement, MSAA-style edge smoothing.
+
+### WS-F — host shell / UX (priority 3, parallel-friendly)
+- **F1 [MECH] detached top/bottom screen windows.** SDL multi-window with
+  per-window scale/rotation and layouts (stacked / side-by-side / focus
+  one screen). Host-only; FNV + soak gate it.
+- **F2 [MECH] input rebinding + config file;** touch-on-gamepad mapping.
+- **F3** (later) save states — `Savestate.h` is already vendored for the
+  3D engine; whole-runner serialization is its own project.
+
+### WS-G — real-hardware validation loop (as needed)
+A DS + flash carts are available for homebrew probes over the network.
+Reserve for cases where melonDS itself is the suspect (its GPU2D/3D
+sources carry explicit `TODO/checkme` items we inherited — e.g. capture
+alpha=0 semantics, RDLINES 0x320 constant). Build the libnds probe
+harness the first time one of these matters; ring-buffer discipline
+applies there too.
+
+### WS-H — release hygiene (before any public artifact)
+GPL-3.0-or-later posture for the runner binary (already documented in
+`THIRD_PARTY_ATTRIBUTION.md`), license texts in-tree, README refresh,
+and a reproducible release-evidence run (G1-G3 outputs archived like
+`docs/firmware_release_evidence.json`).
 
 ## Build / run
 
