@@ -135,9 +135,21 @@ the performance plan.
   main-RAM-bus code (found via insn-ring cycle diff — see that commit).
   Remaining: gameplay-window discovery passes (in-level sound paths) can
   merge more entries monotonically via the same tool.
-- **A2 [MECH] ARM9 overlays → static banks.** Same pipeline for the ~6.5%
-  copied ARM9 code. Overlays may be region-swapped: bank per overlay ID,
-  provenance-validated like the firmware banks.
+- **A2 ✅ DONE (2026-07-16).** ARM9 runtime code (ITCM-resident fast paths
+  at 0x01FF8188.., overlays over/past the static image at 0x0200Fxxx /
+  0x02043xxx / 0x020AAxxx / 0x0232xxxx / 0x023FEE00) is a content-validated
+  bank (`supermario64dsrecomp` config/sm64ds_arm9_ram.toml + tools/
+  capture_arm9_ram_bank.py, fw_arm9 composite model: 32 KiB ITCM high
+  mirror + 4 MiB main RAM contiguous at load 0x01FF8000, no code_copy
+  needed). Overlay-generation check (checkpoint hashes at every 100M
+  insn9): all regions byte-stable 100M..700M except one flip in the
+  0x0232xxxx window (~502 tier-3 hits) — a single 700M capture suffices;
+  no per-generation banks needed. `tier3_insns9` through the 700M G3
+  window: 359,809,505 → 21,274 (entries 21.3M → 4,733); tier3_insns7=135
+  unchanged; clean_ram_rejects=0; counters bit-exact across runs and
+  binaries. Serve-mode nav+title→700M interleaved A/B min-of-3:
+  321.0s → 249.9s (~22%). G1/G2/G3 green. Residual: gameplay-window
+  discovery passes merge monotonically via the same tool.
 - **A3 [MECH] 12 extended firmware bank sets.** The menu-interaction
   tier-3 debt (824k/536k insns). The promotion runbook already exists;
   needs `--discover-static-misses` runs per scenario, regen, G1.
