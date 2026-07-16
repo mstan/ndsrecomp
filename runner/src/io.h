@@ -79,6 +79,24 @@ struct NdsIrqTraceEntry {
 void nds_note_irq_accept(int cpu, uint32_t return_address);
 bool nds_irq_trace_get(int cpu, uint64_t count, NdsIrqTraceEntry* out);
 
+// Always-on trace of DMA channel completions (every completion, IRQ-raising
+// or not — unlike NdsEventCounts::dma_done, which mirrors the oracle's
+// SetIRQ-hook counting). `count` is the absolute completion ordinal from
+// reset; the latest ordinal is returned by nds_dma_trace_count().
+struct NdsDmaTraceEntry {
+    uint64_t count;
+    uint64_t sys;
+    uint64_t cyc;        // completing CPU's own cycle timestamp
+    uint64_t insn;       // completing CPU's retired instructions
+    uint32_t cnt;        // channel CNT at completion
+    uint32_t src, dst;   // programmed base addresses
+    uint8_t cpu;         // 0 = ARM9, 1 = ARM7
+    uint8_t ch;
+    uint8_t start_mode;  // runner encoding (ARM9 0..7; ARM7 0x10|mode)
+};
+uint64_t nds_dma_trace_count();
+bool nds_dma_trace_get(uint64_t count, NdsDmaTraceEntry* out);
+
 struct NdsInsnTraceEntry {
     uint64_t count;
     uint64_t sys;

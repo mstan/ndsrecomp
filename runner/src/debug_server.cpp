@@ -11,6 +11,7 @@
 #include "state.h"
 #include "io.h"
 #include "gpu2d.h"
+#include "gpu3d.h"
 #include "runtime_arm.h"
 #include "spu.h"
 #include "tier3.h"
@@ -370,6 +371,82 @@ std::string handle(const std::string& line) {
             (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
             (unsigned long long)e.insn, e.return_address, e.pending,
             e.wifi_if, e.wifi_ie);
+        return buf;
+    }
+    if (cmd == "gx_state") {
+        NdsGxStateSnapshot s{};
+        nds_gpu3d_state(&s);
+        char buf[448];
+        std::snprintf(buf, sizeof(buf),
+            "{\"geometry_enabled\":%u,\"rendering_enabled\":%u,"
+            "\"gxstat\":%u,\"cycle_count\":%d,\"fifo_level\":%u,"
+            "\"pipe_level\":%u,\"num_polygons\":%u,\"num_vertices\":%u,"
+            "\"flush_request\":%u,\"num_commands\":%u,\"cur_command\":%u,"
+            "\"param_count\":%u,\"total_params\":%u}",
+            s.geometry_enabled, s.rendering_enabled, s.gxstat,
+            s.cycle_count, s.fifo_level, s.pipe_level,
+            s.num_polygons, s.num_vertices, s.flush_request,
+            s.num_commands, s.cur_command, s.param_count, s.total_params);
+        return buf;
+    }
+    if (cmd == "gx_write_sample") {
+        const uint64_t count = json_u64(line, "count", 0);
+        if (count == 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"latest\":%llu}",
+                (unsigned long long)nds_gpu3d_write_trace_count());
+            return buf;
+        }
+        NdsGxWriteTraceEntry e{};
+        if (!nds_gpu3d_write_trace_get(count, &e)) return "{\"found\":false}";
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"arm9\":%llu,\"addr\":%u,"
+            "\"val\":%u,\"width\":%u,\"geometry_enabled\":%u,\"gxstat\":%u,"
+            "\"pipe_level\":%u,\"gxstat_after\":%u,\"pipe_after\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.arm9_cycles,
+            e.addr, e.val, e.width, e.geometry_enabled, e.gxstat,
+            e.pipe_level, e.gxstat_after, e.pipe_after);
+        return buf;
+    }
+    if (cmd == "gx_run_sample") {
+        const uint64_t count = json_u64(line, "count", 0);
+        if (count == 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"latest\":%llu}",
+                (unsigned long long)nds_gpu3d_run_trace_count());
+            return buf;
+        }
+        NdsGxRunTraceEntry e{};
+        if (!nds_gpu3d_run_trace_get(count, &e)) return "{\"found\":false}";
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"arm9\":%llu,"
+            "\"stat_before\":%u,\"stat_after\":%u,\"cc_before\":%d,"
+            "\"cc_after\":%d}",
+            (unsigned long long)e.count, (unsigned long long)e.arm9_cycles,
+            e.gxstat_before, e.gxstat_after,
+            e.cycle_count_before, e.cycle_count_after);
+        return buf;
+    }
+    if (cmd == "dma_sample") {
+        const uint64_t count = json_u64(line, "count", 0);
+        if (count == 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"latest\":%llu}",
+                (unsigned long long)nds_dma_trace_count());
+            return buf;
+        }
+        NdsDmaTraceEntry e{};
+        if (!nds_dma_trace_get(count, &e)) return "{\"found\":false}";
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc\":%llu,"
+            "\"insn\":%llu,\"cpu\":%u,\"ch\":%u,\"cnt\":%u,\"src\":%u,"
+            "\"dst\":%u,\"start_mode\":%u}",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc, (unsigned long long)e.insn,
+            e.cpu, e.ch, e.cnt, e.src, e.dst, e.start_mode);
         return buf;
     }
     if (cmd == "insn_sample") {

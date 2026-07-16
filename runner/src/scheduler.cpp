@@ -11,6 +11,7 @@
 #include "state.h"
 #include "runtime_arm.h"
 #include "io.h"
+#include "gpu3d.h"
 #include "spu.h"
 #include "wifi.h"
 
@@ -302,9 +303,24 @@ void scheduler_run_round() {
     // ARM9 first, to its target in ARM9 cycles; do NOT clamp its overshoot.
     const uint64_t arm9_target = planned << kArm9ClockShift;
     if (sample) phase_start = ProfileClock::now();
-    if (g_slot[0].started && !g_slot[0].halted && g_slot[0].cycles < arm9_target)
-        run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
+    if (g_slot[0].started && !g_slot[0].halted && g_slot[0].cycles < arm9_target) {
+        if (nds_gxfifo_stalled()) {
+            // GXFIFO stall owns the ARM9: its timestamp advances by the
+            // geometry engine's pending cycle debt (capped at the target)
+            // instead of executing; the Run() below then drains commands at
+            // that time. melonDS NDS::RunSystem CPUStop_GXStall branch.
+            const uint64_t debt =
+                static_cast<uint64_t>(nds_gpu3d_cycles_to_run())
+                << kArm9ClockShift;
+            g_slot[0].cycles = std::min(arm9_target, g_slot[0].cycles + debt);
+        } else {
+            run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
+        }
+    }
     nds_tick_timers(0, g_slot[0].cycles);
+    // Geometry engine catch-up to the ARM9's actual timestamp, after its
+    // timers exactly as melonDS orders RunTimers(0); GPU.GPU3D.Run().
+    nds_gpu3d_run(g_slot[0].cycles);
     if (sample) profile_add(g_profile.arm9_ns, phase_start);
 
     // Rendezvous = ARM9's ACTUAL (possibly overshot) timestamp, normalized to

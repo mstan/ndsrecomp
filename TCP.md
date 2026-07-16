@@ -38,6 +38,10 @@ events** and only then read state:
 | `audio_samples` | `start`,`count` (max 4096) | Non-destructive ordinal trace: `{start,count,oldest,produced,pcm_s16le}` |
 | `touch` | `x`,`y`,`down` | injects a TSC touch (oracle + native both accept) |
 | `keys` | `mask` | sets the DS button state |
+| `gx_state` | — | geometry-engine internals: gate flags, GXSTAT raw, FIFO/PIPE levels, vertex/polygon counts, packed-GXFIFO protocol state (native + oracle) |
+| `gx_run_sample` | optional `count` | no `count`: `{latest}`; else ring entry `{arm9,stat_before,stat_after,cc_before,cc_after}` for the count-th GPU3D::Run() invocation. The engine's drain state is Run()-call-time dependent, so both sides expose this cadence (native + oracle) |
+| `gx_write_sample` | optional `count` | ring of ARM9 writes into the 3D register window with engine state before/after each (native + oracle) |
+| `dma_sample` | optional `count` | ring of ALL DMA channel completions (`dma_done` in event_counts mirrors the oracle's SetIRQ-hook and counts only IRQ-raising ones) (native only) |
 
 `region` ∈ `mainram` (0x02000000, 4 MB) · `wram7` (0x03800000) ·
 `wramshared` · `vramA..vramI` · `palA` · `palB` · `oam` · `itcm` · `dtcm`.

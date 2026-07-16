@@ -39,3 +39,10 @@ const NdsVramRendererView* nds_vram_renderer_view(int engine);
 // caller's buffer. Unmapped slots read as zero.
 void nds_vram_copy_texture(uint8_t* dst);   // 512 KiB
 void nds_vram_copy_texpal(uint8_t* dst);    // 128 KiB
+
+// Texture-content generation: bumped on any VRAMCNT remap (and reset).
+// Banks mapped into the texture/texpal slots are not CPU/DMA-addressable, so
+// their contents can only change by being written under another mapping and
+// remapped back — every content change is therefore a remap. A caller that
+// cached the flat views may skip refreshing while the generation is stable.
+uint64_t nds_vram_texture_generation();

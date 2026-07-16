@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "io.h"
+#include "state.h"
 #include "vram.h"
 
 #include "NDS.h"
@@ -24,6 +25,20 @@ namespace {
 melonDS::NDS g_nds;
 
 int g_log_budget = 64;
+
+// Last VRAM texture generation reflected into each flat view (0 = never
+// refreshed; the live counter starts at 1).
+uint64_t g_texture_flat_gen = 0;
+uint64_t g_texpal_flat_gen = 0;
+
+// ~7 frames of scheduler rounds at the 64-cycle rendezvous grid.
+constexpr uint32_t kGxRunTraceSize = 65536;
+NdsGxRunTraceEntry g_gx_run_trace[kGxRunTraceSize] = {};
+uint64_t g_gx_run_trace_count = 0;
+
+constexpr uint32_t kGxWriteTraceSize = 8192;
+NdsGxWriteTraceEntry g_gx_write_trace[kGxWriteTraceSize] = {};
+uint64_t g_gx_write_trace_count = 0;
 
 }  // namespace
 
@@ -48,6 +63,9 @@ void NDS::GXFIFOUnstall() { nds_gxfifo_set_stall(false); }
 
 bool GPU::MakeVRAMFlat_TextureCoherent(
     NonStupidBitField<512*1024/VRAMDirtyGranularity>&) noexcept {
+    const uint64_t gen = nds_vram_texture_generation();
+    if (gen == g_texture_flat_gen) return false;
+    g_texture_flat_gen = gen;
     static u8 fresh[512*1024];
     nds_vram_copy_texture(fresh);
     if (std::memcmp(fresh, VRAMFlat_Texture, sizeof fresh) == 0) return false;
@@ -57,6 +75,9 @@ bool GPU::MakeVRAMFlat_TextureCoherent(
 
 bool GPU::MakeVRAMFlat_TexPalCoherent(
     NonStupidBitField<128*1024/VRAMDirtyGranularity>&) noexcept {
+    const uint64_t gen = nds_vram_texture_generation();
+    if (gen == g_texpal_flat_gen) return false;
+    g_texpal_flat_gen = gen;
     static u8 fresh[128*1024];
     nds_vram_copy_texpal(fresh);
     if (std::memcmp(fresh, VRAMFlat_TexPal, sizeof fresh) == 0) return false;
@@ -128,6 +149,47 @@ void Semaphore_Post(Semaphore* sema, int count) {
 
 // ── Runner-facing bridge API ────────────────────────────────────────────
 
+void nds_gpu3d_state(NdsGxStateSnapshot* out) {
+    if (!out) return;
+    auto& g3 = g_nds.GPU.GPU3D;
+    *out = {
+        g3.GeometryEnabled ? 1u : 0u,
+        g3.RenderingEnabled ? 1u : 0u,
+        g3.GXStat,
+        g3.CycleCount,
+        g3.CmdFIFO.Level(),
+        g3.CmdPIPE.Level(),
+        g3.NumPolygons,
+        g3.NumVertices,
+        g3.FlushRequest,
+        g3.NumCommands,
+        g3.CurCommand,
+        g3.ParamCount,
+        g3.TotalParams,
+    };
+}
+
+uint64_t nds_gpu3d_write_trace_count() { return g_gx_write_trace_count; }
+
+bool nds_gpu3d_write_trace_get(uint64_t count, NdsGxWriteTraceEntry* out) {
+    if (!out || count == 0) return false;
+    const NdsGxWriteTraceEntry& e =
+        g_gx_write_trace[(count - 1) % kGxWriteTraceSize];
+    if (e.count != count) return false;
+    *out = e;
+    return true;
+}
+
+uint64_t nds_gpu3d_run_trace_count() { return g_gx_run_trace_count; }
+
+bool nds_gpu3d_run_trace_get(uint64_t count, NdsGxRunTraceEntry* out) {
+    if (!out || count == 0) return false;
+    const NdsGxRunTraceEntry& e = g_gx_run_trace[(count - 1) % kGxRunTraceSize];
+    if (e.count != count) return false;
+    *out = e;
+    return true;
+}
+
 void nds_gpu3d_reset() {
     g_nds.ARM9Timestamp = 0;
     g_nds.GPU.GPU3D.Reset();
@@ -136,6 +198,12 @@ void nds_gpu3d_reset() {
     g_nds.GPU.GPU3D.SetEnabled(false, false);
     std::memset(g_nds.GPU.VRAMFlat_Texture, 0, sizeof g_nds.GPU.VRAMFlat_Texture);
     std::memset(g_nds.GPU.VRAMFlat_TexPal, 0, sizeof g_nds.GPU.VRAMFlat_TexPal);
+    g_texture_flat_gen = 0;
+    g_texpal_flat_gen = 0;
+    std::memset(g_gx_run_trace, 0, sizeof g_gx_run_trace);
+    g_gx_run_trace_count = 0;
+    std::memset(g_gx_write_trace, 0, sizeof g_gx_write_trace);
+    g_gx_write_trace_count = 0;
     nds_gxfifo_set_stall(false);
 }
 
@@ -145,6 +213,14 @@ bool nds_gpu3d_reg_addr(uint32_t addr) {
 }
 
 uint32_t nds_gpu3d_read(uint32_t addr, uint32_t width) {
+    // melonDS ARM9Timestamp is live during ARM9.Execute, and GXSTAT reads
+    // sync the engine to it (GPU3D::Read32 case 0x600 calls Run()). These
+    // register accesses only ever come from the ARM9's own slice, where
+    // g_runtime_cycles is that live timestamp. A stale value here makes the
+    // engine's busy bit linger a round longer than melonDS and desyncs
+    // guest poll loops (found via the gx_run/gx_write ring diff, SM64DS
+    // 3D init at insn9=55.8M).
+    g_nds.ARM9Timestamp = g_runtime_cycles;
     switch (width) {
         case 1:  return g_nds.GPU.GPU3D.Read8(addr);
         case 2:  return g_nds.GPU.GPU3D.Read16(addr);
@@ -153,14 +229,72 @@ uint32_t nds_gpu3d_read(uint32_t addr, uint32_t width) {
 }
 
 void nds_gpu3d_write(uint32_t addr, uint32_t value, uint32_t width) {
+    // Keep the engine's view of ARM9 time live for mid-slice writes too
+    // (GXFIFO stall/IRQ/DMA decisions inside the vendored write paths).
+    g_nds.ARM9Timestamp = g_runtime_cycles;
+    auto& g3 = g_nds.GPU.GPU3D;
+    ++g_gx_write_trace_count;
+    NdsGxWriteTraceEntry& e =
+        g_gx_write_trace[(g_gx_write_trace_count - 1) % kGxWriteTraceSize];
+    e = {
+        g_gx_write_trace_count, g_runtime_cycles, addr, value, width * 8u,
+        g3.GeometryEnabled ? 1u : 0u, g3.GXStat, g3.CmdPIPE.Level(),
+        0u, 0u,
+    };
     switch (width) {
-        case 1:  g_nds.GPU.GPU3D.Write8(addr, static_cast<melonDS::u8>(value)); break;
-        case 2:  g_nds.GPU.GPU3D.Write16(addr, static_cast<melonDS::u16>(value)); break;
-        default: g_nds.GPU.GPU3D.Write32(addr, value); break;
+        case 1:  g3.Write8(addr, static_cast<melonDS::u8>(value)); break;
+        case 2:  g3.Write16(addr, static_cast<melonDS::u16>(value)); break;
+        default: g3.Write32(addr, value); break;
     }
+    e.gxstat_after = g3.GXStat;
+    e.pipe_after = g3.CmdPIPE.Level();
 }
 
 void nds_gpu3d_set_power(uint16_t powcnt1) {
     g_nds.GPU.GPU3D.SetEnabled((powcnt1 & (1u << 3)) != 0,
                                (powcnt1 & (1u << 2)) != 0);
+}
+
+void nds_gpu3d_run(unsigned long long arm9_cycles) {
+    g_nds.ARM9Timestamp = arm9_cycles;
+    auto& g3 = g_nds.GPU.GPU3D;
+    const uint32_t stat_before = g3.GXStat;
+    const int32_t cc_before = g3.CycleCount;
+    g3.Run();
+    ++g_gx_run_trace_count;
+    g_gx_run_trace[(g_gx_run_trace_count - 1) % kGxRunTraceSize] = {
+        g_gx_run_trace_count, arm9_cycles,
+        stat_before, g3.GXStat, cc_before, g3.CycleCount,
+    };
+}
+
+int32_t nds_gpu3d_cycles_to_run() {
+    return g_nds.GPU.GPU3D.CyclesToRunFor();
+}
+
+void nds_gpu3d_check_fifo_dma() {
+    g_nds.GPU.GPU3D.CheckFIFODMA();
+}
+
+void nds_gpu3d_check_fifo_irq() {
+    g_nds.GPU.GPU3D.CheckFIFOIRQ();
+}
+
+void nds_gpu3d_vcount144() {
+    g_nds.GPU.GPU3D.VCount144(g_nds.GPU);
+}
+
+void nds_gpu3d_vblank() {
+    g_nds.GPU.GPU3D.VBlank();
+}
+
+void nds_gpu3d_vcount215() {
+    g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
+}
+
+void nds_gpu3d_start_frame() {
+    if (g_nds.GPU.GPU3D.AbortFrame) {
+        g_nds.GPU.GPU3D.RestartFrame(g_nds.GPU);
+        g_nds.GPU.GPU3D.AbortFrame = false;
+    }
 }

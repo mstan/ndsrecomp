@@ -75,6 +75,24 @@ enum class CardCommandMode : uint8_t { Raw, Key1, Normal };
 CardCommandMode g_card_mode = CardCommandMode::Raw;
 uint32_t g_card_data_mode = 0;
 
+// ── AUXSPI cartridge backup device (0x040001A0 CNT / 0x040001A2 DATA) ────
+// Mirrors melonDS NDSCartSlot::WriteSPICnt/WriteSPIData/ReadSPIData and
+// CartRetail's regular-EEPROM chip. SM64DS (ASMP) is melonDS ROMList
+// SaveMemType 2 = 8 KiB EEPROM, which is also melonDS's not-in-list default;
+// the ROMList lookup for other chip types lands with the next game target.
+// A byte transfer holds AUXSPICNT bit7 busy for 8*(8<<speed) system cycles,
+// cleared by a scheduled system event; the guest save code spin-waits on
+// that bit, so instant completion shifts the whole ARM7 timeline.
+uint16_t g_auxspicnt = 0;
+uint8_t  g_auxspi_data = 0;
+bool     g_auxspi_hold = false;
+uint32_t g_auxspi_pos = 0;
+uint64_t g_auxspi_deadline = UINT64_MAX;   // busy-clear, system cycles
+uint8_t  g_sram_cmd = 0;
+uint8_t  g_sram_status = 0;
+uint32_t g_sram_addr = 0;
+std::vector<uint8_t> g_cart_sram;
+
 uint32_t load_le32(const uint8_t* p) {
     return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
            (uint32_t{p[2]} << 16u) | (uint32_t{p[3]} << 24u);
@@ -486,6 +504,11 @@ constexpr uint32_t kInsnTraceSize = 262144;
 NdsInsnTraceEntry g_insn_trace[2][kInsnTraceSize] = {};
 constexpr uint32_t kFifoTraceSize = 64;
 NdsFifoTraceEntry g_fifo_trace[2][kFifoTraceSize] = {};
+// DMA completions can storm (a mis-paced streaming channel completes
+// thousands of times per frame); keep enough to span a full frame of them.
+constexpr uint32_t kDmaTraceSize = 8192;
+NdsDmaTraceEntry g_dma_trace[kDmaTraceSize] = {};
+uint64_t g_dma_trace_count = 0;
 
 // Large enough to retain two maximum-size (0x4000-byte) blocks including
 // their causal ROMCTRL/command/completion markers.
@@ -822,6 +845,22 @@ bool dma_any_running(int cpu) {
     return false;
 }
 
+void dma_trace_push(int cpu, int ch, const DmaChannel& d) {
+    ++g_dma_trace_count;
+    g_dma_trace[(g_dma_trace_count - 1) % kDmaTraceSize] = {
+        g_dma_trace_count,
+        scheduler_system_timestamp(),
+        g_runtime_cycles,
+        cpu == 0 ? g_counts.insn9 : g_counts.insn7,
+        d.cnt,
+        d.src,
+        d.dst,
+        static_cast<uint8_t>(cpu),
+        static_cast<uint8_t>(ch),
+        d.start_mode,
+    };
+}
+
 void dma_start(int cpu, int ch) {
     DmaChannel& d = g_dma[cpu][ch];
     if (d.running || !(d.cnt & 0x80000000u)) return;
@@ -867,6 +906,9 @@ void dma_write_count(int cpu, int ch, uint32_t value) {
         d.start_mode = cpu == 0 ? uint8_t((value >> 27u) & 7u)
                                 : uint8_t(((value >> 28u) & 3u) | 0x10u);
         if ((d.start_mode & 7u) == 0u) dma_start(cpu, ch);
+        // GXFIFO DMA arms through the engine's FIFO-level check rather than
+        // starting unconditionally (melonDS DMA::WriteCnt).
+        else if (cpu == 0 && d.start_mode == 7u) nds_gpu3d_check_fifo_dma();
     }
 }
 
@@ -1475,6 +1517,92 @@ void io_mem_write(uint32_t addr, uint32_t value, uint32_t width) {
 
 int active() { return (g_nds_active == NDS_ARM9) ? 0 : 1; }
 
+// ── AUXSPI backup-chip protocol (melonDS CartRetail::SPIWrite + the
+// regular-EEPROM handler; addrsize 2 below 64 KiB) ──────────────────────
+uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
+    if (g_cart_sram.empty()) return 0;
+    if (pos == 0) {
+        switch (val) {
+            case 0x04: g_sram_status &= ~0x02u; return 0;    // WRDI
+            case 0x06: g_sram_status |= 0x02u; return 0;     // WREN
+            default: g_sram_cmd = val; g_sram_addr = 0; break;
+        }
+        return 0xFF;
+    }
+    const uint32_t mask = static_cast<uint32_t>(g_cart_sram.size()) - 1u;
+    const uint32_t addrsize = g_cart_sram.size() > 65536u ? 3u : 2u;
+    switch (g_sram_cmd) {
+        case 0x01:  // write status register
+            if (pos == 1) g_sram_status = (g_sram_status & 0x01u) | (val & 0x0Cu);
+            return 0;
+        case 0x05:  // read status register
+            return g_sram_status;
+        case 0x02:  // write
+            if (pos <= addrsize) {
+                g_sram_addr = (g_sram_addr << 8) | val;
+            } else {
+                if (g_sram_status & 0x02u) g_cart_sram[g_sram_addr & mask] = val;
+                ++g_sram_addr;
+            }
+            if (last) g_sram_status &= ~0x02u;
+            return 0;
+        case 0x03:  // read
+            if (pos <= addrsize) {
+                g_sram_addr = (g_sram_addr << 8) | val;
+                return 0;
+            } else {
+                const uint8_t ret = g_cart_sram[g_sram_addr & mask];
+                ++g_sram_addr;
+                return ret;
+            }
+        case 0x9F:  // read JEDEC ID
+            return 0xFF;
+        default:
+            return 0xFF;
+    }
+}
+
+void auxspi_write_cnt(uint16_t val) {
+    // Deasserting NDS-slot mode mid-hold forcefully releases the chip select.
+    if ((g_auxspicnt & 0x2040u) == 0x2040u && !(val & 0x2000u))
+        g_auxspi_hold = false;
+    g_auxspicnt = (g_auxspicnt & 0x0080u) | (val & 0xE043u);
+}
+
+void auxspi_write_data(uint8_t val) {
+    if (!(g_auxspicnt & 0x8000u)) return;
+    if (!(g_auxspicnt & 0x2000u)) return;
+    if (g_auxspicnt & 0x0080u) return;    // busy: the write is dropped
+    g_auxspicnt |= 0x0080u;
+    const bool hold = (g_auxspicnt & 0x0040u) != 0;
+    bool islast = false;
+    if (!hold) {
+        if (g_auxspi_hold) ++g_auxspi_pos;
+        else g_auxspi_pos = 0;
+        islast = true;
+        g_auxspi_hold = false;
+    } else if (!g_auxspi_hold) {
+        g_auxspi_hold = true;
+        g_auxspi_pos = 0;
+    } else {
+        ++g_auxspi_pos;
+    }
+    g_auxspi_data = cart_sram_spi_write(val, g_auxspi_pos, islast);
+    // One bit per SPI clock, 8 bits per byte: 8*(8<<speed) system cycles,
+    // based at the writing CPU's live timestamp (melonDS ScheduleEvent).
+    const uint32_t delay = 8u * (8u << (g_auxspicnt & 3u));
+    const uint64_t now = active() == 0 ? (g_runtime_cycles >> 1)
+                                       : g_runtime_cycles;
+    g_auxspi_deadline = now + delay;
+}
+
+uint8_t auxspi_read_data() {
+    if (!(g_auxspicnt & 0x8000u)) return 0;
+    if (!(g_auxspicnt & 0x2000u)) return 0;
+    if (g_auxspicnt & 0x0080u) return 0;
+    return g_auxspi_data;
+}
+
 uint16_t ipcsync_read(int cpu) {
     int other = cpu ^ 1;
     uint16_t v = g_ipcsync_out[cpu] & 0x4F00u;          // own out-data + ctrl, readable
@@ -1538,6 +1666,12 @@ void nds_io_reset() {
     std::memset(g_card_command, 0, sizeof(g_card_command));
     g_card_mode = CardCommandMode::Raw;
     g_card_data_mode = 0;
+    // AUXSPI controller/chip protocol state resets; the backup CONTENTS
+    // survive (the cartridge stays inserted across a console reset).
+    g_auxspicnt = 0; g_auxspi_data = 0;
+    g_auxspi_hold = false; g_auxspi_pos = 0;
+    g_auxspi_deadline = UINT64_MAX;
+    g_sram_cmd = 0; g_sram_status = 0; g_sram_addr = 0;
     g_divcnt = 0; g_div_deadline = UINT64_MAX;
     std::memset(g_div_numer, 0, sizeof(g_div_numer));
     std::memset(g_div_denom, 0, sizeof(g_div_denom));
@@ -1619,6 +1753,12 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 
     const uint32_t megabytes = std::max(1u, rom_size >> 20u);
     g_card_chip_id = 0x000000C2u | ((megabytes - 1u) << 8u);
+
+    // Backup chip: 8 KiB regular EEPROM, blank = 0xFF (melonDS CartRetail
+    // with ROMList SaveMemType 2 — SM64DS's entry and also melonDS's
+    // unknown-ROM default). No host persistence yet; matches ndsref, which
+    // also runs without a save file.
+    g_cart_sram.assign(8192, 0xFF);
     return true;
 }
 
@@ -1651,6 +1791,16 @@ const NdsEventCounts& nds_event_counts() { return g_counts; }
 bool nds_spi_trace_get(uint64_t count, NdsSpiTraceEntry* out) {
     if (!out || count == 0) return false;
     const NdsSpiTraceEntry& e = g_spi_trace[(count - 1) % kSpiTraceSize];
+    if (e.count != count) return false;
+    *out = e;
+    return true;
+}
+
+uint64_t nds_dma_trace_count() { return g_dma_trace_count; }
+
+bool nds_dma_trace_get(uint64_t count, NdsDmaTraceEntry* out) {
+    if (!out || count == 0) return false;
+    const NdsDmaTraceEntry& e = g_dma_trace[(count - 1) % kDmaTraceSize];
     if (e.count != count) return false;
     *out = e;
     return true;
@@ -1714,7 +1864,7 @@ void nds_card_debug_state(NdsCardDebugState* out) {
                     sizeof(out->game_code));
     out->chip_id = g_card_chip_id;
     out->rom_size = static_cast<uint32_t>(g_card_rom.size());
-    out->auxspicnt = io_mem_read(0x040001A0u, 2);
+    out->auxspicnt = g_auxspicnt;
     out->romctrl = g_romctrl;
     out->transfer_pos = g_card_transfer_pos;
     out->transfer_len = g_card_transfer_len;
@@ -1746,7 +1896,8 @@ uint32_t nds_card_debug_trace_copy(NdsCardTraceEntry* out,
 
 uint64_t nds_next_system_event_time() {
     return std::min(std::min(g_card_deadline, g_spi_deadline),
-                    std::min(g_div_deadline, g_sqrt_deadline));
+                    std::min(g_auxspi_deadline,
+                             std::min(g_div_deadline, g_sqrt_deadline)));
 }
 
 uint64_t nds_next_timer_overflow_time() {
@@ -1773,8 +1924,13 @@ uint64_t nds_debug_spi_deadline() { return g_spi_deadline; }
 uint64_t nds_debug_card_deadline() { return g_card_deadline; }
 
 void nds_run_system_events(uint64_t timestamp) {
-    // Both events are one-shot. A handler may schedule its successor only
+    // These events are one-shot. A handler may schedule its successor only
     // after a guest data-port read, matching melonDS's card-ready handshake.
+    if (g_auxspi_deadline <= timestamp) {
+        // melonDS NDSCartSlot::SPITransferDone: clear busy, no IRQ.
+        g_auxspi_deadline = UINT64_MAX;
+        g_auxspicnt &= ~0x0080u;
+    }
     if (g_spi_deadline <= timestamp) {
         g_spi_deadline = UINT64_MAX;
         g_spicnt &= ~0x0080u;
@@ -1786,7 +1942,7 @@ void nds_run_system_events(uint64_t timestamp) {
         g_card_deadline = UINT64_MAX;
         if (end_event) {
             g_romctrl &= ~0x80000000u;
-            const uint32_t auxspicnt = io_mem_read(0x040001A0u, 2);
+            const uint32_t auxspicnt = g_auxspicnt;
             if (auxspicnt & 0x4000u)
                 nds_raise_irq(g_card_irq_cpu, 0x00080000u);
             const uint32_t mode = static_cast<uint32_t>(g_card_mode);
@@ -1799,7 +1955,7 @@ void nds_run_system_events(uint64_t timestamp) {
             const uint32_t mode = static_cast<uint32_t>(g_card_mode);
             card_trace_push(NDS_CARD_TRACE_DATA_READY, g_card_irq_cpu,
                             g_card_command, g_romctrl,
-                            io_mem_read(0x040001A0u, 2),
+                            g_auxspicnt,
                             card_response_word(g_card_transfer_pos),
                             mode, mode, g_card_data_mode, g_card_data_mode,
                             false);
@@ -2011,10 +2167,18 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
     cpu &= 1;
     for (int ch = 0; ch < 4; ++ch) {
         DmaChannel& d = g_dma[cpu][ch];
+        // While the GXFIFO stall is asserted only ARM9 channel 0 keeps its
+        // bus grant (melonDS runs DMAs[1..3] only when CPUStop_GXStall is
+        // clear); a stalled channel stays running and resumes when the
+        // geometry engine drains.
+        if (cpu == 0 && ch > 0 && nds_gxfifo_stalled()) continue;
         if (!d.running || g_runtime_cycles >= target_cycles) continue;
         const uint32_t width = (d.cnt & 0x04000000u) ? 4u : 2u;
         const bool gamecard = d.start_mode == (cpu == 0 ? 5u : 0x12u);
-        uint32_t request_units = gamecard ? 1u : UINT32_MAX;
+        const bool gxfifo = cpu == 0 && d.start_mode == 7u;
+        // Gamecard: one word per data-ready request. GXFIFO: at most 112
+        // units per FIFO-level request (melonDS DMA::Start IterCount cap).
+        uint32_t request_units = gamecard ? 1u : gxfifo ? 112u : UINT32_MAX;
         while (d.remaining && g_runtime_cycles < target_cycles) {
             const uint32_t unit = dma_unit_cycles(cpu, d, width);
             g_runtime_cycles += uint64_t{unit} << (cpu == 0 ? 1u : 0u);
@@ -2032,6 +2196,10 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
             --d.remaining;
             d.burst_start = false;
             if (--request_units == 0u) break;
+            // A write into a full GXFIFO stalls channels 1-3 mid-iteration
+            // (melonDS DMA::StallIfRunning); channel 0 keeps streaming into
+            // the overflow queue.
+            if (ch > 0 && cpu == 0 && nds_gxfifo_stalled()) break;
         }
         if (d.remaining) {
             if (gamecard) {
@@ -2039,15 +2207,27 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
                 // Suspend this channel without completing or reloading it; the
                 // next data-ready event resumes the pending transaction.
                 d.running = false;
+            } else if (gxfifo && request_units == 0u) {
+                // Iteration exhausted: suspend and let the engine's FIFO-level
+                // check re-request the next chunk (melonDS DMA::Run9 tail).
+                d.running = false;
+                nds_gpu3d_check_fifo_dma();
             }
             continue;
         }
 
+        dma_trace_push(cpu, ch, d);
         if (!(d.cnt & 0x02000000u)) d.cnt &= ~0x80000000u;
-        if (d.cnt & 0x40000000u) nds_raise_irq(cpu, 1u << (8 + ch));
+        if (d.cnt & 0x40000000u) {
+            nds_raise_irq(cpu, 1u << (8 + ch));
+            // The oracle counts dma_done in its SetIRQ hook, so only
+            // IRQ-raising completions are cross-comparable. IRQ-less
+            // completions (e.g. SM64DS GXFIFO streaming) must not count,
+            // or the native/ndsref counters silently drift apart.
+            ++g_counts.dma_done;
+        }
         d.running = false;
         d.in_progress = false;
-        ++g_counts.dma_done;
         brk_check();
     }
 }
@@ -2088,6 +2268,9 @@ void nds_tick_display(unsigned long long cyc) {
          i <= current_scanline; ++i) {
         const uint32_t physical_line = static_cast<uint32_t>(i % LINES);
         if (physical_line == 0u) {
+            // melonDS GPU::StartFrame: an aborted 3D frame restarts its
+            // renderer before scanline 0 of the new frame.
+            nds_gpu3d_start_frame();
             g_vcount = 0;
         } else if (g_next_vcount_valid) {
             g_vcount = g_next_vcount;
@@ -2119,6 +2302,13 @@ void nds_tick_display(unsigned long long cyc) {
                 ++g_counts.vblank7;
                 nds_raise_irq(1, 0x00000001u);
             }
+            // After the 2D engines, matching melonDS StartScanline order:
+            // polygon sort, render-state latch and geometry bank flip.
+            nds_gpu3d_vblank();
+        } else if (g_vcount == 144u) {
+            nds_gpu3d_vcount144();   // renderer frame-sync point
+        } else if (g_vcount == 215u) {
+            nds_gpu3d_vcount215();   // rasterize the latched frame
         }
         brk_check();
     }
@@ -2253,6 +2443,8 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             return g_ie[cpu] & m;
         case 0x04000214:
             return g_if[cpu] & m;
+        case 0x04000216:             // IF bits 31..16 (ARM9-only, as melonDS)
+            return cpu == 0 ? ((g_if[0] >> 16) & m) : 0u;
         case 0x04000204: case 0x04000205:
             return (g_exmemcnt[cpu] >> ((addr & 1u) * 8u)) & m;
         case 0x04000206: case 0x04000207:
@@ -2264,6 +2456,13 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             return cpu == 1
                 ? ((g_powercontrol7 >> ((addr & 1u) * 8u)) & m)
                 : (io_mem_read(addr, width) & m);
+        case 0x040001A0: case 0x040001A1:  // AUXSPICNT (+ AUXSPIDATA on w32)
+            if (addr == 0x040001A0u && width == 4u)
+                return (uint32_t{g_auxspicnt} |
+                        (uint32_t{auxspi_read_data()} << 16u)) & m;
+            return (g_auxspicnt >> ((addr & 1u) * 8u)) & m;
+        case 0x040001A2: case 0x040001A3:  // AUXSPIDATA
+            return addr == 0x040001A2u ? (auxspi_read_data() & m) : 0u;
         case 0x040001A4: case 0x040001A5:
         case 0x040001A6: case 0x040001A7:
             return (g_romctrl >> ((addr & 3u) * 8)) & m;
@@ -2295,7 +2494,7 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
                     schedule_card_event(uint64_t{xfercycle} * delay, false);
                 } else {
                     g_romctrl &= ~0x80000000u;
-                    const uint32_t auxspicnt = io_mem_read(0x040001A0u, 2);
+                    const uint32_t auxspicnt = g_auxspicnt;
                     if (auxspicnt & 0x4000u)
                         nds_raise_irq(g_card_irq_cpu, 0x00080000u);
                     const uint32_t mode = static_cast<uint32_t>(g_card_mode);
@@ -2443,6 +2642,18 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             return;
         case 0x04000214:
             g_if[cpu] &= ~value;     // write-1-to-clear
+            // The GXFIFO IRQ is level-triggered: acknowledging IF re-asserts
+            // the bit while the FIFO condition still holds (melonDS
+            // ARM9IOWrite16/32 case 0x04000214/216 call GPU3D.CheckFIFOIRQ()).
+            if (cpu == 0) nds_gpu3d_check_fifo_irq();
+            return;
+        case 0x04000216:             // IF bits 31..16 (16-bit acknowledge)
+            // melonDS wires this on the ARM9 only (ARM9IOWrite16); the ARM7
+            // path treats it as an unknown register and drops the write.
+            if (cpu == 0) {
+                g_if[0] &= ~(value << 16);
+                nds_gpu3d_check_fifo_irq();
+            }
             return;
         case 0x04000204: case 0x04000205: { // EXMEMCNT
             const uint32_t shift = (addr & 1u) * 8u;
@@ -2547,11 +2758,30 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             io_mem_write(addr, value, width);   // keep the latch (reads see it)
             return;
         }
+        case 0x040001A0:   // AUXSPICNT (w32 also clocks AUXSPIDATA, melonDS)
+            if (width == 1u) {
+                auxspi_write_cnt(static_cast<uint16_t>(
+                    (g_auxspicnt & 0xFF00u) | (value & 0xFFu)));
+            } else {
+                auxspi_write_cnt(static_cast<uint16_t>(value & 0xFFFFu));
+                if (width == 4u)
+                    auxspi_write_data(static_cast<uint8_t>(value >> 16u));
+            }
+            return;
+        case 0x040001A1:   // AUXSPICNT high byte
+            auxspi_write_cnt(static_cast<uint16_t>(
+                (g_auxspicnt & 0x00FFu) | ((value & 0xFFu) << 8u)));
+            return;
+        case 0x040001A2:   // AUXSPIDATA
+            auxspi_write_data(static_cast<uint8_t>(value));
+            return;
+        case 0x040001A3:   // unmapped byte lane (melonDS drops it)
+            return;
         case 0x040001A4: { // ROMCTRL (32-bit write starts a gamecard block)
             const bool start = (value & ~g_romctrl & 0x80000000u) != 0u;
             g_romctrl = (value & 0xFF7F7FFFu) | (g_romctrl & 0x20800000u);
             const uint16_t aux = static_cast<uint16_t>(
-                io_mem_read(0x040001A0u, 2));
+                g_auxspicnt);
             uint8_t pending_command[8] = {};
             for (uint32_t i = 0; i < 8u; ++i)
                 pending_command[i] = static_cast<uint8_t>(

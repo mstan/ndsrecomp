@@ -36,6 +36,7 @@ std::array<uint16_t, 4> g_texture{};
 std::array<uint16_t, 8> g_texpal{};
 std::array<uint16_t, 2> g_arm7{};
 std::array<NdsVramRendererView, 2> g_renderer_view{};
+uint64_t g_texture_generation = 1;
 
 const uint8_t* direct_chunk(uint16_t mask, uint32_t virtual_base) {
     if (!mask || (mask & (mask - 1u))) return nullptr;
@@ -268,11 +269,14 @@ void nds_vram_copy_texpal(uint8_t* dst) {
     copy_slot_space(dst, g_texpal.data(), 8, 0x4000u);
 }
 
+uint64_t nds_vram_texture_generation() { return g_texture_generation; }
+
 void nds_vram_reset() {
     g_vram.fill(0); g_palette.fill(0); g_oam.fill(0); g_cnt.fill(0);
     g_lcdc = 0; g_abg.fill(0); g_aobj.fill(0); g_bbg.fill(0); g_bobj.fill(0);
     g_abg_ext.fill(0); g_aobj_ext = 0; g_bbg_ext.fill(0); g_bobj_ext = 0;
     g_texture.fill(0); g_texpal.fill(0); g_arm7.fill(0);
+    ++g_texture_generation;
     refresh_renderer_views();
 }
 
@@ -283,6 +287,7 @@ void nds_vram_map(unsigned bank, uint8_t value) {
     apply_map(bank, g_cnt[bank], false);
     g_cnt[bank] = next;
     apply_map(bank, next, true);
+    ++g_texture_generation;
     refresh_renderer_views();
 }
 uint8_t nds_vramcnt(unsigned bank) { return bank < 9 ? g_cnt[bank] : 0; }
