@@ -207,8 +207,7 @@ void watch_push(uint8_t write, uint8_t width, uint32_t addr, uint32_t value) {
     e.seq = g_ring_seq;
     e.cpu = static_cast<uint8_t>(g_nds_active);
     e.cycles = g_runtime_cycles;
-    const NdsEventCounts& counts = nds_event_counts();
-    e.insn = g_nds_active == NDS_ARM9 ? counts.insn9 : counts.insn7;
+    e.insn = g_insn_count[g_nds_active == NDS_ARM9 ? 0 : 1];
     e.write = write;
     e.width = width;
     e.pc = g_cpu.R[15];
@@ -945,6 +944,15 @@ extern "C" uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD,
 extern "C" uint32_t arm7_cycle_combine(uint32_t flat_cycles, uint32_t numD,
                                         uint32_t is_load,
                                         uint32_t has_internal) {
+    // Zero-cost resync tick: codegen zeroes every accumulator before a
+    // BL/fall-through dispatch and re-ticks after the callee returns purely
+    // as an IRQ-delivery boundary. A real instruction always carries the
+    // baked 1S in flat_cycles, so flat==0 with no data identifies that
+    // resync — it must not inherit the seqC-1 fetch correction below (which
+    // charged a spurious +1 for ARM-mode code on the 16-bit main-RAM bus,
+    // e.g. the SM64DS ARM7 runtime-RAM bank; arm9_cycle_combine's all-zero
+    // case already returns 0).
+    if (flat_cycles == 0u && numD == 0u) return 0u;
     if (numD == 0u) {
         // The portable flat cost contains one baked sequential code cycle.
         // Replace that single cycle with melonDS's real S fetch for C-class
