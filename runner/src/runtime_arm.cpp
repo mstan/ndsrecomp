@@ -316,6 +316,7 @@ extern "C" uint32_t g_runtime_deep_trace = 1u;
 
 extern "C" void runtime_set_deep_trace(uint32_t on) {
     g_runtime_deep_trace = on ? 1u : 0u;
+    nds_insn_hook_recompute();
 }
 
 extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,

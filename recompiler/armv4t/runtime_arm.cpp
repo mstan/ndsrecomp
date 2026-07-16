@@ -226,6 +226,10 @@ extern "C" void runtime_trace_reset(void) {
     // after the fact. Also settable via the TCP `insn_trace` command.
     const char* it = std::getenv("GBARECOMP_INSN_TRACE");
     g_runtime_insn_trace = (it && it[0] && it[0] != '0') ? 1u : 0u;
+    // New-emission banks gate their per-insn slow call on g_insn_hook_armed;
+    // in this harness the only payload is the fp ring, so the two flags move
+    // together.
+    g_insn_hook_armed = g_runtime_insn_trace;
     runtime_fp_reset();
 }
 
@@ -275,6 +279,14 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
 
 extern "C" unsigned g_runtime_insn_trace = 0;
 
+// Inline-counter ABI (see runtime_arm.h). The harness has no insn9/insn7
+// event surface — the counters exist so new-emission banks link; the armed
+// slow path forwards to the fp ring, preserving the MC-HP-002 semantics the
+// old `if (g_runtime_insn_trace) runtime_insn_fp()` emission had.
+extern "C" uint64_t g_insn_count[2] = {0, 0};
+extern "C" uint32_t g_insn_hook_armed = 0;
+extern "C" void runtime_insn_slow(void) { runtime_insn_fp(); }
+
 namespace {
 // ~1M instructions of history. At ~125k instr/PPU-frame this covers ~8 frames,
 // comfortably spanning the MC-HP-002 f40 onset and the f48 spin. 80 bytes/entry
@@ -289,7 +301,11 @@ extern "C" void runtime_insn_fp(void) {
     if (!g_fp) {
         g_fp = static_cast<RuntimeFpEntry*>(
             std::calloc(kFpSize, sizeof(RuntimeFpEntry)));
-        if (!g_fp) { g_runtime_insn_trace = 0; return; }  // OOM → disarm quietly
+        if (!g_fp) {  // OOM → disarm quietly (both gates: old + new emission)
+            g_runtime_insn_trace = 0;
+            g_insn_hook_armed = 0;
+            return;
+        }
     }
     RuntimeFpEntry& e = g_fp[g_fp_write];
     e.cycles = g_runtime_cycles;

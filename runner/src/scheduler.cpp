@@ -397,7 +397,9 @@ void scheduler_profile_reset() {
 }
 
 void scheduler_profile(NdsSchedulerProfile* out) {
-    if (out) *out = g_profile;
+    if (!out) return;
+    *out = g_profile;
+    out->rounds = g_profile_rounds;
 }
 
 SchedResult scheduler_run(uint64_t budget) {

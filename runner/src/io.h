@@ -37,19 +37,28 @@ struct NdsEventCounts {
     uint64_t soundbias_w;       // total writes
     uint32_t soundbias_first;   // first value written
     uint32_t soundbias_last;    // most recent value written
-    // Per-CPU retired-instruction counters (always-on, zeroed at reset). Used
-    // as run_to_event anchors ("insn9"/"insn7") to bisect — by instruction
-    // index from reset — the first ARM9/ARM7 instruction whose PC diverges
-    // from the melonDS oracle. The ARM7 BIOS boot is deterministic and (early)
-    // independent of the ARM9, so an insn7-indexed PC compare localizes an
-    // ARM7-internal boot divergence that ipcsync_w (an ARM9-driven anchor)
-    // cannot. See DEBUG.md "fp-stream microscope".
-    uint64_t insn9;
-    uint64_t insn7;
 };
 
 const NdsEventCounts& nds_event_counts();
 uint64_t nds_event_value(const char* name);
+
+// Per-CPU retired-instruction counters ([0]=ARM9, [1]=ARM7; always-on,
+// zeroed at reset). Used as run_to_event anchors ("insn9"/"insn7") to
+// bisect — by instruction index from reset — the first ARM9/ARM7
+// instruction whose PC diverges from the melonDS oracle. The ARM7 BIOS
+// boot is deterministic and (early) independent of the ARM9, so an
+// insn7-indexed PC compare localizes an ARM7-internal boot divergence that
+// ipcsync_w (an ARM9-driven anchor) cannot. See DEBUG.md "fp-stream
+// microscope". Flat C globals (not NdsEventCounts fields) because the
+// generated per-instruction prologue bumps them inline — see runtime_arm.h
+// "Inline retired-instruction counters".
+extern "C" uint64_t g_insn_count[2];
+// Nonzero while any per-insn payload is armed (the deep-trace register
+// ring or an event break); generated code then calls runtime_insn_slow()
+// after its inline bump. Recomputed by nds_insn_hook_recompute() whenever
+// either input changes.
+extern "C" uint32_t g_insn_hook_armed;
+void nds_insn_hook_recompute();
 
 // Always-on, non-perturbing trace of the most recent ARM7 SPIDATA writes.
 // `count` is the absolute spi_w ordinal from reset, allowing native/oracle

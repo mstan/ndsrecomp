@@ -309,16 +309,25 @@ ARM7 operand-dependent count; MCR=2, MRC=3; loads/stores/branches = 0 (folded).
 - instr_cycle_base (arm_ir.cpp:99-166) FOLDS the code fetch into the GBA base
   (branch=3="2S+1N", LDR=2, ...) -- this is why ARM7 is byte-exact, and why it does
   NOT map to melonDS's separate numC/numD/numI.
-- Codegen builds one _cyc = base + shift/PC surcharges + Sum runtime_mem_cycles;
-  runtime_insn_fp ALSO adds runtime_code_cycles(pc). 14 runtime_tick sites, 4
-  mem_cycles sites (LDM loop = N per register), 6 mul_cycles sites.
-- GAPS: runtime_mul_cycles is a FLAT-1 STUB (banks) though the codegen plumbs it;
-  tier3 RtBus never overrides access_cycles -> FLAT-1 data (region-blind).
-- PROPER combine (regen required): split _cyc into _code=runtime_code_cycles(pc) /
-  _data=Sum raw mem_cycles / _int=internal-only; at each tick emit
-  runtime_tick(combine(_code,_data,_int,class)); branch emitters add 2x code(target);
-  fix runtime_mul_cycles to call mul_wait_cycles; give tier3 a real access_cycles +
-  expose interpreter step's components (or approximate). MUST keep the ARM7 path
+- Codegen builds one _cyc = base + shift/PC surcharges + Sum runtime_mem_cycles.
+  14 runtime_tick sites, 4 mem_cycles sites (LDM loop = N per register), 6
+  mul_cycles sites. (The per-insn hook no longer carries any timing: since the
+  inline-counter emission it is `++g_insn_count[g_nds_active]` + an armed-gated
+  runtime_insn_slow() payload call; runtime_insn_fp remains only as the
+  whole-hook for pre-inline banks.)
+- STATUS (2026-07-16): the PROPER combine below is IMPLEMENTED — _cyc is split
+  into _code/_data/_int, every tick emits arm9_cycle_combine/arm7_cycle_combine,
+  runtime_mul_cycles models ARM7 early-termination (incl. Thumb T_MUL_REG
+  C-destroy), and tier3's RtBus overrides access_cycles. One landmine fixed
+  2026-07-16: the post-call/fall-through RESYNC tick (all accumulators zeroed)
+  must cost 0 — arm7_cycle_combine's numD==0 path returned seqC-1, charging a
+  spurious +1 for ARM-mode code on the 16-bit main-RAM bus (first exposed by
+  the SM64DS ARM7 runtime-RAM bank; found via insn-ring cycle diff at
+  insn7=39,596,066).
+- PROPER combine (as designed, now landed): split _cyc into
+  _code=runtime_code_cycles(pc) / _data=Sum raw mem_cycles / _int=internal-only;
+  at each tick emit runtime_tick(combine(_code,_data,_int,class)); branch
+  emitters add the target refill at the transfer site. ARM7 path stays
   behaviorally identical (it's exact) -- combine branches on CPU.
 - Regen: nds_recompile.exe --config bios/biosnds{9,7}.toml --bin ... --out generated
   --bank arm{9,7}_bios ; then rebuild recompiler+runner ; check dispatch_misses.log.

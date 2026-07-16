@@ -318,6 +318,20 @@ extern unsigned g_runtime_insn_trace;  // 0 = off (zero overhead)
 void runtime_insn_fp(void);            // emit one fingerprint (armed-gated by caller)
 void runtime_fp_reset(void);
 uint32_t runtime_fp_count(void);
+
+// ── Inline retired-instruction counters ─────────────────────────────
+// The generated per-instruction prologue bumps g_insn_count[g_nds_active]
+// directly (a single increment — NDS_STATIC_CPU folds the index at compile
+// time) and calls runtime_insn_slow() only while g_insn_hook_armed is
+// nonzero. The counters are the architectural insn9/insn7 event ordinals
+// and always advance; the armed slow path carries the optional payloads
+// (deep-trace register-image ring, event-break check, fp ring) and must
+// NOT bump the counter. runtime_insn_fp() above remains the whole hook for
+// banks generated before this scheme (it bumps the same counters through
+// the runtime), so old- and new-emission banks each count exactly once.
+extern uint64_t g_insn_count[2];   // [0]=ARM9, [1]=ARM7 retired-insn ordinals
+extern uint32_t g_insn_hook_armed; // nonzero → per-insn runtime_insn_slow()
+void runtime_insn_slow(void);      // armed-path payload; no counter bump
 // Write the whole ring (oldest-first) as a compact binary file: a 16-byte
 // header {u32 magic 'GFP1', u32 entry_size, u64 count} followed by `count`
 // RuntimeFpEntry records. Returns the number of records written (0 on error).

@@ -103,7 +103,7 @@ std::string counts_json() {
         (unsigned long long)c.timer_ovf, (unsigned long long)c.spi_w,
         (unsigned long long)c.irq9, (unsigned long long)c.irq7,
         (unsigned long long)c.soundbias_w, c.soundbias_first, c.soundbias_last,
-        (unsigned long long)c.insn9, (unsigned long long)c.insn7,
+        (unsigned long long)g_insn_count[0], (unsigned long long)g_insn_count[1],
         (unsigned long long)scheduler_cpu_cycles(0),
         (unsigned long long)scheduler_cpu_cycles(1));
     return buf;

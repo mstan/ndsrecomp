@@ -21,6 +21,7 @@
 #include "debug_server.h"
 #include "frontend.h"
 #include "gpu2d.h"
+#include "profile_report.h"
 #include "sha1.h"
 
 // Generated per-CPU dispatch tables (C linkage).
@@ -33,6 +34,8 @@ extern "C" const DispatchEntry g_dispatch_sm64ds_arm9[];
 extern "C" const unsigned g_dispatch_sm64ds_arm9_len;
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm7[];
 extern "C" const unsigned g_dispatch_sm64ds_arm7_len;
+extern "C" const DispatchEntry g_dispatch_sm64ds_arm7_ram[];
+extern "C" const unsigned g_dispatch_sm64ds_arm7_ram_len;
 #endif
 #ifndef NDS_BOOTSTRAP_FIRMWARE
 extern "C" const DispatchEntry g_dispatch_fw_arm9_early[];
@@ -310,6 +313,13 @@ int main(int argc, char** argv) {
                               g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
                               g_dispatch_sm64ds_arm7_len, 0x00000000u);
+#ifdef NDS_HAVE_SM64DS_RAM_BANKS
+        // Content-validated runtime-RAM bank (relocated sound engine +
+        // services); registered after the ROM-derived closure so the
+        // immutable payload rows win for their own address range.
+        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
+                              g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
+#endif
 #endif
 
         // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
@@ -353,66 +363,7 @@ int main(int argc, char** argv) {
                  g_cp15.control, g_cp15.dtcm_enable, g_cp15.dtcm_base,
                  g_cp15.dtcm_size);
     nds_dump_irq();
-    NdsGpu2dProfile gpu_profile{};
-    nds_gpu2d_profile(&gpu_profile);
-    if (gpu_profile.scanlines) {
-        std::fprintf(stderr,
-            "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "
-            "across %llu scanlines\n",
-            static_cast<double>(gpu_profile.render_ns) / 1.0e9,
-            static_cast<double>(gpu_profile.engine_ns[0]) / 1.0e9,
-            static_cast<double>(gpu_profile.engine_ns[1]) / 1.0e9,
-            static_cast<double>(gpu_profile.obj_ns) / 1.0e9,
-            static_cast<unsigned long long>(gpu_profile.scanlines));
-        std::fprintf(stderr,
-            "  GPU2D lines: A text[0..4]=%llu/%llu/%llu/%llu/%llu "
-            "no-effect=%llu; B=%llu/%llu/%llu/%llu/%llu no-effect=%llu\n",
-            (unsigned long long)gpu_profile.text_lines[0][0],
-            (unsigned long long)gpu_profile.text_lines[0][1],
-            (unsigned long long)gpu_profile.text_lines[0][2],
-            (unsigned long long)gpu_profile.text_lines[0][3],
-            (unsigned long long)gpu_profile.text_lines[0][4],
-            (unsigned long long)gpu_profile.no_effect_lines[0],
-            (unsigned long long)gpu_profile.text_lines[1][0],
-            (unsigned long long)gpu_profile.text_lines[1][1],
-            (unsigned long long)gpu_profile.text_lines[1][2],
-            (unsigned long long)gpu_profile.text_lines[1][3],
-            (unsigned long long)gpu_profile.text_lines[1][4],
-            (unsigned long long)gpu_profile.no_effect_lines[1]);
-    }
-    NdsSchedulerProfile scheduler_profile_data{};
-    scheduler_profile(&scheduler_profile_data);
-    if (scheduler_profile_data.sampled_rounds != 0) {
-        const double scale = 1.0e-6 / scheduler_profile_data.sampled_rounds;
-        std::fprintf(stderr,
-            "  Scheduler profile: %.3f ms/1000 rounds "
-            "(next %.3f, ARM9 %.3f, ARM7 %.3f, devices %.3f; %llu samples)\n",
-            scheduler_profile_data.sampled_round_ns * scale * 1000.0,
-            scheduler_profile_data.next_event_ns * scale * 1000.0,
-            scheduler_profile_data.arm9_ns * scale * 1000.0,
-            scheduler_profile_data.arm7_ns * scale * 1000.0,
-            scheduler_profile_data.devices_ns * scale * 1000.0,
-            static_cast<unsigned long long>(scheduler_profile_data.sampled_rounds));
-        std::fprintf(stderr,
-            "  Scheduler sub: switch %.3f ms/1000 rounds; devices split "
-            "display %.3f spu %.3f wifi %.3f rtc %.3f sysev %.3f\n",
-            scheduler_profile_data.switch_ns * scale * 1000.0,
-            scheduler_profile_data.display_ns * scale * 1000.0,
-            scheduler_profile_data.spu_ns * scale * 1000.0,
-            scheduler_profile_data.wifi_ns * scale * 1000.0,
-            scheduler_profile_data.rtc_ns * scale * 1000.0,
-            scheduler_profile_data.sysev_ns * scale * 1000.0);
-        std::fprintf(stderr,
-            "  Scheduler counters: switches=%llu crs_words=%llu "
-            "(%.2f switches/round, %.1f words/switch)\n",
-            static_cast<unsigned long long>(scheduler_profile_data.switches),
-            static_cast<unsigned long long>(scheduler_profile_data.crs_words),
-            static_cast<double>(scheduler_profile_data.switches) /
-                static_cast<double>(r.rounds ? r.rounds : 1),
-            static_cast<double>(scheduler_profile_data.crs_words) /
-                static_cast<double>(scheduler_profile_data.switches
-                                        ? scheduler_profile_data.switches : 1));
-    }
+    nds_profile_report(stderr);
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
     return 0;

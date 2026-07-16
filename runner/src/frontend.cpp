@@ -12,6 +12,7 @@
 
 #include "gpu2d.h"
 #include "io.h"
+#include "profile_report.h"
 #include "scheduler.h"
 #include "spu.h"
 
@@ -337,7 +338,7 @@ int nds_run_interactive_frontend() {
                 selftest_event_error |= SDL_PushEvent(&injected) < 0;
                 selftest_key_up = true;
             }
-            if (!selftest_touch_down && counts.insn9 >= 42300000) {
+            if (!selftest_touch_down && g_insn_count[0] >= 42300000) {
                 injected = {};
                 injected.type = SDL_MOUSEBUTTONDOWN;
                 injected.button.button = SDL_BUTTON_LEFT;
@@ -561,6 +562,7 @@ int nds_run_interactive_frontend() {
             static_cast<unsigned long long>(slow_frames_32ms),
             static_cast<unsigned long long>(first_underrun_frame),
             static_cast<unsigned long long>(last_underrun_frame));
+        nds_profile_report(stderr);
     }
     const bool audio_failed = audio_queue_error ||
         (require_audio && (audio_underruns != 0 || !audio || !audio_started));

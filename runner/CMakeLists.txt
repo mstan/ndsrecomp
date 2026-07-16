@@ -117,6 +117,7 @@ add_executable(nds_runner
     src/gpu2d.cpp
     src/gpu3d.cpp
     src/tier3.cpp
+    src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
     src/frontend.cpp
@@ -150,6 +151,10 @@ elseif(EXISTS "${GEN}/fw_arm9_calibration_save_dispatch.c")
 endif()
 if(SM64DS_BANK_SOURCES)
     target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SM64DS_BANKS=1)
+    if(EXISTS "${NDS_SM64DS_BANK_DIR}/sm64ds_arm7_ram_dispatch.c")
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SM64DS_RAM_BANKS=1)
+    endif()
 endif()
 
 # SDL is a host-only presentation layer. The runner remains buildable without

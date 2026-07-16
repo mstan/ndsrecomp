@@ -503,7 +503,14 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
                    const uint8_t* oam, const NdsVramRendererView& vram,
                    const uint32_t* line3d, bool bg0_3d, uint32_t* out) {
     std::array<Pixel,256> obj{};
+    const auto obj_start = profiling() ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
     render_obj_line(engine, y, obj, oam, palette, vram);
+    if (profiling()) {
+        g_obj_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - obj_start).count());
+    }
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
     static std::array<BgLine, 4> text_lines;

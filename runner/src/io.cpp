@@ -540,8 +540,8 @@ void card_trace_push(uint8_t kind, int owner, const uint8_t* command,
     e.sys = scheduler_system_timestamp();
     e.cyc9 = scheduler_cpu_cycles(0);
     e.cyc7 = scheduler_cpu_cycles(1);
-    e.insn9 = g_counts.insn9;
-    e.insn7 = g_counts.insn7;
+    e.insn9 = g_insn_count[0];
+    e.insn7 = g_insn_count[1];
     e.kind = kind;
     e.owner = static_cast<uint8_t>(owner & 1);
     if (command) std::memcpy(e.command, command, sizeof(e.command));
@@ -586,6 +586,48 @@ inline void brk_check() {
     }
 }
 
+}  // namespace
+
+// Retired-insn ordinals + per-insn slow-path gate (see io.h). Defined at
+// global scope — extern "C" symbols the generated banks bump directly.
+// Armed at startup because g_runtime_deep_trace defaults on;
+// nds_insn_hook_recompute keeps it consistent from then on.
+extern "C" uint64_t g_insn_count[2] = {0, 0};
+extern "C" uint32_t g_insn_hook_armed = 1u;
+
+// Keep the generated code's per-insn slow-path gate consistent with its two
+// inputs: the deep-trace policy and the event-break arming state. (Inside
+// this TU so it can see the file-local g_brk_ptr.)
+void nds_insn_hook_recompute() {
+    g_insn_hook_armed = (g_runtime_deep_trace || g_brk_ptr) ? 1u : 0u;
+}
+
+// Armed per-insn payload for new-emission banks: the deep-trace register
+// ring and the event-break check. The counter bump itself is inlined at the
+// emission site (runtime_arm.h "Inline retired-instruction counters"), so
+// this must NOT bump — unlike runtime_insn_fp, the whole hook for banks
+// generated before the inline scheme.
+extern "C" void runtime_insn_slow(void) {
+    const int cpu = (g_nds_active == NDS_ARM7) ? 1 : 0;
+    if (g_runtime_deep_trace) {
+        const uint64_t count = g_insn_count[cpu];
+        NdsInsnTraceEntry& e =
+            g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
+        e = {
+            count,
+            scheduler_system_timestamp(),
+            g_runtime_cycles,
+            g_cpu.R[15],
+            g_cpu.cpsr,
+            runtime_deferred_cycles(),
+        };
+        std::memcpy(e.r, g_cpu.R, sizeof(e.r));
+    }
+    brk_check();
+}
+
+namespace {
+
 // IPC FIFO (0x04000184 CNT / 0x04000188 SEND / 0x04100000 RECV). Two 16-word
 // hardware queues, one per direction. g_fifo[c] holds words CPU c has SENT
 // (the other core RECVs them). The firmware boot uses this to hand the ARM9
@@ -607,8 +649,8 @@ void fifo_send(int c, uint32_t v) {
         scheduler_system_timestamp(),
         c == 0 ? g_runtime_cycles : scheduler_cpu_cycles(0),
         c == 1 ? g_runtime_cycles : scheduler_cpu_cycles(1),
-        g_counts.insn9,
-        g_counts.insn7,
+        g_insn_count[0],
+        g_insn_count[1],
         v,
     };
     brk_check();
@@ -851,7 +893,7 @@ void dma_trace_push(int cpu, int ch, const DmaChannel& d) {
         g_dma_trace_count,
         scheduler_system_timestamp(),
         g_runtime_cycles,
-        cpu == 0 ? g_counts.insn9 : g_counts.insn7,
+        g_insn_count[cpu == 0 ? 0 : 1],
         d.cnt,
         d.src,
         d.dst,
@@ -1652,6 +1694,7 @@ void nds_io_reset() {
     g_vcount = 0; g_next_vcount = 0; g_next_vcount_valid = false;
     g_in_vblank = false;
     g_counts = {};
+    g_insn_count[0] = g_insn_count[1] = 0;
     std::memset(g_dma, 0, sizeof(g_dma));
     g_dma_entry_cycle[0] = g_dma_entry_cycle[1] = 0;
     std::memset(g_spi_trace, 0, sizeof(g_spi_trace));
@@ -1815,7 +1858,7 @@ void nds_note_irq_accept(int cpu, uint32_t return_address) {
         scheduler_system_timestamp(),
         cpu == 0 ? g_runtime_cycles : scheduler_cpu_cycles(0),
         cpu == 1 ? g_runtime_cycles : scheduler_cpu_cycles(1),
-        cpu == 0 ? g_counts.insn9 : g_counts.insn7,
+        g_insn_count[cpu],
         return_address,
         g_ie[cpu] & g_if[cpu],
         cpu == 1 ? nds_wifi_debug_if() : 0u,
@@ -1974,28 +2017,13 @@ void nds_run_system_events(uint64_t timestamp) {
 }
 
 void nds_note_insn_retired(int cpu) {
-    cpu &= 1;
-    uint64_t& count = cpu ? g_counts.insn7 : g_counts.insn9;
-    ++count;
-    // The counter above is architectural (insn9/insn7 event ordinals) and
-    // always advances. The full register-image ring entry is the deep-trace
-    // payload: its 90-byte write into a 20 MB ring misses cache on every
-    // retired instruction, so it follows the deep-trace policy (on wherever
-    // a query surface exists; off in the interactive frontend).
-    if (g_runtime_deep_trace) {
-        NdsInsnTraceEntry& e =
-            g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
-        e = {
-            count,
-            scheduler_system_timestamp(),
-            g_runtime_cycles,
-            g_cpu.R[15],
-            g_cpu.cpsr,
-            runtime_deferred_cycles(),
-        };
-        std::memcpy(e.r, g_cpu.R, sizeof(e.r));
-    }
-    brk_check();
+    // Whole hook for pre-inline-emission banks (via runtime_insn_fp) and the
+    // Tier-3 interpreter: bump the architectural ordinal, then the same armed
+    // payload new-emission banks reach through runtime_insn_slow. Callers
+    // always pass the active CPU, so the slow path's g_nds_active read
+    // matches `cpu`.
+    ++g_insn_count[cpu & 1];
+    if (g_insn_hook_armed) runtime_insn_slow();
 }
 
 uint64_t nds_event_value(const char* name) {
@@ -2009,8 +2037,8 @@ uint64_t nds_event_value(const char* name) {
     if (std::strcmp(name, "timer_ovf") == 0) return g_counts.timer_ovf;
     if (std::strcmp(name, "spi_w") == 0) return g_counts.spi_w;
     if (std::strcmp(name, "soundbias_w") == 0) return g_counts.soundbias_w;
-    if (std::strcmp(name, "insn9") == 0) return g_counts.insn9;
-    if (std::strcmp(name, "insn7") == 0) return g_counts.insn7;
+    if (std::strcmp(name, "insn9") == 0) return g_insn_count[0];
+    if (std::strcmp(name, "insn7") == 0) return g_insn_count[1];
     return UINT64_MAX;
 }
 
@@ -2026,8 +2054,8 @@ const uint64_t* event_ptr(const char* name) {
     if (std::strcmp(name, "timer_ovf") == 0) return &g_counts.timer_ovf;
     if (std::strcmp(name, "spi_w") == 0) return &g_counts.spi_w;
     if (std::strcmp(name, "soundbias_w") == 0) return &g_counts.soundbias_w;
-    if (std::strcmp(name, "insn9") == 0) return &g_counts.insn9;
-    if (std::strcmp(name, "insn7") == 0) return &g_counts.insn7;
+    if (std::strcmp(name, "insn9") == 0) return &g_insn_count[0];
+    if (std::strcmp(name, "insn7") == 0) return &g_insn_count[1];
     return nullptr;
 }
 }  // namespace
@@ -2039,10 +2067,12 @@ void nds_event_break_arm(const char* name, uint64_t target) {
     g_brk_is_insn = name && (std::strcmp(name, "insn7") == 0 ||
                              std::strcmp(name, "insn9") == 0);
     g_nds_insn_stop = false;
+    nds_insn_hook_recompute();
 }
 void nds_event_break_disarm() {
     g_brk_ptr = nullptr; g_brk_hit = false;
     g_brk_is_insn = false; g_nds_insn_stop = false;
+    nds_insn_hook_recompute();
 }
 bool nds_event_break_hit() { return g_brk_hit; }
 
@@ -2741,7 +2771,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
                 scheduler_system_timestamp(),
                 scheduler_cpu_cycles(0),
                 g_runtime_cycles,
-                g_counts.insn7,
+                g_insn_count[1],
                 g_cpu.R[15],
                 static_cast<uint32_t>(value & 0xFFu),
             };

@@ -39,6 +39,9 @@ struct NdsSchedulerProfile {
     uint64_t wifi_ns;
     uint64_t rtc_ns;
     uint64_t sysev_ns;
+    // Total rounds observed while profiling (exact, not sampled) — the
+    // denominator for switches/round in the report.
+    uint64_t rounds;
 };
 
 // Opt-in coarse sampler used by the release profiler. It samples one complete
