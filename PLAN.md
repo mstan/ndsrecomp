@@ -123,15 +123,18 @@ first-divergence-disciplined session.
 Measured at SM64DS boot→title (insn9=200M): ARM9 93.5% static / 6.5%
 tier-3; ARM7 68.7% / 31.3%. The interpreter is the correctness floor, not
 the performance plan.
-- **A1 [MECH→SPEC] ARM7 game payload → static banks.** The whole SM64DS
-  ARM7 program (sound engine, cart/input services) is copied to RAM at
-  boot and runs tier-3 (~18.5M insns by 200M). Pipeline: run with
-  `--discover-static-misses` through boot + representative gameplay →
-  `tier3_coverage` regions → finder over the RAM image (the game repo's
-  bank pipeline; per-title config lives in `supermario64dsrecomp`) →
-  regen → gates. Acceptance: `tier3_insns7 ≈ 0` through the G3 window;
-  gameplay spot-checks clean. Judgment part: multi-entry/landing-pad
-  config for the sound engine's dispatch style.
+- **A1 ✅ DONE (2026-07-16).** The relocated ARM7 runtime code (sound
+  engine in shared-WRAM/WRAM at 0x037F8000..0x03805818+, helpers in the
+  0x027Cxxxx main-RAM mirror alias) is a content-validated bank
+  (`supermario64dsrecomp` config/sm64ds_arm7_ram.toml + tools/
+  capture_arm7_ram_bank.py, firmware-capture model, code_copy rows for
+  the WRAM window and all main-RAM mirror aliases).
+  `tier3_insns7` through the 700M G3 window: 123,815,925 → 135;
+  clean_ram_rejects=0; G1/G2/G3 green. Promotion exposed and fixed a
+  general +1-cycle arm7_cycle_combine resync bug for ARM-mode
+  main-RAM-bus code (found via insn-ring cycle diff — see that commit).
+  Remaining: gameplay-window discovery passes (in-level sound paths) can
+  merge more entries monotonically via the same tool.
 - **A2 [MECH] ARM9 overlays → static banks.** Same pipeline for the ~6.5%
   copied ARM9 code. Overlays may be region-swapped: bank per overlay ID,
   provenance-validated like the firmware banks.
@@ -146,17 +149,22 @@ Boot is ~1.3× realtime (masked by the audio prebuffer); gameplay budget
 will tighten with 3D scenes. Measurement discipline is mandatory: the
 machine's wall clock varies 2× — interleaved A/B, min-of-N, or the soak's
 phase/underrun stats; never single boot-window runs.
-- **B1 [MECH] profile first.** `NDS_PROFILE_SCHED`, `NDS_PROFILE_GPU`,
-  soak phase stats before/after every change; keep numbers in commits.
-- **B2 [SPEC] inline the per-insn counter in emission.** The
-  `runtime_insn_fp` call chain is the largest per-instruction constant;
-  fold counting/timing into emitted code. Recompiler change → regen all
-  (~156 bank TUs) → full gates. High leverage, medium risk.
+- **B1 ✅ DONE (2026-07-16).** Profile reporting now prints from every
+  exit path (nds_profile_report; it was batch-only, so profiled soaks
+  yielded nothing) and the OBJ bucket includes the previously-untimed
+  compose_line6 call. Post-B2/B4 profiled soak: GPU2D 6.11s
+  (A 4.12 / B 1.99 / OBJ 2.43) per 2400 frames; scheduler round 5.37µs
+  (ARM9 2.13, ARM7 1.18, devices 1.68 of which display 1.11).
+- **B2 ✅ DONE (2026-07-16).** Per-insn counter inlined in emission
+  (`++g_insn_count[g_nds_active]` + armed-gated runtime_insn_slow);
+  ~8-9%% emu-phase win on the firmware soak (interleaved A/B). Old
+  emission stays ABI-valid; the 12 extended firmware bank sets remain
+  old-emission until their captures are regenerated.
 - **B3 [SPEC] bus fast paths.** Inline main-RAM/WRAM load-store fast
   paths ahead of the general bus dispatch.
-- **B4 [MECH] GPU2D remaining passes.** OBJ line pass is next (~2.6s of
-  the 2400-frame boot's GPU time); same per-tile treatment as the text-BG
-  work (commit 984ac08 as the template). FNV pins the output.
+- **B4 ✅ DONE (2026-07-16).** OBJ line pass per-tile for regular
+  tile-mode sprites: GPU2D 8.29s → 6.11s, OBJ 3.61s → 2.43s on the
+  profiled soak; FNV/G3 pinned. Affine/bitmap/window stay per-pixel.
 - **B5 [JUDG] scheduler round overhead.** Round-granular costs (per-round
   Run(), timer catch-up) if B1 shows them material.
 - Acceptance: sustained 60 FPS interactive through title+attract with
