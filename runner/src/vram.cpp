@@ -239,7 +239,34 @@ void arm9_vram_write(uint32_t addr, uint32_t value, uint32_t width) {
     }
 }
 
+// Refresh one flattened 3D slot space (texture image or texture palette)
+// from the live bank mapping. Unmapped slots read as zero; the legal
+// overlapping-bank case keeps the exact OR-combining fallback.
+void copy_slot_space(uint8_t* dst, const uint16_t* masks, unsigned slots,
+                     uint32_t slot_size) {
+    for (unsigned s = 0; s < slots; ++s) {
+        uint8_t* out = dst + s * slot_size;
+        const uint32_t base = s * slot_size;
+        const uint16_t mask = masks[s];
+        if (!mask) { std::memset(out, 0, slot_size); continue; }
+        if (const uint8_t* direct = direct_chunk(mask, base)) {
+            std::memcpy(out, direct, slot_size);
+            continue;
+        }
+        for (uint32_t off = 0; off < slot_size; off += 4u)
+            store(out + off, mapped_read(mask, base + off, 4), 4);
+    }
+}
+
 } // namespace
+
+void nds_vram_copy_texture(uint8_t* dst) {
+    copy_slot_space(dst, g_texture.data(), 4, 0x20000u);
+}
+
+void nds_vram_copy_texpal(uint8_t* dst) {
+    copy_slot_space(dst, g_texpal.data(), 8, 0x4000u);
+}
 
 void nds_vram_reset() {
     g_vram.fill(0); g_palette.fill(0); g_oam.fill(0); g_cnt.fill(0);

@@ -44,8 +44,29 @@ GNU General Public License v3.0 or later.
 directory. The tracked `oracle/patches/` files contain patch context against
 melonDS and are intended solely for that GPL-covered build. The tracked oracle
 shim compiles with melonDS into a separate executable; any distribution of
-that combined executable must comply with the GPL. The native `runner/` does
-not compile or link melonDS.
+that combined executable must comply with the GPL.
+
+## melonDS vendored GPU3D (runner)
+
+Since 2026-07-16 the native runner additionally vendors the melonDS 3D
+geometry engine and software rasterizer as its 3D device model (decision:
+accept GPL for the runner executable rather than reimplement the 3D
+pipeline; the guest still produces every register and GXFIFO write, so this
+remains a device model, not HLE).
+
+- Local scope: `runner/vendor/melonds/`
+- Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
+  `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`, `FIFO.h`,
+  `types.h`, `Savestate.h`, `Savestate.cpp`, `NonStupidBitfield.h`
+- Project-written shim headers in the same directory (`NDS.h`, `GPU.h`,
+  `Platform.h`) replace the melonDS headers of the same names with the
+  minimal interface slice the vendored units consume; as derived interfaces
+  they are likewise GPL-3.0-or-later. The bridge `runner/src/gpu3d.cpp`
+  implements them against the runner's own device models.
+- Consequence: `nds_runner` is a combined work with melonDS. Any
+  distribution of the runner binary must comply with GPL-3.0-or-later.
+  The recompiler, the generated banks, and all `ndsref`-independent tooling
+  remain outside this boundary and do not compile or link melonDS code.
 
 The native implementation uses melonDS as a behavioral and timing reference.
 An audit before the first public release found no exact normalized six-line

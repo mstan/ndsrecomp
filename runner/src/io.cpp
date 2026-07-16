@@ -12,6 +12,7 @@
 #include "state.h"
 #include "scheduler.h"
 #include "gpu2d.h"
+#include "gpu3d.h"
 #include "spu.h"
 #include "vram.h"
 
@@ -1587,6 +1588,7 @@ void nds_io_reset() {
     nds_spu_reset();
     nds_vram_reset();
     nds_gpu2d_reset();
+    nds_gpu3d_reset();
 }
 
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
@@ -1944,6 +1946,8 @@ void nds_tick_rtc(unsigned long long system_cycles) {
 // ── Interrupt controller ────────────────────────────────────────────────
 void nds_raise_irq(int cpu, uint32_t bits) { g_if[cpu & 1] |= bits; }
 
+void nds_clear_irq(int cpu, uint32_t bits) { g_if[cpu & 1] &= ~bits; }
+
 void nds_dump_irq() {
     for (int c = 0; c < 2; ++c)
         std::fprintf(stderr, "  ARM%c IME=%u IE=0x%08X IF=0x%08X IPCSYNC.out=0x%04X\n",
@@ -1982,6 +1986,13 @@ unsigned long long nds_halt_entry_cycle(int cpu) {
 }
 
 bool nds_dma_cpu_stalled(int cpu) { return dma_any_running(cpu & 1); }
+
+// GXFIFO ARM9 stall flag (melonDS CPUStop_GXStall). Set/cleared by the
+// vendored GPU3D via the NDS shim; scheduler consumption lands with the
+// geometry engine's Run() wiring (3D Phase 2).
+static bool g_gxfifo_stall = false;
+void nds_gxfifo_set_stall(bool stalled) { g_gxfifo_stall = stalled; }
+bool nds_gxfifo_stalled() { return g_gxfifo_stall; }
 
 unsigned long long nds_dma_entry_cycle(int cpu) {
     return g_dma_entry_cycle[cpu & 1];
@@ -2200,6 +2211,11 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
         }
         return value & m;
     }
+    // On the ARM9 the 0x04000320..0x040006A3 window is the 3D engine
+    // (GXFIFO at 0x400..0x43F overlaps the ARM7's SPU address range); the
+    // SPU only exists on the ARM7 side.
+    if (cpu == 0 && nds_gpu3d_reg_addr(addr))
+        return nds_gpu3d_read(addr, width) & m;
     if (addr >= 0x04000400u && addr < 0x04000520u)
         return cpu == 1 ? (nds_spu_read(addr, width) & m) : 0u;
     if (dma_reg_addr(addr)) return dma_reg_read(cpu, addr, width) & m;
@@ -2340,6 +2356,12 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
         }
         return;
     }
+    // ARM9 3D engine window (see nds_io_read): must win over the ARM7-SPU
+    // range check below, which previously swallowed ARM9 GXFIFO writes.
+    if (cpu == 0 && nds_gpu3d_reg_addr(addr)) {
+        nds_gpu3d_write(addr, value, width);
+        return;
+    }
     if (addr >= 0x04000400u && addr < 0x04000520u) {
         if (cpu != 1) return;
         if (addr == 0x04000504u) {
@@ -2471,6 +2493,9 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
                 const uint16_t merged = static_cast<uint16_t>(
                     (old & ~wmask) | ((value << shift) & wmask));
                 io_mem_write(0x04000304u, merged & 0x820Fu, 2);
+                // POWCNT1 bit3/bit2 gate the 3D geometry/rendering engines
+                // (melonDS GPU::SetPowerCnt).
+                nds_gpu3d_set_power(merged & 0x820Fu);
                 return;
             }
             const uint32_t shift = (addr & 1u) * 8u;

@@ -33,3 +33,9 @@ struct NdsVramRendererView {
     const uint8_t* obj[16];
 };
 const NdsVramRendererView* nds_vram_renderer_view(int engine);
+
+// 3D renderer flattened texture views: refresh the OR-combined texture-slot
+// space (4 x 128 KiB) / texture-palette-slot space (8 x 16 KiB) into the
+// caller's buffer. Unmapped slots read as zero.
+void nds_vram_copy_texture(uint8_t* dst);   // 512 KiB
+void nds_vram_copy_texpal(uint8_t* dst);    // 128 KiB

@@ -200,6 +200,9 @@ bool     nds_event_break_hit();
 // runtime polls nds_irq_pending(cpu) each tick and vectors when set and
 // CPSR.I is clear. cpu: 0 = ARM9, 1 = ARM7. Returns IE&IF when IME enabled.
 void     nds_raise_irq(int cpu, uint32_t bits);
+// Level-style sources (GXFIFO) deassert their IF bit when the condition
+// clears, matching melonDS NDS::ClearIRQ.
+void     nds_clear_irq(int cpu, uint32_t bits);
 uint32_t nds_irq_pending(int cpu);
 
 // Guest CPU low-power state. HALTCNT/CP15 halt is cooperative rather than a
@@ -221,6 +224,14 @@ bool     nds_dma_cpu_stalled(int cpu);
 unsigned long long nds_dma_entry_cycle(int cpu);
 void     nds_dma_run(int cpu, unsigned long long target_cycles);
 void     nds_dma_trigger(int cpu, uint32_t start_mode);
+
+// GXFIFO CPU-stall primitive (ARM9 only), modeled on the DMA stall: a write
+// to a full geometry FIFO parks the ARM9 while the geometry engine drains
+// the overflow queue, matching melonDS CPUStop_GXStall. The vendored GPU3D
+// sets/clears the flag; the scheduler-side consumption lands with the
+// geometry engine's Run() wiring (3D Phase 2).
+void     nds_gxfifo_set_stall(bool stalled);
+bool     nds_gxfifo_stalled();
 
 // melonDS ordering: each CPU's timers advance at that CPU's own post-Execute
 // timestamp; display/system time advances only after ARM7 catches up.

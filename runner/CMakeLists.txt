@@ -115,15 +115,30 @@ add_executable(nds_runner
     src/spu.cpp
     src/vram.cpp
     src/gpu2d.cpp
+    src/gpu3d.cpp
     src/tier3.cpp
     src/scheduler.cpp
     src/debug_server.cpp
     src/frontend.cpp
-    src/main.cpp)
+    src/main.cpp
+    vendor/melonds/GPU3D.cpp
+    vendor/melonds/GPU3D_Soft.cpp
+    vendor/melonds/Savestate.cpp)
 target_include_directories(nds_runner PRIVATE
     src
+    vendor/melonds                                     # vendored melonDS GPU3D + shims (GPL-3.0-or-later)
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
+if(NOT MSVC)
+    # Unmodified upstream melonDS sources carry their own warning posture;
+    # keep the runner's -Wall -Wextra signal clean without editing vendored
+    # code.
+    set_source_files_properties(
+        vendor/melonds/GPU3D.cpp
+        vendor/melonds/GPU3D_Soft.cpp
+        vendor/melonds/Savestate.cpp
+        PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
 if(NDS_BOOTSTRAP_FIRMWARE)
     target_compile_definitions(nds_runner PRIVATE NDS_BOOTSTRAP_FIRMWARE=1)
