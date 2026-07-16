@@ -50,6 +50,17 @@ void nds_gpu3d_vblank();
 void nds_gpu3d_vcount215();
 void nds_gpu3d_start_frame();
 
+// Rasterized 3D scanline for the 2D compositor (GPU3D::GetLine: applies the
+// RenderXPos horizontal scroll; zero-filled while AbortFrame is set). The
+// returned 256-entry buffer is valid until the next call.
+const uint32_t* nds_gpu3d_line(int line);
+
+// Engine A BG0HOFS writes dual-purpose into the 3D scroll register
+// (melonDS GPU2D Write8/16 case 0x010, forwarded before the power gate;
+// SetRenderXPos itself ignores writes while rendering is powered off).
+void nds_gpu3d_set_render_xpos(uint16_t value);
+uint16_t nds_gpu3d_render_xpos();
+
 // Always-on ring of geometry-engine Run() invocations. The engine's
 // guest-visible busy/drain state depends on WHEN Run() is called (melonDS
 // FinishWork is call-time dependent), so scheduler round boundaries must

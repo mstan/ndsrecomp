@@ -271,6 +271,16 @@ void nds_vram_copy_texpal(uint8_t* dst) {
 
 uint64_t nds_vram_texture_generation() { return g_texture_generation; }
 
+bool nds_vram_lcdc_mapped(unsigned bank) {
+    return bank < 9 && (g_lcdc & (1u << bank)) != 0;
+}
+
+uint8_t* nds_vram_bank_data(unsigned bank) {
+    return bank < 9 ? g_vram.data() + kBankOffset[bank] : nullptr;
+}
+
+void nds_vram_note_capture_write() { ++g_texture_generation; }
+
 void nds_vram_reset() {
     g_vram.fill(0); g_palette.fill(0); g_oam.fill(0); g_cnt.fill(0);
     g_lcdc = 0; g_abg.fill(0); g_aobj.fill(0); g_bbg.fill(0); g_bobj.fill(0);

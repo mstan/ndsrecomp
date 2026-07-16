@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "gpu3d.h"
 #include "io.h"
 #include "vram.h"
 
@@ -26,6 +27,10 @@ struct Unit {
     uint8_t eva = 16, evb = 0, evy = 0;
     uint32_t capture = 0;
     uint16_t master_bright = 0;
+    // DISPCAPCNT enable latches at scanline 0 and captures for the whole
+    // frame; the enable bit auto-clears at VBlank only if it latched
+    // (melonDS Unit::CaptureLatch).
+    bool capture_latch = false;
 };
 
 struct Pixel {
@@ -35,6 +40,7 @@ struct Pixel {
     uint8_t priority = 4; // 0 is frontmost; backdrop is 4
     uint8_t order = 0; // equal-priority order: OBJ, BG0, BG1, BG2, BG3
     bool valid = false;
+    uint8_t alpha5 = 0; // 3D-layer pixel: its 5-bit alpha 1..31 (0 = not 3D)
 };
 
 std::array<Unit,2> g_unit{};
@@ -149,6 +155,18 @@ uint32_t blend(uint32_t a, uint32_t b, uint32_t eva, uint32_t evb) {
     uint32_t bl = ((((a >> 16) & 0x3Fu) * eva) + (((b >> 16) & 0x3Fu) * evb) + 8) >> 4;
     return std::min(r,63u) | (std::min(g,63u)<<8) | (std::min(bl,63u)<<16);
 }
+// The 3D layer blends with 5-bit precision using the pixel's own alpha
+// (melonDS ColorBlend5): eva = alpha+1 in 1..32, evb = 32-eva.
+uint32_t blend5(uint32_t a, uint32_t b, uint32_t alpha) {
+    const uint32_t eva = alpha + 1u;
+    if (eva == 32u) return a;
+    const uint32_t evb = 32u - eva;
+    uint32_t r = (((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 16u) >> 5;
+    uint32_t g = ((((a >> 8) & 0x3Fu) * eva) + (((b >> 8) & 0x3Fu) * evb) + 16u) >> 5;
+    uint32_t bl = ((((a >> 16) & 0x3Fu) * eva) + (((b >> 16) & 0x3Fu) * evb) + 16u) >> 5;
+    return std::min(r,63u) | (std::min(g,63u)<<8) | (std::min(bl,63u)<<16);
+}
+
 uint32_t brighten(uint32_t c, uint32_t f, uint32_t bias = 8u) {
     const uint32_t r = (c & 0x3Fu) + ((((63u-(c&0x3Fu))*f)+bias)>>4);
     const uint32_t g0 = (c>>8)&0x3Fu;
@@ -448,6 +466,21 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
 uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
     uint32_t c=top.color;
     const uint16_t target2=static_cast<uint16_t>(below.target)<<8;
+    if (top.alpha5) {
+        // 3D layer on top: whenever the pixel behind is a BLDCNT second
+        // target, per-pixel 5-bit blending is forced regardless of the
+        // selected color effect (melonDS ColorComposite coloreffect=4).
+        if (u.bldcnt & target2) return blend5(c, below.color, top.alpha5);
+        // Otherwise the 3D layer acts as BG0 (first-target bit 0x01) for
+        // brightness effects only; alpha blend never applies here.
+        if (u.bldcnt & top.target) {
+            switch ((u.bldcnt >> 6) & 3u) {
+                case 2: return brighten(c, u.evy);
+                case 3: return darken(c, u.evy);
+            }
+        }
+        return c;
+    }
     if(top.alpha && (u.bldcnt&target2)){
         const uint32_t eva=top.alpha==0xFFu?u.eva:top.alpha;
         c=blend(c,below.color,eva,top.alpha==0xFFu?u.evb:16u-eva);
@@ -461,6 +494,168 @@ uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
     return c;
 }
 
+// Composite one scanline into the internal 6-bit format (channels at bits
+// 0-5/8-13/16-21) including the 3D layer when BG0 is redirected to it.
+// This is the general-path twin of the dst-direct fast paths in
+// render_engine_line, which carry the same layer/priority/blend rules but
+// skip the 3D layer and the 6-bit intermediate.
+void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
+                   const uint8_t* oam, const NdsVramRendererView& vram,
+                   const uint32_t* line3d, bool bg0_3d, uint32_t* out) {
+    std::array<Pixel,256> obj{};
+    render_obj_line(engine, y, obj, oam, palette, vram);
+    const uint16_t backdrop15 = view16(palette, 0);
+    const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
+    static std::array<BgLine, 4> text_lines;
+    size_t text_count = 0;
+    const uint32_t bgmode = u.dispcnt & 7u;
+    int text_bgs[4];
+    for (int bg = 0; bg < 4; ++bg) {
+        if (!(u.dispcnt & (0x100u << bg))) continue;
+        if (bg == 0 && bg0_3d) continue;   // BG0's slot is the 3D layer
+        const bool text = (bg < 2) || (bgmode == 0) ||
+            (bg == 2 && (bgmode == 1 || bgmode == 3)) ||
+            (bg == 3 && bgmode == 0);
+        if (text) text_bgs[text_count++] = bg;
+    }
+    for (size_t i = 0; i < text_count; ++i)
+        decode_text_line(engine, text_bgs[i], y, palette, vram,
+                         text_lines[i]);
+    const uint8_t prio3d = static_cast<uint8_t>(u.bgcnt[0] & 3u);
+    auto ahead = [](const Pixel& a, const Pixel& b) {
+        return a.priority < b.priority ||
+               (a.priority == b.priority && a.order < b.order);
+    };
+    for (int x = 0; x < 256; ++x) {
+        Pixel top = backdrop, below = backdrop;
+        auto push = [&](const Pixel& p) {
+            if (ahead(p, top)) { below = top; top = p; }
+            else if (ahead(p, below)) { below = p; }
+        };
+        for (size_t i = 0; i < text_count; ++i) {
+            const uint16_t c = text_lines[i].color[x];
+            if (!(c & 0x8000u)) continue;
+            const BgLine& l = text_lines[i];
+            push(Pixel{rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
+                       l.target, 0, l.prio, l.order, true});
+        }
+        if (bg0_3d && line3d) {
+            const uint32_t c3 = line3d[x];
+            const uint8_t a3 = static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
+            // alpha 0 = fully transparent; the layer competes at BG0's
+            // priority and order (melonDS DrawBG_3D).
+            if (a3)
+                push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0, prio3d, 1, true, a3});
+        }
+        if (obj[x].valid) push(obj[x]);
+        out[x] = compose(u, top, below);
+    }
+}
+
+// DISPCAPCNT capture (engine A), mirroring melonDS SoftRenderer::DoCapture:
+// writes 15-bit+alpha pixels into the physical destination bank (gated on
+// its LCDC mapping), blending source A (composite or 3D-only line, in the
+// internal 6-bit format) with source B (LCDC VRAM or the display FIFO).
+void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
+                const uint32_t* line3d) {
+    const uint32_t cap = u.capture;
+    const uint32_t dstbank = (cap >> 16) & 3u;
+    if (!nds_vram_lcdc_mapped(dstbank)) return;
+    uint16_t* const dstp =
+        reinterpret_cast<uint16_t*>(nds_vram_bank_data(dstbank));
+    uint32_t dstaddr = (((cap >> 18) & 3u) << 14) + line * width;
+
+    // Source A: the 3D-only line or the pre-master-brightness composite.
+    // A composited pixel always carries the opaque alpha bit (the software
+    // compositor never leaves a hole); 3D-only pixels use their own alpha.
+    const bool srcA_3d = (cap & 0x01000000u) != 0;
+    const uint32_t* const srcA = srcA_3d ? line3d : comp6;
+
+    // Source B: LCDC VRAM bank (selected by DISPCNT's VRAM-block field) or
+    // the main-memory display FIFO. The FIFO feed (0x04000068 + DMA mode 4)
+    // is not implemented; an unfed melonDS FIFO buffer reads all-zero.
+    static constexpr uint16_t kZeroLine[256] = {};
+    const uint16_t* srcB = nullptr;
+    uint32_t srcBaddr = line * 256u;
+    if (cap & 0x02000000u) {
+        srcB = kZeroLine;
+        srcBaddr = 0;
+    } else {
+        const uint32_t srcbank = (u.dispcnt >> 18) & 3u;
+        if (nds_vram_lcdc_mapped(srcbank))
+            srcB = reinterpret_cast<const uint16_t*>(
+                nds_vram_bank_data(srcbank));
+        if (((u.dispcnt >> 16) & 3u) != 2u)
+            srcBaddr += ((cap >> 26) & 3u) << 14;
+    }
+    dstaddr &= 0xFFFFu;
+    srcBaddr &= 0xFFFFu;
+
+    switch ((cap >> 29) & 3u) {
+        case 0:  // source A only
+            for (uint32_t i = 0; i < width; ++i) {
+                const uint32_t val = srcA ? srcA[i] : 0;
+                const uint32_t r = (val >> 1) & 0x1Fu;
+                const uint32_t g = (val >> 9) & 0x1Fu;
+                const uint32_t b = (val >> 17) & 0x1Fu;
+                const uint32_t a = (!srcA_3d || (val >> 24)) ? 0x8000u : 0u;
+                dstp[dstaddr] = static_cast<uint16_t>(r | (g << 5) |
+                                                      (b << 10) | a);
+                dstaddr = (dstaddr + 1u) & 0xFFFFu;
+            }
+            break;
+        case 1:  // source B only
+            for (uint32_t i = 0; i < width; ++i) {
+                dstp[dstaddr] = srcB ? srcB[srcBaddr & 0xFFFFu] : 0;
+                srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
+                dstaddr = (dstaddr + 1u) & 0xFFFFu;
+            }
+            break;
+        default: {  // A+B blend with the capture EVA/EVB fields
+            uint32_t eva = cap & 0x1Fu;
+            uint32_t evb = (cap >> 8) & 0x1Fu;
+            if (eva > 16u) eva = 16u;
+            if (evb > 16u) evb = 16u;
+            for (uint32_t i = 0; i < width; ++i) {
+                const uint32_t val = srcA ? srcA[i] : 0;
+                const uint32_t rA = (val >> 1) & 0x1Fu;
+                const uint32_t gA = (val >> 9) & 0x1Fu;
+                const uint32_t bA = (val >> 17) & 0x1Fu;
+                const uint32_t aA = (!srcA_3d || (val >> 24)) ? 1u : 0u;
+                uint32_t rD, gD, bD, aD;
+                if (srcB) {
+                    const uint16_t vb = srcB[srcBaddr & 0xFFFFu];
+                    const uint32_t rB = vb & 0x1Fu;
+                    const uint32_t gB = (vb >> 5) & 0x1Fu;
+                    const uint32_t bB = (vb >> 10) & 0x1Fu;
+                    const uint32_t aB = vb >> 15;
+                    rD = ((rA * aA * eva) + (rB * aB * evb) + 8u) >> 4;
+                    gD = ((gA * aA * eva) + (gB * aB * evb) + 8u) >> 4;
+                    bD = ((bA * aA * eva) + (bB * aB * evb) + 8u) >> 4;
+                    aD = (eva > 0 ? aA : 0u) | (evb > 0 ? aB : 0u);
+                } else {
+                    // Unmapped source-B bank: the B term is absent entirely
+                    // (melonDS drops it rather than blending with black).
+                    rD = ((rA * aA * eva) + 8u) >> 4;
+                    gD = ((gA * aA * eva) + 8u) >> 4;
+                    bD = ((bA * aA * eva) + 8u) >> 4;
+                    aD = eva > 0 ? aA : 0u;
+                }
+                if (rD > 0x1Fu) rD = 0x1Fu;
+                if (gD > 0x1Fu) gD = 0x1Fu;
+                if (bD > 0x1Fu) bD = 0x1Fu;
+                dstp[dstaddr] = static_cast<uint16_t>(rD | (gD << 5) |
+                                                      (bD << 10) |
+                                                      (aD << 15));
+                srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
+                dstaddr = (dstaddr + 1u) & 0xFFFFu;
+            }
+            break;
+        }
+    }
+    nds_vram_note_capture_write();
+}
+
 void render_engine_line(int engine, int y) {
     Unit& u=g_unit[engine];
     Frame& fb = g_fb[g_front ^ 1][engine];
@@ -468,23 +663,70 @@ void render_engine_line(int engine, int y) {
     const uint8_t* const palette = nds_vram_renderer_palette(engine);
     const uint8_t* const oam = nds_vram_renderer_oam(engine);
     const NdsVramRendererView& vram = *nds_vram_renderer_view(engine);
-    if (!palette || !oam || (u.dispcnt & 0x80u)) {
+    const bool forceblank = !palette || !oam || (u.dispcnt & 0x80u);
+    // DISPCAPCNT latches at the top of the frame; setting the enable bit
+    // mid-frame does not capture until the next frame. melonDS's arm skips
+    // only its own force-blank cases (VCount>192, engine-B power-off),
+    // neither of which applies to engine A here.
+    if (engine == 0 && y == 0 && (u.capture & 0x80000000u))
+        u.capture_latch = true;
+    if (forceblank) {
         std::fill_n(dst, 256, 0xFFFFFFFFu);
         return;
     }
     const uint32_t mode=(u.dispcnt>>16)&(engine?1u:3u);
-    if(mode==0){
-        std::fill_n(dst, 256, 0xFFFFFFFFu);
-        return;
+
+    uint32_t capw = 0;
+    bool cap = false;
+    if (engine == 0 && u.capture_latch) {
+        static constexpr uint16_t kCapW[4] = {128, 256, 256, 256};
+        static constexpr uint8_t kCapH[4] = {128, 64, 128, 192};
+        const uint32_t size = (u.capture >> 20) & 3u;
+        capw = kCapW[size];
+        cap = y < kCapH[size];
     }
-    if(mode==2){
-        const uint32_t bank=(u.dispcnt>>18)&3u;
-        const uint32_t base=0x06800000u+(bank<<17)+(y*256u)*2u;
-        for(int x=0;x<256;++x){
-            const uint16_t c=static_cast<uint16_t>(
-                nds_video_read(9,base+x*2u,2));
-            dst[x]=to_rgb32(rgb6(c));
+    const bool bg0_3d = engine == 0 && (u.dispcnt & 0x8u) != 0 &&
+                        (u.dispcnt & 0x100u) != 0;
+
+    if (bg0_3d || cap || mode != 1u) {
+        // General path: mirror melonDS DrawScanline ordering — composite
+        // (when the display or capture consumes it), display-mode mux,
+        // capture, master brightness on every mode except screen-off.
+        const uint32_t* line3d =
+            (engine == 0) ? nds_gpu3d_line(y) : nullptr;
+        static std::array<uint32_t, 256> comp6;
+        const bool need_comp =
+            mode == 1u || (cap && !(u.capture & 0x01000000u));
+        if (need_comp)
+            compose_line6(engine, y, u, palette, oam, vram, line3d,
+                          bg0_3d, comp6.data());
+        const uint32_t mbmode = u.master_bright >> 14;
+        const uint32_t mb = std::min<uint32_t>(16, u.master_bright & 0x1Fu);
+        auto bright = [&](uint32_t c6) {
+            if (mbmode == 1u) return brighten(c6, mb, 0u);
+            if (mbmode == 2u) return darken(c6, mb, 15u);
+            return c6;
+        };
+        if (mode == 0u) {
+            std::fill_n(dst, 256, 0xFFFFFFFFu);
+        } else if (mode == 1u) {
+            for (int x = 0; x < 256; ++x)
+                dst[x] = to_rgb32(bright(comp6[x]));
+        } else if (mode == 2u) {
+            const uint32_t bank=(u.dispcnt>>18)&3u;
+            const uint32_t base=0x06800000u+(bank<<17)+(y*256u)*2u;
+            for(int x=0;x<256;++x){
+                const uint16_t c=static_cast<uint16_t>(
+                    nds_video_read(9,base+x*2u,2));
+                dst[x]=to_rgb32(bright(rgb6(c)));
+            }
+        } else {
+            // Main-memory display FIFO: the feed (0x04000068 + DMA mode 4)
+            // is not implemented; an unfed FIFO displays black.
+            std::fill_n(dst, 256, to_rgb32(bright(0u)));
         }
+        if (cap) do_capture(u, y, capw, need_comp ? comp6.data() : nullptr,
+                            line3d);
         return;
     }
 
@@ -643,6 +885,10 @@ void reg_write16(Unit&u,int engine,uint32_t off,uint16_t v){
     if(off==0x64){u.capture=(u.capture&0xFFFF0000u)|(v&0x1F1Fu);return;}
     if(off==0x66){u.capture=(u.capture&0xFFFFu)|((uint32_t{v}<<16)&0xEF3F0000u);return;}
     if(off==0x6C){u.master_bright=v;return;}
+    // Engine A BG0HOFS doubles as the 3D scroll register, forwarded before
+    // the power gate (melonDS Write16 case 0x010; the engine-side BGXPos
+    // store below still happens when powered).
+    if(off==0x10&&engine==0)nds_gpu3d_set_render_xpos(v);
     if(!enabled(engine))return;
     if(off>=8&&off<16){u.bgcnt[(off-8)>>1]=v;return;}
     if(off>=0x10&&off<0x20){uint16_t* p=((off-0x10)&2)?u.bgy:u.bgx;p[(off-0x10)>>2]=v;return;}
@@ -677,6 +923,12 @@ void reg_write8(Unit& u, int engine, uint32_t off, uint8_t v) {
         if (engine) u.dispcnt &= 0xC0B1FFF7u;
         return;
     }
+    if (off == 0x10 && engine == 0)
+        nds_gpu3d_set_render_xpos(static_cast<uint16_t>(
+            (nds_gpu3d_render_xpos() & 0xFF00u) | v));
+    else if (off == 0x11 && engine == 0)
+        nds_gpu3d_set_render_xpos(static_cast<uint16_t>(
+            (nds_gpu3d_render_xpos() & 0x00FFu) | (uint16_t{v} << 8)));
     if (!enabled(engine)) return;
     if (off >= 8 && off < 16) {
         uint16_t& reg = u.bgcnt[(off - 8) >> 1];
@@ -782,6 +1034,16 @@ void nds_gpu2d_render_frame(){
         nds_gpu2d_render_scanline(line);
 }
 void nds_gpu2d_finish_frame(){g_front ^= 1;}
+void nds_gpu2d_vblank(){
+    // melonDS Unit::VBlank: the capture enable bit auto-clears at line 192
+    // only if it latched at line 0 this frame.
+    for (auto& u : g_unit) {
+        if (u.capture_latch) {
+            u.capture &= ~0x80000000u;
+            u.capture_latch = false;
+        }
+    }
+}
 const uint32_t* nds_gpu2d_framebuffer(int screen){
     const bool normal=(nds_powercontrol9()&0x8000u)!=0;
     const int engine=normal?screen:(screen^1);

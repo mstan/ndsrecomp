@@ -40,6 +40,15 @@ const NdsVramRendererView* nds_vram_renderer_view(int engine);
 void nds_vram_copy_texture(uint8_t* dst);   // 512 KiB
 void nds_vram_copy_texpal(uint8_t* dst);    // 128 KiB
 
+// Display-capture unit access (engine A DISPCAPCNT). Capture reads/writes
+// the physical bank storage directly, gated only on the bank being mapped
+// to LCDC (melonDS DoCapture); it does not go through the CPU mapping.
+bool nds_vram_lcdc_mapped(unsigned bank);
+uint8_t* nds_vram_bank_data(unsigned bank);
+// A capture write can land in a bank later remapped as texture data; bump
+// the texture generation so cached flat views refresh.
+void nds_vram_note_capture_write();
+
 // Texture-content generation: bumped on any VRAMCNT remap (and reset).
 // Banks mapped into the texture/texpal slots are not CPU/DMA-addressable, so
 // their contents can only change by being written under another mapping and

@@ -2302,8 +2302,10 @@ void nds_tick_display(unsigned long long cyc) {
                 ++g_counts.vblank7;
                 nds_raise_irq(1, 0x00000001u);
             }
-            // After the 2D engines, matching melonDS StartScanline order:
-            // polygon sort, render-state latch and geometry bank flip.
+            // melonDS StartScanline order: 2D units first (capture-enable
+            // auto-clear), then the 3D engine's polygon sort, render-state
+            // latch and geometry bank flip.
+            nds_gpu2d_vblank();
             nds_gpu3d_vblank();
         } else if (g_vcount == 144u) {
             nds_gpu3d_vcount144();   // renderer frame-sync point

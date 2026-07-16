@@ -11,6 +11,10 @@ void nds_gpu2d_write(uint32_t addr, uint32_t value, uint32_t width);
 void nds_gpu2d_render_scanline(int line);
 void nds_gpu2d_render_frame();
 void nds_gpu2d_finish_frame();
+// Line-192 hook: auto-clears a latched DISPCAPCNT enable (melonDS
+// Unit::VBlank). Called before the 3D engine's VBlank, matching melonDS
+// StartScanline order.
+void nds_gpu2d_vblank();
 const uint32_t* nds_gpu2d_framebuffer(int screen);
 
 struct NdsGpu2dProfile {

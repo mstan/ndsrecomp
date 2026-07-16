@@ -292,6 +292,18 @@ void nds_gpu3d_vcount215() {
     g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
 }
 
+const uint32_t* nds_gpu3d_line(int line) {
+    return g_nds.GPU.GPU3D.GetLine(line);
+}
+
+void nds_gpu3d_set_render_xpos(uint16_t value) {
+    g_nds.GPU.GPU3D.SetRenderXPos(value);
+}
+
+uint16_t nds_gpu3d_render_xpos() {
+    return g_nds.GPU.GPU3D.GetRenderXPos();
+}
+
 void nds_gpu3d_start_frame() {
     if (g_nds.GPU.GPU3D.AbortFrame) {
         g_nds.GPU.GPU3D.RestartFrame(g_nds.GPU);
