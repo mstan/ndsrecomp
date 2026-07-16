@@ -180,7 +180,13 @@ uint64_t framebuffer_rgb_fnv(int screen) {
 
 int nds_run_interactive_frontend() {
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
+    // SDL_INIT_TIMER matters on Windows: it raises the OS timer resolution
+    // to 1 ms (SDL_HINT_TIMER_RESOLUTION default). Without it SDL_Delay(1)
+    // sleeps a full ~15.6 ms scheduler quantum, so the audio-queue throttle
+    // overshoots every frame, pinning the loop at ~57 FPS and cyclically
+    // starving the audio queue (the audible boot crackle).
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
+                 SDL_INIT_TIMER) != 0) {
         std::fprintf(stderr, "[sdl] init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -288,6 +294,15 @@ int nds_run_interactive_frontend() {
     bool selftest_touch_down = false;
     bool selftest_touch_up = false;
     bool selftest_event_error = false;
+    uint64_t phase_emu_ticks = 0;
+    uint64_t phase_present_ticks = 0;
+    uint64_t phase_drain_ticks = 0;
+    uint64_t max_emu_ticks = 0;
+    uint64_t max_emu_frame = 0;
+    uint64_t slow_frames_32ms = 0;
+    uint64_t last_underruns_seen = 0;
+    uint64_t first_underrun_frame = 0;
+    uint64_t last_underrun_frame = 0;
     const uint64_t soak_start = SDL_GetPerformanceCounter();
 
     while (running) {
@@ -378,6 +393,7 @@ int nds_run_interactive_frontend() {
             }
         }
 
+        const uint64_t phase0 = SDL_GetPerformanceCounter();
         const uint64_t now = scheduler_system_timestamp();
         const uint64_t next_frame =
             (now / kSystemCyclesPerFrame + 1u) * kSystemCyclesPerFrame;
@@ -385,6 +401,24 @@ int nds_run_interactive_frontend() {
                !(scheduler_cpu_terminal_halted(0) &&
                  scheduler_cpu_terminal_halted(1))) {
             scheduler_run_round();
+        }
+        {
+            const uint64_t emu_ticks = SDL_GetPerformanceCounter() - phase0;
+            phase_emu_ticks += emu_ticks;
+            if (emu_ticks > max_emu_ticks) {
+                max_emu_ticks = emu_ticks;
+                max_emu_frame = shown_frames;
+            }
+            if (emu_ticks * 1000u > frequency * 32u) ++slow_frames_32ms;
+        }
+        {
+            const uint64_t seen =
+                audio_queue.underruns.load(std::memory_order_relaxed);
+            if (seen != last_underruns_seen) {
+                if (!last_underruns_seen) first_underrun_frame = shown_frames;
+                last_underrun_frame = shown_frames;
+                last_underruns_seen = seen;
+            }
         }
 
         if (mouse_down || touch_release_pending)
@@ -394,6 +428,7 @@ int nds_run_interactive_frontend() {
             touch_release_pending = false;
         }
 
+        const uint64_t phase1 = SDL_GetPerformanceCounter();
         SDL_UpdateTexture(top, nullptr, nds_gpu2d_framebuffer(0),
                           kScreenWidth * sizeof(uint32_t));
         SDL_UpdateTexture(bottom, nullptr, nds_gpu2d_framebuffer(1),
@@ -405,12 +440,15 @@ int nds_run_interactive_frontend() {
         SDL_RenderCopy(renderer, top, nullptr, &top_rect);
         SDL_RenderCopy(renderer, bottom, nullptr, &bottom_rect);
         SDL_RenderPresent(renderer);
+        phase_present_ticks += SDL_GetPerformanceCounter() - phase1;
         if (audio && audio_started) {
             const uint32_t queued = audio_queue_count(audio, audio_queue);
             audio_min_queue = std::min(audio_min_queue, queued);
         }
+        const uint64_t phase2 = SDL_GetPerformanceCounter();
         const uint32_t queued = drain_audio(
             audio, audio_queue, audio_started, audio_queue_error);
+        phase_drain_ticks += SDL_GetPerformanceCounter() - phase2;
         audio_max_queue = std::max(audio_max_queue, queued);
         if (audio && !audio_started && queued >= kAudioStartFrames) {
             // Opening paused and prebuffering avoids the guaranteed startup
@@ -484,6 +522,20 @@ int nds_run_interactive_frontend() {
             last_touch_event_x, last_touch_event_y,
             static_cast<unsigned long long>(top_hash),
             static_cast<unsigned long long>(bottom_hash));
+        const double tick_seconds = 1.0 / static_cast<double>(frequency);
+        std::fprintf(stderr,
+            "[sdl] phases: emu=%.3fs present=%.3fs drain=%.3fs other=%.3fs "
+            "max_emu_ms=%.1f@f%llu slow32ms=%llu underrun_frames=[%llu,%llu]\n",
+            phase_emu_ticks * tick_seconds,
+            phase_present_ticks * tick_seconds,
+            phase_drain_ticks * tick_seconds,
+            soak_seconds - (phase_emu_ticks + phase_present_ticks +
+                            phase_drain_ticks) * tick_seconds,
+            max_emu_ticks * tick_seconds * 1000.0,
+            static_cast<unsigned long long>(max_emu_frame),
+            static_cast<unsigned long long>(slow_frames_32ms),
+            static_cast<unsigned long long>(first_underrun_frame),
+            static_cast<unsigned long long>(last_underrun_frame));
     }
     const bool audio_failed = audio_queue_error ||
         (require_audio && (audio_underruns != 0 || !audio || !audio_started));

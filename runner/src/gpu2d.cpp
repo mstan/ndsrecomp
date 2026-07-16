@@ -95,6 +95,30 @@ uint16_t obj_view16(const NdsVramRendererView& view, int engine,
     }
     return static_cast<uint16_t>(nds_vram_read_obj(engine, addr, 2));
 }
+uint32_t bg_view32(const NdsVramRendererView& view, int engine,
+                   uint32_t addr) {
+    // 4-byte tile rows are 4-byte aligned inside a 32/64-byte tile, so a
+    // row never crosses a 16 KiB chunk boundary.
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 31u);
+    if (const uint8_t* direct = view.bg[chunk]) {
+        uint32_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return nds_vram_read_bg(engine, addr, 4);
+}
+uint64_t bg_view64(const NdsVramRendererView& view, int engine,
+                   uint32_t addr) {
+    // 8-byte rows of 8bpp tiles are 8-byte aligned; same no-crossing rule.
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 31u);
+    if (const uint8_t* direct = view.bg[chunk]) {
+        uint64_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return uint64_t{nds_vram_read_bg(engine, addr, 4)} |
+           (uint64_t{nds_vram_read_bg(engine, addr + 4u, 4)} << 32);
+}
 uint32_t rgb6(uint16_t color) {
     return ((color & 0x001Fu) << 1) |
            (((color & 0x03E0u) >> 4) << 8) |
@@ -108,6 +132,16 @@ uint32_t to_rgb32(uint32_t color) {
     const uint32_t g = (g6 << 2) | (g6 >> 4);
     const uint32_t b = (b6 << 2) | (b6 >> 4);
     return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+// 15-bit source color -> host pixel, byte-identical to to_rgb32(rgb6(c)).
+const uint32_t* rgb32_lut() {
+    static const std::array<uint32_t, 32768> lut = [] {
+        std::array<uint32_t, 32768> t{};
+        for (uint32_t c = 0; c < 32768u; ++c)
+            t[c] = to_rgb32(rgb6(static_cast<uint16_t>(c)));
+        return t;
+    }();
+    return lut.data();
 }
 uint32_t blend(uint32_t a, uint32_t b, uint32_t eva, uint32_t evb) {
     uint32_t r = (((a & 0x3Fu) * eva) + ((b & 0x3Fu) * evb) + 8) >> 4;
@@ -209,8 +243,107 @@ Pixel text_pixel(TextLine& line, int x) {
         if (!index) return {};
         color = view16(line.palette,(((tile>>12)&0xFu)<<5)+(index<<1));
     }
-    return {rgb6(color), static_cast<uint8_t>(1u << bg), 0,
+    // NOTE: color is returned in raw 15-bit form; the per-tile line decoder
+    // below is the primary path and its buffers hold 15-bit colors. This
+    // per-pixel routine remains as the exact-semantics fallback for mosaic.
+    return {color, static_cast<uint8_t>(1u << bg), 0,
             static_cast<uint8_t>(cnt & 3u), static_cast<uint8_t>(bg + 1), true};
+}
+
+// One decoded text-BG scanline. Per-pixel storage is the raw 15-bit color
+// with bit 15 as the "opaque" flag; target/priority/order are per-layer
+// constants on a text BG so they live once beside the buffer.
+struct BgLine {
+    std::array<uint16_t, 256> color;  // bit15 = opaque
+    uint8_t prio = 0;
+    uint8_t target = 0;
+    uint8_t order = 0;
+};
+
+void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
+                      const NdsVramRendererView& vram, BgLine& out) {
+    Unit& u = g_unit[engine];
+    TextLine line = prepare_text_line(engine, bg, y, palette, &vram);
+    out.prio = static_cast<uint8_t>(line.cnt & 3u);
+    out.target = static_cast<uint8_t>(1u << bg);
+    out.order = static_cast<uint8_t>(bg + 1);
+
+    if ((line.cnt & 0x40u) && u.bg_mosaic_x) {
+        // Mosaic-X resamples per pixel; keep the exact per-pixel path.
+        for (int x = 0; x < 256; ++x) {
+            const Pixel p = text_pixel(line, x);
+            out.color[x] = p.valid
+                ? static_cast<uint16_t>(p.color | 0x8000u) : 0u;
+        }
+        return;
+    }
+
+    const uint32_t size = line.cnt >> 14;
+    const uint32_t sx_mask = (size & 1u) ? 0x1FFu : 0xFFu;
+    const bool color256 = (line.cnt & 0x0080u) != 0;
+    const bool extpal = color256 && (u.dispcnt & 0x40000000u);
+    const uint32_t extpal_slot =
+        (bg < 2 && (line.cnt & 0x2000u)) ? 2u + bg : static_cast<uint32_t>(bg);
+    uint32_t row_base = line.map_base;
+    if (line.cnt & 0x8000u) {
+        row_base += (line.sy & 0x1F8u) << 3;
+        if (line.cnt & 0x4000u) row_base += (line.sy & 0x100u) << 3;
+    } else {
+        row_base += (line.sy & 0xF8u) << 3;
+    }
+
+    int x = 0;
+    while (x < 256) {
+        const uint32_t sx = (u.bgx[bg] + static_cast<uint32_t>(x)) & sx_mask;
+        const uint32_t tx = sx & 7u;
+        const int run = std::min<int>(static_cast<int>(8u - tx), 256 - x);
+        const uint32_t map_addr =
+            row_base + ((sx & 0xF8u) >> 2) + ((sx & line.width_extra) << 3);
+        const uint16_t tile = static_cast<uint16_t>(
+            bg_view16(vram, engine, map_addr));
+        const bool hflip = (tile & 0x0400u) != 0;
+        const uint32_t ty = (tile & 0x0800u) ? 7u - (line.sy & 7u)
+                                             : (line.sy & 7u);
+        if (color256) {
+            const uint64_t row = bg_view64(vram, engine,
+                line.char_base + ((tile & 0x3FFu) << 6) + (ty << 3));
+            for (int k = 0; k < run; ++k) {
+                const uint32_t px = tx + static_cast<uint32_t>(k);
+                const uint32_t sel = hflip ? 7u - px : px;
+                const uint8_t index =
+                    static_cast<uint8_t>(row >> (sel * 8u));
+                if (!index) { out.color[x + k] = 0u; continue; }
+                uint16_t color;
+                if (extpal) {
+                    color = static_cast<uint16_t>(nds_vram_read_bg_extpal(
+                        engine,
+                        (extpal_slot << 13) +
+                            (static_cast<uint32_t>(tile >> 12) << 9) +
+                            (uint32_t{index} << 1),
+                        2));
+                } else {
+                    color = view16(palette, uint32_t{index} << 1);
+                }
+                out.color[x + k] = static_cast<uint16_t>(color | 0x8000u);
+            }
+        } else {
+            const uint32_t row = bg_view32(vram, engine,
+                line.char_base + ((tile & 0x3FFu) << 5) + (ty << 2));
+            const uint32_t pal_base =
+                (static_cast<uint32_t>(tile >> 12) & 0xFu) << 5;
+            for (int k = 0; k < run; ++k) {
+                const uint32_t px = tx + static_cast<uint32_t>(k);
+                const uint32_t sel = hflip ? 7u - px : px;
+                const uint8_t index =
+                    static_cast<uint8_t>((row >> (sel * 4u)) & 0xFu);
+                if (!index) { out.color[x + k] = 0u; continue; }
+                out.color[x + k] = static_cast<uint16_t>(
+                    view16(palette, pal_base + (uint32_t{index} << 1)) |
+                    0x8000u);
+            }
+        }
+        x += run;
+    }
 }
 
 void put_obj(std::array<Pixel,256>& line, int x, const Pixel& p) {
@@ -364,32 +497,45 @@ void render_engine_line(int engine, int y) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - obj_start).count());
     }
-    const Pixel backdrop{rgb6(view16(palette,0)),0x20u,0,4,5,true};
-    std::array<TextLine,4> text_lines{};
-    size_t text_count=0;
-    const uint32_t bgmode=u.dispcnt&7u;
-    for(int bg=0;bg<4;++bg){
-        if(!(u.dispcnt&(0x100u<<bg)))continue;
-        const bool text=(bg<2)||(bgmode==0)||
-            (bg==2&&(bgmode==1||bgmode==3))||(bg==3&&bgmode==0);
-        if(text) text_lines[text_count++]=
-            prepare_text_line(engine,bg,y,palette,&vram);
+    const uint16_t backdrop15 = view16(palette, 0);
+    const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
+    const uint32_t* const lut = rgb32_lut();
+    static std::array<BgLine, 4> text_lines;  // decoded, sorted front-first
+    size_t text_count = 0;
+    const uint32_t bgmode = u.dispcnt & 7u;
+    int text_bgs[4];
+    for (int bg = 0; bg < 4; ++bg) {
+        if (!(u.dispcnt & (0x100u << bg))) continue;
+        const bool text = (bg < 2) || (bgmode == 0) ||
+            (bg == 2 && (bgmode == 1 || bgmode == 3)) ||
+            (bg == 3 && bgmode == 0);
+        if (text) text_bgs[text_count++] = bg;
     }
-    auto text_ahead = [](const TextLine& a, const TextLine& b) {
-        const uint32_t ap = a.cnt & 3u;
-        const uint32_t bp = b.cnt & 3u;
-        return ap != bp ? ap < bp : a.bg < b.bg;
-    };
-    // Four elements maximum: insertion sort is smaller and avoids pulling a
-    // generic introsort into this scanline-hot function.
-    for (size_t i = 1; i < text_count; ++i) {
-        const TextLine line = text_lines[i];
-        size_t j = i;
-        while (j && text_ahead(line, text_lines[j - 1])) {
-            text_lines[j] = text_lines[j - 1];
-            --j;
+    // Front-first order: lower BGCNT priority wins, ties break to the lower
+    // BG index. Four elements maximum: insertion sort on the index list.
+    {
+        int order[4];
+        uint8_t prio[4];
+        for (size_t i = 0; i < text_count; ++i) {
+            order[i] = text_bgs[i];
+            prio[i] = static_cast<uint8_t>(u.bgcnt[text_bgs[i]] & 3u);
         }
-        text_lines[j] = line;
+        for (size_t i = 1; i < text_count; ++i) {
+            const int bg = order[i];
+            const uint8_t p = prio[i];
+            size_t j = i;
+            while (j && (p < prio[j - 1] ||
+                         (p == prio[j - 1] && bg < order[j - 1]))) {
+                order[j] = order[j - 1];
+                prio[j] = prio[j - 1];
+                --j;
+            }
+            order[j] = bg;
+            prio[j] = p;
+        }
+        for (size_t i = 0; i < text_count; ++i)
+            decode_text_line(engine, order[i], y, palette, vram,
+                             text_lines[i]);
     }
     const uint32_t mbmode=u.master_bright>>14;
     const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
@@ -398,7 +544,8 @@ void render_engine_line(int engine, int y) {
     if (text_count == 0 && u.bldcnt == 0 && mbmode == 0) {
         if (profiling()) ++g_text_lines[engine][0];
         for (int x = 0; x < 256; ++x)
-            dst[x] = to_rgb32(obj[x].valid ? obj[x].color : backdrop.color);
+            dst[x] = obj[x].valid ? to_rgb32(obj[x].color)
+                                  : lut[backdrop15];
         return;
     }
     auto ahead = [](const Pixel& a, const Pixel& b) {
@@ -415,16 +562,23 @@ void render_engine_line(int engine, int y) {
             ++g_no_effect_lines[engine];
         }
         for (int x = 0; x < 256; ++x) {
-            Pixel top = backdrop;
-            for (size_t bg = 0; bg < text_count; ++bg) {
-                const Pixel pixel = text_pixel(text_lines[bg], x);
-                if (pixel.valid) {
-                    top = pixel;
+            // BG layers are front-first: the first opaque pixel is the top
+            // candidate; an OBJ pixel wins any priority tie (order 0).
+            uint16_t top15 = backdrop15;
+            uint8_t top_prio = 4;
+            for (size_t i = 0; i < text_count; ++i) {
+                const uint16_t c = text_lines[i].color[x];
+                if (c & 0x8000u) {
+                    top15 = c;
+                    top_prio = text_lines[i].prio;
                     break;
                 }
             }
-            if (obj[x].valid && ahead(obj[x], top)) top = obj[x];
-            dst[x] = to_rgb32(top.color);
+            if (obj[x].valid && obj[x].priority <= top_prio) {
+                dst[x] = to_rgb32(obj[x].color);
+            } else {
+                dst[x] = lut[top15 & 0x7FFFu];
+            }
         }
         return;
     }
@@ -432,9 +586,12 @@ void render_engine_line(int engine, int y) {
     for(int x=0;x<256;++x){
         Pixel top=backdrop, below=backdrop;
         bool have_top = false;
-        for(size_t bg=0;bg<text_count;++bg){
-            const Pixel pixel = text_pixel(text_lines[bg],x);
-            if (!pixel.valid) continue;
+        for (size_t i = 0; i < text_count; ++i) {
+            const uint16_t c = text_lines[i].color[x];
+            if (!(c & 0x8000u)) continue;
+            const BgLine& l = text_lines[i];
+            const Pixel pixel{rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
+                              l.target, 0, l.prio, l.order, true};
             if (!have_top) {
                 top = pixel;
                 have_top = true;
