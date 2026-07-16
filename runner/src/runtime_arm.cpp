@@ -312,8 +312,23 @@ const char* trace_kind_name(uint32_t k) {
 }
 }  // namespace
 
+extern "C" uint32_t g_runtime_deep_trace = 1u;
+
+extern "C" void runtime_set_deep_trace(uint32_t on) {
+    g_runtime_deep_trace = on ? 1u : 0u;
+}
+
 extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
                                     uint32_t value, uint32_t aux) {
+    // Per-store/per-load events fire for every guest memory access, so they
+    // are the one trace class gated by the deep-trace policy: every mode
+    // with a query surface (--serve, batch with its exit tail dump) keeps
+    // them on; the interactive frontend has no debug server, so recording
+    // them there costs real time with no way to ever read them back.
+    // Block-level events (dispatch/exchange/call/swi/irq) stay unconditional.
+    if ((kind == RUNTIME_TRACE_MEM_WRITE || kind == RUNTIME_TRACE_MEM_READ) &&
+        !g_runtime_deep_trace)
+        return;
     RuntimeTraceEntry& e = g_trace[g_trace_w];
     e.seq = ++g_trace_seq; e.cycles = g_runtime_cycles; e.kind = kind;
     e.pc = pc; e.cpsr = g_cpu.cpsr; e.addr = addr; e.value = value; e.aux = aux;
@@ -327,6 +342,10 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
 extern "C" void runtime_trace_reset(void) {
     g_trace_w = g_trace_count = g_trace_seq = 0;
     g_runtime_cycles = 0;
+    // Always on: the per-insn hook owns the insn9/insn7 retired counters
+    // (event ordinals for run_to_event / traversal / selftest), which must
+    // count in every mode. The deep-trace policy only gates the hook's
+    // ring-entry payload (see nds_note_insn_retired).
     g_runtime_insn_trace = 1u;
 }
 

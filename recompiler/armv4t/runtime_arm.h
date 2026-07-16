@@ -289,6 +289,14 @@ void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
 void runtime_trace_reset(void);
 void runtime_trace_dump_recent(uint32_t max_entries);
 
+// Deep-trace policy: gates the per-access payloads (mem_r/mem_w trace events
+// and the per-instruction register-image ring entry). Architectural event
+// counters (insn9/insn7) always advance regardless. Default on; the
+// interactive frontend turns it off because it exposes no query surface for
+// those rings, while --serve and batch (exit tail dump) keep it on.
+extern uint32_t g_runtime_deep_trace;
+void runtime_set_deep_trace(uint32_t on);
+
 // ── Per-instruction fingerprint ring (MC-HP-002 cycle-aligned diff) ──
 // When g_runtime_insn_trace != 0 the generated per-instruction prologue calls
 // runtime_insn_fp() to record the pre-execution architectural state of EVERY

@@ -1819,17 +1819,24 @@ void nds_note_insn_retired(int cpu) {
     cpu &= 1;
     uint64_t& count = cpu ? g_counts.insn7 : g_counts.insn9;
     ++count;
-    NdsInsnTraceEntry& e =
-        g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
-    e = {
-        count,
-        scheduler_system_timestamp(),
-        g_runtime_cycles,
-        g_cpu.R[15],
-        g_cpu.cpsr,
-        runtime_deferred_cycles(),
-    };
-    std::memcpy(e.r, g_cpu.R, sizeof(e.r));
+    // The counter above is architectural (insn9/insn7 event ordinals) and
+    // always advances. The full register-image ring entry is the deep-trace
+    // payload: its 90-byte write into a 20 MB ring misses cache on every
+    // retired instruction, so it follows the deep-trace policy (on wherever
+    // a query surface exists; off in the interactive frontend).
+    if (g_runtime_deep_trace) {
+        NdsInsnTraceEntry& e =
+            g_insn_trace[cpu][(count - 1) % kInsnTraceSize];
+        e = {
+            count,
+            scheduler_system_timestamp(),
+            g_runtime_cycles,
+            g_cpu.R[15],
+            g_cpu.cpsr,
+            runtime_deferred_cycles(),
+        };
+        std::memcpy(e.r, g_cpu.R, sizeof(e.r));
+    }
     brk_check();
 }
 

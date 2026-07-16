@@ -321,6 +321,11 @@ int main(int argc, char** argv) {
     boot();
 
     if (interactive) {
+        // The interactive frontend exposes no debug server, so the per-access
+        // deep-trace payloads (mem_r/mem_w events, per-insn register images)
+        // could never be queried — drop them for real-time headroom. Event
+        // counters still advance; --serve and batch keep full tracing.
+        runtime_set_deep_trace(0);
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
         return nds_run_interactive_frontend();
     }
