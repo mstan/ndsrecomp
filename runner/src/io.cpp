@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include "state.h"
@@ -1175,6 +1176,56 @@ uint8_t  g_rtc_irq_flag = 0;
 uint32_t g_rtc_clock_count = 0;
 uint64_t g_rtc_processed_ticks = 0;
 
+uint8_t rtc_bcd(unsigned v) {
+    return static_cast<uint8_t>(((v / 10u) << 4) | (v % 10u));
+}
+
+// Set the date/time registers from the host's local clock, following
+// melonDS RTC::SetDateTime exactly: DS range is 2000-2099; the day-of-week
+// register is a software counter the DS firmware counts from 0=Sunday, and
+// 01/01/2000 was a Saturday; hour carries the PM flag (0x40) and drops 12
+// in 12-hour mode (status1 bit 1 clear).
+void rtc_sync_host() {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
+    int year = tm_buf.tm_year + 1900;
+    const int month = tm_buf.tm_mon + 1;
+    const int day = tm_buf.tm_mday;
+    int hour = tm_buf.tm_hour;
+    const int minute = tm_buf.tm_min;
+    const int second = tm_buf.tm_sec > 59 ? 59 : tm_buf.tm_sec;  // leap second
+
+    year %= 100;
+    if (year < 0) year = 0;
+
+    static const int monthdays[13] =
+        {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int numdays = (year * 365) + ((year + 3) / 4);
+    for (int m = 1; m < month; ++m) {
+        numdays += monthdays[m];
+        if (m == 2 && !(year & 3)) ++numdays;
+    }
+    numdays += day - 1;
+    const int dayofweek = (6 + numdays) % 7;   // 01/01/2000 = Saturday
+
+    const int pm = hour >= 12 ? 0x40 : 0;
+    if (!(g_rtc_status1 & 0x02u) && pm) hour -= 12;   // 12-hour mode
+
+    g_rtc_datetime[0] = rtc_bcd(static_cast<unsigned>(year));
+    g_rtc_datetime[1] = rtc_bcd(static_cast<unsigned>(month));
+    g_rtc_datetime[2] = rtc_bcd(static_cast<unsigned>(day));
+    g_rtc_datetime[3] = static_cast<uint8_t>(dayofweek);
+    g_rtc_datetime[4] = static_cast<uint8_t>(
+        rtc_bcd(static_cast<unsigned>(hour)) | pm);
+    g_rtc_datetime[5] = rtc_bcd(static_cast<unsigned>(minute));
+    g_rtc_datetime[6] = rtc_bcd(static_cast<unsigned>(second));
+}
+
 uint8_t rtc_bcd_increment(uint8_t v) {
     ++v;
     if ((v & 0x0Fu) >= 0x0Au) v = static_cast<uint8_t>(v + 0x06u);
@@ -1681,6 +1732,9 @@ uint32_t mask_for(uint32_t width) {
 // the Tier-3 loop (tier3.cpp) via the io.h extern. Set by brk_check above.
 bool g_nds_insn_stop = false;
 
+// --rtc-host (see io.h): main.cpp sets this before the initial boot.
+bool g_nds_rtc_host = false;
+
 void nds_io_reset() {
     for (int i = 0; i < 2; ++i) {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
@@ -1749,6 +1803,10 @@ void nds_io_reset() {
         std::memcpy(g_rtc_datetime, dt, 7);
     }
     g_rtc_status1 = 0x02; g_rtc_status2 = 0x00;
+    // Opt-in host clock: every guest boot starts at host local time. The
+    // deterministic power-on datetime above stays the default (oracle gates
+    // compare RTC state, so parity runs must never set this).
+    if (g_nds_rtc_host) rtc_sync_host();
     for (int i = 0; i < 2; ++i) {
         g_fifo_cnt[i] = 0; g_fifo_head[i] = 0; g_fifocnt[i] = 0; g_fifo_lastrx[i] = 0;
     }

@@ -12,6 +12,11 @@
 uint32_t nds_io_read(uint32_t addr, uint32_t width);
 void     nds_io_write(uint32_t addr, uint32_t value, uint32_t width);
 void     nds_io_reset();
+// Opt-in host-clock RTC (--rtc-host): when true, every guest boot
+// (nds_io_reset) starts the RTC at the host's local time instead of the
+// fixed deterministic power-on datetime. Default false — the oracle gates
+// (G1/G3) and all parity work require the deterministic clock.
+extern bool g_nds_rtc_host;
 void     nds_set_touch(uint16_t x, uint16_t y, bool down);
 void     nds_set_key_mask(uint32_t mask);
 uint64_t nds_next_system_event_time();

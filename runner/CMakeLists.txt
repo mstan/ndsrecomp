@@ -60,10 +60,11 @@ set_source_files_properties(
     ${SM64DS_BANK_SOURCES}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
 if(SM64DS_BANK_SOURCES AND NOT MSVC)
-    # Initial game banks are large and still pre-alpha; keep iteration builds
-    # inexpensive until boot correctness is established.
+    # Game banks are on the hot path (the ARM7 runtime-RAM bank carries the
+    # sound engine); boot correctness is gate-proven (G1/G2/G3), so compile
+    # them optimized. -g0 keeps the large generated TUs cheap to link.
     set_source_files_properties(${SM64DS_BANK_SOURCES}
-        PROPERTIES COMPILE_OPTIONS "-w;-O0;-g0")
+        PROPERTIES COMPILE_OPTIONS "-w;-O2;-g0")
 endif()
 
 # Every immutable bank is CPU-specific even though both use one runtime ABI.

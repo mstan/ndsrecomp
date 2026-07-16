@@ -178,6 +178,11 @@ int main(int argc, char** argv) {
             interactive = true;
         } else if (a == "--discover-static-misses") {
             discover_static_misses = true;
+        } else if (a == "--rtc-host") {
+            // Start the guest RTC at host local time on every boot. Opt-in:
+            // the oracle gates compare RTC state, so parity runs keep the
+            // deterministic power-on clock.
+            g_nds_rtc_host = true;
         } else if (a == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (a == "--rom" && i + 1 < argc) {
@@ -186,7 +191,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
-                "[--discover-static-misses]\n",
+                "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
