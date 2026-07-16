@@ -27,9 +27,17 @@ constexpr int kWindowScale = 2;
 constexpr uint64_t kSystemCyclesPerFrame = 2130ull * 263ull;
 constexpr int kAudioFrequency = 33513982 / 1024;
 constexpr uint32_t kAudioQueueFrames = 2048;
-constexpr uint32_t kAudioStartFrames = 2048;
+// Playback starts only once kAudioStartFrames (~1.5 s) are queued. The cold
+// boot's frames ~5-131 emulate below real time with a measured cumulative
+// production deficit of up to ~1.15 s; prebuffering more than that rides the
+// whole window out with zero gaps — the stream stays bit-exact, only the
+// initial latency is higher. The bounded drain (see drain_audio) then glides
+// the queue back down to the ~63 ms steady-state target over a couple of
+// seconds without ever freezing video, well before the Health & Safety
+// screen needs interactive input.
+constexpr uint32_t kAudioStartFrames = 57344;
 constexpr uint32_t kAudioFrameBytes = 2u * sizeof(int16_t);
-constexpr uint32_t kAudioCapacityFrames = 8192;
+constexpr uint32_t kAudioCapacityFrames = 65536;
 
 struct AudioQueue {
     std::array<int16_t, kAudioCapacityFrames * 2> samples{};
@@ -107,7 +115,7 @@ uint32_t audio_queue_count(SDL_AudioDeviceID device, AudioQueue& queue) {
 }
 
 uint32_t drain_audio(SDL_AudioDeviceID device, AudioQueue& queue,
-                     bool throttle, bool& queue_error) {
+                     bool throttle, uint32_t pace_floor, bool& queue_error) {
     if (!device) return 0;
     std::array<int16_t, 2048> samples{};
     for (;;) {
@@ -140,10 +148,15 @@ uint32_t drain_audio(SDL_AudioDeviceID device, AudioQueue& queue,
         }
     }
     // Audio is the host's real-time clock. Never drop a produced block: if the
-    // emulator is faster than the DS cadence, let SDL consume the small
-    // bounded backlog before emulating another frame.
+    // emulator is faster than the DS cadence, let SDL consume the backlog
+    // before emulating another frame. pace_floor is the current allowance:
+    // kAudioQueueFrames in steady state, temporarily higher right after the
+    // boot prebuffer (the caller decays it a fixed step per frame). The sleep
+    // only stops the queue RISING above the floor — it never forces the queue
+    // down while the emulator is running behind, so a slow stretch spends the
+    // buffered runway instead of having it slept away.
     uint32_t queued = audio_queue_count(device, queue);
-    while (throttle && queued > kAudioQueueFrames) {
+    while (throttle && queued > pace_floor) {
         SDL_Delay(1);
         queued = audio_queue_count(device, queue);
     }
@@ -283,6 +296,7 @@ int nds_run_interactive_frontend() {
         std::getenv("NDS_FRONTEND_SELFTEST_MENU") != nullptr;
     bool audio_started = false;
     bool audio_queue_error = false;
+    uint32_t audio_pace_floor = kAudioQueueFrames;
     uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
     uint32_t audio_max_queue = 0;
     uint64_t host_key_presses = 0;
@@ -446,8 +460,18 @@ int nds_run_interactive_frontend() {
             audio_min_queue = std::min(audio_min_queue, queued);
         }
         const uint64_t phase2 = SDL_GetPerformanceCounter();
+        // Glide: after the prebuffered start, the pacing allowance decays a
+        // fixed step per frame from the prebuffer level down to the steady
+        // 63 ms target, shedding the extra startup latency over a couple of
+        // seconds without ever forcing the queue down during a slow stretch.
+        constexpr uint32_t kGlideStepFrames = 300;
+        if (audio_pace_floor > kAudioQueueFrames + kGlideStepFrames)
+            audio_pace_floor -= kGlideStepFrames;
+        else
+            audio_pace_floor = kAudioQueueFrames;
         const uint32_t queued = drain_audio(
-            audio, audio_queue, audio_started, audio_queue_error);
+            audio, audio_queue, audio_started, audio_pace_floor,
+            audio_queue_error);
         phase_drain_ticks += SDL_GetPerformanceCounter() - phase2;
         audio_max_queue = std::max(audio_max_queue, queued);
         if (audio && !audio_started && queued >= kAudioStartFrames) {
@@ -457,6 +481,7 @@ int nds_run_interactive_frontend() {
             SDL_PauseAudioDevice(audio, 0);
             audio_started = true;
             audio_min_queue = queued;
+            audio_pace_floor = kAudioStartFrames;
         }
 
         ++shown_frames;
