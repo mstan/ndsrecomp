@@ -1746,6 +1746,27 @@ uint64_t nds_next_system_event_time() {
     return std::min(std::min(g_card_deadline, g_spi_deadline),
                     std::min(g_div_deadline, g_sqrt_deadline));
 }
+
+uint64_t nds_next_timer_overflow_time() {
+    // Timers are catch-up-ticked rather than deadline-scheduled, so the idle
+    // fast-forward needs their next overflow as an explicit deadline. Only
+    // clock-driven timers own a timeline position; a count-up (cascade) timer
+    // overflows at a feeding timer's overflow instant, which this already
+    // bounds — the catch-up tick then propagates the carry exactly.
+    uint64_t best = UINT64_MAX;
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        for (int t = 0; t < 4; ++t) {
+            const Timer& T = g_timer[cpu][t];
+            if (!(T.ctrl & 0x80u)) continue;
+            if (T.ctrl & 0x4u) continue;
+            const unsigned long long pre = kPrescaler[T.ctrl & 3u];
+            const unsigned long long span = 0x10000ull - T.counter;
+            const uint64_t when = g_timer_last[cpu] + (span * pre - T.accum);
+            best = std::min(best, when);
+        }
+    }
+    return best;
+}
 uint64_t nds_debug_spi_deadline() { return g_spi_deadline; }
 uint64_t nds_debug_card_deadline() { return g_card_deadline; }
 

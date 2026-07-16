@@ -15,6 +15,7 @@ void     nds_io_reset();
 void     nds_set_touch(uint16_t x, uint16_t y, bool down);
 void     nds_set_key_mask(uint32_t mask);
 uint64_t nds_next_system_event_time();
+uint64_t nds_next_timer_overflow_time();
 uint64_t nds_debug_spi_deadline();
 uint64_t nds_debug_card_deadline();
 void     nds_run_system_events(uint64_t timestamp);

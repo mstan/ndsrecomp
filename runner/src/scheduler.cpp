@@ -81,6 +81,8 @@ uint64_t next_scheduled_event_time() {
                              std::min(rtc, std::min(spu, lcd))));
 }
 
+bool g_sample_active = false;
+
 void save_current() {
     if (g_cur < 0) return;
     g_slot[g_cur].state = g_cpu;
@@ -93,6 +95,11 @@ void save_current() {
 
 void switch_to(int cpu) {
     if (g_cur == cpu) return;
+    const auto t0 = g_sample_active ? ProfileClock::now()
+                                    : ProfileClock::time_point{};
+    ++g_profile.switches;
+    if (g_cur >= 0) g_profile.crs_words += runtime_call_stack_depth();
+    g_profile.crs_words += g_slot[cpu].crs_depth;
     // Save outgoing: register file AND call-return stack (a preempted
     // spin may be deep in a call chain whose returns must survive).
     save_current();
@@ -101,6 +108,7 @@ void switch_to(int cpu) {
     runtime_deferred_cycles_set(g_slot[cpu].deferred_cycles);
     g_nds_active = (cpu == 0) ? NDS_ARM9 : NDS_ARM7;
     g_cur = cpu;
+    if (g_sample_active) profile_add(g_profile.switch_ns, t0);
 }
 
 // Run `cpu` for up to `quantum` cycles (its own clock), or until it
@@ -246,12 +254,46 @@ void scheduler_run_round() {
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
     const bool sample = profiling() && ((g_profile_rounds++ % 1009u) == 0u);
+    g_sample_active = sample;
     const auto round_start = sample ? ProfileClock::now()
                                     : ProfileClock::time_point{};
     auto phase_start = round_start;
 
     uint64_t planned = g_sys_timestamp + kIterCap;
     const uint64_t ev = next_scheduled_event_time();
+    // Idle fast-forward: with both CPUs guest-halted, no wake pending and no
+    // DMA owning a bus, no instruction can retire before the next scheduled
+    // event — jump the rendezvous straight to it instead of grinding
+    // kIterCap-cycle rounds through the wait. Every wake source is a
+    // scheduled deadline (display/SPU/RTC/wifi via next_scheduled_event_time,
+    // card/SPI/div/sqrt via nds_next_system_event_time) except the catch-up
+    // timers, which contribute their next overflow here. All device ticks are
+    // absolute-timestamp catch-up, so one large step and many small steps
+    // produce identical state at the deadline.
+    if (g_slot[0].started && g_slot[1].started &&
+        !g_slot[0].halted && !g_slot[1].halted &&
+        nds_cpu_halted(0) && !nds_halt_wake_pending(0) &&
+        nds_cpu_halted(1) && !nds_halt_wake_pending(1) &&
+        !nds_dma_cpu_stalled(0) && !nds_dma_cpu_stalled(1)) {
+        const uint64_t tov = nds_next_timer_overflow_time();
+        uint64_t wake;
+        if (ev <= tov) {
+            wake = ev;
+        } else {
+            // A timer overflow is not a scheduled event: on the incremental
+            // grid its IRQ becomes visible at the first kIterCap step AT or
+            // AFTER the overflow (the catch-up tick at that rendezvous raises
+            // it), or at the next scheduled event when that event snaps into
+            // the same step. Jump to exactly that instant — anything finer
+            // would deliver the IRQ earlier than the non-jumping scheduler
+            // (and the melonDS oracle) and shift the woken CPU's timeline.
+            const uint64_t steps =
+                (tov - g_sys_timestamp + kIterCap - 1u) / kIterCap;
+            const uint64_t grid = g_sys_timestamp + steps * kIterCap;
+            wake = (ev < grid + 8u) ? ev : grid;
+        }
+        if (wake > planned) planned = wake;
+    }
     if (sample) profile_add(g_profile.next_event_ns, phase_start);
     // melonDS deliberately snaps to an event up to seven cycles beyond the
     // normal 64-cycle cap (kIterationCycleMargin=8).
@@ -296,15 +338,34 @@ void scheduler_run_round() {
     }
 
     if (sample) phase_start = ProfileClock::now();
-    nds_tick_display(rendezvous);
-    nds_tick_spu(rendezvous);
-    nds_wifi_run_events(rendezvous);
-    nds_tick_rtc(rendezvous);
-    nds_run_system_events(rendezvous);
+    if (sample) {
+        auto t = phase_start;
+        nds_tick_display(rendezvous);
+        profile_add(g_profile.display_ns, t);
+        t = ProfileClock::now();
+        nds_tick_spu(rendezvous);
+        profile_add(g_profile.spu_ns, t);
+        t = ProfileClock::now();
+        nds_wifi_run_events(rendezvous);
+        profile_add(g_profile.wifi_ns, t);
+        t = ProfileClock::now();
+        nds_tick_rtc(rendezvous);
+        profile_add(g_profile.rtc_ns, t);
+        t = ProfileClock::now();
+        nds_run_system_events(rendezvous);
+        profile_add(g_profile.sysev_ns, t);
+    } else {
+        nds_tick_display(rendezvous);
+        nds_tick_spu(rendezvous);
+        nds_wifi_run_events(rendezvous);
+        nds_tick_rtc(rendezvous);
+        nds_run_system_events(rendezvous);
+    }
     if (sample) {
         profile_add(g_profile.devices_ns, phase_start);
         profile_add(g_profile.sampled_round_ns, round_start);
         ++g_profile.sampled_rounds;
+        g_sample_active = false;
     }
 
     // melonDS overwrites its local target with ARM9Timestamp>>shift before

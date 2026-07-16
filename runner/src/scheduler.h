@@ -28,6 +28,17 @@ struct NdsSchedulerProfile {
     uint64_t devices_ns;
     uint64_t sampled_round_ns;
     uint64_t sampled_rounds;
+    // Sub-buckets. switch_ns is sampled (same 1-in-1009 rounds); switches and
+    // crs_words are exact whole-run counters (an increment is too cheap to
+    // gate). The devices split shares the sampled rounds.
+    uint64_t switch_ns;
+    uint64_t switches;
+    uint64_t crs_words;
+    uint64_t display_ns;
+    uint64_t spu_ns;
+    uint64_t wifi_ns;
+    uint64_t rtc_ns;
+    uint64_t sysev_ns;
 };
 
 // Opt-in coarse sampler used by the release profiler. It samples one complete

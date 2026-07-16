@@ -388,6 +388,25 @@ int main(int argc, char** argv) {
             scheduler_profile_data.arm7_ns * scale * 1000.0,
             scheduler_profile_data.devices_ns * scale * 1000.0,
             static_cast<unsigned long long>(scheduler_profile_data.sampled_rounds));
+        std::fprintf(stderr,
+            "  Scheduler sub: switch %.3f ms/1000 rounds; devices split "
+            "display %.3f spu %.3f wifi %.3f rtc %.3f sysev %.3f\n",
+            scheduler_profile_data.switch_ns * scale * 1000.0,
+            scheduler_profile_data.display_ns * scale * 1000.0,
+            scheduler_profile_data.spu_ns * scale * 1000.0,
+            scheduler_profile_data.wifi_ns * scale * 1000.0,
+            scheduler_profile_data.rtc_ns * scale * 1000.0,
+            scheduler_profile_data.sysev_ns * scale * 1000.0);
+        std::fprintf(stderr,
+            "  Scheduler counters: switches=%llu crs_words=%llu "
+            "(%.2f switches/round, %.1f words/switch)\n",
+            static_cast<unsigned long long>(scheduler_profile_data.switches),
+            static_cast<unsigned long long>(scheduler_profile_data.crs_words),
+            static_cast<double>(scheduler_profile_data.switches) /
+                static_cast<double>(r.rounds ? r.rounds : 1),
+            static_cast<double>(scheduler_profile_data.crs_words) /
+                static_cast<double>(scheduler_profile_data.switches
+                                        ? scheduler_profile_data.switches : 1));
     }
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
