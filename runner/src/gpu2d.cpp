@@ -101,6 +101,30 @@ uint16_t obj_view16(const NdsVramRendererView& view, int engine,
     }
     return static_cast<uint16_t>(nds_vram_read_obj(engine, addr, 2));
 }
+uint32_t obj_view32(const NdsVramRendererView& view, int engine,
+                    uint32_t addr) {
+    // 4-byte rows of 4bpp OBJ tiles are 4-byte aligned inside a 32-byte
+    // tile, so a row never crosses a 16 KiB chunk boundary.
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 15u);
+    if (const uint8_t* direct = view.obj[chunk]) {
+        uint32_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return nds_vram_read_obj(engine, addr, 4);
+}
+uint64_t obj_view64(const NdsVramRendererView& view, int engine,
+                    uint32_t addr) {
+    // 8-byte rows of 8bpp OBJ tiles are 8-byte aligned; same no-crossing rule.
+    const uint32_t chunk = (addr >> 14u) & (engine ? 7u : 15u);
+    if (const uint8_t* direct = view.obj[chunk]) {
+        uint64_t value = 0;
+        std::memcpy(&value, direct + (addr & 0x3FFFu), sizeof(value));
+        return value;
+    }
+    return uint64_t{nds_vram_read_obj(engine, addr, 4)} |
+           (uint64_t{nds_vram_read_obj(engine, addr + 4u, 4)} << 32);
+}
 uint32_t bg_view32(const NdsVramRendererView& view, int engine,
                    uint32_t addr) {
     // 4-byte tile rows are 4-byte aligned inside a 32/64-byte tile, so a
@@ -408,6 +432,62 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                 pb=static_cast<int16_t>(view16(oam,oam_base+group*32+14));
                 pc=static_cast<int16_t>(view16(oam,oam_base+group*32+22));
                 pd=static_cast<int16_t>(view16(oam,oam_base+group*32+30));
+            }
+            if(!affine && mode!=3){
+                // Per-tile fast path (the decode_text_line treatment): for a
+                // regular tile-mode OBJ, py and therefore the tile row are
+                // per-line constants and px walks monotonically, so one
+                // 32/64-bit row fetch feeds up to 8 pixels. Byte-identical to
+                // the per-pixel loop below: same index-0 skip, same palette
+                // lookups, one put_obj per pixel. Affine (non-monotonic px),
+                // bitmap (different addressing), and the OBJ-window stub keep
+                // the generic path.
+                const int py=(a1&0x2000u)?h-1-row:row;
+                uint32_t tile_index=tile;
+                if(u.dispcnt&0x10u) {
+                    tile_index <<= (u.dispcnt >> 20) & 3u;
+                    tile_index += (py>>3)*(w>>3)*(color256?2u:1u);
+                } else {
+                    tile_index += (py>>3)*0x20u;
+                }
+                const bool hflip=a1&0x1000u;
+                const bool use_extpal=(u.dispcnt&0x80000000u)!=0u;
+                const uint32_t extpal_base=((a2>>12)&0xFu)<<9;
+                const uint32_t pal16=pal_base+(((a2>>12)&0xFu)<<5);
+                int dx=sx<0?-sx:0;
+                const int dx_end=sx+bw>256?256-sx:bw;
+                Pixel p{0,0x10u,alpha,static_cast<uint8_t>(priority),0,true};
+                while(dx<dx_end){
+                    const int px=hflip?w-1-dx:dx;
+                    const int tile_left=hflip?(px&7)+1:8-(px&7);
+                    const int run=std::min(tile_left,dx_end-dx);
+                    if(color256){
+                        const uint32_t addr=(tile_index<<5)+((py&7)<<3)+((px>>3)<<6);
+                        const uint64_t rowbits=obj_view64(vram,engine,addr);
+                        for(int k=0;k<run;++k){
+                            const int pxk=hflip?px-k:px+k;
+                            const uint8_t index=static_cast<uint8_t>(rowbits>>((pxk&7)*8));
+                            if(!index)continue;
+                            uint16_t color;
+                            if(use_extpal)color=static_cast<uint16_t>(nds_vram_read_obj_extpal(engine,extpal_base+(index<<1),2));
+                            else color=view16(palette,pal_base+(index<<1));
+                            p.color=rgb6(color);
+                            put_obj(out,sx+dx+k,p);
+                        }
+                    }else{
+                        const uint32_t addr=(tile_index<<5)+((py&7)<<2)+((px>>3)<<5);
+                        const uint32_t rowbits=obj_view32(vram,engine,addr);
+                        for(int k=0;k<run;++k){
+                            const int pxk=hflip?px-k:px+k;
+                            const uint8_t index=(rowbits>>((pxk&7)*4))&0xFu;
+                            if(!index)continue;
+                            p.color=rgb6(view16(palette,pal16+(index<<1)));
+                            put_obj(out,sx+dx+k,p);
+                        }
+                    }
+                    dx+=run;
+                }
+                continue;
             }
             for(int dx=0;dx<bw;++dx){
                 int px,py;
