@@ -361,13 +361,22 @@ int main(int argc, char** argv) {
     boot();
 
     if (interactive) {
-        // The interactive frontend exposes no debug server, so the per-access
-        // deep-trace payloads (mem_r/mem_w events, per-insn register images)
-        // could never be queried — drop them for real-time headroom. Event
-        // counters still advance; --serve and batch keep full tracing.
+        // The per-access deep-trace payloads (bus ring, mem_r/mem_w events,
+        // per-insn register images) default OFF in play mode for real-time
+        // headroom — the B3 inline bus fast path engages while they are off.
+        // The play-mode TCP surface below can re-arm them on demand
+        // (`deep_trace` command); event counters always advance.
         runtime_set_deep_trace(0);
+        // Play-mode debug surface (sibling-recomp model): an I/O thread owns
+        // the socket, commands execute on the frontend thread between frames
+        // via debug_pump(). Execution stays frontend-owned (run_to_* are
+        // rejected); queries, rings, and touch/keys injection are live.
+        debug_set_reset_fn(boot);
+        debug_pump_start(port);
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
-        return nds_run_interactive_frontend();
+        const int rc = nds_run_interactive_frontend();
+        debug_pump_stop();
+        return rc;
     }
 
     if (serve) {

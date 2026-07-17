@@ -10,11 +10,19 @@
 #include <limits>
 #include <string>
 
+#include "debug_server.h"
 #include "gpu2d.h"
 #include "io.h"
 #include "profile_report.h"
 #include "scheduler.h"
 #include "spu.h"
+
+namespace {
+// Written per presented frame by the frontend loop, read from the same
+// thread by the `frontend_stats` debug command at the debug_pump() safe
+// point. Stays all-zero (active=0) when no frontend is running.
+NdsFrontendLiveStats g_live_stats{};
+}  // namespace
 
 #if defined(NDS_HAVE_SDL2)
 #define SDL_MAIN_HANDLED
@@ -312,6 +320,9 @@ int nds_run_interactive_frontend() {
     uint64_t phase_emu_ticks = 0;
     uint64_t phase_present_ticks = 0;
     uint64_t phase_drain_ticks = 0;
+    g_live_stats = {};
+    g_live_stats.active = 1;
+    g_live_stats.freq = frequency;
     uint64_t max_emu_ticks = 0;
     uint64_t max_emu_frame = 0;
     uint64_t slow_frames_32ms = 0;
@@ -321,6 +332,10 @@ int nds_run_interactive_frontend() {
     const uint64_t soak_start = SDL_GetPerformanceCounter();
 
     while (running) {
+        // Play-mode debug surface: execute any pending TCP command at this
+        // between-frames safe point (no-op when no pump was started or no
+        // client is connected). See debug_server.h.
+        debug_pump();
         if (selftest_menu) {
             const NdsEventCounts& counts = nds_event_counts();
             SDL_Event injected{};
@@ -487,6 +502,12 @@ int nds_run_interactive_frontend() {
 
         ++shown_frames;
         ++fps_frames;
+        g_live_stats.frames = shown_frames;
+        g_live_stats.emu_ticks = phase_emu_ticks;
+        g_live_stats.present_ticks = phase_present_ticks;
+        g_live_stats.drain_ticks = phase_drain_ticks;
+        g_live_stats.underruns =
+            audio_queue.underruns.load(std::memory_order_relaxed);
         const uint64_t counter = SDL_GetPerformanceCounter();
         if (counter - fps_start >= frequency) {
             const double seconds = static_cast<double>(counter - fps_start) /
@@ -513,6 +534,7 @@ int nds_run_interactive_frontend() {
 
     nds_set_touch(0, 0, false);
     nds_set_key_mask(0x0FFFu);
+    g_live_stats.active = 0;
     const double soak_seconds = static_cast<double>(
         SDL_GetPerformanceCounter() - soak_start) /
         static_cast<double>(frequency);
@@ -587,3 +609,12 @@ int nds_run_interactive_frontend() {
 }
 
 #endif
+
+void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
+    if (!out) return;
+    *out = g_live_stats;
+#if defined(NDS_HAVE_SDL2)
+    if (g_live_stats.active)
+        out->now_ticks = SDL_GetPerformanceCounter();
+#endif
+}

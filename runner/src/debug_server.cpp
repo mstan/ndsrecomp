@@ -7,9 +7,16 @@
 #include <string>
 #include <vector>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 #include "scheduler.h"
 #include "state.h"
 #include "io.h"
+#include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "runtime_arm.h"
@@ -36,6 +43,11 @@ using socket_t = int;
 namespace {
 
 std::function<void()> g_reset_fn;
+
+// Play-mode flag: set by debug_pump_start(). Execution-driving commands are
+// rejected while the SDL frontend owns execution (psxrecomp model — query
+// the always-on rings instead of advancing the machine from a handler).
+bool g_play_mode = false;
 
 const char HEX[] = "0123456789abcdef";
 
@@ -482,6 +494,56 @@ std::string handle(const std::string& line) {
         return buf;
     }
     if (cmd == "io_state") return io_state_json();
+    if (cmd == "frontend_stats") {
+        // Cumulative frontend counters; sample twice and diff for fps /
+        // phase shares over the window. active=0 → headless (all zeros).
+        NdsFrontendLiveStats s{};
+        nds_frontend_live_stats(&s);
+        return "{\"active\":" + std::to_string(s.active) +
+               ",\"frames\":" + std::to_string(s.frames) +
+               ",\"emu_ticks\":" + std::to_string(s.emu_ticks) +
+               ",\"present_ticks\":" + std::to_string(s.present_ticks) +
+               ",\"drain_ticks\":" + std::to_string(s.drain_ticks) +
+               ",\"now_ticks\":" + std::to_string(s.now_ticks) +
+               ",\"freq\":" + std::to_string(s.freq) +
+               ",\"underruns\":" + std::to_string(s.underruns) + "}";
+    }
+    if (cmd == "profile") {
+        // Raw NDS_PROFILE_GPU / NDS_PROFILE_SCHED accumulators (zero unless
+        // the corresponding env var armed sampling at process start).
+        NdsGpu2dProfile gpu{};
+        nds_gpu2d_profile(&gpu);
+        NdsSchedulerProfile sched{};
+        scheduler_profile(&sched);
+        return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
+               ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
+               ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
+               ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +
+               ",\"scanlines\":" + std::to_string(gpu.scanlines) +
+               "},\"sched\":{\"sampled_rounds\":" +
+               std::to_string(sched.sampled_rounds) +
+               ",\"rounds\":" + std::to_string(sched.rounds) +
+               ",\"sampled_round_ns\":" + std::to_string(sched.sampled_round_ns) +
+               ",\"next_event_ns\":" + std::to_string(sched.next_event_ns) +
+               ",\"arm9_ns\":" + std::to_string(sched.arm9_ns) +
+               ",\"arm7_ns\":" + std::to_string(sched.arm7_ns) +
+               ",\"devices_ns\":" + std::to_string(sched.devices_ns) +
+               ",\"display_ns\":" + std::to_string(sched.display_ns) +
+               ",\"spu_ns\":" + std::to_string(sched.spu_ns) +
+               ",\"wifi_ns\":" + std::to_string(sched.wifi_ns) +
+               ",\"rtc_ns\":" + std::to_string(sched.rtc_ns) +
+               ",\"sysev_ns\":" + std::to_string(sched.sysev_ns) +
+               ",\"switches\":" + std::to_string(sched.switches) + "}}";
+    }
+    if (cmd == "deep_trace") {
+        // Live toggle for the per-access payload policy (bus ring, mem_r/w
+        // events, per-insn register images + the B3 inline bus fast path,
+        // which engages while this is off). Play mode has a query surface,
+        // so the payloads are armable on demand.
+        runtime_set_deep_trace(
+            static_cast<uint32_t>(json_u64(line, "on", 1)));
+        return "{\"deep_trace\":" + std::to_string(g_runtime_deep_trace) + "}";
+    }
     if (cmd == "sched_state") {
         char buf[768];
         std::snprintf(buf, sizeof(buf),
@@ -500,6 +562,15 @@ std::string handle(const std::string& line) {
             scheduler_cpu_halt_reason(0), scheduler_cpu_halt_reason(1));
         return buf;
     }
+    // Execution-driving commands are serve-mode only: in play mode the
+    // frontend owns execution; a handler advancing the machine here would
+    // fight the frame loop. Query the always-on rings / event_counts and
+    // sample twice instead.
+    if (g_play_mode && (cmd == "run_to_pc" || cmd == "run_to_event" ||
+                        cmd == "run_cycles" || cmd == "run_rounds"))
+        return "{\"error\":\"" + cmd + " unavailable in play mode: the "
+               "frontend owns execution; query rings/event_counts and sample "
+               "twice\"}";
     if (cmd == "run_to_pc") {
         const uint32_t pc = static_cast<uint32_t>(json_u64(line, "pc", 0));
         uint64_t max_rounds = json_u64(line, "max_rounds", 50000000);
@@ -851,4 +922,141 @@ void debug_serve(uint16_t port) {
         }
         CLOSESOCK(client);
     }
+}
+
+// ── Play-mode pump (psxrecomp handoff model) ────────────────────────────
+// A dedicated I/O thread owns accept/recv/send on the same line-JSON
+// protocol; each complete request line is handed to the frontend thread,
+// which executes it inside debug_pump() between frames — the emu state is
+// only ever touched by its owning thread, so no emulator locking exists.
+// The mutex/condvar below protect ONLY the request/response handoff pair.
+
+namespace {
+
+enum class PumpIo { Idle, Req, Resp };
+std::thread g_pump_thread;
+std::mutex g_pump_mutex;
+std::condition_variable g_pump_resp_cv;
+PumpIo g_pump_state = PumpIo::Idle;
+std::string g_pump_req;
+std::string g_pump_resp;
+std::atomic<bool> g_pump_shutdown{false};
+socket_t g_pump_listener = INVALID_SOCKET;
+std::atomic<socket_t> g_pump_client{INVALID_SOCKET};
+
+void pump_io_thread() {
+    while (!g_pump_shutdown.load(std::memory_order_relaxed)) {
+        socket_t client = accept(g_pump_listener, nullptr, nullptr);
+        if (client == INVALID_SOCKET) {
+            if (g_pump_shutdown.load(std::memory_order_relaxed)) break;
+            continue;
+        }
+        g_pump_client.store(client, std::memory_order_relaxed);
+        std::string buf;
+        char chunk[65536];
+        bool open = true;
+        while (open && !g_pump_shutdown.load(std::memory_order_relaxed)) {
+            int n = recv(client, chunk, sizeof(chunk), 0);
+            if (n <= 0) break;
+            buf.append(chunk, (size_t)n);
+            size_t nl;
+            while ((nl = buf.find('\n')) != std::string::npos) {
+                std::string req = buf.substr(0, nl);
+                buf.erase(0, nl + 1);
+                std::string resp;
+                if (json_str(req, "cmd") == "ping") {
+                    // Liveness fast path answered on the I/O thread: ping
+                    // works even while the frontend thread is buried in a
+                    // slow frame (freeze diagnosis).
+                    resp = "{\"pong\":true}";
+                } else {
+                    std::unique_lock<std::mutex> lock(g_pump_mutex);
+                    g_pump_req = req;
+                    g_pump_state = PumpIo::Req;
+                    if (g_pump_resp_cv.wait_for(
+                            lock, std::chrono::seconds(30),
+                            [] { return g_pump_state == PumpIo::Resp; })) {
+                        resp = g_pump_resp;
+                    } else {
+                        resp = "{\"error\":\"frontend busy or frozen\"}";
+                    }
+                    g_pump_state = PumpIo::Idle;
+                }
+                resp.push_back('\n');
+                if (!send_all(client, resp.data(), resp.size())) {
+                    open = false;
+                    break;
+                }
+            }
+        }
+        // Exchange-then-close so shutdown and this thread never both close
+        // the same handle.
+        const socket_t mine =
+            g_pump_client.exchange(INVALID_SOCKET, std::memory_order_relaxed);
+        if (mine != INVALID_SOCKET) CLOSESOCK(mine);
+    }
+}
+
+}  // namespace
+
+bool debug_pump_start(uint16_t port) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::fprintf(stderr, "[debug] WSAStartup failed\n");
+        return false;
+    }
+#endif
+    g_pump_listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_pump_listener == INVALID_SOCKET) {
+        std::fprintf(stderr, "[debug] socket() failed\n");
+        return false;
+    }
+    int yes = 1;
+    setsockopt(g_pump_listener, SOL_SOCKET, SO_REUSEADDR,
+               (const char*)&yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(g_pump_listener, (sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(g_pump_listener, 1) != 0) {
+        std::fprintf(stderr,
+                     "[debug] play-mode surface unavailable (port %u busy)\n",
+                     port);
+        CLOSESOCK(g_pump_listener);
+        g_pump_listener = INVALID_SOCKET;
+        return false;
+    }
+    g_play_mode = true;
+    g_pump_shutdown.store(false, std::memory_order_relaxed);
+    g_pump_thread = std::thread(pump_io_thread);
+    std::fprintf(stderr, "[debug] play-mode surface on 127.0.0.1:%u\n", port);
+    return true;
+}
+
+void debug_pump() {
+    if (g_pump_listener == INVALID_SOCKET) return;
+    std::unique_lock<std::mutex> lock(g_pump_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || g_pump_state != PumpIo::Req) return;
+    const std::string req = g_pump_req;
+    lock.unlock();
+    std::string resp = handle(req);   // frontend thread: the safe point
+    lock.lock();
+    g_pump_resp = std::move(resp);
+    g_pump_state = PumpIo::Resp;
+    lock.unlock();
+    g_pump_resp_cv.notify_one();
+}
+
+void debug_pump_stop() {
+    if (g_pump_listener == INVALID_SOCKET) return;
+    g_pump_shutdown.store(true, std::memory_order_relaxed);
+    CLOSESOCK(g_pump_listener);   // unblocks accept()
+    g_pump_listener = INVALID_SOCKET;
+    const socket_t client =
+        g_pump_client.exchange(INVALID_SOCKET, std::memory_order_relaxed);
+    if (client != INVALID_SOCKET) CLOSESOCK(client);  // unblocks recv()
+    if (g_pump_thread.joinable()) g_pump_thread.join();
+    g_play_mode = false;
 }

@@ -10,6 +10,20 @@ per request.
 
 Configurable via `debug.ini` per build.
 
+**Two native modes, one protocol.** `--serve` is the headless oracle
+surface: commands drive execution (`run_to_*`). `--interactive` (play
+mode) serves the SAME protocol on the same port from a dedicated I/O
+thread; each command executes on the frontend thread between frames
+(psxrecomp handoff model), so the window keeps running. In play mode the
+`run_to_*` commands return an error — the frontend owns execution; query
+the always-on rings / `event_counts` / `frontend_stats` and sample twice.
+`ping` is answered on the I/O thread even while a frame is in flight.
+Play-mode extras: `frontend_stats` (cumulative presented-frame/phase/
+underrun counters + host perf clock — diff two samples for fps),
+`profile` (raw NDS_PROFILE_GPU/SCHED accumulators), `deep_trace`
+(`{"on":0|1}` — live toggle for the per-access payload policy; the
+inline bus fast path engages while off, the default in play mode).
+
 ## Sync on hardware events, never frame indices
 
 The DS has two CPUs at different clocks. Comparing native vs oracle by
