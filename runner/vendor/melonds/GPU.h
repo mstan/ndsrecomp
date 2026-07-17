@@ -6,9 +6,11 @@
     the owned GPU3D sub-object, the flat texture/texture-palette VRAM views
     with their per-frame coherence calls, and the dirty-tracking types those
     calls are keyed on. Texture data comes from the runner's VRAM model
-    (runner/src/vram.cpp); the dirty-tracking shim reports nothing dirty and
-    MakeVRAMFlat_*Coherent instead refreshes the whole flat view and derives
-    the "changed" result by comparing bytes (runner/src/gpu3d.cpp).
+    (runner/src/vram.cpp); the dirty-tracking shim starts from a clean set and
+    MakeVRAMFlat_*Coherent compares the flat view in 512-byte chunks, reports
+    each changed chunk, and copies it (runner/src/gpu3d.cpp). The software
+    renderer consumes the aggregate result; the optional compute texture
+    cache also consumes the precise chunk bits.
 
     As an interface derived from melonDS this file is distributed under the
     same terms as the vendored sources: GPL-3.0-or-later (see GPU3D.h).
@@ -31,9 +33,8 @@ class GPU;
 constexpr u32 VRAMDirtyGranularity = 512;
 
 // Dirty-region tracker shim. The real melonDS type diffs bank mappings and
-// per-bank write bitmaps; the runner instead refreshes the flat views in
-// full, so DeriveState always reports a clean set and the returned bitfield
-// is ignored by the shimmed MakeVRAMFlat_*Coherent implementations.
+// per-bank write bitmaps; the runner starts clean and its coherence methods
+// OR in the exact flat-view chunks whose bytes changed.
 template <u32 Size, u32 MappingGranularity>
 struct VRAMTrackingSet
 {

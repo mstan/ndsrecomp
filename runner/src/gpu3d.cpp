@@ -79,27 +79,45 @@ void NDS::GXFIFOUnstall() { nds_gxfifo_set_stall(false); }
 // and derives the renderer's "textures changed" input by comparing bytes.
 
 bool GPU::MakeVRAMFlat_TextureCoherent(
-    NonStupidBitField<512*1024/VRAMDirtyGranularity>&) noexcept {
+    NonStupidBitField<512*1024/VRAMDirtyGranularity>& dirty) noexcept {
     const uint64_t gen = nds_vram_texture_generation();
     if (gen == g_texture_flat_gen) return false;
     g_texture_flat_gen = gen;
     static u8 fresh[512*1024];
     nds_vram_copy_texture(fresh);
-    if (std::memcmp(fresh, VRAMFlat_Texture, sizeof fresh) == 0) return false;
-    std::memcpy(VRAMFlat_Texture, fresh, sizeof fresh);
-    return true;
+    bool changed = false;
+    for (size_t offset = 0; offset < sizeof fresh;
+         offset += VRAMDirtyGranularity) {
+        if (std::memcmp(fresh + offset, VRAMFlat_Texture + offset,
+                        VRAMDirtyGranularity) == 0)
+            continue;
+        dirty[static_cast<u32>(offset / VRAMDirtyGranularity)] = true;
+        std::memcpy(VRAMFlat_Texture + offset, fresh + offset,
+                    VRAMDirtyGranularity);
+        changed = true;
+    }
+    return changed;
 }
 
 bool GPU::MakeVRAMFlat_TexPalCoherent(
-    NonStupidBitField<128*1024/VRAMDirtyGranularity>&) noexcept {
+    NonStupidBitField<128*1024/VRAMDirtyGranularity>& dirty) noexcept {
     const uint64_t gen = nds_vram_texture_generation();
     if (gen == g_texpal_flat_gen) return false;
     g_texpal_flat_gen = gen;
     static u8 fresh[128*1024];
     nds_vram_copy_texpal(fresh);
-    if (std::memcmp(fresh, VRAMFlat_TexPal, sizeof fresh) == 0) return false;
-    std::memcpy(VRAMFlat_TexPal, fresh, sizeof fresh);
-    return true;
+    bool changed = false;
+    for (size_t offset = 0; offset < sizeof fresh;
+         offset += VRAMDirtyGranularity) {
+        if (std::memcmp(fresh + offset, VRAMFlat_TexPal + offset,
+                        VRAMDirtyGranularity) == 0)
+            continue;
+        dirty[static_cast<u32>(offset / VRAMDirtyGranularity)] = true;
+        std::memcpy(VRAMFlat_TexPal + offset, fresh + offset,
+                    VRAMDirtyGranularity);
+        changed = true;
+    }
+    return changed;
 }
 
 }  // namespace melonDS
