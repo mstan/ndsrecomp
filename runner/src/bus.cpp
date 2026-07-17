@@ -1010,26 +1010,6 @@ extern "C" uint32_t arm9_refill_cycles(uint32_t target) {
     return words * cc;
 }
 
-// ARM9 per-instruction cycle COMBINE â€” melonDS's exact AddCycles_C/CI/CD/CDI
-// (ARM.h:266-303). See runtime_arm.h for the full contract; called from every
-// codegen-emitted tick site's ARM9 branch (arm_codegen.cpp), never for ARM7.
-// `has_data` selects CD/CDI (loads/stores: no internal cycle, code/data
-// overlap) vs C/CI (everything else: internal cycles add flat, no overlap).
-// int math for the -6 (only the has_data branch can go negative before the
-// outer max), floored at 0 defensively though the max(numC,numD) term already
-// guarantees a non-negative result whenever numC/numD themselves are.
-extern "C" uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD,
-                                       uint32_t numI, uint32_t has_data) {
-    if (has_data) {
-        int overlap = static_cast<int>(numC) + static_cast<int>(numD) - 6;
-        int floor_v = static_cast<int>(numC) > static_cast<int>(numD)
-                          ? static_cast<int>(numC) : static_cast<int>(numD);
-        int m = overlap > floor_v ? overlap : floor_v;
-        return m > 0 ? static_cast<uint32_t>(m) : 0u;
-    }
-    return numI ? (numC + numI) : numC;
-}
-
 // ARM7 memory instructions use melonDS ARMv4::AddCycles_CD/CDI.  The old
 // flat `base + numD` expression is exact on fast same-bus regions, but it
 // overcounts accesses between BIOS/WRAM code and the 16-bit main-RAM bus

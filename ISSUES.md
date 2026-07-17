@@ -187,6 +187,23 @@ CPU/runtime/scheduler; renderer work still matters for worker-core
 contention and future high-resolution HLE, but cannot alone meet the
 8.3 ms whole-frame target.
 
+First exact CPU result (2026-07-17): `arm9_cycle_combine` is now a
+header-inline pure integer helper. This lets each CPU-specific generated
+bank fold the constant instruction class and removes almost every
+per-instruction combine ABI call without changing generated sources.
+Static audit found identical generated-symbol/relocation coverage,
+`.text` shrinking 235,726,176→223,701,472 bytes (**-5.10%**), and only
+201 residual helper calls from 31,994 combine sites in a representative
+gameplay shard. Clean nav→700M interleaved A/B seconds were baseline
+`124.174 / 115.842 / 110.705 / 112.840 / 110.373` versus inline
+`118.894 / 120.594 / 109.483 / 109.845 / 109.595`: **0.8% min-of-5**
+and **2.7% median** improvement. Live castle-control windows improved
+from `53.89 / 54.22 / 53.12` to `54.46 / 54.54 / 54.76 FPS`
+(**+1.2% median**). This is a small additive/code-footprint win, not a
+60-FPS solution. Gates: G1 8/8 with zero Tier-3/rejects; G2 2,400 frames,
+zero underruns/audio errors and exact FNV pair; always-on/forced G3
+byte-lock passed at 100M..700M on both framebuffers.
+
 Then rank exact CPU work from evidence. The leading low-risk probe is
 runner-scoped LTO/IPO: generated instructions currently make
 out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,

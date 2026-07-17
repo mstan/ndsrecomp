@@ -355,8 +355,17 @@ uint32_t arm9_refill_cycles(uint32_t target);
 // branch/PC-write tick sites); this returns only the instruction's own
 // class cost. ARM9 only — every codegen tick site's ARM7 branch is the
 // ORIGINAL flat _cyc expression, verbatim; this is never called for ARM7.
-uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD, uint32_t numI,
-                            uint32_t has_data);
+static inline uint32_t arm9_cycle_combine(uint32_t numC, uint32_t numD,
+                                          uint32_t numI,
+                                          uint32_t has_data) {
+    if (has_data) {
+        const uint32_t floor_v = numC > numD ? numC : numD;
+        const uint32_t sum = numC + numD;
+        const uint32_t overlap = sum > 6u ? sum - 6u : 0u;
+        return overlap > floor_v ? overlap : floor_v;
+    }
+    return numI ? numC + numI : numC;
+}
 uint32_t arm7_cycle_combine(uint32_t flat_cycles, uint32_t numD,
                             uint32_t is_load, uint32_t has_internal);
 
