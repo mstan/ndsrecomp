@@ -163,8 +163,17 @@ the performance plan.
   **G1: all 8 scenarios pass with tier3_insns9=tier3_insns7=0** (was
   824k/536k) and clean_ram_rejects=0 — the interpreter is fully idle
   across the entire firmware surface. G2 FNV pinned, G3 byte-locked.
-- **A4 [MECH] re-pin `supermario64dsrecomp`** to the current framework
-  HEAD once A1/A2 land (it pins 87f7ad4, many commits behind).
+- **A4 ✅ DONE (2026-07-16).** `supermario64dsrecomp` re-pinned to
+  framework `0d5eb09` after the gameplay-generation gates.
+- **A5 ✅ DONE (2026-07-16).** Gameplay coverage promotion keeps two
+  ARM9 capture generations because castle gameplay replaces large
+  title overlays at the same addresses. A single-source trial regressed
+  title-window Tier-3 to 122,456,468; separate content-validated
+  boot/title (18,174 funcs) + gameplay (40,314 funcs) banks restore it
+  to 20,503 (pre-merge 21,274), ARM7=13, rejects=0. G1/G2/G3 green.
+  The ARM9 capture tool now refuses cross-generation replacement and
+  requires `--variant`. Quiet-host gameplay FPS profiling remains WS-B
+  P-1; heavily contended provisional samples were rejected.
 
 ### WS-B — throughput to a locked 60 FPS (priority 1b)
 Boot is ~1.3× realtime (masked by the audio prebuffer); gameplay budget

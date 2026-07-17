@@ -9,13 +9,11 @@ numbers, like PLAN.md does).
 
 ## State snapshot (2026-07-16)
 
-- HEADs, all pushed: framework `ndsrecomp` **14482c0** ·
-  game repo `supermario64dsrecomp` **0d7851a** · `ndsref` **04ca532**.
-- **Uncommitted** (game repo): `config/sm64ds_arm9_ram.toml` +
-  `config/sm64ds_arm7_ram.toml` — the gameplay-window bank merges
-  (ISSUE-1). The built runner
-  `runner/build-sm64-native/nds_runner.exe` already links these merged
-  banks and is **unvalidated**.
+- HEADs, all pushed: framework `ndsrecomp` **0d5eb09** ·
+  game repo `supermario64dsrecomp` **f25c2ff** · `ndsref` **04ca532**.
+- Both worktrees are clean. The runner links separate content-validated
+  ARM9 boot/title (`85e24929…`, 18,174 functions) and gameplay
+  (`53f37d3f…`, 40,314 functions) generations plus the merged ARM7 bank.
 - Standing gates (run after EVERY change, defined in PLAN.md):
   - **G1** firmware traversal: `py -3 oracle\firmware_traversal.py
     --scenario <name>` for all 8 scenarios in
@@ -34,7 +32,7 @@ numbers, like PLAN.md does).
 - Perf picture (all measured, interleaved A/B min-of-N, same machine):
   - Tier-3 interpretation is **eliminated as a cost class**: firmware
     surface tier3 = 0 across all 8 scenarios; game boot→title→700M
-    tier3_insns9 = 21,274 / tier3_insns7 = 135 (~0.003% of executed
+    tier3_insns9 = 20,503 / tier3_insns7 = 13 (~0.003% of executed
     instructions). WS-A banked ~22% (A2), B3 inline bus fast path
     ~14% (game serve), B2 ~8-9%, B4 GPU2D OBJ 8.29s→6.11s per soak.
   - The remaining gap to 60 FPS is **static/native-path host cost**.
@@ -47,47 +45,35 @@ numbers, like PLAN.md does).
 
 ---
 
-## ISSUE-1 — [IN-FLIGHT, LAND FIRST] gameplay bank-merge validation
+## ISSUE-1 — [CORRECTNESS LANDED; PERF SAMPLE PENDING] gameplay banks
 
-The two RAM-bank configs were re-captured live during real castle-
-grounds gameplay (title → ADVENTURE → FILE A → castle grounds as
-Yoshi, ~1 min varied movement) over the play-mode TCP surface:
-ARM9 config 10,315 → 28,536 entries (capture image sha1 `53f37d3f…`),
-ARM7 5,117 → 5,243 (`c21758bd…`). Regenerated banks: ARM9 RAM
-18,174 → 40,314 functions; ARM7 RAM 7,247. Runner rebuilt clean.
-**Zero measurements taken since** — validation was paused for a
-user check-in (approved to proceed).
+Landed and pushed as framework `0d5eb09` + game `f25c2ff`. The first
+boot-window acceptance correctly stopped a bad promotion:
+`tier3_insns9=122,456,468` (pre-merge 21,274). Root cause was not
+missing coverage: the monotonic address merge replaced the bank's only
+source image, while gameplay had replaced title overlays at
+`0x020A0000..0x020CFFFF`; 5,232 / 10,315 old roots had different first
+opcodes. The fix preserves the boot/title and gameplay byte generations
+as separate content-validated banks. The capture helper now requires a
+new `--variant` when an existing source identity differs, preventing a
+repeat.
 
-Capture bins (git-ignored, required for regen) are at
-`supermario64dsrecomp/generated/capture/sm64ds_arm{9,7}_ram.bin`.
+Final correctness evidence:
 
-Steps (all user-approved):
+- G3 100M..700M: byte-locked at every stop including both framebuffers;
+  ARM9 Tier-3 **20,503**, ARM7 **13**, `clean_ram_rejects=0`.
+- G1: all 8 scenarios pass from fresh pairs, firmware Tier-3/rejects
+  zero, audio sample-exact. G2: 2,400 frames, underruns zero, FNV pair
+  `(e333837761ca0d1c,d61d2eb50e96b61d)`.
+- Interactive navigation reached live castle-grounds gameplay with the
+  split banks.
 
-1. **Boot-window acceptance.** Kill stale servers by port first
-   (see rules below). Launch a serve pair, run the nav→700M timed
-   path (scratchpad helper `a2_timed_run.py` if still present, else
-   the G3 probe run), read `tier3_insns9` — compare vs the pre-merge
-   21,274. Expect *some* movement: the gameplay captures replaced the
-   boot-window captures, and where boot-vs-gameplay overlay content
-   differs, rows now validate against gameplay bytes (content
-   validation keeps correctness; the count is what we're measuring).
-   A large regression (≫100k) means a capture problem — stop and
-   diagnose, don't commit.
-2. **G1 (8 scenarios, fresh pair each) + G2 + G3.** All must be green.
-   Bank promotion keeps `clean_ram_rejects=0` and passes
-   `--validate-live-bytes`.
-3. **FPS re-probe** (this doubles as the ISSUE-2 baseline — record
-   everything). Launch `--interactive --rom`, drive over TCP
-   (port 19842): menu tap (128,48) → title tap (128,120) →
-   ADVENTURE (128,162) → FILE A (52,55) → Start-skip cutscenes →
-   castle grounds. At menu / title / castle grounds: sample
-   `frontend_stats` twice for fps, and `profile`
-   (NDS_PROFILE_GPU/SCHED) for the bucket breakdown. Scratchpad
-   helper `fps_probe.py` did this; recreate if lost.
-4. **Commit** the two game-repo configs with the numbers, re-pin
-   `ndsrecomp.pin` to the framework HEAD, update PLAN.md status +
-   memory. Framework commits first if any framework change was
-   needed.
+Only the FPS/profile sample remains, and it is now ISSUE-2/P-1 rather
+than unlanded correctness work. The first attempt was invalid: 48–54
+unrelated build processes were active; provisional samples had heavy
+underruns (menu 59.5 FPS, title 34.9, castle 31.0→26.3). Do not use
+those as baseline evidence. Repeat menu/title/castle
+`frontend_stats` + `profile` min-of-N on a quiet host before P-2.
 
 ## ISSUE-2 — [PIVOT — PRIMARY WORKSTREAM] locked 60 FPS with headroom
 
@@ -131,6 +117,8 @@ The 40 FPS report and the display-bucket numbers predate the merged
 banks. The ISSUE-1 fps/profile probe at menu / title / castle grounds
 is the baseline that ranks the buckets. Every subsequent P-item is
 justified (or dropped) by this measurement, not by the inference.
+The 2026-07-16 attempt was rejected for severe unrelated compiler load;
+see ISSUE-1. **P-1 remains the next action and P-2 must not start first.**
 
 ### P-2: threaded 3D software rasterizer (expected main win)
 
@@ -219,7 +207,8 @@ accuracy-affecting work. Do not silently degrade fidelity for speed.
 Castle interior, painting levels, bosses load overlays not yet
 captured → tier-3 returns there. The ~15-min routine (monotonic,
 gate-checked): play `--interactive --rom --discover-static-misses`
-into the new area → run both capture tools with `--skip-nav`
+into the new area → run the ARM9 capture tool with `--skip-nav
+--variant <area_name>` and the ARM7 tool with `--skip-nav`
 (`supermario64dsrecomp/tools/capture_arm{9,7}_ram_bank.py`) against
 the play surface → regen banks → rebuild → gates → commit with
 counts. The user can play with discovery on to feed this.
@@ -245,8 +234,7 @@ people actually playing.
   validate on a GXFIFO-heavy title before trusting.
 - Informational: 27 residual boot-window ARM7 entries + BIOS
   mid-function PCs.
-- Game repo `ndsrecomp.pin` is one commit behind framework HEAD —
-  routine re-pin post-gates (part of ISSUE-1 step 4).
+- Game repo `ndsrecomp.pin` is current at framework `0d5eb09`.
 
 ---
 
