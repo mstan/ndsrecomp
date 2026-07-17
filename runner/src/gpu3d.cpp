@@ -447,7 +447,15 @@ void nds_gpu3d_start_frame() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
         g_compute_rendered_frame) {
-        g_nds.GPU.GPU3D.GetCurrentRenderer().PrepareCaptureFrame();
+        auto& renderer = g_nds.GPU.GPU3D.GetCurrentRenderer();
+        // Order the compute shader's image stores before glGetTexImage copies
+        // the low-resolution texture into the pixel-pack buffer.
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+        renderer.PrepareCaptureFrame();
+        // The runner's sparse 2D paths need not consume 3D on line 0, while
+        // ComputeRenderer maps its PBO only from GetLine(0). Force that map
+        // now so a later first consumer cannot observe stale CPU pixels.
+        (void)renderer.GetLine(0);
         g_compute_rendered_frame = false;
         g_compute_frame_ready = true;
     }
