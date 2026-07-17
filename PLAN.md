@@ -172,8 +172,22 @@ phase/underrun stats; never single boot-window runs.
   ~8-9%% emu-phase win on the firmware soak (interleaved A/B). Old
   emission stays ABI-valid; the 12 extended firmware bank sets remain
   old-emission until their captures are regenerated.
-- **B3 [SPEC] bus fast paths.** Inline main-RAM/WRAM load-store fast
-  paths ahead of the general bus dispatch.
+- **B3 ✅ DONE (2026-07-16).** Inline bus fast path: static-inline
+  bus_read_*/bus_write_* in runtime_arm.h serve main RAM / WRAM / ARM9
+  TCM directly (resolve()-exact mapping incl. WRAMCNT split + TCM
+  shadowing, bounds-checked; writes replicate written[]/generation/
+  static-guard provenance byte-for-byte) while the deep-trace policy is
+  off — interactive only; --serve/batch keep the fully-ringed slow path
+  bit-identical, `NDS_DEEP_TRACE=0` opts a serve server into fast-path
+  mode for equivalence proofs and honest perf A/B. No emission change,
+  no regen: every call site (old/new banks, tier-3, devices) routes via
+  the header. Proven: G3 byte-lock passes with the fast path FORCED
+  (700M, both framebuffers); G1/G2/G3 green in normal modes. Perf (same
+  binary, interleaved): game-path serve nav+title→700M default 150.3s →
+  fast 129.1s (~14%); firmware soak emu 21.06s → 20.06s min-of-3
+  (~4.7%); slow path unregressed (min-of-2 within noise). Follow-up
+  candidate: inline runtime_mem_cycles' hot regions (separate
+  melonDS-mirroring risk class, not done here).
 - **B4 ✅ DONE (2026-07-16).** OBJ line pass per-tile for regular
   tile-mode sprites: GPU2D 8.29s → 6.11s, OBJ 3.61s → 2.43s on the
   profiled soak; FNV/G3 pinned. Affine/bitmap/window stay per-pixel.

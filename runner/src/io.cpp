@@ -1817,6 +1817,7 @@ void nds_io_reset() {
     g_keyinput = 0x007F03FFu;
     g_rcnt = 0;
     g_wramcnt = 0;
+    bus_fast_refresh();
     g_wifiwaitcnt = 0;
     g_warned = 0;
     nds_wifi_reset();
@@ -2640,7 +2641,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             const uint32_t a = addr + i;
             const uint8_t byte = static_cast<uint8_t>(value >> (i * 8u));
             if (a >= 0x04000240u && a <= 0x04000246u) nds_vram_map(a - 0x04000240u, byte);
-            else if (a == 0x04000247u) g_wramcnt = byte;
+            else if (a == 0x04000247u) { g_wramcnt = byte; bus_fast_refresh(); }
             else if (a >= 0x04000248u && a <= 0x04000249u) nds_vram_map(a - 0x04000241u, byte);
         }
         return;

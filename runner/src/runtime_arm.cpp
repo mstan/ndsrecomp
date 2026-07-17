@@ -245,7 +245,7 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 }
 }  // namespace
 
-void runtime_note_code_write() {
+extern "C" void runtime_note_code_write(void) {
     if (!g_static_guard.invalidated &&
         guard_generation_changed(g_static_guard))
         g_static_guard.invalidated = true;

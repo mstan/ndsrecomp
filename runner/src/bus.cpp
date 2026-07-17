@@ -1,4 +1,4 @@
-// bus.cpp — DS memory bus (first bring-up slice: ARM9-centric).
+﻿// bus.cpp â€” DS memory bus (first bring-up slice: ARM9-centric).
 //
 // Implements bus_read/write_{u8,u16,u32} (the C ABI the recompiled banks
 // call) over the DS memory map. Per-CPU views branch on g_nds_active.
@@ -6,10 +6,10 @@
 // which is why g_cp15 is consulted here.
 //
 // Memory map per GBATEK ("DS Memory Map"). I/O registers are stubbed for
-// now (return 0, logged) — they get real models as the boot demands them
-// (IPC, SPI, IRQ, POWCNT…). An always-on access ring records every bus
+// now (return 0, logged) â€” they get real models as the boot demands them
+// (IPC, SPI, IRQ, POWCNTâ€¦). An always-on access ring records every bus
 // touch so a probe can query the window of interest retroactively
-// (OBSERVABILITY rule — never arm-then-capture).
+// (OBSERVABILITY rule â€” never arm-then-capture).
 
 #include <algorithm>
 #include <cstdint>
@@ -259,7 +259,7 @@ uint8_t* resolve(uint32_t addr, uint32_t len) {
         uint32_t o = addr & 0x003FFFFFu;
         if (o + len <= g_main_ram.size()) return g_main_ram.data() + o;
     }
-    // Shared WRAM (0x03000000 region) — simplified: serve the 32 KB block
+    // Shared WRAM (0x03000000 region) â€” simplified: serve the 32 KB block
     // mirrored. (WRAMCNT split modeling comes with the ARM7 slice.)
     if (addr >= 0x03000000u && addr < 0x03800000u) {
         const uint32_t mode = nds_wramcnt() & 3u;
@@ -318,7 +318,7 @@ void unmapped(uint32_t addr, bool write, uint32_t width, uint32_t value) {
         std::fprintf(stderr, "[bus] ARM%c unmapped %s 0x%08X w=%u%s\n",
                      g_nds_active == NDS_ARM9 ? '9' : '7',
                      write ? "write" : "read", addr, width,
-                     write ? "" : " (→0)");
+                     write ? "" : " (â†’0)");
         ++warned;
     }
     (void)value;
@@ -357,6 +357,100 @@ void bus_init() {
     g_ring_seq = 0;
     g_watch_w = 0;
     g_watch_count = 0;
+    bus_fast_refresh();
+}
+
+// ── Inline bus fast path (B3): exported fast-map windows ───────────────
+// The static-inline bus_read_*/bus_write_* layer in runtime_arm.h serves
+// main RAM / WRAM / ARM9 TCM directly from these windows while the
+// deep-trace policy is off (interactive frontend). Each window mirrors
+// resolve()'s mapping for its address range EXACTLY — same backing, same
+// mirror mask, same bounds — plus the parallel Tier-3 provenance arrays
+// so fast writes preserve written[]/generation semantics byte-for-byte.
+// Recomputed whenever a mapping input changes: bus_init (backings are
+// (re)allocated), WRAMCNT writes (io.cpp), CP15 control/TCM writes
+// (cp15.cpp).
+
+extern "C" {
+NdsBusFastWin g_busf_main = {};
+NdsBusFastWin g_busf_wram_lo[2] = {};
+NdsBusFastWin g_busf_wram_hi[2] = {};
+NdsBusFastWin g_busf_itcm = {};
+NdsBusFastWin g_busf_dtcm = {};
+uint32_t g_busf_itcm_limit = 0;
+uint32_t g_busf_dtcm_base = 0;
+uint32_t g_busf_dtcm_limit = 0;
+}
+
+void bus_fast_refresh() {
+    if (g_main_ram.empty()) {
+        // Boot ordering: cp15_reset can run before bus_init has allocated
+        // the backings. Leave every window disabled; bus_init's own
+        // refresh (after allocation) publishes the real map.
+        g_busf_main = {};
+        g_busf_wram_lo[0] = g_busf_wram_lo[1] = {};
+        g_busf_wram_hi[0] = g_busf_wram_hi[1] = {};
+        g_busf_itcm = {};
+        g_busf_dtcm = {};
+        g_busf_itcm_limit = g_busf_dtcm_base = g_busf_dtcm_limit = 0u;
+        return;
+    }
+    g_busf_main = {g_main_ram.data(), g_main_ram_written.data(),
+                   g_main_ram_generation.data(), 0x003FFFFFu};
+    // 0x03800000..0x03FFFFFF: resolve() serves the ARM7 WRAM backing for
+    // BOTH CPUs (no arm9 branch there) — mirror that, not hardware lore.
+    g_busf_wram_hi[0] = g_busf_wram_hi[1] =
+        {g_arm7_wram.data(), g_arm7_wram_written.data(),
+         g_arm7_wram_generation.data(), 0x0000FFFFu};
+    // 0x03000000..0x037FFFFF per WRAMCNT, exactly resolve()'s split. The
+    // 0x4000 window base is 4-KiB-page aligned, so the provenance arrays
+    // can be offset the same way (page index stays region-consistent).
+    const uint32_t mode = nds_wramcnt() & 3u;
+    const auto shared_win = [&](uint32_t base, uint32_t mask) {
+        return NdsBusFastWin{g_shared_wram.data() + base,
+                             g_shared_wram_written.data() + base,
+                             g_shared_wram_generation.data() +
+                                 (base >> kExecPageShift),
+                             mask};
+    };
+    switch (mode) {
+        case 0:
+            g_busf_wram_lo[NDS_ARM9] = shared_win(0u, 0x7FFFu);
+            g_busf_wram_lo[NDS_ARM7] =
+                {g_arm7_wram.data(), g_arm7_wram_written.data(),
+                 g_arm7_wram_generation.data(), 0x0000FFFFu};
+            break;
+        case 1:
+            g_busf_wram_lo[NDS_ARM9] = shared_win(0x4000u, 0x3FFFu);
+            g_busf_wram_lo[NDS_ARM7] = shared_win(0u, 0x3FFFu);
+            break;
+        case 2:
+            g_busf_wram_lo[NDS_ARM9] = shared_win(0u, 0x3FFFu);
+            g_busf_wram_lo[NDS_ARM7] = shared_win(0x4000u, 0x3FFFu);
+            break;
+        default:  // mode 3: whole shared block to the ARM7; ARM9 unmapped
+            g_busf_wram_lo[NDS_ARM9] = {};
+            g_busf_wram_lo[NDS_ARM7] = shared_win(0u, 0x7FFFu);
+            break;
+    }
+    // ARM9 TCM, exactly resolve()'s conditions: ITCM responds across its
+    // virtual span below main RAM (32 KiB backing mirrored); DTCM is a
+    // NON-mirrored window — only the first 16 KiB of its virtual span is
+    // backed, the rest falls through (to the slow path here).
+    g_busf_itcm = {g_itcm.data(), g_itcm_written.data(),
+                   g_itcm_generation.data(), 0x00007FFFu};
+    g_busf_dtcm = {g_dtcm.data(), g_dtcm_written.data(),
+                   g_dtcm_generation.data(), 0x00003FFFu};
+    g_busf_itcm_limit =
+        (g_cp15.itcm_enable && g_cp15.itcm_size)
+            ? std::min<uint32_t>(g_cp15.itcm_size, 0x02000000u)
+            : 0u;
+    g_busf_dtcm_base = g_cp15.dtcm_base;
+    g_busf_dtcm_limit =
+        (g_cp15.dtcm_enable && g_cp15.dtcm_size)
+            ? std::min<uint32_t>(g_cp15.dtcm_size,
+                                 static_cast<uint32_t>(g_dtcm.size()))
+            : 0u;
 }
 
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n) {
@@ -415,7 +509,7 @@ bool bus_get_region(const char* name, BusRegion* out) {
     return false;
 }
 
-// True for writable regions that can hold guest-copied executable code —
+// True for writable regions that can hold guest-copied executable code â€”
 // the Tier-3 dirty-RAM interpreter runs from these. Branches on the active
 // CPU for ARM9 ITCM (mirrored across its virtual span). Keeps the
 // memory-map authority in the bus so Tier-3 can't drift from resolve().
@@ -510,9 +604,9 @@ uint32_t bus_debug_watch_copy(BusWatchEvent* out, uint32_t max_entries) {
     return count;
 }
 
-// ── C ABI: the generated banks call these ──────────────────────────────
+// â”€â”€ C ABI: the generated banks call these â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-extern "C" uint32_t bus_read_u32(uint32_t addr) {
+extern "C" uint32_t bus_read_u32_slow(uint32_t addr) {
     uint32_t v;
     if (uint8_t* p = resolve(addr, 4)) { std::memcpy(&v, p, 4); }
     else if (nds_video_address(addr)) v = nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 4);
@@ -525,7 +619,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
     return v;
 }
 
-extern "C" uint16_t bus_read_u16(uint32_t addr) {
+extern "C" uint16_t bus_read_u16_slow(uint32_t addr) {
     uint16_t v;
     if (uint8_t* p = resolve(addr, 2)) { std::memcpy(&v, p, 2); }
     else { uint32_t x; if (nds_video_address(addr)) v = static_cast<uint16_t>(nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 2));
@@ -538,7 +632,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
     return v;
 }
 
-extern "C" uint8_t bus_read_u8(uint32_t addr) {
+extern "C" uint8_t bus_read_u8_slow(uint32_t addr) {
     uint8_t v;
     if (uint8_t* p = resolve(addr, 1)) { v = *p; }
     else { uint32_t x; if (nds_video_address(addr)) v = static_cast<uint8_t>(nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 1));
@@ -551,7 +645,7 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
     return v;
 }
 
-extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
+extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val) {
     ring_push(1, 4, addr, val);
     if (uint8_t* p = resolve(addr, 4)) {
         std::memcpy(p, &val, 4);
@@ -565,7 +659,7 @@ extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
     else unmapped(addr, true, 4, val);
 }
 
-extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
+extern "C" void bus_write_u16_slow(uint32_t addr, uint16_t val) {
     ring_push(1, 2, addr, val);
     if (uint8_t* p = resolve(addr, 2)) {
         std::memcpy(p, &val, 2);
@@ -579,7 +673,7 @@ extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
     else unmapped(addr, true, 2, val);
 }
 
-extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
+extern "C" void bus_write_u8_slow(uint32_t addr, uint8_t val) {
     ring_push(1, 1, addr, val);
     if (uint8_t* p = resolve(addr, 1)) {
         *p = val;
@@ -609,7 +703,7 @@ void bus_device_write32(int cpu, uint32_t addr, uint32_t value) {
 }
 
 // ARM7 (ARMv4T) region N/S bus timings, ported from melonDS's effective model
-// (NDS::InitTimings / NDS::SetARM7RegionTimings — third_party/melonDS/src/NDS.cpp).
+// (NDS::InitTimings / NDS::SetARM7RegionTimings â€” third_party/melonDS/src/NDS.cpp).
 // Unlike the uncached ARM9, the ARM7 has NO +3 nonseq CPU penalty and (mostly)
 // no 32-bit-bus splitting: BIOS, shared+ARM7 WRAM and I/O are true 32-bit-bus
 // regions with N=S=1 ("fast", matches the recompiler's static ARMv4T cost table,
@@ -756,7 +850,7 @@ inline uint32_t arm9_gba_slot_cycles(uint32_t addr, uint32_t width,
 // ARM9: returns the RAW region data cost (numD). The code/data overlap
 // (melonDS: max(numC+numD-6, max(numC,numD))) is applied ONCE per
 // instruction by arm9_cycle_combine, over the SUM of every call this
-// instruction makes (e.g. one per register for LDM/STM) — never here, so
+// instruction makes (e.g. one per register for LDM/STM) â€” never here, so
 // this always returns the true per-access cost regardless of how many
 // calls a single instruction makes or whether a given call is the
 // sequential continuation of an LDM/STM. Cost is in the active CPU's
@@ -764,7 +858,7 @@ inline uint32_t arm9_gba_slot_cycles(uint32_t addr, uint32_t width,
 // calibrated against the oracle's cyc9-at-equal-retired-index.
 //
 // ARM7: region-aware per melonDS's ARM7MemTimings (single 8/16-bit accesses are
-// always charged at the region's N — melonDS's DataRead8/16 always index the
+// always charged at the region's N â€” melonDS's DataRead8/16 always index the
 // nonseq slot; only 32-bit LDM/STM continuations use `sequential` for S). For
 // "fast" regions (BIOS/WRAM/IO) this reproduces melonDS's LDR/STR/LDM/STM cost
 // EXACTLY against the recompiler's static ARMv4T base table (verified by hand:
@@ -807,28 +901,28 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
     return data;                // raw numD in ARM9 clock units
 }
 
-// Code-FETCH memory timing (Commit B for the ARM9 — see docs/scheduler_design.md
-// — Commit D for the ARM7). Charged per retired instruction on the active CPU,
+// Code-FETCH memory timing (Commit B for the ARM9 â€” see docs/scheduler_design.md
+// â€” Commit D for the ARM7). Charged per retired instruction on the active CPU,
 // on TOP of the static per-instruction base baked into the recompiler's ARMv4T
 // cost table (recompiler/armv4t/arm_ir.cpp instr_cycle_base), which already
 // assumes a 1-cycle sequential code fetch ("1S") for every op.
 //
 // ARM9: returns the RAW numC (this instruction's own code-fetch cost, or a
 // branch/PC-write TARGET's, when called from arm_codegen.cpp's pipeline-
-// refill term) — melonDS: all code accesses are forced nonseq 32-bit
+// refill term) â€” melonDS: all code accesses are forced nonseq 32-bit
 // (ARM.h:254), so numC is the region's N32 cost (post +3 ARM9 nonseq
 // penalty on every region except main RAM, post x2 ARM9 clock shift), e.g.
 // uncached BIOS fetch = 8 ARM9 cyc. arm9_cycle_combine (bottom of this
 // file) is the ONLY place that folds numC together with numD/numI per
-// melonDS's exact AddCycles_C/CI/CD/CDI — this function must never predict
+// melonDS's exact AddCycles_C/CI/CD/CDI â€” this function must never predict
 // or absorb any part of that combine itself. Constants are a first cut,
 // calibrated against the oracle's cyc9-at-equal-retired-index.
 //
 // ARM7: the static base's baked-in "1S" already matches melonDS's steady-state
-// AddCycles_C exactly for every region that is genuinely 1-cycle-sequential —
+// AddCycles_C exactly for every region that is genuinely 1-cycle-sequential â€”
 // which is every ARM7 region EXCEPT main RAM / VRAM in ARM (32-bit) mode, where
 // the 16-bit bus splits S32=S16+S16=2. So the ONLY correction needed here is
-// that one region/width case (+1); everywhere else this returns 0 — adding a
+// that one region/width case (+1); everywhere else this returns 0 â€” adding a
 // naive flat code-fetch cost on top of the ARM7's already-fast base would only
 // overcharge further (measured starting point: native ~1.85 cyc/insn vs oracle
 // ~1.63, i.e. ALREADY over, not under). Taken branches bypass this current-PC
@@ -843,11 +937,11 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
         uint32_t s32 = r.s16 + r.s16;
         return (s32 > 1u) ? (s32 - 1u) : 0u;                 // ARM-mode S32 beyond the baked 1
     }
-    // ARM9 code fetch is FORCED non-sequential 32-bit — melonDS: "all code
+    // ARM9 code fetch is FORCED non-sequential 32-bit â€” melonDS: "all code
     // accesses are forced nonseq 32bit" (ARM.h:254); there is NO sequential-fetch
     // speedup on the ARM9 (RegionCodeCycles is pinned to the region's N32 cost).
     // Charge that N32 cost (post +3 non-seq penalty on every region except main
-    // RAM, post x2 ARM9 clock shift) on EVERY fetch — the full RAW numC; the
+    // RAM, post x2 ARM9 clock shift) on EVERY fetch â€” the full RAW numC; the
     // combine (arm9_cycle_combine) is what folds this together with numD/numI,
     // not this function.
     // (Per-PU-region cacheability -> flat averaged 3/1 is a later refinement; the
@@ -857,7 +951,7 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // fetches 32 bits even in Thumb, so the odd-halfword instruction shares its
     // predecessor's fetch and costs ZERO. Halves the cost of Thumb loops (e.g.
     // the firmware's Thumb BIOS IRQ-wait spin during the IPC handshake). This is
-    // a true raw-zero (not a baseline absorption) — kept as-is.
+    // a true raw-zero (not a baseline absorption) â€” kept as-is.
     const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
     if (thumb && (pc & 2u)) return 0u;
     const Arm9CodeTiming timing = arm9_current_code_timing(pc);
@@ -916,7 +1010,7 @@ extern "C" uint32_t arm9_refill_cycles(uint32_t target) {
     return words * cc;
 }
 
-// ARM9 per-instruction cycle COMBINE — melonDS's exact AddCycles_C/CI/CD/CDI
+// ARM9 per-instruction cycle COMBINE â€” melonDS's exact AddCycles_C/CI/CD/CDI
 // (ARM.h:266-303). See runtime_arm.h for the full contract; called from every
 // codegen-emitted tick site's ARM9 branch (arm_codegen.cpp), never for ARM7.
 // `has_data` selects CD/CDI (loads/stores: no internal cycle, code/data
@@ -948,7 +1042,7 @@ extern "C" uint32_t arm7_cycle_combine(uint32_t flat_cycles, uint32_t numD,
     // BL/fall-through dispatch and re-ticks after the callee returns purely
     // as an IRQ-delivery boundary. A real instruction always carries the
     // baked 1S in flat_cycles, so flat==0 with no data identifies that
-    // resync — it must not inherit the seqC-1 fetch correction below (which
+    // resync â€” it must not inherit the seqC-1 fetch correction below (which
     // charged a spurious +1 for ARM-mode code on the 16-bit main-RAM bus,
     // e.g. the SM64DS ARM7 runtime-RAM bank; arm9_cycle_combine's all-zero
     // case already returns 0).

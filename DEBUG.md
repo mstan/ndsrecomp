@@ -37,6 +37,15 @@ synchronize the ARM9 and ARM7 observers.
 All on in Release. Eviction keeps memory bounded; targeted dumps pull
 the requested slice.
 
+One documented exception, the **deep-trace policy** (runtime_arm.h): the
+interactive frontend exposes no query surface, so the per-access payloads
+(`bus_ring` entries for RAM data accesses via the inline bus fast path,
+mem_r/mem_w trace events, per-insn register images) are dropped there for
+real-time headroom. Every mode with a query surface (`--serve`, batch)
+keeps them all; `NDS_DEEP_TRACE=0` on a serve server opts into the
+interactive behavior for fast-path equivalence proofs and honest perf A/B.
+Event counters (insn9/insn7, event_counts) advance in every mode.
+
 ## The loop
 
 1. Find the **first** divergence vs the melonDS oracle, not the final

@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>  // generated banks are C; `bool` returns need this
+#include <string.h>   // the inline bus fast path does aligned-safe memcpy
 
 #ifdef __cplusplus
 extern "C" {
@@ -122,16 +123,189 @@ static inline uint32_t cpsr_v(void) { return (g_cpu.cpsr & CPSR_V_BIT) ? 1u : 0u
 int arm_cond_passes(unsigned cond);
 
 // ── Bus ────────────────────────────────────────────────────────────
-// All cart reads/writes flow through these. The runtime sets up the
-// bus pointer before any cart code runs; bus_set_active() is called
-// from the runner's main().
+// All guest data accesses flow through the static-inline bus_read_* /
+// bus_write_* pair below (B3 bus fast path). The slow functions are the
+// complete reference model (region resolve, always-on access ring, I/O,
+// video, unmapped diagnostics) in runner/src/bus.cpp. The inline layer
+// serves main RAM / shared+ARM7 WRAM / ARM9 TCM directly from the
+// exported fast-map windows — but ONLY while the deep-trace policy is
+// off (g_runtime_deep_trace == 0, i.e. the interactive frontend, which
+// exposes no query surface for per-access ring payloads; see the policy
+// comment further down). Every mode with a query surface (--serve,
+// batch) keeps g_runtime_deep_trace on and takes the slow path for every
+// access, so the bus ring still records everything there.
+//
+// Fast-path invariants (must hold or the window must fall back):
+//   * acceptance ⊆ resolve(): a fast hit returns exactly the bytes the
+//     slow path would (same mirror math, same bounds; unaligned edge
+//     cases that resolve() rejects fall back to the slow path);
+//   * writes preserve Tier-3 provenance byte-for-byte: written[] bytes,
+//     per-4KiB-page generation bump (0 skipped), and the static-guard
+//     invalidation via runtime_note_code_write();
+//   * windows are refreshed by bus_fast_refresh() whenever the mapping
+//     inputs change (WRAMCNT, CP15 TCM config, bus_init).
 
-uint32_t bus_read_u32(uint32_t addr);
-uint16_t bus_read_u16(uint32_t addr);
-uint8_t  bus_read_u8 (uint32_t addr);
-void     bus_write_u32(uint32_t addr, uint32_t val);
-void     bus_write_u16(uint32_t addr, uint16_t val);
-void     bus_write_u8 (uint32_t addr, uint8_t  val);
+uint32_t bus_read_u32_slow(uint32_t addr);
+uint16_t bus_read_u16_slow(uint32_t addr);
+uint8_t  bus_read_u8_slow (uint32_t addr);
+void     bus_write_u32_slow(uint32_t addr, uint32_t val);
+void     bus_write_u16_slow(uint32_t addr, uint16_t val);
+void     bus_write_u8_slow (uint32_t addr, uint8_t  val);
+
+// Called after any writable backing generation changes (every RAM write).
+// The static runtime uses this to invalidate the currently executing
+// provenance-validated bank without polling page vectors per instruction.
+void runtime_note_code_write(void);
+
+// Deep-trace policy flag — full declaration/comment further down; the
+// inline fast path needs it in scope here.
+extern uint32_t g_runtime_deep_trace;
+
+// One fast-map window: a directly addressable, mirrored, power-of-two
+// backing with its parallel Tier-3 provenance arrays. data == NULL means
+// the window is not fast-servable right now (e.g. ARM9 shared-WRAM view
+// with WRAMCNT mode 3) and accesses take the slow path.
+typedef struct NdsBusFastWin {
+    uint8_t*  data;     // backing bytes (window base already applied)
+    uint8_t*  written;  // per-byte write-provenance flags (parallel)
+    uint32_t* gen;      // per-4KiB-page provenance generations (parallel)
+    uint32_t  mask;     // mirror mask: off = addr & mask (window-relative)
+} NdsBusFastWin;
+
+extern NdsBusFastWin g_busf_main;        // 0x02000000..0x02FFFFFF, both CPUs
+extern NdsBusFastWin g_busf_wram_lo[2];  // 0x03000000..0x037FFFFF, per CPU
+extern NdsBusFastWin g_busf_wram_hi[2];  // 0x03800000..0x03FFFFFF, per CPU
+extern NdsBusFastWin g_busf_itcm;        // ARM9 ITCM (guarded by the limit)
+extern NdsBusFastWin g_busf_dtcm;        // ARM9 DTCM (non-mirrored window)
+extern uint32_t g_busf_itcm_limit;       // virtual span; 0 = disabled
+extern uint32_t g_busf_dtcm_base;
+extern uint32_t g_busf_dtcm_limit;       // min(virtual size, 16 KiB); 0 = off
+
+// Classify an address into a fast window, mirroring resolve()'s region
+// order exactly (ARM9: ITCM, then DTCM, then the shared map). Returns
+// NULL when the address is not fast-servable. NDS_STATIC_CPU folds the
+// per-CPU branches at compile time inside generated banks.
+static inline const NdsBusFastWin* nds_busf_classify(uint32_t addr,
+                                                     uint32_t* off) {
+    if (g_nds_active == NDS_ARM9) {
+        if (addr < g_busf_itcm_limit) {
+            *off = addr & g_busf_itcm.mask;
+            return &g_busf_itcm;
+        }
+        {
+            const uint32_t d = addr - g_busf_dtcm_base;
+            if (d < g_busf_dtcm_limit) { *off = d; return &g_busf_dtcm; }
+        }
+    }
+    if (addr - 0x02000000u < 0x01000000u) {
+        *off = addr & g_busf_main.mask;
+        return &g_busf_main;
+    }
+    if (addr - 0x03000000u < 0x00800000u) {
+        const NdsBusFastWin* w = &g_busf_wram_lo[g_nds_active];
+        *off = addr & w->mask;
+        return w;
+    }
+    if (addr - 0x03800000u < 0x00800000u) {
+        const NdsBusFastWin* w = &g_busf_wram_hi[g_nds_active];
+        *off = addr & w->mask;
+        return w;
+    }
+    return 0;
+}
+
+// Write-side Tier-3 provenance, identical to the slow path's
+// note_ram_write: bump every touched page's generation (skipping 0),
+// invalidate the static guard, mark the written bytes.
+static inline void nds_busf_note_write(const NdsBusFastWin* w, uint32_t off,
+                                       uint32_t width) {
+    const uint32_t first = off >> 12u;
+    const uint32_t last = (off + width - 1u) >> 12u;
+    uint32_t page;
+    for (page = first; page <= last; ++page) {
+        const uint32_t g = w->gen[page] + 1u;
+        w->gen[page] = g ? g : 1u;
+    }
+    runtime_note_code_write();
+    {
+        uint32_t i;
+        for (i = 0; i < width; ++i) w->written[off + i] = 1u;
+    }
+}
+
+static inline uint32_t bus_read_u32(uint32_t addr) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data && off + 4u <= w->mask + 1u) {
+            uint32_t v;
+            memcpy(&v, w->data + off, 4);
+            return v;
+        }
+    }
+    return bus_read_u32_slow(addr);
+}
+
+static inline uint16_t bus_read_u16(uint32_t addr) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data && off + 2u <= w->mask + 1u) {
+            uint16_t v;
+            memcpy(&v, w->data + off, 2);
+            return v;
+        }
+    }
+    return bus_read_u16_slow(addr);
+}
+
+static inline uint8_t bus_read_u8(uint32_t addr) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data) return w->data[off];
+    }
+    return bus_read_u8_slow(addr);
+}
+
+static inline void bus_write_u32(uint32_t addr, uint32_t val) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data && off + 4u <= w->mask + 1u) {
+            memcpy(w->data + off, &val, 4);
+            nds_busf_note_write(w, off, 4u);
+            return;
+        }
+    }
+    bus_write_u32_slow(addr, val);
+}
+
+static inline void bus_write_u16(uint32_t addr, uint16_t val) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data && off + 2u <= w->mask + 1u) {
+            memcpy(w->data + off, &val, 2);
+            nds_busf_note_write(w, off, 2u);
+            return;
+        }
+    }
+    bus_write_u16_slow(addr, val);
+}
+
+static inline void bus_write_u8(uint32_t addr, uint8_t val) {
+    if (!g_runtime_deep_trace) {
+        uint32_t off;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data) {
+            w->data[off] = val;
+            nds_busf_note_write(w, off, 1u);
+            return;
+        }
+    }
+    bus_write_u8_slow(addr, val);
+}
 
 // ── Per-instruction cycle cost (memory + multiply) ─────────────────
 // Generated code computes the fixed part of an instruction's cost

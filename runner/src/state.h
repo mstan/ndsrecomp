@@ -95,10 +95,12 @@ bool bus_addr_is_writable_ram(uint32_t addr);
 bool bus_addr_has_write_provenance(uint32_t addr);
 bool bus_range_has_write_provenance(uint32_t addr, uint32_t size);
 uint32_t bus_exec_page_generation(uint32_t addr);
-// Called after any writable backing generation changes. The static runtime
-// uses this to invalidate the currently executing provenance-validated bank
-// without polling page vectors at every guest instruction.
-void runtime_note_code_write();
+// (runtime_note_code_write moved to runtime_arm.h with C linkage — the
+// inline bus fast path's write side calls it from generated C banks.)
+// Recompute the inline fast-map windows (runtime_arm.h) from the current
+// mapping inputs. Call after anything that changes what an address means:
+// bus_init, WRAMCNT writes, CP15 control/TCM writes.
+void bus_fast_refresh();
 // Compare generated source bytes with the active CPU's live executable view
 // without producing bus events or consuming guest cycles.
 bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,

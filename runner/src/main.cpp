@@ -356,6 +356,14 @@ int main(int argc, char** argv) {
     }
 
     if (serve) {
+        // Optional: NDS_DEEP_TRACE=0 drops the per-access payloads (bus
+        // ring, mem_r/mem_w events, per-insn register images) in serve
+        // mode too — the bus fast path then engages exactly as in the
+        // interactive frontend. Used to prove fast-path execution
+        // equivalence under the G3 byte-lock and for honest serve-mode
+        // perf A/B (deep trace otherwise masks bank/bus wins).
+        if (const char* dt = std::getenv("NDS_DEEP_TRACE"))
+            if (dt[0] == '0' && dt[1] == '\0') runtime_set_deep_trace(0);
         std::fprintf(stderr, "[run] debug server mode from reset\n");
         debug_set_reset_fn(boot);
         debug_serve(port);

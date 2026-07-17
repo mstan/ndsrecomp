@@ -65,6 +65,7 @@ void cp15_reset() {
     g_cp15.high_vectors = true;
     g_cp15.control = (1u << 13);
     if (++g_cp15_timing_generation == 0u) g_cp15_timing_generation = 1u;
+    bus_fast_refresh();
 }
 
 // True if code fetches from `addr` are served by the ARM9 instruction cache:
@@ -123,7 +124,10 @@ extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
             g_cp15_timing_generation = 1u;
     switch (crn) {
         case 1:  // control register (c1,c0,0)
-            if (crm == 0 && op2 == 0) apply_control(value);
+            if (crm == 0 && op2 == 0) {
+                apply_control(value);
+                bus_fast_refresh();   // ITCM/DTCM enable bits live here
+            }
             break;
         case 2:  // cachability bits
             if (crm == 0) g_cache_cfg[op2 & 7] = value;
@@ -143,10 +147,12 @@ extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
             if (crm == 1 && op2 == 0) {          // DTCM base/size
                 g_cp15.dtcm_base = value & 0xFFFFF000u;
                 g_cp15.dtcm_size = tcm_bytes(value);
+                bus_fast_refresh();
                 std::fprintf(stderr, "[cp15] DTCM region: base=%08X vsize=%u\n",
                              g_cp15.dtcm_base, g_cp15.dtcm_size);
             } else if (crm == 1 && op2 == 1) {   // ITCM size (base = 0)
                 g_cp15.itcm_size = tcm_bytes(value);
+                bus_fast_refresh();
                 std::fprintf(stderr, "[cp15] ITCM region: base=0 vsize=%u\n",
                              g_cp15.itcm_size);
             }
