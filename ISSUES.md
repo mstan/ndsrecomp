@@ -204,6 +204,28 @@ from `53.89 / 54.22 / 53.12` to `54.46 / 54.54 / 54.76 FPS`
 zero underruns/audio errors and exact FNV pair; always-on/forced G3
 byte-lock passed at 100M..700M on both framebuffers.
 
+Second exact CPU result (2026-07-17): the runner now maintains an exact
+`IME & IE & IF` cache and a rare-condition yield-poll hint. Generated banks
+keep the existing `runtime_tick` / `runtime_should_yield` ABI and the full
+faithful checks remain available as the slow path. Every transition that can
+make a CPU halt, DMA stall, instruction/event break, static guard
+invalidation, terminal halt, or interrupt pending sets/recomputes the
+corresponding runner state; break-PC and cycle-cap remain dynamically tested
+on every poll. `NDS_CPU_FAST_POLL=0/1` provides same-binary reference/forced
+testing, with the exact fast path default-on.
+
+Nav-to-700M same-binary A/B seconds were OFF
+`118.375 / 115.639 / 116.337 / 132.648 / 138.057` versus ON
+`120.148 / 112.707 / 110.558 / 132.487 / 106.690`. The host slowed sharply
+during the latter samples, so retain both views: min-of-5 improves
+**8.4% throughput** (115.639 -> 106.690 seconds) and medians improve
+**5.0%** (118.375 -> 112.707 seconds). All ten samples had identical
+700M instruction, static-coverage, Tier-3 `(20,503,13)`, and reject `(0,0)`
+counters. Forced-ON gates pass: G1 8/8 with byte-exact frames/audio and zero
+Tier-3/rejects; G2 2,400 frames with zero underruns/errors/input and exact FNV
+pair `(e333837761ca0d1c,d61d2eb50e96b61d)`; G3 byte-lock at 100M..700M on
+both framebuffers with the established RAM_COUNT sequence.
+
 Then rank exact CPU work from evidence. The leading low-risk probe is
 runner-scoped LTO/IPO: generated instructions currently make
 out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,

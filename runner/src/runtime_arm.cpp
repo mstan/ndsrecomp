@@ -81,6 +81,23 @@ std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
 // so a guest spin loop can't hang the host.
 unsigned long long g_cycle_cap = 0;  // 0 = unlimited
 std::vector<uint64_t> g_discovery_seen;
+uint32_t g_yield_poll_hint = 1u;
+bool g_cpu_fast_poll = true;
+
+void request_yield_poll() { g_yield_poll_hint = 1u; }
+
+bool configured_cpu_fast_poll() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_CPU_FAST_POLL");
+        if (!value || (value[0] == '1' && value[1] == '\0')) return true;
+        if (value[0] == '0' && value[1] == '\0') return false;
+        std::fprintf(stderr,
+                     "invalid NDS_CPU_FAST_POLL value (expected 0 or 1); "
+                     "using faithful full polling\n");
+        return false;
+    }();
+    return enabled;
+}
 
 bool static_bios_pc(uint32_t pc) {
     return (g_nds_active == NDS_ARM9)
@@ -215,6 +232,7 @@ struct StaticGuardScope {
         if (!saved.invalidated && guard_generation_changed(saved))
             saved.invalidated = true;
         g_static_guard = saved;
+        if (saved.invalidated) request_yield_poll();
     }
 };
 
@@ -245,10 +263,14 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 }
 }  // namespace
 
+extern "C" void runtime_request_yield_poll(void) { request_yield_poll(); }
+
 extern "C" void runtime_note_code_write(void) {
     if (!g_static_guard.invalidated &&
-        guard_generation_changed(g_static_guard))
+        guard_generation_changed(g_static_guard)) {
         g_static_guard.invalidated = true;
+        request_yield_poll();
+    }
 }
 
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
@@ -284,12 +306,14 @@ extern "C" uint32_t nds_exception_base(void) {
 extern "C" void nds_halt(const char* reason) {
     g_nds_terminal = true;
     g_nds_halt_reason = reason;
+    request_yield_poll();
 }
 
 // Slice control used by the scheduler: arm the cycle cap, clear terminal.
 extern "C" void nds_slice_begin(unsigned long long cap) {
     g_nds_terminal = false;
     g_cycle_cap = cap;
+    request_yield_poll();
 }
 
 // ── Trace ring (dispatch / branch / swi / irq events) ───────────────────
@@ -406,7 +430,10 @@ extern "C" void runtime_tick(uint32_t cycles) {
     // (R15 already points at the next instruction = the return address).
     // runtime_irq masks CPSR.I before vectoring, so it cannot re-enter here
     // while the handler runs.
-    if (!(g_cpu.cpsr & CPSR_I_BIT) && nds_irq_pending(g_nds_active))
+    const uint32_t pending = g_cpu_fast_poll
+        ? g_nds_irq_pending_cache[g_nds_active]
+        : nds_irq_pending(g_nds_active);
+    if (!(g_cpu.cpsr & CPSR_I_BIT) && pending)
         runtime_irq(g_cpu.R[15]);
 }
 // Per-instruction unwind: terminal halts only (a guest spin waiting on the
@@ -418,6 +445,18 @@ ArmCpuState g_preserved_unwind_state{};
 }
 
 extern "C" bool runtime_should_yield(void) {
+    // In fast mode rare state transitions eagerly set the hint. While it is
+    // clear, only the two per-instruction dynamic predicates remain. The full
+    // scan below is unchanged and is also the NDS_CPU_FAST_POLL=0 reference.
+    if (g_cpu_fast_poll && !g_yield_poll_hint) {
+        const bool break_pc_hit =
+            g_runtime_break_pc &&
+            (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u);
+        const bool cycle_cap_hit =
+            g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap;
+        if (!break_pc_hit && !cycle_cap_hit) return false;
+    }
+
     // insn7/insn9 anchor reached → stop at this exact instruction (see io.cpp
     // g_nds_insn_stop). The bisector resets per K, so the mid-function unwind
     // (which does not preserve the call-return stack) is never resumed from.
@@ -440,13 +479,15 @@ extern "C" bool runtime_should_yield(void) {
         g_unwinding = true;
         return true;
     }
-    if (g_runtime_break_pc && (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u))
+    if (g_runtime_break_pc &&
+        (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u))
         nds_halt("break pc");
     if (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) {
         g_unwinding = true;
         return true;
     }
     if (g_nds_terminal) { g_unwinding = true; return true; }
+    g_yield_poll_hint = 0u;
     return false;
 }
 // Cooperative slice preemption: trips once this slice's cycle cap is
@@ -923,6 +964,8 @@ extern "C" void runtime_unimplemented_op(const char* op_name, uint32_t pc) {
     nds_halt("unimplemented op");
 }
 extern "C" void runtime_init(void*) {
+    g_cpu_fast_poll = configured_cpu_fast_poll();
+    request_yield_poll();
     g_crs_depth = 0;
     g_deferred_cycles = 0;
     g_discovery_seen.clear();

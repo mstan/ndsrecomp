@@ -236,6 +236,10 @@ void     nds_raise_irq(int cpu, uint32_t bits);
 // clears, matching melonDS NDS::ClearIRQ.
 void     nds_clear_irq(int cpu, uint32_t bits);
 uint32_t nds_irq_pending(int cpu);
+// Exact IME&IE&IF value maintained at every interrupt-register mutation.
+// runtime_tick may read this directly in its parity-safe common path; HALT
+// wake rules must continue to use nds_halt_wake_pending instead.
+extern uint32_t g_nds_irq_pending_cache[2];
 
 // Guest CPU low-power state. HALTCNT/CP15 halt is cooperative rather than a
 // terminal runner failure: the scheduler advances a sleeping CPU's timestamp

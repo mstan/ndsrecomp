@@ -17,6 +17,12 @@
 #include "spu.h"
 #include "vram.h"
 
+// Runner-only rare-condition hint owned by runtime_arm.cpp. Generated banks
+// keep calling the unchanged runtime_should_yield ABI.
+extern "C" void runtime_request_yield_poll(void);
+
+uint32_t g_nds_irq_pending_cache[2] = {0, 0};
+
 namespace {
 
 // ── IPCSYNC (0x04000180) — the cross-core handshake ─────────────────────
@@ -46,6 +52,11 @@ bool     g_in_vblank = false;      // DISPSTAT VBlank flag latch
 uint32_t g_ime[2] = {0, 0};           // 0x208 master enable (bit0)
 uint32_t g_ie[2]  = {0, 0};           // 0x210 enable mask
 uint32_t g_if[2]  = {0, 0};           // 0x214 request flags (write-1-to-clear)
+inline void irq_recompute(int cpu) {
+    cpu &= 1;
+    g_nds_irq_pending_cache[cpu] =
+        (g_ime[cpu] & 1u) ? (g_ie[cpu] & g_if[cpu]) : 0u;
+}
 uint16_t g_exmemcnt[2] = {0x4000u, 0x4000u}; // 0x204, shared ownership bits
 uint16_t g_powercontrol7 = 0x0001u;    // 0x304 POWCNT2 (sound on, Wi-Fi off)
 uint32_t g_keyinput = 0x007F03FFu;
@@ -584,6 +595,7 @@ inline void brk_check() {
     if (g_brk_ptr && *g_brk_ptr >= g_brk_target) {
         g_brk_hit = true;
         if (g_brk_is_insn) g_nds_insn_stop = true;
+        runtime_request_yield_poll();
     }
 }
 
@@ -924,6 +936,7 @@ void dma_start(int cpu, int ch) {
     d.burst_start = true;
     d.running = true;
     d.in_progress = true;
+    runtime_request_yield_poll();
     if (!was_running) g_dma_entry_cycle[cpu] = g_runtime_cycles;
 }
 
@@ -1739,6 +1752,7 @@ void nds_io_reset() {
     for (int i = 0; i < 2; ++i) {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
         g_ime[i] = 0; g_ie[i] = 0; g_if[i] = 0; g_haltcnt[i] = 0;
+        g_nds_irq_pending_cache[i] = 0;
         g_cpu_halted[i] = false;
         g_halt_entry_cycle[i] = 0;
         g_dispstat[i] = 0;
@@ -2189,9 +2203,17 @@ void nds_tick_rtc(unsigned long long system_cycles) {
 }
 
 // ── Interrupt controller ────────────────────────────────────────────────
-void nds_raise_irq(int cpu, uint32_t bits) { g_if[cpu & 1] |= bits; }
+void nds_raise_irq(int cpu, uint32_t bits) {
+    cpu &= 1;
+    g_if[cpu] |= bits;
+    irq_recompute(cpu);
+}
 
-void nds_clear_irq(int cpu, uint32_t bits) { g_if[cpu & 1] &= ~bits; }
+void nds_clear_irq(int cpu, uint32_t bits) {
+    cpu &= 1;
+    g_if[cpu] &= ~bits;
+    irq_recompute(cpu);
+}
 
 void nds_dump_irq() {
     for (int c = 0; c < 2; ++c)
@@ -2214,6 +2236,7 @@ void nds_cpu_enter_halt(int cpu) {
     // the completed MCR cost as ARM::Cycles debt while sleep snaps to targets.
     g_halt_entry_cycle[cpu] = g_runtime_cycles;
     g_cpu_halted[cpu] = true;
+    runtime_request_yield_poll();
 }
 
 bool nds_halt_wake_pending(int cpu) {
@@ -2727,9 +2750,11 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             return;
         case 0x04000208:
             g_ime[cpu] = value & 0x1u;
+            irq_recompute(cpu);
             return;
         case 0x04000210:
             g_ie[cpu] = value;
+            irq_recompute(cpu);
             return;
         case 0x04000214:
             g_if[cpu] &= ~value;     // write-1-to-clear
@@ -2737,6 +2762,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             // the bit while the FIFO condition still holds (melonDS
             // ARM9IOWrite16/32 case 0x04000214/216 call GPU3D.CheckFIFOIRQ()).
             if (cpu == 0) nds_gpu3d_check_fifo_irq();
+            irq_recompute(cpu);
             return;
         case 0x04000216:             // IF bits 31..16 (16-bit acknowledge)
             // melonDS wires this on the ARM9 only (ARM9IOWrite16); the ARM7
@@ -2744,6 +2770,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
             if (cpu == 0) {
                 g_if[0] &= ~(value << 16);
                 nds_gpu3d_check_fifo_irq();
+                irq_recompute(0);
             }
             return;
         case 0x04000204: case 0x04000205: { // EXMEMCNT
@@ -2785,6 +2812,7 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
                 g_halt_entry_cycle[cpu] =
                     g_runtime_cycles >= code ? g_runtime_cycles - code : 0u;
                 g_cpu_halted[cpu] = true;
+                runtime_request_yield_poll();
             }
             return;
         case 0x04000304: case 0x04000305: { // POWCNT2 (ARM7)
