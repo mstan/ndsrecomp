@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -21,6 +22,9 @@
 
 #include "NDS.h"
 #include "GPU3D_Soft.h"
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+#include "GPU3D_Compute.h"
+#endif
 
 namespace {
 
@@ -43,6 +47,11 @@ NdsGxWriteTraceEntry g_gx_write_trace[kGxWriteTraceSize] = {};
 uint64_t g_gx_write_trace_count = 0;
 
 NdsGpu3dProfile g_gpu3d_profile{};
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+bool g_compute_rendered_frame = false;
+bool g_compute_frame_ready = false;
+uint32_t g_compute_zero_line[256] = {};
+#endif
 
 bool profiling() {
     static const bool enabled = std::getenv("NDS_PROFILE_GPU") != nullptr;
@@ -185,9 +194,54 @@ void Semaphore_Post(Semaphore* sema, int count) {
 // ── Runner-facing bridge API ────────────────────────────────────────────
 
 void nds_gpu3d_set_threaded(bool threaded) {
-    auto& renderer = static_cast<melonDS::SoftRenderer&>(
-        g_nds.GPU.GPU3D.GetCurrentRenderer());
-    renderer.SetThreaded(threaded, g_nds.GPU);
+    auto* renderer = dynamic_cast<melonDS::SoftRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    if (renderer) renderer->SetThreaded(threaded, g_nds.GPU);
+}
+
+void nds_gpu3d_use_soft_renderer(bool threaded) {
+    auto* renderer = dynamic_cast<melonDS::SoftRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    if (!renderer) {
+        auto replacement = std::make_unique<melonDS::SoftRenderer>();
+        renderer = replacement.get();
+        g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(replacement));
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        g_compute_rendered_frame = false;
+        g_compute_frame_ready = false;
+#endif
+    }
+    renderer->SetThreaded(threaded, g_nds.GPU);
+}
+
+bool nds_gpu3d_compute_renderer_built() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool nds_gpu3d_use_compute_renderer() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto renderer = melonDS::ComputeRenderer::New();
+    if (!renderer) return false;
+    renderer->SetRenderSettings(1, false);
+    while (renderer->NeedsShaderCompile()) {
+        int current = 0;
+        int count = 0;
+        renderer->ShaderCompileStep(current, count);
+        std::fprintf(stderr, "[gpu3d] compute shader %d/%d\r",
+                     current + 1, count);
+    }
+    std::fprintf(stderr, "[gpu3d] compute shaders ready          \n");
+    g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(renderer));
+    g_compute_rendered_frame = false;
+    g_compute_frame_ready = false;
+    return true;
+#else
+    return false;
+#endif
 }
 
 void nds_gpu3d_profile(NdsGpu3dProfile* out) {
@@ -250,6 +304,10 @@ void nds_gpu3d_reset() {
     std::memset(g_gx_write_trace, 0, sizeof g_gx_write_trace);
     g_gx_write_trace_count = 0;
     g_gpu3d_profile = NdsGpu3dProfile{};
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_compute_rendered_frame = false;
+    g_compute_frame_ready = false;
+#endif
     nds_gxfifo_set_stall(false);
 }
 
@@ -344,15 +402,27 @@ void nds_gpu3d_vblank() {
 void nds_gpu3d_vcount215() {
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        if (g_nds.GPU.GPU3D.IsRendererAccelerated())
+            g_compute_rendered_frame = true;
+#endif
         return;
     }
     const auto start = ProfileClock::now();
     g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated())
+        g_compute_rendered_frame = true;
+#endif
     profile_add(g_gpu3d_profile.vcount215_ns, start);
     ++g_gpu3d_profile.vcount215_calls;
 }
 
 const uint32_t* nds_gpu3d_line(int line) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated() && !g_compute_frame_ready)
+        return g_compute_zero_line;
+#endif
     if (!profiling()) return g_nds.GPU.GPU3D.GetLine(line);
     const auto start = ProfileClock::now();
     const uint32_t* result = g_nds.GPU.GPU3D.GetLine(line);
@@ -374,4 +444,12 @@ void nds_gpu3d_start_frame() {
         g_nds.GPU.GPU3D.RestartFrame(g_nds.GPU);
         g_nds.GPU.GPU3D.AbortFrame = false;
     }
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
+        g_compute_rendered_frame) {
+        g_nds.GPU.GPU3D.GetCurrentRenderer().PrepareCaptureFrame();
+        g_compute_rendered_frame = false;
+        g_compute_frame_ready = true;
+    }
+#endif
 }

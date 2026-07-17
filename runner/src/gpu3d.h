@@ -13,6 +13,13 @@ void nds_gpu3d_reset();
 // only where the byte-identical renderer work runs; guest-visible device
 // timing and state remain on the scheduler thread.
 void nds_gpu3d_set_threaded(bool threaded);
+void nds_gpu3d_use_soft_renderer(bool threaded);
+
+// Optional performance-HLE renderer. The OpenGL context and function loader
+// must be current before activation. Failure leaves the faithful soft
+// renderer selected. use_soft_renderer() explicitly restores the fallback.
+bool nds_gpu3d_use_compute_renderer();
+bool nds_gpu3d_compute_renderer_built();
 
 struct NdsGpu3dProfile {
     uint64_t vcount215_ns;

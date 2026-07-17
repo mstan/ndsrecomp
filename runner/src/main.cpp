@@ -24,6 +24,9 @@
 #include "gpu3d.h"
 #include "profile_report.h"
 #include "sha1.h"
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+#include "melonds_compute/ComputeHost.h"
+#endif
 
 // Generated per-CPU dispatch tables (C linkage).
 extern "C" const DispatchEntry g_dispatch_arm9_bios[];
@@ -221,6 +224,23 @@ int main(int argc, char** argv) {
 
     g_discover_static_misses = discover_static_misses;
 
+    bool compute_requested = false;
+    if (const char* renderer = std::getenv("NDS_3D_RENDERER")) {
+        if (std::strcmp(renderer, "soft") != 0 &&
+            std::strcmp(renderer, "compute") != 0) {
+            std::fprintf(stderr,
+                         "invalid NDS_3D_RENDERER (expected soft or compute)\n");
+            return 2;
+        }
+        compute_requested = std::strcmp(renderer, "compute") == 0;
+        if (compute_requested && !nds_gpu3d_compute_renderer_built()) {
+            std::fprintf(stderr,
+                "NDS_3D_RENDERER=compute requested but this runner was "
+                "built without NDS_ENABLE_COMPUTE_RENDERER\n");
+            return 2;
+        }
+    }
+
     // Interactive play benefits from overlapping the upstream soft
     // rasterizer with guest execution. Keep serve/non-frontend runs on the
     // established single-threaded path by default so parity gates are
@@ -400,6 +420,13 @@ int main(int argc, char** argv) {
     };
     boot();
 
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    // Interactive mode creates the hidden context only after its visible SDL
+    // allocations succeed. Headless/serve modes own it here so forced
+    // compute selection is observable by the parity and perf harnesses.
+    if (!interactive && !nds_compute_host_start()) return 1;
+#endif
+
     if (interactive) {
         // The per-access deep-trace payloads (bus ring, mem_r/mem_w events,
         // per-insn register images) default OFF in play mode for real-time
@@ -431,6 +458,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] debug server mode from reset\n");
         debug_set_reset_fn(boot);
         debug_serve(port);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        nds_compute_host_stop();
+#endif
         return 0;
     }
 
@@ -453,5 +483,8 @@ int main(int argc, char** argv) {
     nds_profile_report(stderr);
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    nds_compute_host_stop();
+#endif
     return 0;
 }

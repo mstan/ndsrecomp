@@ -12,10 +12,14 @@
 
 #include "debug_server.h"
 #include "gpu2d.h"
+#include "gpu3d.h"
 #include "io.h"
 #include "profile_report.h"
 #include "scheduler.h"
 #include "spu.h"
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+#include "melonds_compute/ComputeHost.h"
+#endif
 
 namespace {
 // Written per presented frame by the frontend loop, read from the same
@@ -255,6 +259,26 @@ int nds_run_interactive_frontend() {
         return 1;
     }
 
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    // Activate only after every fallible visible-frontend allocation. From
+    // here onward teardown always destroys the compute renderer while this
+    // context is current.
+    if (!nds_compute_host_start()) {
+        SDL_DestroyTexture(bottom);
+        SDL_DestroyTexture(top);
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+#else
+    if (const char* selection = std::getenv("NDS_3D_RENDERER")) {
+        if (std::strcmp(selection, "compute") == 0)
+            std::fprintf(stderr,
+                         "[gpu3d] compute renderer not built; using soft\n");
+    }
+#endif
+
     AudioQueue audio_queue{};
     SDL_AudioSpec want{};
     // The mixer runs once per 1024 DS system cycles. Request its integer host
@@ -332,6 +356,14 @@ int nds_run_interactive_frontend() {
     const uint64_t soak_start = SDL_GetPerformanceCounter();
 
     while (running) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        if (!nds_compute_host_make_current()) {
+            std::fprintf(stderr, "[gpu3d] lost compute GL context: %s\n",
+                         SDL_GetError());
+            running = false;
+            break;
+        }
+#endif
         // Play-mode debug surface: execute any pending TCP command at this
         // between-frames safe point (no-op when no pump was started or no
         // client is connected). See debug_server.h.
@@ -544,6 +576,9 @@ int nds_run_interactive_frontend() {
     const uint64_t audio_underruns =
         audio_queue.underruns.load(std::memory_order_relaxed);
     if (audio) SDL_CloseAudioDevice(audio);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    nds_compute_host_stop();
+#endif
     SDL_DestroyTexture(bottom);
     SDL_DestroyTexture(top);
     SDL_DestroyRenderer(renderer);

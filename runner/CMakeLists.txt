@@ -136,6 +136,7 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
         vendor/melonds/GPU3D_TexcacheOpenGL.cpp
         src/melonds_compute/GPU_OpenGL.cpp
         src/melonds_compute/PlatformCompute.cpp
+        src/melonds_compute/ComputeHost.cpp
         vendor/melonds/OpenGLSupport.cpp
         vendor/melonds/glad/glad.c
         vendor/melonds/xxhash/xxhash.c)
