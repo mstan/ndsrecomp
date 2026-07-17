@@ -77,14 +77,17 @@ those as baseline evidence. Repeat menu/title/castle
 
 ## ISSUE-2 — [PIVOT — PRIMARY WORKSTREAM] locked 60 FPS with headroom
 
-**User decision (2026-07-16):** the LLE floor is proven (firmware
+**User decisions (2026-07-16, expanded 2026-07-17):** the LLE floor is proven (firmware
 tier3=0, all gates byte-locked vs the independent oracle), which is
 the precondition the project policy set for building layers above it.
 The project now pivots to a **default-on host-side optimization
 layer** to reach a locked 60 FPS *with headroom* — headroom matters
 because widescreen/ultrawide enhancements (WS-E) come next and 3D
 rasterization cost scales linearly with pixel count. Primary target
-architecture: x86-64.
+architecture: x86-64. The practical headroom target is now roughly
+**2x real-time throughput** (about 8.3 ms of host work per 16.7 ms
+frame), not merely clearing 60 FPS, to absorb lower-end hosts and later
+21:9 + anti-aliasing/supersampling cost.
 
 ### Policy tiers (agreed with the user — respect these boundaries)
 
@@ -93,10 +96,13 @@ architecture: x86-64.
    FORCED (the B3 precedent). These may be **always-on / default-on**
    with zero policy tension. *This tier is where the 60 FPS is
    expected to come from.*
-2. **Accuracy-affecting perf HLE, default-on** — would amend the
-   standing parity-default rule (PRINCIPLES.md / ENHANCEMENTS Rule 1).
-   **Requires explicit user sign-off per item**, and only if tier 1
-   measurably falls short. Do not start tier-2 work unprompted.
+2. **Accuracy-affecting perf HLE** — the user explicitly authorized
+   pursuing modular floating-point/approximate shortcuts when they offer
+   gains comparable to the strongest parity-safe options. The proven
+   faithful LLE renderer must remain intact and selectable; every HLE
+   shortcut must be separately gated, accuracy-diffed against LLE, and
+   measured before any default-on decision. Do not mix several
+   approximations into one unattributable change.
 3. **Enhancements** (widescreen, ultrawide, GL/compute renderer,
    higher internal resolution) — WS-E, opt-in, later. Not this issue.
 
@@ -113,14 +119,17 @@ rasterizer inner loops if profiling justifies it, nowhere else.
 
 ### P-1: measured gameplay baseline (falls out of ISSUE-1 step 3)
 
-The 40 FPS report and the display-bucket numbers predate the merged
-banks. The ISSUE-1 fps/profile probe at menu / title / castle grounds
-is the baseline that ranks the buckets. Every subsequent P-item is
-justified (or dropped) by this measurement, not by the inference.
-The 2026-07-16 attempt was rejected for severe unrelated compiler load;
-see ISSUE-1. **P-1 remains the next action and P-2 must not start first.**
+Measured 2026-07-17 on the validated split gameplay banks, quiet host,
+normal priority. Firmware menu held 59.84 FPS with zero underruns; title
+ran 54.03--55.88 FPS; live castle-grounds player control ran
+37.51--40.76 FPS, with a stable 60-second sample at **39.41 FPS**
+(2,366 frames / 1,453 underruns). The castle scheduler sample was
+5.218 us/round: ARM9 2.717, ARM7 1.444, devices 0.731, display 0.256;
+the sparse 1/1009 sampler usually misses the once-per-frame VCount215
+raster call. GPU2D itself was only 0.862 ms/frame. P-2 is justified by
+the direct FPS gap and the verified VCount215 soft-rasterizer path.
 
-### P-2: threaded 3D software rasterizer (expected main win)
+### P-2: threaded 3D software rasterizer — COMPLETE (2026-07-17)
 
 Thread the vendored melonDS soft renderer the way upstream does —
 scanline-partitioned worker rendering with **identical pixel output**
@@ -137,43 +146,45 @@ Verified facts (2026-07-16, this session):
   `Thread_Create/Wait/Free` (std::thread) and
   `Semaphore_Create/Free/Reset/Wait/Post` (mutex+cv) —
   `runner/src/gpu3d.cpp:95-148`.
-- The runner deliberately never calls `SetThreaded(true, …)` — the
-  comment at `runner/src/gpu3d.cpp:90-93` says single-threaded was
-  chosen for deterministic, oracle-comparable execution. That concern
-  is what the gating pattern below answers.
-
-Plan:
-
-1. Wire `SetThreaded(true, gpu)` from the runner bridge
-   (`runner/src/gpu3d.cpp` / frontend init). **No vendor-file edits
-   needed** — it's a public vendored API. If a vendor file genuinely
-   must change, restore upstream code verbatim and document the delta;
-   never hand-roll divergent logic inside `runner/vendor/melonds/`.
-2. Mirror the **B3 gating pattern** exactly: interactive/play mode
-   defaults threaded; `--serve`/batch/oracle modes default
-   single-threaded and bit-identical; an env var (suggest
-   `NDS_3D_THREADED=1`) forces threaded mode on a serve server for
-   equivalence proofs and honest same-binary perf A/B.
-3. **Prove parity**: G3 byte-lock (100M..700M, both framebuffers)
-   with threading FORCED, plus G1/G2/G3 green in normal modes.
-   Threading is host-side render-order only; if any guest-visible
-   divergence appears (GXSTAT, RDLINES-class state, capture
-   contents), that's a real finding — stop and root-cause, don't
-   fudge the gate.
-4. **Measure**: same-binary interleaved A/B min-of-3 on the serve
-   nav→700M path (threaded vs not), and the interactive fps probe at
-   castle grounds vs the P-1 baseline. Watch the sync boundary: the
-   2D compositor reads 3D scanlines as they complete
-   (`RenderThreadRendering` / semaphore handshake); a naive
-   full-frame join wastes the parallelism.
-5. Commit with numbers.
+- The old runner policy deliberately left this disabled. It is now
+  wired only through the public API: interactive defaults on,
+  serve/batch defaults off, and `NDS_3D_THREADED=0/1` provides
+  same-binary A/B and forced-on proof. No vendor files changed.
+- Reusable debug reset first disables/joins the worker, resets all
+  devices, then restores the selected policy. Five forced-threaded
+  reset→1,000-VBlank→framebuffer-read stress cycles passed.
+- Gates after the lifecycle fix: all eight G1 scenarios pass with
+  zero Tier-3/rejects; G2 2,400 frames has zero underruns/audio errors
+  and FNV pair `(e333837761ca0d1c,d61d2eb50e96b61d)`; normal and
+  FORCED-threaded G3 byte-lock both pass at 100M..700M, both screens.
+- Serve nav→700M interleaved A/B (seconds, lower is better): off
+  `187.164 / 174.689 / 188.972`; on
+  `150.810 / 151.957 / 154.126`. Min-of-3 improves **13.7%**;
+  medians improve **18.8%**. Every sample retained Tier-3
+  `(20,503,13)` and rejects `(0,0)`.
+- Live castle-control same-binary windows: off
+  `35.76 / 36.28 / 33.96 FPS`; on
+  `42.62 / 41.61 / 41.66 FPS` (**16.5% median gain**). P-2 is a
+  material default-on win but is still far short of locked 60 and the
+  2x-capacity target.
 
 ### P-3: B5 — scheduler-round overhead [JUDG]
 
-Only if P-1 shows the scheduler buckets material after P-2 (title
-profile had scheduler round 5.37 µs: ARM9 2.13, ARM7 1.18, devices
-1.68). Round-granular costs: per-round Run() dispatch, timer catch-up.
-Same discipline: measure, change, G-gates, measure, commit.
+P-2 still leaves castle near 42 FPS, so this is material. First add
+direct per-frame timing around 3D RenderFrame/worker wait/GetLine (the
+1/1009 scheduler sampler misses the once-per-frame raster call) and use
+a diagnostic-only null/clear renderer to establish the zero-raster
+ceiling. Do not ship that diagnostic renderer.
+
+Then rank exact CPU work from evidence. The leading low-risk probe is
+runner-scoped LTO/IPO: generated instructions currently make
+out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,
+`runtime_tick`, ARM9 cycle combine, and memory timing helpers. If full
+LTO establishes a useful ceiling, prefer small CPU-specialized inline
+fast paths with exact fallback over one giant opaque change. Retain raw
+`switch_ns`, `switches`, `crs_words`, and `next_event_ns` before
+touching context copies or deadline calculation. Same discipline:
+measure, change, G-gates, measure, commit.
 
 ### P-4: bus/runtime residuals [MECH-ish]
 
@@ -183,24 +194,39 @@ mirror the melonDS timing model exactly, prove with G3). Also any
 remaining slow-path bus hits visible in the profile. Only if material
 after P-2/P-3.
 
-### P-5: escalation (tier 2) — STOP AND ASK
+### P-5: modular performance-HLE escalation (tier 2)
 
-If, after P-2..P-4, castle-grounds fps is still short of locked 60 at
-normal process priority, compile the measured evidence (bucket
-breakdown, what each P-item bought) and **ask the user** before any
-accuracy-affecting work. Do not silently degrade fidelity for speed.
+If P-2..P-4 cannot reach the 2x-headroom target, use the measured
+evidence to rank modular HLE candidates, including floating-point or
+approximate raster math. Keep faithful LLE selectable, expose explicit
+A/B control, quantify framebuffer/visual differences, and never
+silently remove fidelity for speed.
+
+Current best architecture candidate is upstream melonDS
+`ComputeRenderer` behind the existing `Renderer3D` seam, with untouched
+`SoftRenderer` as faithful fallback. It is not drop-in: the runner must
+produce real 512-byte flat-VRAM dirty granules for its texture cache,
+add the accelerated capture/readback hook required by CPU GPU2D
+`GetLine`, and provide a GL 4.3 context/frontend path. Classic GL is a
+lower-accuracy compatibility fallback and also expects raw VRAM banks
+the runner shim does not expose. Scalar floating-point interpolation
+shortcuts are lower priority: review estimates only 1.2--1.8x
+renderer-local and potentially <=10--25% whole-runtime, with edge/depth
+error. Use the null-render ceiling before investing in either path.
 
 ### Acceptance for ISSUE-2
 
 - Sustained locked 60 FPS interactive through title, attract, AND
   castle-grounds gameplay, `underruns=0`, normal process priority
   (extends the WS-B acceptance line in PLAN.md).
-- **Headroom**: average frame work comfortably under budget —
-  target ≤ ~11 ms of the 16.7 ms frame so a future 16:9 widescreen
-  render (~1.33× pixels) still fits without tier-2 concessions.
+- **Headroom**: target roughly 2x real-time throughput, i.e. average
+  host frame work ≤ ~8.3 ms of the 16.7 ms frame, so lower-end CPUs
+  and future 21:9 widescreen render (~1.75× pixels at equal height,
+  before AA/supersampling) still have usable budget.
   Report the measured margin, whatever it is.
-- All three gates green; every optimization proven parity-safe with
-  its forced-on G3 run; per-change perf numbers in commit messages.
+- All three gates green; every tier-1 optimization proven parity-safe
+  with its forced-on G3 run; tier-2 backends get explicit visual/error
+  and guest-state validation; per-change perf numbers in commits.
 
 ## ISSUE-3 — [ROUTINE, RECURRING] gameplay coverage merges
 

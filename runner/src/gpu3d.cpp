@@ -88,9 +88,9 @@ bool GPU::MakeVRAMFlat_TexPalCoherent(
 }  // namespace melonDS
 
 // ── melonDS::Platform shim ──────────────────────────────────────────────
-// Real primitives so every vendored code path is sound, but the runner
-// never calls SoftRenderer::SetThreaded(true, ...): deterministic,
-// oracle-comparable execution requires the single-threaded render path.
+// Real primitives for the vendored renderer's optional host worker thread.
+// The runner selects this through SoftRenderer's public API; serve-mode
+// parity runs remain single-threaded unless explicitly forced.
 
 namespace melonDS::Platform {
 
@@ -148,6 +148,12 @@ void Semaphore_Post(Semaphore* sema, int count) {
 }  // namespace melonDS::Platform
 
 // ── Runner-facing bridge API ────────────────────────────────────────────
+
+void nds_gpu3d_set_threaded(bool threaded) {
+    auto& renderer = static_cast<melonDS::SoftRenderer&>(
+        g_nds.GPU.GPU3D.GetCurrentRenderer());
+    renderer.SetThreaded(threaded, g_nds.GPU);
+}
 
 void nds_gpu3d_state(NdsGxStateSnapshot* out) {
     if (!out) return;

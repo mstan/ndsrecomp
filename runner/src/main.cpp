@@ -21,6 +21,7 @@
 #include "debug_server.h"
 #include "frontend.h"
 #include "gpu2d.h"
+#include "gpu3d.h"
 #include "profile_report.h"
 #include "sha1.h"
 
@@ -220,6 +221,26 @@ int main(int argc, char** argv) {
 
     g_discover_static_misses = discover_static_misses;
 
+    // Interactive play benefits from overlapping the upstream soft
+    // rasterizer with guest execution. Keep serve/non-frontend runs on the
+    // established single-threaded path by default so parity gates are
+    // unchanged; NDS_3D_THREADED=0/1 provides same-binary A/B and a forced-on
+    // parity proof.
+    bool gpu3d_threaded = interactive;
+    if (const char* value = std::getenv("NDS_3D_THREADED")) {
+        if (value[0] == '0' && value[1] == '\0') {
+            gpu3d_threaded = false;
+        } else if (value[0] == '1' && value[1] == '\0') {
+            gpu3d_threaded = true;
+        } else {
+            std::fprintf(stderr,
+                         "invalid NDS_3D_THREADED value (expected 0 or 1)\n");
+            return 2;
+        }
+    }
+    std::fprintf(stderr, "[gpu3d] threaded soft renderer: %s\n",
+                 gpu3d_threaded ? "on" : "off");
+
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
     auto fw = read_file(dir + "/firmware.bin");
@@ -245,6 +266,10 @@ int main(int argc, char** argv) {
     // Full power-on init, reusable so the debug server can honour `reset`
     // (the bisector compares fresh-from-reset at each event count).
     auto boot = [&]() {
+        // A debug reset may arrive after a threaded frame was started. Join
+        // the worker before GPU3D::Reset clears its render buffers, then
+        // restore the selected host policy once initialization is complete.
+        nds_gpu3d_set_threaded(false);
         bus_init();
         bus_load_arm9_bios(a9.data(), (uint32_t)a9.size());
         bus_load_arm7_bios(a7.data(), (uint32_t)a7.size());
@@ -371,6 +396,7 @@ int main(int argc, char** argv) {
         scheduler_init();
         scheduler_reset_cpu(0, 0xFFFF0000u, reset_cpsr);  // ARM9
         scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
+        nds_gpu3d_set_threaded(gpu3d_threaded);
     };
     boot();
 

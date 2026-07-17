@@ -9,6 +9,11 @@
 
 void nds_gpu3d_reset();
 
+// Host scheduling policy for the vendored soft rasterizer. Threading changes
+// only where the byte-identical renderer work runs; guest-visible device
+// timing and state remain on the scheduler thread.
+void nds_gpu3d_set_threaded(bool threaded);
+
 // ARM9 3D register window: DISP3DCNT (0x04000060..63) plus the melonDS
 // dispatch range 0x04000320..0x040006A3 (tables, clear/fog, GXFIFO at
 // 0x400..0x43F, direct command ports at 0x440..0x5CB, GXSTAT/results at
