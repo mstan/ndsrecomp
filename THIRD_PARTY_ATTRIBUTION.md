@@ -73,6 +73,11 @@ remains a device model, not HLE).
   minimal interface slice the vendored units consume; as derived interfaces
   they are likewise GPL-3.0-or-later. The bridge `runner/src/gpu3d.cpp`
   implements them against the runner's own device models.
+- Project-written compute adapters under `runner/src/melonds_compute/`
+  provide the host GL-context owner, the `GLCompositor` interface slice, and
+  the `Platform` file-service slice consumed by the byte-identical upstream
+  compute sources. These interfaces are derived from melonDS and are likewise
+  GPL-3.0-or-later; they do not replace or alter the faithful soft renderer.
 - Consequence: `nds_runner` is a combined work with melonDS. Any
   distribution of the runner binary must comply with GPL-3.0-or-later.
   The recompiler, the generated banks, and all `ndsref`-independent tooling

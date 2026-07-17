@@ -14,6 +14,9 @@ endif()
 option(NDS_BOOTSTRAP_FIRMWARE
     "Build with BIOS banks only so guest-produced firmware RAM can be captured"
     OFF)
+option(NDS_ENABLE_COMPUTE_RENDERER
+    "Build the optional melonDS OpenGL 4.3 compute renderer"
+    OFF)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -126,7 +129,22 @@ add_executable(nds_runner
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
+if(NDS_ENABLE_COMPUTE_RENDERER)
+    target_sources(nds_runner PRIVATE
+        vendor/melonds/GPU3D_Compute.cpp
+        vendor/melonds/GPU3D_Texcache.cpp
+        vendor/melonds/GPU3D_TexcacheOpenGL.cpp
+        src/melonds_compute/GPU_OpenGL.cpp
+        src/melonds_compute/PlatformCompute.cpp
+        vendor/melonds/OpenGLSupport.cpp
+        vendor/melonds/glad/glad.c
+        vendor/melonds/xxhash/xxhash.c)
+    target_compile_definitions(nds_runner PRIVATE
+        NDS_HAVE_COMPUTE_RENDERER=1
+        MELONDS_GL_HEADER="glad/glad.h")
+endif()
 target_include_directories(nds_runner PRIVATE
+    $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
     src
     vendor/melonds                                     # vendored melonDS GPU3D + shims (GPL-3.0-or-later)
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
@@ -140,6 +158,27 @@ if(NOT MSVC)
         vendor/melonds/GPU3D_Soft.cpp
         vendor/melonds/Savestate.cpp
         PROPERTIES COMPILE_OPTIONS "-w")
+    if(NDS_ENABLE_COMPUTE_RENDERER)
+        set_source_files_properties(
+            vendor/melonds/GPU3D_Compute.cpp
+            vendor/melonds/GPU3D_Texcache.cpp
+            vendor/melonds/GPU3D_TexcacheOpenGL.cpp
+            vendor/melonds/OpenGLSupport.cpp
+            vendor/melonds/glad/glad.c
+            vendor/melonds/xxhash/xxhash.c
+            PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+endif()
+if(NDS_ENABLE_COMPUTE_RENDERER)
+    if(MSVC)
+        set_source_files_properties(vendor/melonds/OpenGLSupport.cpp
+            PROPERTIES COMPILE_OPTIONS
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute/PlatformCompute.h")
+    else()
+        set_source_files_properties(vendor/melonds/OpenGLSupport.cpp
+            PROPERTIES COMPILE_OPTIONS
+            "-w;-include;${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute/PlatformCompute.h")
+    endif()
 endif()
 target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
 if(NDS_BOOTSTRAP_FIRMWARE)
@@ -173,6 +212,12 @@ find_package(SDL2 CONFIG QUIET)
 if(TARGET SDL2::SDL2)
     target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
     target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+endif()
+if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2)
+    message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires SDL2")
+endif()
+if(NDS_ENABLE_COMPUTE_RENDERER AND CMAKE_DL_LIBS)
+    target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})
 endif()
 if(WIN32)
     target_link_libraries(nds_runner PRIVATE ws2_32)
