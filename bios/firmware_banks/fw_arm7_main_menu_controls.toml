@@ -9,7 +9,7 @@ cpu          = "arm7"
 isa          = "armv4t"
 load_address = 0x02000000
 size         = 0x00418000
-entry_pc     = 0x038043DE
+entry_pc     = 0x037FFBFC
 
 [identity]
 sha1 = "ff385bba88f9a7b6a5d0267efbcf4b404d4efc33"
@@ -19,6 +19,31 @@ runtime_start = 0x037F8000
 source_start  = 0x02400000
 size          = 0x00018000
 name          = "scenario ARM7 WRAM source copy"
+
+[[entry_point]]
+addr = 0x037FFBFC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC00
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC02
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC04
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x038008C6
+mode = "thumb"
+kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x038043D4

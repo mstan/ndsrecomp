@@ -55,6 +55,11 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02324B44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02324DE0
 mode = "thumb"
 kind = "runtime_observed"
@@ -81,6 +86,21 @@ kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x02325088
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02325090
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02325098
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023250CC
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -247,6 +267,66 @@ kind = "runtime_observed"
 [[entry_point]]
 addr = 0x0232608E
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D004
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D008
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D00C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D010
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D014
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D018
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D01C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D020
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D024
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D028
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D02C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0232D030
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]

@@ -150,9 +150,19 @@ the performance plan.
   binaries. Serve-mode nav+title→700M interleaved A/B min-of-3:
   321.0s → 249.9s (~22%). G1/G2/G3 green. Residual: gameplay-window
   discovery passes merge monotonically via the same tool.
-- **A3 [MECH] 12 extended firmware bank sets.** The menu-interaction
-  tier-3 debt (824k/536k insns). The promotion runbook already exists;
-  needs `--discover-static-misses` runs per scenario, regen, G1.
+- **A3 ✅ DONE (2026-07-16).** All extended firmware bank sets rebuilt
+  from fresh per-scenario LLE captures (traversal --capture-static-dir
+  on a discovery server, fresh server pair per scenario — consecutive
+  scenarios on one pair desync the audio ordinal streams). Image sha1s
+  reproduced the committed identities exactly; entries grew monotonically
+  (from-scratch discovery is more complete than the incrementally-grown
+  originals). Discovery surfaced ARM7 roots in three scenarios that
+  previously had none → 3 NEW configs+banks (fw_arm7_{profile_save,
+  system_options_save,shutdown}), now registered: 16 extended sets
+  total, all new-emission, gate NDS_HAVE_FW_EXTENDED_BANKS on.
+  **G1: all 8 scenarios pass with tier3_insns9=tier3_insns7=0** (was
+  824k/536k) and clean_ram_rejects=0 — the interpreter is fully idle
+  across the entire firmware surface. G2 FNV pinned, G3 byte-locked.
 - **A4 [MECH] re-pin `supermario64dsrecomp`** to the current framework
   HEAD once A1/A2 land (it pins 87f7ad4, many commits behind).
 

@@ -3,5433 +3,5104 @@
 # every generated function against the current live guest bytes.
 
 [program]
-name         = "NDS ARM9 firmware (system_options_save generation)"
-id           = "fw_arm9_system_options_save"
-cpu          = "arm9"
-isa          = "armv5te"
-load_address = 0x01FF8000
-size         = 0x00408000
-entry_pc     = 0x02323B40
+name         = "NDS ARM7 firmware (shutdown generation)"
+id           = "fw_arm7_shutdown"
+cpu          = "arm7"
+isa          = "armv4t"
+load_address = 0x02000000
+size         = 0x00418000
+entry_pc     = 0x02300204
 
 [identity]
-sha1 = "25f2525bf9438dfdc646d718119859eaa53cc3d1"
+sha1 = "960458cbd2d6b4ef87eb0fbbca137e109ba990be"
+
+[[code_copy]]
+runtime_start = 0x037F8000
+source_start  = 0x02400000
+size          = 0x00018000
+name          = "scenario ARM7 WRAM source copy"
 
 [[entry_point]]
-addr = 0x01FF8188
+addr = 0x02300200
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02322908
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02322988
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02322A0C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02322A58
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323724
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323738
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323780
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323A34
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B40
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B42
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B46
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B48
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B4A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B4C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B4E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B50
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B52
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B54
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B56
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B5A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B5C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B5E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B62
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B66
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B6A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B6C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323B70
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323CEC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323E7C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323E8C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323EC4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323FA4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02323FC0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324054
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023240FC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324108
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324114
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232414C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232415C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232425C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232435C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324370
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232441C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324A80
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324BF8
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324C2C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324C6C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324C88
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02324F78
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232505C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023250A4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023250FC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023251FC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232524C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023252F0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023252FC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325344
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325368
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232538C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023253B0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023253E4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023253F4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325464
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325488
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325540
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325604
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325650
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02325778
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02326924
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02326DAC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02326FDC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232750C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023276EA
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023276EC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023276EE
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023276F0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023276FA
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327700
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232770E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232772A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232772E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327734
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232773C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327740
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327742
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232774A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F4A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F54
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F60
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F6A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F7C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F84
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327F8E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FA0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FB2
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FC0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FC6
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FD0
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FE2
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02327FF4
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02328056
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232805A
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232805E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02328066
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232806C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02328086
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x023281FC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02329100
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x02329134
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232B134
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232BAD4
+addr = 0x02300204
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232BB2C
+addr = 0x0230020C
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232BF44
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232C71E
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232CC7C
+addr = 0x02300218
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D004
+addr = 0x0230022C
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D008
+addr = 0x02300238
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D00C
+addr = 0x02300240
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D010
+addr = 0x0230024C
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D014
+addr = 0x0230025C
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D018
+addr = 0x02300274
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D01C
+addr = 0x02300280
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D020
+addr = 0x0230028C
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D024
+addr = 0x02300298
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D028
+addr = 0x023002A4
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D02C
+addr = 0x023002A8
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D030
+addr = 0x023002B0
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232D8AC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232DBEC
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232DC3C
-mode = "thumb"
-kind = "runtime_observed"
-
-[[entry_point]]
-addr = 0x0232DDBC
+addr = 0x023002B4
 mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0232E808
-mode = "thumb"
+addr = 0x023002BC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D00
-mode = "thumb"
+addr = 0x023002C0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D08
-mode = "thumb"
+addr = 0x023002C8
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D0E
-mode = "thumb"
+addr = 0x023002CC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D30
-mode = "thumb"
+addr = 0x023002E0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D38
-mode = "thumb"
+addr = 0x023002E4
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D3A
-mode = "thumb"
+addr = 0x023002EC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D3E
-mode = "thumb"
+addr = 0x0230030C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D42
-mode = "thumb"
+addr = 0x02300320
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D46
-mode = "thumb"
+addr = 0x0230032C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D4A
-mode = "thumb"
+addr = 0x02300330
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D4E
-mode = "thumb"
+addr = 0x0230035C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D52
-mode = "thumb"
+addr = 0x02300380
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D56
-mode = "thumb"
+addr = 0x0230039C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D5A
-mode = "thumb"
+addr = 0x023003A4
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D5C
-mode = "thumb"
+addr = 0x023003C0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D5E
-mode = "thumb"
+addr = 0x023003C4
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D62
-mode = "thumb"
+addr = 0x023003CC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D6A
-mode = "thumb"
+addr = 0x023003D8
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D6E
-mode = "thumb"
+addr = 0x023003DC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D72
+addr = 0x023008C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D76
-mode = "thumb"
+addr = 0x023008CC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D78
-mode = "thumb"
+addr = 0x023008D0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D7A
+addr = 0x023008F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D7C
+addr = 0x023008FA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D80
+addr = 0x02300900
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D82
+addr = 0x02300908
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D86
+addr = 0x0230090C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D88
+addr = 0x02300916
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D8A
+addr = 0x02300924
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D8E
+addr = 0x02300928
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358D98
+addr = 0x0230092E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358DD0
+addr = 0x02300932
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E12
+addr = 0x02300938
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E22
+addr = 0x0230093A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E2A
+addr = 0x02300942
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E2C
+addr = 0x02300944
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E2E
+addr = 0x02300948
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E32
+addr = 0x02300950
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E36
+addr = 0x02300954
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E3C
+addr = 0x02300960
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E3E
+addr = 0x02300964
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E42
+addr = 0x0230096A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E4A
+addr = 0x02300970
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E52
+addr = 0x0230097A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E76
+addr = 0x0230097E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358E7A
+addr = 0x02300984
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358ECE
+addr = 0x0230098C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EE4
+addr = 0x02300990
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EF0
+addr = 0x02300992
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EF2
+addr = 0x02300998
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EF4
+addr = 0x0230099E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EF6
+addr = 0x023009A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EFA
+addr = 0x02300A04
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A08
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358EFE
+addr = 0x02300A14
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A18
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A1C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F00
+addr = 0x02300A24
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A28
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A2C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F02
+addr = 0x02300A34
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A38
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F06
+addr = 0x02300A44
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A48
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A4C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F28
+addr = 0x02300A54
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A58
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A5C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F2A
+addr = 0x023012D4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023012D8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023012DC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F2C
+addr = 0x02301794
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F2E
+addr = 0x023017A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F80
+addr = 0x023017F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F82
+addr = 0x023017FA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F84
+addr = 0x02301806
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F86
+addr = 0x02304628
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230462C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304630
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F96
+addr = 0x023049A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358F9A
+addr = 0x023049A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FA2
+addr = 0x023049AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FAA
+addr = 0x023049BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FAE
+addr = 0x023049C0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FB2
+addr = 0x023049C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FB4
+addr = 0x023049D6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FDC
+addr = 0x023049E0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02358FDE
+addr = 0x023049F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359034
+addr = 0x023049F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359036
+addr = 0x02304A0A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235904A
+addr = 0x02304A16
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359052
+addr = 0x02304A22
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359056
+addr = 0x02304A2C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359058
+addr = 0x02304A36
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235905C
+addr = 0x02304A40
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235906C
+addr = 0x02304A46
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359076
+addr = 0x02304A4A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235908A
+addr = 0x02304AB4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235909E
+addr = 0x02304AC2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590A2
+addr = 0x02304ACC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590A6
+addr = 0x02304AD2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590AC
+addr = 0x02304ADE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590B8
+addr = 0x02304B18
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B1C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590C4
+addr = 0x02304B24
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590CE
+addr = 0x02304B28
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B30
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B34
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590DE
+addr = 0x02304B88
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023590E8
+addr = 0x02304B94
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359110
+addr = 0x02304B9C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359114
+addr = 0x02304BA0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359154
+addr = 0x02304BAE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359156
+addr = 0x02304BB0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235915A
+addr = 0x02304BB4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235915C
+addr = 0x02304BB6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235915E
+addr = 0x02304BB8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359160
+addr = 0x02304BBA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359166
+addr = 0x02304BBC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235916A
+addr = 0x02304BBE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235916E
+addr = 0x02304BC0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359172
+addr = 0x02304BC2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235917C
+addr = 0x02304BC6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235917E
+addr = 0x02304BD4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359182
+addr = 0x02304BD8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359186
+addr = 0x02304BE8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BEC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BF0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591AC
+addr = 0x02304C3C
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304C40
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591B2
+addr = 0x02304CA4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591B6
+addr = 0x02304CAE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591C4
+addr = 0x02304CBC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591C6
+addr = 0x02304CCA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591CA
+addr = 0x02304CF2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591CC
+addr = 0x02304D10
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591D2
+addr = 0x02304D38
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591DE
+addr = 0x02304D40
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591E2
+addr = 0x02304D60
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D64
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591E4
+addr = 0x02304D70
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591E6
+addr = 0x02304D76
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591E8
+addr = 0x02304D78
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591EA
+addr = 0x02304D7A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591EC
+addr = 0x02304D7C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591EE
+addr = 0x02304EE8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EEC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591F2
+addr = 0x02304EF0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EF8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EFC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304F00
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591F8
+addr = 0x023050D0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023591FA
+addr = 0x023050D2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359200
+addr = 0x023050D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235920A
+addr = 0x023050D6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235922C
+addr = 0x023050D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235922E
+addr = 0x023050DA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359232
+addr = 0x023050DC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359234
+addr = 0x023050DE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359236
+addr = 0x023050E0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359238
+addr = 0x023050E2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235923A
+addr = 0x023050E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235923C
+addr = 0x023050E6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235923E
+addr = 0x023050E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359242
+addr = 0x023050EA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359246
+addr = 0x023050EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235924A
+addr = 0x023050EE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235926A
+addr = 0x023050F0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235926C
+addr = 0x023050F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235926E
+addr = 0x023050F4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359270
+addr = 0x023050F6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359274
+addr = 0x023050F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235927A
+addr = 0x023050FA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235927C
+addr = 0x023050FC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235927E
+addr = 0x023050FE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359282
+addr = 0x02305100
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592D0
+addr = 0x02305102
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592D2
+addr = 0x02305104
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592D4
+addr = 0x02305106
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592D6
+addr = 0x02305108
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592D8
+addr = 0x0230510A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592DA
+addr = 0x0230510C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592DC
+addr = 0x0230510E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592DE
+addr = 0x02305110
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592E0
+addr = 0x02305112
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592E2
+addr = 0x02305114
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592E6
+addr = 0x02305118
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592EA
+addr = 0x0230511A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592EC
+addr = 0x0230511C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592F0
+addr = 0x0230511E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592F2
+addr = 0x0230515C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592FA
+addr = 0x02305160
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023592FE
+addr = 0x02305162
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359306
+addr = 0x02305180
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359324
+addr = 0x02305182
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359326
+addr = 0x02305184
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235932A
+addr = 0x02305186
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235932E
+addr = 0x02305188
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359336
+addr = 0x0230518A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235933A
+addr = 0x0230518C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235933C
+addr = 0x0230518E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235933E
+addr = 0x02305190
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359348
+addr = 0x02305192
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235934A
+addr = 0x02305194
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359350
+addr = 0x02305196
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359352
+addr = 0x02305198
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359354
+addr = 0x0230519A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359356
+addr = 0x0230519C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359358
+addr = 0x0230519E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235935A
+addr = 0x023051A0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235935C
+addr = 0x023051A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235935E
+addr = 0x023051A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359362
+addr = 0x023051A8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359364
+addr = 0x023051AA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359368
+addr = 0x023051AC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235936A
+addr = 0x023051AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359370
+addr = 0x023051B0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359376
+addr = 0x023051B2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359384
+addr = 0x023051B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235939A
+addr = 0x023051B6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235939C
+addr = 0x023051BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023593D0
+addr = 0x023051BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023593D8
+addr = 0x023051C0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023593DC
+addr = 0x023051C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023593E0
+addr = 0x023051C4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023593F6
+addr = 0x023051C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359404
+addr = 0x023051C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235941A
+addr = 0x023051CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359430
+addr = 0x023051CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359454
+addr = 0x02305224
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235949C
+addr = 0x02305228
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594AA
+addr = 0x0230522A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594B0
+addr = 0x02305230
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594BC
+addr = 0x02305232
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594C4
+addr = 0x02305236
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594E4
+addr = 0x0230523C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594EE
+addr = 0x0230523E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023594FE
+addr = 0x02305240
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359514
+addr = 0x02305242
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359516
+addr = 0x02305244
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235951A
+addr = 0x02305246
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235951E
+addr = 0x02305248
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359520
+addr = 0x0230524C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359522
+addr = 0x02305250
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359524
+addr = 0x02305252
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359526
+addr = 0x02305256
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235952A
+addr = 0x02305258
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235952C
+addr = 0x0230525A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235952E
+addr = 0x0230525C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359530
+addr = 0x0230525E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359532
+addr = 0x02305260
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359534
+addr = 0x02305262
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359536
+addr = 0x02305264
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235953A
+addr = 0x02305266
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235953E
+addr = 0x02305268
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359540
+addr = 0x0230526A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359542
+addr = 0x0230526C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359544
+addr = 0x0230526E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359546
+addr = 0x02305270
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235954A
+addr = 0x02305274
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235954C
+addr = 0x02305276
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235954E
+addr = 0x02305278
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359552
+addr = 0x0230527A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359556
+addr = 0x0230527C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359558
+addr = 0x0230527E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235955A
+addr = 0x02305280
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235955E
+addr = 0x02305282
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359560
+addr = 0x02305284
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359564
+addr = 0x02305286
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359566
+addr = 0x0230528A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359568
+addr = 0x0230528C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235956A
+addr = 0x0230528E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235956E
+addr = 0x02305290
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359570
+addr = 0x023052B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359572
+addr = 0x023052B6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359596
+addr = 0x023052BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235959A
+addr = 0x023052C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235959C
+addr = 0x023052C4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235959E
+addr = 0x023052C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595A0
+addr = 0x023052C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595A2
+addr = 0x023052CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595A4
+addr = 0x023052CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595A6
+addr = 0x023052D0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595A8
+addr = 0x023052D2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595AA
+addr = 0x023052D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595AC
+addr = 0x023052D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595AE
+addr = 0x023052DA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595B0
+addr = 0x023052DC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595B2
+addr = 0x023052DE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595B4
+addr = 0x023052E0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595B6
+addr = 0x023052E2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595B8
+addr = 0x023052E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595BA
+addr = 0x023052E6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595BE
+addr = 0x023052E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595C2
+addr = 0x023052EA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595C6
+addr = 0x023052EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595C8
+addr = 0x023052EE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595CA
+addr = 0x023052F0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595E8
+addr = 0x023052F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595EA
+addr = 0x023052F4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595F2
+addr = 0x023052F6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023595F6
+addr = 0x023052F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359608
+addr = 0x023052FA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235961A
+addr = 0x023052FC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359620
+addr = 0x023052FE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235962C
+addr = 0x02305300
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359630
+addr = 0x02305302
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359632
+addr = 0x02305304
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359638
+addr = 0x02305306
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235963E
+addr = 0x02305308
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359642
+addr = 0x0230530A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359650
+addr = 0x0230530C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359652
+addr = 0x0230530E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235965A
+addr = 0x02305310
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359662
+addr = 0x02305312
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359668
+addr = 0x02305314
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359684
+addr = 0x02305318
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359686
+addr = 0x0230531C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235968A
+addr = 0x0230531E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235968E
+addr = 0x02305320
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359690
+addr = 0x02305322
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596A2
+addr = 0x02305324
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596AE
+addr = 0x02305326
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596B6
+addr = 0x0230532A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596BA
+addr = 0x0230532C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596BE
+addr = 0x0230532E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596C4
+addr = 0x023054F0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596C6
+addr = 0x023054F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596C8
+addr = 0x023054F4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596CE
+addr = 0x02305500
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596D4
+addr = 0x02305506
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596DA
+addr = 0x02305510
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596E2
+addr = 0x02305518
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596E8
+addr = 0x0230551C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596EC
+addr = 0x02305522
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023596F0
+addr = 0x0230552E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359704
+addr = 0x02305536
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359706
+addr = 0x02305546
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359728
+addr = 0x0230555C
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305560
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235972A
+addr = 0x0230556C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235974A
+addr = 0x0230556E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359758
+addr = 0x02305572
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359776
+addr = 0x0230557E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235977A
+addr = 0x02305582
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359786
+addr = 0x02305584
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235978A
+addr = 0x02305586
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359794
+addr = 0x02305588
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235979C
+addr = 0x0230558C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597A4
+addr = 0x0230558E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597B2
+addr = 0x02305590
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597B8
+addr = 0x02305592
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597D4
+addr = 0x02305594
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597DE
+addr = 0x02305596
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597E2
+addr = 0x023055A2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023597F6
+addr = 0x023055AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359800
+addr = 0x023055BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359804
+addr = 0x023055BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235981A
+addr = 0x02305606
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359826
+addr = 0x02305608
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235982A
+addr = 0x0230560A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359836
+addr = 0x02305612
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235983E
+addr = 0x02305614
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235984C
+addr = 0x02305618
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359858
+addr = 0x0230561A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235985A
+addr = 0x0230561C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359874
+addr = 0x02305620
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359898
+addr = 0x02305624
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235989A
+addr = 0x02305628
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235989E
+addr = 0x0230562C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598A6
+addr = 0x02305630
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598AC
+addr = 0x02305632
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598B0
+addr = 0x02305638
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598B2
+addr = 0x02305658
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230565C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598B4
+addr = 0x02305664
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598B6
+addr = 0x0230566A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598BA
+addr = 0x02305678
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598C8
+addr = 0x0230567A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598CA
+addr = 0x0230567C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598CC
+addr = 0x0230567E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598CE
+addr = 0x02305680
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598D2
+addr = 0x02305682
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598D6
+addr = 0x02305684
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598D8
+addr = 0x02305686
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598DC
+addr = 0x02305688
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598DE
+addr = 0x0230568A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598E2
+addr = 0x0230568C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023598EE
+addr = 0x0230568E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359908
+addr = 0x02305690
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E18
+addr = 0x02305696
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E1A
+addr = 0x023056A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E1E
+addr = 0x023056AC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E20
+addr = 0x023056AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E22
+addr = 0x023056B2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E28
+addr = 0x023056B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E2A
+addr = 0x023056B6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E2C
+addr = 0x023056CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E2E
+addr = 0x023056D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E32
+addr = 0x023056E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E36
+addr = 0x023056FC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E3E
+addr = 0x02305716
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E42
+addr = 0x02305720
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E46
+addr = 0x02305724
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230576C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E4A
+addr = 0x0230576E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E4E
+addr = 0x02305770
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E72
+addr = 0x02305774
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E76
+addr = 0x02305776
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E78
+addr = 0x02305778
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E7C
+addr = 0x02305788
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359E7E
+addr = 0x0230578A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EA2
+addr = 0x0230578C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EA6
+addr = 0x0230578E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EA8
+addr = 0x02305790
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EAA
+addr = 0x02305792
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EAC
+addr = 0x02305794
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EAE
+addr = 0x02305796
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359ED2
+addr = 0x02305798
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359ED6
+addr = 0x0230579A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359ED8
+addr = 0x0230579C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EDC
+addr = 0x0230579E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359EDE
+addr = 0x023057A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F02
+addr = 0x023057A8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F06
+addr = 0x023057AA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F08
+addr = 0x023057AC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F0C
+addr = 0x023057BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F16
+addr = 0x023057BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F18
+addr = 0x023057C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F1A
+addr = 0x023057C4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F2E
+addr = 0x023057C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F32
+addr = 0x023057C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F34
+addr = 0x023057CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F38
+addr = 0x023057CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F3E
+addr = 0x023057CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F42
+addr = 0x023057D0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F44
+addr = 0x023057D2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F46
+addr = 0x023057D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F5A
+addr = 0x023057E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F5E
+addr = 0x023057E6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F60
+addr = 0x023057E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F62
+addr = 0x023057EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F64
+addr = 0x023057F6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F6A
+addr = 0x023057F8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F70
+addr = 0x02305B7C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F72
+addr = 0x02305B7E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F7A
+addr = 0x02305B80
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F86
+addr = 0x02305B82
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F8A
+addr = 0x02305B86
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F8C
+addr = 0x02305D60
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F8E
+addr = 0x02305D62
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F90
+addr = 0x02305D66
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359F92
+addr = 0x02305D6E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FA4
+addr = 0x02305D72
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FB0
+addr = 0x02305D8A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FC4
+addr = 0x02305D90
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FC6
+addr = 0x02305DA0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FCA
+addr = 0x02305DA4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FCC
+addr = 0x02305DA6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FCE
+addr = 0x02305DBC
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DC0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FD0
+addr = 0x02305DC8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FD2
+addr = 0x02305DCE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FD6
+addr = 0x02305DDE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FDA
+addr = 0x02305DF0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FDC
+addr = 0x02305DF4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FDE
+addr = 0x02305E30
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FE0
+addr = 0x02305E36
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FE2
+addr = 0x02305E44
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FE6
+addr = 0x02305E5A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FEC
+addr = 0x02305E64
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FEE
+addr = 0x02305EB0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FF2
+addr = 0x02305EBA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FF6
+addr = 0x02305ED8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FF8
+addr = 0x02305EDA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02359FFA
+addr = 0x02305F00
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A002
+addr = 0x02305F02
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A008
+addr = 0x02305F06
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A010
+addr = 0x02305F08
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A022
+addr = 0x02305F16
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A03A
+addr = 0x02305F1A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A03C
+addr = 0x02305F1E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A03E
+addr = 0x02305F22
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A046
+addr = 0x02305F2E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A048
+addr = 0x02305F30
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A04A
+addr = 0x02305F42
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A04C
+addr = 0x02305F60
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A04E
+addr = 0x02305F68
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A052
+addr = 0x02305F6A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A058
+addr = 0x02305F74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A05A
+addr = 0x02305F7C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A05E
+addr = 0x02306164
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A062
+addr = 0x0230617C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A064
+addr = 0x02306186
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0A8
+addr = 0x02306190
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0AA
+addr = 0x02306192
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0AC
+addr = 0x023061BA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0B2
+addr = 0x023061BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0B4
+addr = 0x023061D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0B6
+addr = 0x023061DC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0BA
+addr = 0x023061EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0BE
+addr = 0x023061F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0C6
+addr = 0x02306218
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0CA
+addr = 0x02306224
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0CE
+addr = 0x0230622E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A0D2
+addr = 0x02306288
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A116
+addr = 0x0230629C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A118
+addr = 0x023062A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A11A
+addr = 0x023063EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A11E
+addr = 0x023063EE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A122
+addr = 0x023063FE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A126
+addr = 0x0230641C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A128
+addr = 0x02306438
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A12E
+addr = 0x02306452
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A132
+addr = 0x0230647A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A134
+addr = 0x02306492
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A136
+addr = 0x023064B8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A156
+addr = 0x023064CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A15A
+addr = 0x023064E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A15C
+addr = 0x023064F0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A15E
+addr = 0x02306508
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A186
+addr = 0x0230652E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A18A
+addr = 0x02306538
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A18C
+addr = 0x02306548
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A18E
+addr = 0x02306554
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A192
+addr = 0x02306556
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A194
+addr = 0x0230656A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A196
+addr = 0x0230659A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A198
+addr = 0x023065D0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A19A
+addr = 0x02306600
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A274
+addr = 0x02306608
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A276
+addr = 0x0230660A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A27E
+addr = 0x0230660C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A28A
+addr = 0x0230660E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A28E
+addr = 0x02306610
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A29A
+addr = 0x02306616
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2AA
+addr = 0x02306624
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2B2
+addr = 0x02306632
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2C0
+addr = 0x0230663A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2CE
+addr = 0x0230664A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2D2
+addr = 0x0230668E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2DC
+addr = 0x023066B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2DE
+addr = 0x023066C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2E2
+addr = 0x023066CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2E4
+addr = 0x023066CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2E6
+addr = 0x023066E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2E8
+addr = 0x023066EC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2EA
+addr = 0x023066F6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2EE
+addr = 0x02306710
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2F0
+addr = 0x0230671E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2F2
+addr = 0x02306738
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2F6
+addr = 0x02306742
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2FC
+addr = 0x02306760
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A2FE
+addr = 0x02306784
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A302
+addr = 0x0230678C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A312
+addr = 0x02306796
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A31A
+addr = 0x023067A0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A31E
+addr = 0x023067A4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A322
+addr = 0x023067A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A324
+addr = 0x023067BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A326
+addr = 0x023067D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A328
+addr = 0x0230681A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A32A
+addr = 0x02306826
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A32C
+addr = 0x0230684C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A32E
+addr = 0x02306858
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A332
+addr = 0x0230685A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A334
+addr = 0x0230685C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A336
+addr = 0x02306860
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A346
+addr = 0x02306874
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A348
+addr = 0x02306876
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A34A
+addr = 0x02306886
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A34C
+addr = 0x02306888
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A34E
+addr = 0x02306890
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A362
+addr = 0x0230689E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A364
+addr = 0x023068A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A366
+addr = 0x023068B6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A36A
+addr = 0x023068D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A36C
+addr = 0x023068E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A36E
+addr = 0x023068F2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A370
+addr = 0x02306910
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A372
+addr = 0x0230691E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A374
+addr = 0x02306934
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A376
+addr = 0x02306946
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A378
+addr = 0x02306956
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A37A
+addr = 0x02306962
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A37E
+addr = 0x02306984
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A382
+addr = 0x02306990
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A386
+addr = 0x0230699E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A388
+addr = 0x023069A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A38A
+addr = 0x023069AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A38C
+addr = 0x023069B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A38E
+addr = 0x023069BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A390
+addr = 0x023069C0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A392
+addr = 0x023069CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A394
+addr = 0x023069D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A396
+addr = 0x023069FC
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A00
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A398
+addr = 0x02306A08
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A0C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A39A
+addr = 0x02306A14
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A39E
+addr = 0x02306A16
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3A0
+addr = 0x02306A22
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3A2
+addr = 0x02306A34
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3A6
+addr = 0x02306A36
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3AA
+addr = 0x02306A38
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3AC
+addr = 0x02306A3A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3AE
+addr = 0x02306A3C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3B2
+addr = 0x02306A3E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3B6
+addr = 0x02306A42
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3BA
+addr = 0x02306A44
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3BC
+addr = 0x02306A46
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3BE
+addr = 0x02306A50
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3C2
+addr = 0x02306A54
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3C4
+addr = 0x02306A56
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3C6
+addr = 0x02306A58
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3CA
+addr = 0x02306A5E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3CE
+addr = 0x02306A62
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3D6
+addr = 0x02306A64
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3D8
+addr = 0x02306A68
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3DA
+addr = 0x02306A6A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3F0
+addr = 0x02306A74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3F2
+addr = 0x02306A76
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3F6
+addr = 0x02306A78
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3F8
+addr = 0x02306A7C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3FA
+addr = 0x02306A7E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A3FE
+addr = 0x02306A98
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A402
+addr = 0x02306AB0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A404
+addr = 0x02306ABC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A406
+addr = 0x02306ACA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A420
+addr = 0x02306AD2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A422
+addr = 0x02306ADC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A426
+addr = 0x02306ADE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A428
+addr = 0x02306AE0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A42A
+addr = 0x02306AE2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A430
+addr = 0x02306AE4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A432
+addr = 0x02306AE6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A436
+addr = 0x02306AE8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A43A
+addr = 0x02306AEA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A43C
+addr = 0x02306AEC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A43E
+addr = 0x02306AF2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A448
+addr = 0x02306AF4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A454
+addr = 0x02306AF8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A472
+addr = 0x02306AFE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A47A
+addr = 0x02306B02
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A47C
+addr = 0x02306B06
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A486
+addr = 0x02306B08
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A48A
+addr = 0x02306B0A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A48C
+addr = 0x02306B10
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A490
+addr = 0x02306B12
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A492
+addr = 0x02306B14
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A4A2
+addr = 0x02306B1E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A56C
+addr = 0x02306B20
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A56E
+addr = 0x02306B22
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A572
+addr = 0x02306B24
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A576
+addr = 0x02306B26
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A57A
+addr = 0x02306B28
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A590
+addr = 0x02306B2A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A592
+addr = 0x02306B2C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A596
+addr = 0x02306B30
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A598
+addr = 0x02306B3C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5A0
+addr = 0x02306B3E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5A2
+addr = 0x02306B40
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5A6
+addr = 0x02306B42
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5AA
+addr = 0x02306B44
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5AE
+addr = 0x02306B46
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5C4
+addr = 0x02306B48
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5C6
+addr = 0x02306B4A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5CA
+addr = 0x02306B4C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5CC
+addr = 0x02306B54
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5D4
+addr = 0x02306B5A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5D6
+addr = 0x02306B5E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5DA
+addr = 0x02306B60
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5DE
+addr = 0x02306B64
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5E2
+addr = 0x02306B66
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5F8
+addr = 0x02306B6A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5FA
+addr = 0x02306B6E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A5FE
+addr = 0x02306B70
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A600
+addr = 0x02306B72
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A608
+addr = 0x02306B74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A60A
+addr = 0x02306B76
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A60E
+addr = 0x02306B78
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A612
+addr = 0x02306B7A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A614
+addr = 0x02306B84
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A616
+addr = 0x02306B86
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A618
+addr = 0x02306B88
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A61A
+addr = 0x02306B8A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A61E
+addr = 0x02306B8C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A624
+addr = 0x02306B8E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A626
+addr = 0x02306B90
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A63E
+addr = 0x02306B92
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A640
+addr = 0x02306B94
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A642
+addr = 0x02306B9A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A644
+addr = 0x02306BE8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A646
+addr = 0x02306BF0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A64A
+addr = 0x02306BF4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A64E
+addr = 0x02306BF8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A654
+addr = 0x02306C06
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A66E
+addr = 0x02306C28
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A670
+addr = 0x02306C3C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A672
+addr = 0x02306C4A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A674
+addr = 0x02306C4C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A676
+addr = 0x02306C4E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A67A
+addr = 0x02306C50
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A69E
+addr = 0x02306C52
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6A0
+addr = 0x02306C54
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6A2
+addr = 0x02306C56
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6A4
+addr = 0x02306C58
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6A6
+addr = 0x02306C5A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6AA
+addr = 0x02306C5E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6AE
+addr = 0x02306C66
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6B2
+addr = 0x02306C68
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6B4
+addr = 0x02306C6A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6B6
+addr = 0x02306C74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6CC
+addr = 0x02306C76
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6D6
+addr = 0x02306C78
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6DA
+addr = 0x02306C7A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6DC
+addr = 0x02306C7C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235A6DE
+addr = 0x02306C7E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C594
+addr = 0x02306C80
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C596
+addr = 0x02306C9A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C59A
+addr = 0x02306CB4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C59C
+addr = 0x02306CC0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C59E
+addr = 0x02306CC2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5A2
+addr = 0x02306CC8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5A4
+addr = 0x02306CCE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5A6
+addr = 0x02306CD0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5A8
+addr = 0x02306CD2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5AA
+addr = 0x02306CE2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5AC
+addr = 0x02306CEE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5AE
+addr = 0x02306CF0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5B0
+addr = 0x02306CF4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5B2
+addr = 0x02306D04
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5B4
+addr = 0x02306D1E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5BC
+addr = 0x02306D24
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5C0
+addr = 0x02306D2E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5C4
+addr = 0x02306D80
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D84
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5C8
+addr = 0x02306D90
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5DC
+addr = 0x02306D98
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5E0
+addr = 0x02306D9C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C5F2
+addr = 0x02306D9E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C600
+addr = 0x02306DA2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C604
+addr = 0x02306E4C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C60C
+addr = 0x02306E4E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C614
+addr = 0x02306E5E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C61A
+addr = 0x02306E72
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C61E
+addr = 0x02306E84
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235C620
+addr = 0x02306E8E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD38
+addr = 0x02306EA0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD3E
+addr = 0x02306EAA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD50
+addr = 0x02306EB8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD5C
+addr = 0x02306ED4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD64
+addr = 0x02306ED8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F50
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD6C
+addr = 0x02306F52
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD6E
+addr = 0x02306F5C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD72
+addr = 0x02306F70
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD7C
+addr = 0x02306F74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD7E
+addr = 0x02306F7A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD82
+addr = 0x02306F7E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD84
+addr = 0x02306F8A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD86
+addr = 0x02306F8E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD88
+addr = 0x02306F94
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD8A
+addr = 0x02306F98
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD8C
+addr = 0x02306F9C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD8E
+addr = 0x02306FB2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD96
+addr = 0x02306FD4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FD8
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FD9E
+addr = 0x02306FE0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDA0
+addr = 0x02306FE4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023071CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDA2
+addr = 0x023071CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDA6
+addr = 0x023071D2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDAC
+addr = 0x02307254
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDAE
+addr = 0x0230725C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDB0
+addr = 0x023073BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDB2
+addr = 0x023073C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDB6
+addr = 0x02307404
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDB8
+addr = 0x02307410
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDBA
+addr = 0x02307420
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDBC
+addr = 0x0230745C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDBE
+addr = 0x02307464
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDC4
+addr = 0x02307468
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDC6
+addr = 0x0230747A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDC8
+addr = 0x02307488
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDCA
+addr = 0x0230748C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDD4
+addr = 0x023074A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDD6
+addr = 0x023074B8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDDC
+addr = 0x023074CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDDE
+addr = 0x023074D2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDE2
+addr = 0x02307728
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDEE
+addr = 0x0230772A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDF4
+addr = 0x0230772C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDFA
+addr = 0x0230772E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FDFE
+addr = 0x02307732
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE00
+addr = 0x02307734
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE06
+addr = 0x02307736
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE0A
+addr = 0x0230773A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE0C
+addr = 0x02307742
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE16
+addr = 0x02307744
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE18
+addr = 0x02307748
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE1A
+addr = 0x0230774A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE38
+addr = 0x0230774C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE44
+addr = 0x02307758
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE48
+addr = 0x0230775A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE4A
+addr = 0x0230775C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE50
+addr = 0x0230775E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE68
+addr = 0x02307760
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FE7A
+addr = 0x02307762
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FEB4
+addr = 0x02307764
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FEB8
+addr = 0x02307766
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FED4
+addr = 0x02307768
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FEE2
+addr = 0x0230776A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FEEA
+addr = 0x0230776C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF20
+addr = 0x0230776E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF22
+addr = 0x02307772
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF26
+addr = 0x02307774
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF28
+addr = 0x02307778
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF2A
+addr = 0x0230777A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF2E
+addr = 0x0230777C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF32
+addr = 0x023077AC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF34
+addr = 0x023077BA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF38
+addr = 0x023077BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF3A
+addr = 0x023077C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF3E
+addr = 0x023077CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF42
+addr = 0x023077CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF44
+addr = 0x023077D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF46
+addr = 0x023077DA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF48
+addr = 0x023077DC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF4A
+addr = 0x023077F8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077FC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF50
+addr = 0x02307824
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF52
+addr = 0x0230782C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF56
+addr = 0x02307894
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF60
+addr = 0x023078A2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF62
+addr = 0x023078AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF64
+addr = 0x023078BC
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078C0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF66
+addr = 0x0230D2E4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF6A
+addr = 0x0230D2EE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF6E
+addr = 0x0230D2F4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF70
+addr = 0x0230D306
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF80
+addr = 0x0230D30C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF82
+addr = 0x0230D312
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF84
+addr = 0x0230D326
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF86
+addr = 0x0230D332
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF8E
+addr = 0x0230D336
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF9C
+addr = 0x0230D348
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FF9E
+addr = 0x0230D352
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFA0
+addr = 0x0230D356
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFA2
+addr = 0x0230D362
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFAA
+addr = 0x0230D366
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFB0
+addr = 0x0230D36A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFBE
+addr = 0x0230D36E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFDA
+addr = 0x0230D376
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFEA
+addr = 0x0230D394
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D398
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0235FFF4
+addr = 0x0230D3A4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3A8
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360000
+addr = 0x0230D3B4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3B8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3BC
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360004
+addr = 0x0230D400
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360008
+addr = 0x0230D402
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236000A
+addr = 0x0230D404
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360010
+addr = 0x0230D406
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360012
+addr = 0x0230D408
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360020
+addr = 0x0230D40A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360022
+addr = 0x0230D40C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360024
+addr = 0x0230D40E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360026
+addr = 0x0230D410
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236003C
+addr = 0x0230D412
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236003E
+addr = 0x0230D414
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360042
+addr = 0x0230D416
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360044
+addr = 0x0230D418
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360046
+addr = 0x0230D41A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236004A
+addr = 0x0230D41C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236004C
+addr = 0x0230D41E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236004E
+addr = 0x0230D420
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360050
+addr = 0x0230D422
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360052
+addr = 0x0230D424
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360054
+addr = 0x0230D426
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360056
+addr = 0x0230D428
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236005E
+addr = 0x0230D42A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360062
+addr = 0x0230D42C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360064
+addr = 0x0230D42E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360066
+addr = 0x0230D430
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236006A
+addr = 0x0230D432
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236006C
+addr = 0x0230D434
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236006E
+addr = 0x0230D440
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360070
+addr = 0x0230D448
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360072
+addr = 0x0230D450
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360074
+addr = 0x0230D460
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360078
+addr = 0x0230D470
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236007C
+addr = 0x0230D474
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D490
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236007E
+addr = 0x0230D49A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360082
+addr = 0x0230D4A6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360084
+addr = 0x0230D4AE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360086
+addr = 0x0230D4B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360088
+addr = 0x0230D4B6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236008A
+addr = 0x0230D4B8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236008E
+addr = 0x0230D4BA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360092
+addr = 0x0230D4BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360096
+addr = 0x0230D4BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236009A
+addr = 0x0230D4C0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236009E
+addr = 0x0230D4C2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600A0
+addr = 0x0230D4C4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600A2
+addr = 0x0230D4C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600A6
+addr = 0x0230D4C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600A8
+addr = 0x0230D4CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600AA
+addr = 0x0230D4CC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600AC
+addr = 0x0230D4CE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600AE
+addr = 0x0230D4D8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600B0
+addr = 0x0230D4F4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600B2
+addr = 0x037FACD8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600B6
+addr = 0x037FAD0C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600B8
+addr = 0x037FB308
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600BA
+addr = 0x037FB318
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600BE
+addr = 0x037FB326
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600C2
+addr = 0x037FB336
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600C6
+addr = 0x037FB33A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600C8
+addr = 0x037FB33C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600CA
+addr = 0x037FB34A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600CC
+addr = 0x037FB34E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600CE
+addr = 0x037FB354
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600D2
+addr = 0x037FB35A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600D4
+addr = 0x037FB35E
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600D6
+addr = 0x037FB380
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600D8
+addr = 0x037FB40C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600DC
+addr = 0x037FB460
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600DE
+addr = 0x037FB598
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600E2
+addr = 0x037FB604
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600E4
+addr = 0x037FDA20
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600E6
+addr = 0x037FDA4C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600E8
+addr = 0x037FDAD0
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDB64
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600EA
+addr = 0x037FDE9C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600EE
+addr = 0x037FDF88
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600F4
+addr = 0x037FE244
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600F6
+addr = 0x037FE318
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600FA
+addr = 0x037FE434
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x023600FE
+addr = 0x037FE46C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360100
+addr = 0x037FE50C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360102
+addr = 0x037FE518
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360106
+addr = 0x037FE574
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236010A
+addr = 0x037FE5E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236010C
+addr = 0x037FE664
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236010E
+addr = 0x037FEAC4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360114
+addr = 0x037FEBF0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360116
+addr = 0x037FEBF8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360118
+addr = 0x037FF184
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FF2D8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FF338
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236011A
+addr = 0x037FF434
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236011C
+addr = 0x037FF442
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236011E
+addr = 0x037FF448
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360122
+addr = 0x037FF44A
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360124
+addr = 0x037FF458
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360126
+addr = 0x037FF468
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236012A
+addr = 0x037FFBFC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236012C
+addr = 0x037FFC00
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236012E
+addr = 0x037FFC02
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360132
+addr = 0x037FFC04
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360136
+addr = 0x037FFC06
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360138
+addr = 0x03800084
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236013A
+addr = 0x038008C6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236013E
+addr = 0x038008CA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360140
+addr = 0x03800AD6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360142
+addr = 0x03800AF6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360146
+addr = 0x03800BDA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360148
+addr = 0x03800BDC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236014A
+addr = 0x03800DC4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236014C
+addr = 0x038013B0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236014E
+addr = 0x038013B4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360150
+addr = 0x038013C8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360152
+addr = 0x038013E0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360158
+addr = 0x038015E2
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236015A
+addr = 0x038015E8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236015E
+addr = 0x03801BA6
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360160
+addr = 0x03801E0C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360162
+addr = 0x03801F74
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360164
+addr = 0x03802EAC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360166
+addr = 0x03802EF4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360168
+addr = 0x03803F10
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236016A
+addr = 0x0380400C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236016C
+addr = 0x038043D4
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236016E
+addr = 0x038043DE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360170
+addr = 0x038043EA
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360172
+addr = 0x038043F0
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360174
+addr = 0x0380440C
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360176
+addr = 0x03804494
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x02360178
+addr = 0x03804608
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236017A
+addr = 0x038048BE
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236017C
+addr = 0x038048D4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804B60
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804D6C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E88
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
-addr = 0x0236017E
+addr = 0x03805040
 mode = "thumb"
 kind = "runtime_observed"

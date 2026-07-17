@@ -73,6 +73,12 @@ extern "C" const DispatchEntry g_dispatch_fw_arm9_shutdown[];
 extern "C" const unsigned g_dispatch_fw_arm9_shutdown_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_calibration_save[];
 extern "C" const unsigned g_dispatch_fw_arm7_calibration_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_profile_save[];
+extern "C" const unsigned g_dispatch_fw_arm7_profile_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_system_options_save[];
+extern "C" const unsigned g_dispatch_fw_arm7_system_options_save_len;
+extern "C" const DispatchEntry g_dispatch_fw_arm7_shutdown[];
+extern "C" const unsigned g_dispatch_fw_arm7_shutdown_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_date_alarm_save[];
 extern "C" const unsigned g_dispatch_fw_arm7_date_alarm_save_len;
 extern "C" const DispatchEntry g_dispatch_fw_arm7_main_menu_controls[];
@@ -299,6 +305,15 @@ int main(int argc, char** argv) {
 #ifdef NDS_HAVE_FW_EXTENDED_BANKS
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_calibration_save,
                               g_dispatch_fw_arm7_calibration_save_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_profile_save,
+                              g_dispatch_fw_arm7_profile_save_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_system_options_save,
+                              g_dispatch_fw_arm7_system_options_save_len,
+                              0x00000000u);
+        nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_shutdown,
+                              g_dispatch_fw_arm7_shutdown_len,
                               0x00000000u);
         nds_register_dispatch(NDS_ARM7, g_dispatch_fw_arm7_date_alarm_save,
                               g_dispatch_fw_arm7_date_alarm_save_len,

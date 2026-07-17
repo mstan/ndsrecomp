@@ -9,7 +9,7 @@ cpu          = "arm7"
 isa          = "armv4t"
 load_address = 0x02000000
 size         = 0x00418000
-entry_pc     = 0x023004D0
+entry_pc     = 0x02300204
 
 [identity]
 sha1 = "c62e4bf22c7ea7e52468b8f9a5bb9b8f335e50fd"
@@ -21,13 +21,218 @@ size          = 0x00018000
 name          = "scenario ARM7 WRAM source copy"
 
 [[entry_point]]
+addr = 0x02300200
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300204
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230020C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300218
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230022C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300238
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300240
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230024C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230025C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300274
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300280
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230028C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300298
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002A4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002A8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002B0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002B4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002BC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002C0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002C8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002CC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002E0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002E4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023002EC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230030C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300320
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230032C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300330
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230035C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300380
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230039C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003A4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003C0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003C4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003CC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003D8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023003DC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02300404
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02300408
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230040C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02300414
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300418
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230041C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -251,6 +456,36 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02300808
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230080A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300814
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300818
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230081C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300822
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02300828
 mode = "thumb"
 kind = "runtime_observed"
@@ -318,6 +553,16 @@ kind = "runtime_observed"
 [[entry_point]]
 addr = 0x02300868
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230086C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300870
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -441,8 +686,173 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023008CC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023008D0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023008F8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023008FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300900
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300908
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230090C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300916
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300924
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300928
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230092E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300932
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300938
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230093A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300942
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300944
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300948
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300950
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300954
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300960
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300964
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230096A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300970
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230097A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230097E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300984
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230098C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300990
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300992
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300998
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230099E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023009A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A04
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A08
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -451,8 +861,83 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02300A18
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A1C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A28
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A2C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A34
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A38
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A48
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A4C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A54
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A58
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300A5C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02300FF8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02300FFC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301000
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -461,8 +946,328 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023012D8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023012DC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301794
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017DE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023017FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301806
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301808
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230180A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230180C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230180E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301810
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301812
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301814
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301816
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301818
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230181A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230181C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230181E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301820
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301822
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301824
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301826
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301828
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230182A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230182C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230182E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301830
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02301832
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301834
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301836
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301838
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230183A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301844
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02301848
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230184C
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -1951,6 +2756,16 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230462C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304630
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023046CC
 mode = "thumb"
 kind = "runtime_observed"
@@ -2066,6 +2881,151 @@ mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023049A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023049F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A0A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A16
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A22
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A2C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A36
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A40
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A46
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304A4A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304AB4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304AC2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304ACC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304AD2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304ADE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B18
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B1C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B28
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B30
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B34
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02304B3C
 mode = "thumb"
 kind = "runtime_observed"
@@ -2146,8 +3106,118 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02304B8C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B94
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304B9C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BA0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BAE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BB0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BB2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BB4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BB6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BB8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BBA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BBC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BBE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BC0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BC2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BC6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BCA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BD2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BD4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BD8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02304BE8
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BEC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304BF0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -2203,6 +3273,16 @@ kind = "runtime_observed"
 [[entry_point]]
 addr = 0x02304C28
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304C3C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304C40
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -2406,6 +3486,81 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02304CA4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304CAE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304CBC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304CCA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304CF2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D10
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D38
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D40
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D60
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D64
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D70
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D76
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D78
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D7A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304D7C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02304E58
 mode = "thumb"
 kind = "runtime_observed"
@@ -2417,6 +3572,36 @@ kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x02304E60
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EE8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EEC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EF0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EF8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304EFC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02304F00
 mode = "arm"
 kind = "runtime_observed"
 
@@ -2441,7 +3626,257 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023050D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050DC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050DE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050EA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023050FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305100
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305102
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305104
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305106
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305108
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230510A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230510C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230510E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305110
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305112
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305114
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305116
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305118
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230511A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230511C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230511E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x0230515C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230515E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305160
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305162
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305164
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305166
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305168
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230516A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230516C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230516E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305170
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305172
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -2451,7 +3886,682 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02305182
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305184
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305186
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305188
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230518A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230518C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230518E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305190
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305192
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305194
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305196
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305198
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230519A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230519C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230519E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051A0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023051A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023051CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305224
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305228
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230522A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305230
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305232
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305236
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230523A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230523C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230523E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305240
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305242
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305244
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305246
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305248
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230524C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305250
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305252
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305256
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305258
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230525A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230525C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230525E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305260
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305262
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305264
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305266
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305268
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230526A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230526C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230526E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305270
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305272
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305274
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305276
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305278
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230527A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230527C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230527E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305280
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305282
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305284
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305286
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230528A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230528C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230528E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305290
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052DC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052DE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052EA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023052FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305300
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305302
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305304
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305306
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305308
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230530A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230530C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230530E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305310
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305312
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305314
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305318
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230531C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230531E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305320
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305322
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305324
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305326
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230532A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230532C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230532E
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -2646,8 +4756,453 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023054F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023054F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023054F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305500
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305506
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305510
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305518
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230551C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305522
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230552E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305536
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305546
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230555C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305560
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230556C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230556E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305572
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305576
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230557E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305582
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305584
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305586
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305588
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230558C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230558E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305590
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305592
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305594
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305596
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305598
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023055C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305606
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305608
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230560A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305610
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305612
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305614
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305618
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230561A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230561C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305620
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305624
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305628
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230562C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230562E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305630
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305632
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305638
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305658
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230565C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305664
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230566A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305678
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230567A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230567C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230567E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305680
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305682
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305684
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305686
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305688
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230568A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230568C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230568E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305690
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305696
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023056A4
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023056FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305716
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305720
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305724
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -2751,12 +5306,217 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230576E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305770
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305772
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305774
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305776
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305778
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02305788
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230578A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230578C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230578E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305790
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305792
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305794
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305796
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305798
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230579A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230579C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230579E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023057BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057EA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023057FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230580A
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -2811,7 +5571,127 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02305B7E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305B80
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305B82
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305B84
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305B86
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305B88
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02305D24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D26
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D28
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D2A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D2C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D2E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D30
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D32
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D34
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D36
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D38
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D3A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D3C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D3E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D40
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D42
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D46
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D48
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -2821,12 +5701,147 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02305D62
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D66
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D6E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D72
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D86
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D8A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D90
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D94
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305D9A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DA0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DA4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DA6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DBC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DC0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02305DC8
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02305DCE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DDA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DDE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DE4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DEE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DF0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305DF4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E1C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02305E30
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E36
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E42
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E5A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305E64
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -2887,6 +5902,206 @@ kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x02305EB0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EB2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EB6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EB8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EBA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EBE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EC2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EC8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305ED4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305ED8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305EDA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F00
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F02
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F06
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F08
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F0A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F12
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F14
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F16
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F1A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F1E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F22
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F26
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F2A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F2C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F2E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F30
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F32
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F38
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F3E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F40
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F42
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F46
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F60
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F66
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F68
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F6A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F70
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02305F7C
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3381,6 +6596,131 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230617C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306186
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306190
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306192
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061DC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023061F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306208
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306216
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306218
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306224
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230622A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230622E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306288
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230628A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230629C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023062A0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023062A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023062AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023062B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023062CC
 mode = "thumb"
 kind = "runtime_observed"
@@ -3721,7 +7061,137 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023063EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023063FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023063FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230641C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230642C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306438
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306440
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306452
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306474
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230647A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230648E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306492
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023064FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306508
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230650A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230652E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02306538
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306540
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306548
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3731,7 +7201,112 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02306556
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230655A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230655C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230656A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306570
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230657E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230659A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065DE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023065E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02306600
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306602
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306608
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230660A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230660C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230660E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306610
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306612
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306616
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3741,7 +7316,82 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02306626
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306632
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306634
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306638
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230663A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306642
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306644
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230664A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230668C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230668E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306692
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306694
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023066B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066CC
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3751,7 +7401,52 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023066EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023066F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306704
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02306710
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306718
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230671C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230671E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306728
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3761,7 +7456,62 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230673E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306742
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306746
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230674C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230675E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306760
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306770
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02306784
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230678C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230678E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306794
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306796
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3771,7 +7521,97 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x023067A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023067FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230681A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230681C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230681E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306826
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x0230684C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230684E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306854
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306858
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230685A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230685C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306860
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3781,7 +7621,102 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02306876
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230687E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306886
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306888
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230688E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306890
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230689C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230689E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023068D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023068FC
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -3791,13 +7726,968 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230691A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230691E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306922
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306924
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02306934
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306946
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306948
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230694A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230694C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306954
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306956
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230695E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306962
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230696C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306970
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306972
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x02306984
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306990
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230699A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230699E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023069FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A00
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A08
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A0C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A14
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A16
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A22
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A34
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A36
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A38
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A3A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A3C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A3E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A42
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A46
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A50
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A54
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A56
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A58
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A5E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A62
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A64
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A68
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A6A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A76
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A78
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A7C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A7E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306A98
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AB0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ABC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ACA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AD2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ADC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ADE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AE0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AE2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AE4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AE6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AE8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AEA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AEC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AF2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AF4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AF8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306AFE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B02
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B06
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B08
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B0A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B10
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B12
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B14
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B1E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B20
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B22
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B26
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B28
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B2A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B2C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B30
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B3C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B3E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B40
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B42
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B44
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B46
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B48
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B4A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B4C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B54
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B5A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B5E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B60
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B64
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B66
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B6A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B6E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B70
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B72
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B76
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B78
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B7A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B84
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B86
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B88
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B8A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B8C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B8E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B90
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B92
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B94
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306B9A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306BE8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306BF0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306BF4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306BF8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C06
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C28
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C3C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C4A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C4C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C4E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C50
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C52
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C54
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C56
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C58
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C5A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C5E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C66
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C68
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C6A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C76
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C78
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C7A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C7C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C7E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C80
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306C9A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CB4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CC0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CC2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CC8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CCE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CD0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CD2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CE2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CEE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CF0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306CF4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D04
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D1E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D24
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D2E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D80
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D84
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D90
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D98
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D9C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306D9E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306DA2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E4C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E4E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E58
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E5E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E66
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E72
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E7A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E84
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E8E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306E9E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EA0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EA8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EAA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EAE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EB8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306EBE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ED4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306ED8
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -4011,6 +8901,116 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x02306F52
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F56
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F5C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F60
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F70
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F7A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F7E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F82
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F8A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F8E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F94
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F96
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F98
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F9A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306F9C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FA6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FB2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FD4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FD8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FE0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02306FE4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x023070B8
 mode = "thumb"
 kind = "runtime_observed"
@@ -4022,6 +9022,441 @@ kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x023070C0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023071CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023071CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023071D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023071D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307254
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307256
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230725C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023073BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023073C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023073C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023073C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023073CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307404
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307406
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307410
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307420
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307436
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230745C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230745E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307464
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307468
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307476
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230747A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307486
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307488
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230748C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023074D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307728
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230772A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230772C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230772E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307730
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307732
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307734
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307736
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307738
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230773A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230773C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230773E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307742
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307744
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307748
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230774A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230774C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307758
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230775A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230775C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230775E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307760
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307762
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307764
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307766
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307768
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230776A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230776C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230776E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307772
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307774
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307778
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230777A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230777C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077DC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023077FC
 mode = "arm"
 kind = "runtime_observed"
 
@@ -4086,8 +9521,53 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230782C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230782E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x02307894
 mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x02307896
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x023078C0
+mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
@@ -6126,12 +11606,942 @@ mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230D2E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D2EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D2F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D306
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D30C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D312
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D326
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D332
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D336
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D348
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D352
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D356
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D362
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D366
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D36A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D36E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D376
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D394
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D398
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3A8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3B8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D3BC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x0230D400
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x0230D402
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D404
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D406
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D408
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D40A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D40C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D40E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D410
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D412
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D414
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D416
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D418
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D41A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D41C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D41E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D420
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D422
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D424
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D426
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D428
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D42A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D42C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D42E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D430
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D432
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D434
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D440
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D448
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D450
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D460
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D470
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D474
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x0230D490
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D492
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D494
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D496
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D498
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D49A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D49C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D49E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4A0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4DC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0230D4F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F80FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8106
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8108
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F810A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F810C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F810E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8110
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8112
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8114
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8116
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8118
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F811A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F811C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F811E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8120
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F816C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F816E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8170
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8172
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8174
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8176
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8178
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8180
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8182
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8184
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8186
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8188
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F818A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F818C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F818E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8190
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8192
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8194
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8196
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F8198
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037F819A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FACD8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FAD0C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB308
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB318
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB31A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB31C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB31E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB320
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB322
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB324
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB326
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB328
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB32A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB32C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB32E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB330
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB332
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB334
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB336
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB338
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB33A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB33C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB33E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB340
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB342
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB344
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB346
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB348
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB34A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB34C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB34E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB350
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB352
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB354
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB356
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB358
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB35A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB35C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB35E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB360
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB362
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB364
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB366
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB368
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -6141,12 +12551,387 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FB36C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x037FB380
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FB40C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB460
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB462
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB464
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB466
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB468
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB46A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB46C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB46E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB470
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB472
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB474
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB476
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB478
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB47A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB47C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB47E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB480
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB482
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB484
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB486
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB490
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB492
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB494
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB496
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB498
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB49A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB49C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB49E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4A0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4EA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB4FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB500
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB502
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x037FB50C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB598
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FB604
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -9481,12 +16266,517 @@ mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FDA20
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDA4C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDAD0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDB64
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDC9C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDCC0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDE9C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDEC0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FDF88
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE244
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x037FE2BC
 mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FE318
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE340
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE342
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE344
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE346
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE348
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE34A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE34E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE350
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE352
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE354
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE35C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE35E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE360
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE362
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE364
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE36A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE36C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE36E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE370
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE372
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE39C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE39E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3A0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3A2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3A4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3A6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3A8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3AA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3AC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3AE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3B0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3B2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3B4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3B6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3B8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3BA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3BC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3BE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3C0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3C2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3C4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3C8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3CC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3CE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3D0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3D2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3D6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3D8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3DA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3E0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3E2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3E4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3E6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3EA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3EC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3EE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3F0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3F2
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3F4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3F6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3F8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3FA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3FC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE3FE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE400
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE402
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE404
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE406
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE408
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE422
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE424
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE426
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE428
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE42A
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE42C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE42E
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE434
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE46C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE50C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE518
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE574
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE5E8
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FE664
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x037FEA18
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FEAC4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FEBF0
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FEBF8
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -9546,6 +16836,11 @@ mode = "arm"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FF338
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x037FF384
 mode = "arm"
 kind = "runtime_observed"
@@ -9576,6 +16871,46 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x037FFBFC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFBFE
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC00
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC02
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC04
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x037FFC06
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x038008C6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x038008CA
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x03800DC4
 mode = "thumb"
 kind = "runtime_observed"
@@ -9597,6 +16932,41 @@ kind = "runtime_observed"
 
 [[entry_point]]
 addr = 0x03801BA6
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03801E0C
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03801EEC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03801F74
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03802EAC
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03802EF4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03803F10
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x0380400C
 mode = "thumb"
 kind = "runtime_observed"
 
@@ -9756,8 +17126,88 @@ mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
+addr = 0x038048D4
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
 addr = 0x03804B60
 mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804D6C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E88
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E8C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E90
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E94
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E98
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804E9C
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EA0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EA4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EA8
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EAC
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EB0
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03804EB4
+mode = "arm"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03805040
+mode = "thumb"
+kind = "runtime_observed"
+
+[[entry_point]]
+addr = 0x03805044
+mode = "thumb"
 kind = "runtime_observed"
 
 [[entry_point]]
