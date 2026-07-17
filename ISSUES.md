@@ -176,6 +176,17 @@ direct per-frame timing around 3D RenderFrame/worker wait/GetLine (the
 a diagnostic-only null/clear renderer to establish the zero-raster
 ceiling. Do not ship that diagnostic renderer.
 
+Direct bridge timing landed/measured 2026-07-17 on the same title path
+to 700M (4,286 rendered frames): unthreaded VCount215 spends
+**7.399 ms/frame** in the soft render. Threaded mode reduces the main
+critical path to 0.0136 ms submission + 0.0260 ms GetLine waits +
+0.0062 ms VCount144 sync. Wall time falls 188.399→154.296 seconds,
+or 7.96 ms/frame, matching the hidden raster cost. Therefore the
+remaining ~23.5 ms castle critical path is primarily guest
+CPU/runtime/scheduler; renderer work still matters for worker-core
+contention and future high-resolution HLE, but cannot alone meet the
+8.3 ms whole-frame target.
+
 Then rank exact CPU work from evidence. The leading low-risk probe is
 runner-scoped LTO/IPO: generated instructions currently make
 out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,

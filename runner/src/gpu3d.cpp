@@ -6,8 +6,10 @@
 
 #include "gpu3d.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -39,6 +41,21 @@ uint64_t g_gx_run_trace_count = 0;
 constexpr uint32_t kGxWriteTraceSize = 8192;
 NdsGxWriteTraceEntry g_gx_write_trace[kGxWriteTraceSize] = {};
 uint64_t g_gx_write_trace_count = 0;
+
+NdsGpu3dProfile g_gpu3d_profile{};
+
+bool profiling() {
+    static const bool enabled = std::getenv("NDS_PROFILE_GPU") != nullptr;
+    return enabled;
+}
+
+using ProfileClock = std::chrono::steady_clock;
+
+void profile_add(uint64_t& dst, ProfileClock::time_point start) {
+    dst += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            ProfileClock::now() - start).count());
+}
 
 }  // namespace
 
@@ -155,6 +172,10 @@ void nds_gpu3d_set_threaded(bool threaded) {
     renderer.SetThreaded(threaded, g_nds.GPU);
 }
 
+void nds_gpu3d_profile(NdsGpu3dProfile* out) {
+    if (out) *out = g_gpu3d_profile;
+}
+
 void nds_gpu3d_state(NdsGxStateSnapshot* out) {
     if (!out) return;
     auto& g3 = g_nds.GPU.GPU3D;
@@ -210,6 +231,7 @@ void nds_gpu3d_reset() {
     g_gx_run_trace_count = 0;
     std::memset(g_gx_write_trace, 0, sizeof g_gx_write_trace);
     g_gx_write_trace_count = 0;
+    g_gpu3d_profile = NdsGpu3dProfile{};
     nds_gxfifo_set_stall(false);
 }
 
@@ -287,7 +309,14 @@ void nds_gpu3d_check_fifo_irq() {
 }
 
 void nds_gpu3d_vcount144() {
+    if (!profiling()) {
+        g_nds.GPU.GPU3D.VCount144(g_nds.GPU);
+        return;
+    }
+    const auto start = ProfileClock::now();
     g_nds.GPU.GPU3D.VCount144(g_nds.GPU);
+    profile_add(g_gpu3d_profile.vcount144_ns, start);
+    ++g_gpu3d_profile.vcount144_calls;
 }
 
 void nds_gpu3d_vblank() {
@@ -295,11 +324,23 @@ void nds_gpu3d_vblank() {
 }
 
 void nds_gpu3d_vcount215() {
+    if (!profiling()) {
+        g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
+        return;
+    }
+    const auto start = ProfileClock::now();
     g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
+    profile_add(g_gpu3d_profile.vcount215_ns, start);
+    ++g_gpu3d_profile.vcount215_calls;
 }
 
 const uint32_t* nds_gpu3d_line(int line) {
-    return g_nds.GPU.GPU3D.GetLine(line);
+    if (!profiling()) return g_nds.GPU.GPU3D.GetLine(line);
+    const auto start = ProfileClock::now();
+    const uint32_t* result = g_nds.GPU.GPU3D.GetLine(line);
+    profile_add(g_gpu3d_profile.getline_ns, start);
+    ++g_gpu3d_profile.getline_calls;
+    return result;
 }
 
 void nds_gpu3d_set_render_xpos(uint16_t value) {

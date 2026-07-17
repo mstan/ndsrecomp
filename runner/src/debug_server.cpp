@@ -513,6 +513,8 @@ std::string handle(const std::string& line) {
         // the corresponding env var armed sampling at process start).
         NdsGpu2dProfile gpu{};
         nds_gpu2d_profile(&gpu);
+        NdsGpu3dProfile gpu3d{};
+        nds_gpu3d_profile(&gpu3d);
         NdsSchedulerProfile sched{};
         scheduler_profile(&sched);
         return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
@@ -520,6 +522,15 @@ std::string handle(const std::string& line) {
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
                ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +
                ",\"scanlines\":" + std::to_string(gpu.scanlines) +
+               "},\"gpu3d\":{\"vcount215_ns\":" +
+               std::to_string(gpu3d.vcount215_ns) +
+               ",\"vcount215_calls\":" +
+               std::to_string(gpu3d.vcount215_calls) +
+               ",\"getline_ns\":" + std::to_string(gpu3d.getline_ns) +
+               ",\"getline_calls\":" + std::to_string(gpu3d.getline_calls) +
+               ",\"vcount144_ns\":" + std::to_string(gpu3d.vcount144_ns) +
+               ",\"vcount144_calls\":" +
+               std::to_string(gpu3d.vcount144_calls) +
                "},\"sched\":{\"sampled_rounds\":" +
                std::to_string(sched.sampled_rounds) +
                ",\"rounds\":" + std::to_string(sched.rounds) +
@@ -533,7 +544,9 @@ std::string handle(const std::string& line) {
                ",\"wifi_ns\":" + std::to_string(sched.wifi_ns) +
                ",\"rtc_ns\":" + std::to_string(sched.rtc_ns) +
                ",\"sysev_ns\":" + std::to_string(sched.sysev_ns) +
-               ",\"switches\":" + std::to_string(sched.switches) + "}}";
+               ",\"switch_ns\":" + std::to_string(sched.switch_ns) +
+               ",\"switches\":" + std::to_string(sched.switches) +
+               ",\"crs_words\":" + std::to_string(sched.crs_words) + "}}";
     }
     if (cmd == "deep_trace") {
         // Live toggle for the per-access payload policy (bus ring, mem_r/w

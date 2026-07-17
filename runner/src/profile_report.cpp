@@ -3,6 +3,7 @@
 #include "profile_report.h"
 
 #include "gpu2d.h"
+#include "gpu3d.h"
 #include "scheduler.h"
 
 void nds_profile_report(std::FILE* out) {
@@ -32,6 +33,20 @@ void nds_profile_report(std::FILE* out) {
             (unsigned long long)gpu_profile.text_lines[1][3],
             (unsigned long long)gpu_profile.text_lines[1][4],
             (unsigned long long)gpu_profile.no_effect_lines[1]);
+    }
+    NdsGpu3dProfile gpu3d_profile{};
+    nds_gpu3d_profile(&gpu3d_profile);
+    if (gpu3d_profile.vcount215_calls || gpu3d_profile.getline_calls ||
+        gpu3d_profile.vcount144_calls) {
+        std::fprintf(out,
+            "  GPU3D profile: submit/render %.3f s (%llu calls), "
+            "GetLine %.3f s (%llu calls), sync144 %.3f s (%llu calls)\n",
+            static_cast<double>(gpu3d_profile.vcount215_ns) / 1.0e9,
+            (unsigned long long)gpu3d_profile.vcount215_calls,
+            static_cast<double>(gpu3d_profile.getline_ns) / 1.0e9,
+            (unsigned long long)gpu3d_profile.getline_calls,
+            static_cast<double>(gpu3d_profile.vcount144_ns) / 1.0e9,
+            (unsigned long long)gpu3d_profile.vcount144_calls);
     }
     NdsSchedulerProfile sched{};
     scheduler_profile(&sched);

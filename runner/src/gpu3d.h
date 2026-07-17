@@ -14,6 +14,16 @@ void nds_gpu3d_reset();
 // timing and state remain on the scheduler thread.
 void nds_gpu3d_set_threaded(bool threaded);
 
+struct NdsGpu3dProfile {
+    uint64_t vcount215_ns;
+    uint64_t vcount215_calls;
+    uint64_t getline_ns;
+    uint64_t getline_calls;
+    uint64_t vcount144_ns;
+    uint64_t vcount144_calls;
+};
+void nds_gpu3d_profile(NdsGpu3dProfile* out);
+
 // ARM9 3D register window: DISP3DCNT (0x04000060..63) plus the melonDS
 // dispatch range 0x04000320..0x040006A3 (tables, clear/fog, GXFIFO at
 // 0x400..0x43F, direct command ports at 0x440..0x5CB, GXSTAT/results at
