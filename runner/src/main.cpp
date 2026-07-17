@@ -38,6 +38,10 @@ extern "C" const DispatchEntry g_dispatch_sm64ds_arm7_ram[];
 extern "C" const unsigned g_dispatch_sm64ds_arm7_ram_len;
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm9_ram[];
 extern "C" const unsigned g_dispatch_sm64ds_arm9_ram_len;
+#ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
+extern "C" const DispatchEntry g_dispatch_sm64ds_arm9_ram_gameplay[];
+extern "C" const unsigned g_dispatch_sm64ds_arm9_ram_gameplay_len;
+#endif
 #endif
 #ifndef NDS_BOOTSTRAP_FIRMWARE
 extern "C" const DispatchEntry g_dispatch_fw_arm9_early[];
@@ -349,6 +353,16 @@ int main(int argc, char** argv) {
         // live bytes still match the static image.
         nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
                               g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
+#endif
+#ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
+        // A later gameplay capture carries different overlay generations at
+        // many of the same virtual addresses. Keep it in a separate
+        // content-validated bank: boot/title bytes above win when present,
+        // then this generation becomes eligible after the guest swaps them.
+        nds_register_dispatch(NDS_ARM9,
+                              g_dispatch_sm64ds_arm9_ram_gameplay,
+                              g_dispatch_sm64ds_arm9_ram_gameplay_len,
+                              0xFFFF0000u);
 #endif
 #endif
 

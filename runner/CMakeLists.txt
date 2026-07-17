@@ -160,6 +160,10 @@ if(SM64DS_BANK_SOURCES)
         target_compile_definitions(nds_runner PRIVATE
             NDS_HAVE_SM64DS_ARM9_RAM_BANKS=1)
     endif()
+    if(EXISTS "${NDS_SM64DS_BANK_DIR}/sm64ds_arm9_ram_gameplay_dispatch.c")
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS=1)
+    endif()
 endif()
 
 # SDL is a host-only presentation layer. The runner remains buildable without
