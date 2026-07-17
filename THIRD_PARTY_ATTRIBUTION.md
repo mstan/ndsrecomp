@@ -58,6 +58,16 @@ remains a device model, not HLE).
 - Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
   `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`, `FIFO.h`,
   `types.h`, `Savestate.h`, `Savestate.cpp`, `NonStupidBitfield.h`
+- The optional compute-renderer source import is also byte-identical to
+  melonDS tag `1.0rc`, commit
+  `e3fa6f4224e0d706df3ee262ae41cfb0deadc593`:
+  `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`,
+  `GPU3D_Texcache.cpp`, `GPU3D_Texcache.h`,
+  `GPU3D_TexcacheOpenGL.cpp`, `GPU3D_TexcacheOpenGL.h`,
+  `OpenGLSupport.cpp`, `OpenGLSupport.h`, `PlatformOGL.h`,
+  `xxhash/xxhash.c`, and `xxhash/xxhash.h`, plus
+  `frontend/glad/{glad.c,glad.h,khrplatform.h}` stored locally under
+  `runner/vendor/melonds/glad/`.
 - Project-written shim headers in the same directory (`NDS.h`, `GPU.h`,
   `Platform.h`) replace the melonDS headers of the same names with the
   minimal interface slice the vendored units consume; as derived interfaces
