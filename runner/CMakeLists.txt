@@ -20,6 +20,9 @@ option(NDS_ENABLE_COMPUTE_RENDERER
 option(NDS_PROFILE_HLE_HEAT
     "Build candidate-only sampled leaf heat instrumentation"
     OFF)
+option(NDS_PROFILE_MEM_TIMING
+    "Build candidate-only runtime memory-timing census instrumentation"
+    OFF)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -138,6 +141,12 @@ add_executable(nds_runner
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
+if(NDS_PROFILE_MEM_TIMING)
+    # Keep the production memory-timing helper object unchanged. Only the
+    # helper implementation and passive query command see the census define.
+    set_property(SOURCE src/bus.cpp src/debug_server.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS NDS_PROFILE_MEM_TIMING=1)
+endif()
 if(NDS_PROFILE_HLE_HEAT)
     # Only title ARM9 sources can contain the selected wrappers/descriptors.
     # Do not force the hundreds of unrelated firmware-bank TUs to rebuild for

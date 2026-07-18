@@ -241,23 +241,26 @@ Then rank exact CPU work from evidence. An initial runner-scoped GCC LTO/IPO
 ceiling attempt produced a 663 MB intermediate archive but no linked runner;
 it is incomplete and provides no performance evidence. Do not keep paying its
 whole-program build cost as the selection gate. Generated instructions still
-make out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,
-`runtime_tick`, and memory-timing helpers. The next parity-safe CPU experiment
-is therefore a narrow generated-code specialization of those exact common
-paths, retaining the out-of-line faithful fallback. The earlier fast-poll result
-makes a >=5% gain plausible; reject the experiment if quiet interleaved A/B is
-below that threshold or code growth/i-cache cost erases the saved calls. Retain raw
+make out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`, and
+`runtime_tick`. Any next parity-safe CPU experiment must be selected from fresh
+measurement and retain the out-of-line faithful fallback; memory-timing call
+share alone has now been shown insufficient. Reject an experiment if quiet
+interleaved A/B is below the 5% threshold or code growth/i-cache cost erases the
+saved calls. Retain raw
 `switch_ns`, `switches`, `crs_words`, and `next_event_ns` before
 touching context copies or deadline calculation. Same discipline:
 measure, change, G-gates, measure, commit.
 
-### P-4: bus/runtime residuals [MECH-ish]
+### P-4: bus/runtime residuals — MEASURED, FIRST CANDIDATE REJECTED
 
-The B3 follow-up candidate from PLAN.md: inline `runtime_mem_cycles`'
-hot regions (flagged as a separate melonDS-mirroring risk class —
-mirror the melonDS timing model exactly, prove with G3). Also any
-remaining slow-path bus hits visible in the profile. Only if material
-after P-2/P-3.
+The default-off passive census described in the experiment ledger measured
+`runtime_mem_cycles` precisely enough to justify one exact specialization.
+That candidate covered 57.6278% of calls and passed full castle endpoint
+parity, but two clean untouched/fast rotations were flat-to-negative
+(`0.98335`, `0.99732`) and it was removed. Only the finished census remains.
+Do not retry address-class timing specialization without new evidence for a
+materially different implementation; pursue other bus/runtime residuals only
+when a profile establishes a plausible >=5% host-time win.
 
 ### P-5: modular performance-HLE escalation (tier 2)
 
@@ -455,6 +458,36 @@ exploratory gain, but it failed the >=5% retention gate and was removed without
 spending full G1/G2/G3 time. The result reinforces that broad universally hot
 generated/runtime boundaries matter; it does not justify retaining this added
 ABI and timing-snapshot maintenance surface on its own.
+
+A passive memory-timing census was then added as candidate-only selection
+instrumentation. It is compile-time default-off, counts cumulative calls and
+modeled guest cycles by CPU, width, sequential flag, and timing region, and is
+queried after the fact through `mem_timing_profile`; it has no arm/reset mode.
+With counting enabled, castle VBlank 2,600--4,400 contained **96,196,549**
+`runtime_mem_cycles` calls and **192,695,446** modeled guest cycles. ARM9 D-cache
+was 36.6420% of calls, ARM9 DTCM 31.7003%, ARM7 fixed-fast regions 25.5712%,
+and all remaining classes 6.0865%. The profile-enabled run matched the
+uninstrumented runner at both endpoints across both framebuffers and full
+event/GX/scheduler/static-coverage/Tier-3 state. A profiling-disabled build kept
+the 944-byte `runtime_mem_cycles` production symbol byte-identical to the prior
+binary.
+
+The census justified one bounded exact generated timing experiment, which was
+implemented and rejected on 2026-07-18. Live ARM9 ITCM/DTCM and ARM7 fixed-fast
+regions could return the exact one-cycle result above the authoritative generic
+fallback, covering **57.6278%** of measured calls. A same-binary environment
+switch preserved the literal generic floor. Focused boundary tests covered the
+4-GiB DTCM wrap case and every ARM7 dynamic-region edge; representative
+runner-flag objects showed favorable code size. Untouched, forced-floor, and
+fast-path binaries matched exactly at castle VBlank 2,600 and 4,400 across both
+framebuffers and full state. Performance did not follow call coverage: two
+compiler-clean simultaneous rotations produced untouched/fast ratios
+**0.98335** and **0.99732**, while their untouched/forced-floor controls were
+**0.99822** and **1.00032**. A third rotation was invalidated by overlapping
+compilers. With both valid signals flat-to-negative and no affirmative path to
+the >=5% retention requirement, the fast path and its ABI/tests were removed;
+only the finished default-off census remains. The result is also a warning not
+to equate helper-call share with host-time share.
 
 The adversarial review rejected the earlier general wrapper-local inclusive
 timer: slice unwinds can destroy a wrapper host frame and resume in a descendant

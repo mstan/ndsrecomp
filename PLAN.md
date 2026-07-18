@@ -204,9 +204,10 @@ phase/underrun stats; never single boot-window runs.
   (700M, both framebuffers); G1/G2/G3 green in normal modes. Perf (same
   binary, interleaved): game-path serve nav+title→700M default 150.3s →
   fast 129.1s (~14%); firmware soak emu 21.06s → 20.06s min-of-3
-  (~4.7%); slow path unregressed (min-of-2 within noise). Follow-up
-  candidate: inline runtime_mem_cycles' hot regions (separate
-  melonDS-mirroring risk class, not done here).
+  (~4.7%); slow path unregressed (min-of-2 within noise). The B3
+  `runtime_mem_cycles` follow-up was measured 2026-07-18 and rejected:
+  <1.5% same-binary ON/OFF and approximately zero net gain against the
+  untouched runner. The default-off census remains; see ISSUES P-4.
 - **B4 ✅ DONE (2026-07-16).** OBJ line pass per-tile for regular
   tile-mode sprites: GPU2D 8.29s → 6.11s, OBJ 3.61s → 2.43s on the
   profiled soak; FNV/G3 pinned. Affine/bitmap/window stay per-pixel.

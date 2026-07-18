@@ -12,18 +12,127 @@
 // (OBSERVABILITY rule â€” never arm-then-capture).
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "state.h"
 #include "runtime_arm.h"
 #include "io.h"
+#include "mem_timing_profile.h"
 #include "wifi.h"
 #include "vram.h"
 
 namespace {
+
+#if defined(NDS_PROFILE_MEM_TIMING)
+enum class MemTimingRegion : uint8_t {
+    Arm9Itcm,
+    Arm9Dtcm,
+    Arm9Dcache,
+    Arm9GbaRom,
+    Arm9GbaSram,
+    Arm9MainRam,
+    Arm9PalVram,
+    Arm9Other,
+    Arm7MainRam,
+    Arm7Vram,
+    Arm7Wifi,
+    Arm7GbaRom,
+    Arm7GbaSram,
+    Arm7OtherFast,
+    Count,
+};
+
+constexpr size_t kMemTimingCpuCount = 2u;
+constexpr size_t kMemTimingWidthCount = 4u;
+constexpr size_t kMemTimingSequentialCount = 3u;
+constexpr size_t kMemTimingRegionCount =
+    static_cast<size_t>(MemTimingRegion::Count);
+
+struct MemTimingStats {
+    uint64_t calls = 0u;
+    uint64_t guest_cycles = 0u;
+    uint32_t min_cycles = UINT32_MAX;
+    uint32_t max_cycles = 0u;
+};
+
+using MemTimingCells = std::array<std::array<std::array<std::array<
+    MemTimingStats, kMemTimingRegionCount>, kMemTimingSequentialCount>,
+    kMemTimingWidthCount>, kMemTimingCpuCount>;
+MemTimingCells g_mem_timing_cells{};
+
+bool mem_timing_count_enabled() {
+    static const bool enabled = [] {
+        const char* mode = std::getenv("NDS_MEM_TIMING_PROFILE");
+        if (!mode || !*mode || std::strcmp(mode, "off") == 0) return false;
+        if (std::strcmp(mode, "count") == 0) return true;
+        std::fprintf(stderr,
+            "invalid NDS_MEM_TIMING_PROFILE (expected off/count); disabling\n");
+        return false;
+    }();
+    return enabled;
+}
+
+size_t mem_timing_width_index(uint32_t width) {
+    return width == 1u ? 0u : width == 2u ? 1u : width == 4u ? 2u : 3u;
+}
+
+size_t mem_timing_sequential_index(uint32_t sequential) {
+    return sequential == 0u ? 0u : sequential == 1u ? 1u : 2u;
+}
+
+const char* mem_timing_width_name(size_t index) {
+    static constexpr const char* names[] = {"1", "2", "4", "other"};
+    return names[index];
+}
+
+const char* mem_timing_sequential_name(size_t index) {
+    static constexpr const char* names[] = {"0", "1", "other"};
+    return names[index];
+}
+
+const char* mem_timing_region_name(MemTimingRegion region) {
+    static constexpr const char* names[] = {
+        "arm9_itcm", "arm9_dtcm", "arm9_dcache", "arm9_gba_rom",
+        "arm9_gba_sram", "arm9_main_ram", "arm9_pal_vram",
+        "arm9_other", "arm7_main_ram", "arm7_vram", "arm7_wifi",
+        "arm7_gba_rom", "arm7_gba_sram", "arm7_other_fast",
+    };
+    return names[static_cast<size_t>(region)];
+}
+
+void mem_timing_note(uint32_t cpu, uint32_t width, uint32_t sequential,
+                     MemTimingRegion region, uint32_t guest_cycles) {
+    if (!mem_timing_count_enabled()) return;
+    MemTimingStats& stats =
+        g_mem_timing_cells[cpu][mem_timing_width_index(width)]
+                          [mem_timing_sequential_index(sequential)]
+                          [static_cast<size_t>(region)];
+    ++stats.calls;
+    stats.guest_cycles += guest_cycles;
+    stats.min_cycles = std::min(stats.min_cycles, guest_cycles);
+    stats.max_cycles = std::max(stats.max_cycles, guest_cycles);
+}
+
+MemTimingRegion arm7_mem_timing_region(uint32_t addr) {
+    if (addr >= 0x02000000u && addr < 0x03000000u)
+        return MemTimingRegion::Arm7MainRam;
+    if (addr >= 0x06000000u && addr < 0x07000000u)
+        return MemTimingRegion::Arm7Vram;
+    if (addr >= 0x04800000u && addr < 0x04810000u)
+        return MemTimingRegion::Arm7Wifi;
+    if (addr >= 0x08000000u && addr < 0x0A000000u)
+        return MemTimingRegion::Arm7GbaRom;
+    if (addr >= 0x0A000000u && addr < 0x0B000000u)
+        return MemTimingRegion::Arm7GbaSram;
+    return MemTimingRegion::Arm7OtherFast;
+}
+#endif
 
 // Backing stores. Sized to the architectural maxima; mirroring is applied
 // at access time.
@@ -876,21 +985,50 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
         uint32_t s32 = arm7_s32(r);
         // melonDS: single 8/16-bit transfers always cost N (DataRead8/16);
         // only 32-bit transfers (LDR/STR/LDM/STM) see the sequential S rate.
-        return (width >= 4u) ? (sequential ? s32 : n32) : r.n16;
+        const uint32_t data =
+            (width >= 4u) ? (sequential ? s32 : n32) : r.n16;
+#if defined(NDS_PROFILE_MEM_TIMING)
+        mem_timing_note(1u, width, sequential,
+                        arm7_mem_timing_region(addr), data);
+#endif
+        return data;
     }
     uint32_t data;
-    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
+#if defined(NDS_PROFILE_MEM_TIMING)
+    MemTimingRegion region = MemTimingRegion::Arm9Other;
+#endif
+    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size) {
         data = 1u;                                          // ITCM
-    else if (g_cp15.dtcm_enable && addr >= g_cp15.dtcm_base &&
-             addr - g_cp15.dtcm_base < g_cp15.dtcm_size)
+#if defined(NDS_PROFILE_MEM_TIMING)
+        region = MemTimingRegion::Arm9Itcm;
+#endif
+    } else if (g_cp15.dtcm_enable && addr >= g_cp15.dtcm_base &&
+               addr - g_cp15.dtcm_base < g_cp15.dtcm_size) {
         data = 1u;                                          // DTCM
-    else if (cp15_data_cacheable(addr))
+#if defined(NDS_PROFILE_MEM_TIMING)
+        region = MemTimingRegion::Arm9Dtcm;
+#endif
+    } else if (cp15_data_cacheable(addr)) {
         data = sequential ? 1u : 3u;                        // averaged D-cache
-    else if (addr >= 0x08000000u && addr < 0x0B000000u)
+#if defined(NDS_PROFILE_MEM_TIMING)
+        region = MemTimingRegion::Arm9Dcache;
+#endif
+    } else if (addr >= 0x08000000u && addr < 0x0B000000u) {
         data = arm9_gba_slot_cycles(addr, width, sequential != 0u);
-    else {
+#if defined(NDS_PROFILE_MEM_TIMING)
+        region = addr < 0x0A000000u
+            ? MemTimingRegion::Arm9GbaRom
+            : MemTimingRegion::Arm9GbaSram;
+#endif
+    } else {
         const bool main_ram = addr >= 0x02000000u && addr < 0x03000000u;
         const bool pal_vram = addr >= 0x05000000u && addr < 0x07000000u;
+#if defined(NDS_PROFILE_MEM_TIMING)
+        region = main_ram
+            ? MemTimingRegion::Arm9MainRam
+            : pal_vram ? MemTimingRegion::Arm9PalVram
+                       : MemTimingRegion::Arm9Other;
+#endif
         if (sequential)
             data = (main_ram || pal_vram) ? 4u : 2u;
         else if (width >= 4u)
@@ -898,8 +1036,59 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
         else
             data = main_ram ? 16u : 8u;
     }
+#if defined(NDS_PROFILE_MEM_TIMING)
+    mem_timing_note(0u, width, sequential, region, data);
+#endif
     return data;                // raw numD in ARM9 clock units
 }
+
+#if defined(NDS_PROFILE_MEM_TIMING)
+std::string nds_mem_timing_profile_json() {
+    const bool enabled = mem_timing_count_enabled();
+    std::string out = std::string("{\"enabled\":") +
+        (enabled ? "true" : "false") +
+        ",\"mode\":\"" + (enabled ? "count" : "off") +
+        "\",\"cells\":[";
+    bool first = true;
+    uint64_t total_calls = 0u;
+    uint64_t total_guest_cycles = 0u;
+    for (size_t cpu = 0; cpu < kMemTimingCpuCount; ++cpu) {
+        for (size_t width = 0; width < kMemTimingWidthCount; ++width) {
+            for (size_t sequential = 0;
+                 sequential < kMemTimingSequentialCount; ++sequential) {
+                for (size_t region = 0; region < kMemTimingRegionCount;
+                     ++region) {
+                    const MemTimingStats& stats =
+                        g_mem_timing_cells[cpu][width][sequential][region];
+                    if (stats.calls == 0u) continue;
+                    total_calls += stats.calls;
+                    total_guest_cycles += stats.guest_cycles;
+                    if (!first) out.push_back(',');
+                    first = false;
+                    out += "{\"cpu\":" + std::to_string(cpu ? 7 : 9) +
+                           ",\"width\":\"" + mem_timing_width_name(width) +
+                           "\",\"sequential\":\"" +
+                           mem_timing_sequential_name(sequential) +
+                           "\",\"region\":\"" +
+                           mem_timing_region_name(
+                               static_cast<MemTimingRegion>(region)) +
+                           "\",\"calls\":" + std::to_string(stats.calls) +
+                           ",\"guest_cycles\":" +
+                           std::to_string(stats.guest_cycles) +
+                           ",\"min_cycles\":" +
+                           std::to_string(stats.min_cycles) +
+                           ",\"max_cycles\":" +
+                           std::to_string(stats.max_cycles) + "}";
+                }
+            }
+        }
+    }
+    out += "],\"total_calls\":" + std::to_string(total_calls) +
+           ",\"total_guest_cycles\":" +
+           std::to_string(total_guest_cycles) + "}";
+    return out;
+}
+#endif
 
 // Code-FETCH memory timing (Commit B for the ARM9 â€” see docs/scheduler_design.md
 // â€” Commit D for the ARM7). Charged per retired instruction on the active CPU,
