@@ -378,6 +378,84 @@ and passed G1 8/8, G2 at 2,400 frames with zero underruns/errors and the locked
 FNV pair, and G3 GX/both-screen byte-lock at 100M--700M. The measurement seam is
 green; no CPU-HLE speedup is claimed.
 
+A parity-safe generated retirement-call fusion was also tried and rejected on
+2026-07-18. It replaced each adjacent `runtime_tick(cycles)` plus
+`runtime_unwinding()` ABI pair with one exact `runtime_retire(cycles)` helper;
+the helper preserved cycle/deferred-debt commitment, IRQ observation, and
+unwind ordering. Regenerated banks linked and focused decode/cycle tests passed.
+In a representative gameplay shard `.text` shrank 1,580,224 -> 1,534,304 bytes
+(**-2.91%**), with 6,249 tick relocations and 6,249 unwind relocations replaced
+by 6,249 retire relocations. Fresh-process castle-cutscene validation proved the
+untouched and fused binaries identical at both VBlank 2,600 and 4,400: both
+framebuffers plus event/instruction, GX, scheduler, static-coverage, and Tier-3
+state all matched (endpoint ARM9/ARM7 instructions
+`585,396,047 / 178,255,829`). Two timing attempts were contaminated by unrelated
+PSX/SNES compiler work and are not performance evidence. The complete attempt's
+raw, invalid ABBAAB seconds were baseline
+`35.902 / 37.218 / 36.406` and fused
+`36.353 / 37.019 / 40.030`; even the lower envelope did not indicate a 5% win.
+Because promotion requires affirmative >=5% quiet evidence, the experiment
+failed the retention gate and was removed without spending full G1/G2/G3 time.
+This rejects only the extra call-boundary fusion, not the larger exact work
+inside code-fetch or memory-timing helpers.
+
+An out-of-line static ARM9 code-fetch specialization was then tried and
+rejected on 2026-07-18. Generated ARM9 ARM/Thumb own-fetch sites called
+mode-specific helpers while ARM7, refills, Tier-3, and the original generic
+helper remained faithful fallbacks; `NDS_CPU_STATIC_FETCH=0/1` selected the
+same experimental binary's generic/specialized path. The deployed ARM common
+path was a 15-instruction leaf, OFF/invalid state tail-jumped to the original
+helper, a representative optimized shard retained exactly 1,580,224 bytes of
+`.text`, and relocations changed exactly as intended (gameplay shard:
+31,974 ARM + 4 Thumb specialized calls, zero generic own-fetch calls; ARM7
+stayed generic). Untouched A, experimental OFF, and ON were byte/state exact at
+castle VBlank 2,600 and 4,400: both framebuffers, event/instruction, GX,
+scheduler, static/Tier-3 state, and rejects matched; endpoint ARM9/ARM7 counts
+were `585,396,047 / 178,255,829` with rejects `(0,0)`.
+
+The shared host repeatedly launched unrelated workloads, so no sequential
+timing batch was claimable. A diagnostic-only simultaneous A/O/N harness pinned
+each fresh process to a disjoint two-core-plus-sibling set and rotated all three
+sets across rounds. Its A/O control ratios were `0.9991 / 1.0113 / 0.9947`;
+ON/A ratios were `1.0140 / 1.0175 / 0.9993`, and ON/O ratios were
+`1.0149 / 1.0061 / 1.0046`. One round overlapped a compiler and all results are
+exploratory, not promotion evidence. Nevertheless every observed signal was
+below 1.8%, far from the required 5%; absent affirmative material evidence,
+the standalone seam failed the retention gate and was removed without full
+G1/G2/G3. This does not reject combining yield/count/hook/fetch work behind one
+exact prologue ABI, which removes a larger universally executed boundary.
+
+That larger exact combined-prologue experiment was implemented and rejected on
+2026-07-18. For statically compiled ARM9 ARM instructions it combined the
+yield poll, retired-instruction count/hook, and own-code fetch behind one host
+ABI boundary; ARM7, Thumb, unusual/refill paths, and an authoritative generic
+fallback stayed unchanged. The runner kept a private snapshot of the already
+latched ARM9 code-region timing and still tested live ITCM placement. Generated
+R15 publication and all yield/retirement/fetch ordering remained faithful.
+Focused decode/codegen and cycle tests passed. A representative gameplay shard
+contained 31,974 combined ARM sites and only four legacy Thumb sites; `.text`
+fell from 9,259,712 to 7,070,784 bytes (**-23.64%**). Untouched and combined
+binaries were exact at castle VBlank 2,600 and 4,400: both framebuffers plus
+event/instruction, GX, scheduler, static-coverage, and Tier-3 state matched.
+
+Six compiler-clean simultaneous forward/reverse affinity rotations produced
+baseline/candidate throughput ratios
+`1.04496 / 1.06125 / 1.04158 / 1.05493 / 1.03007 / 1.04306`.
+Each binary visited each affinity set equally. The balanced geometric mean was
+**1.04593**, the median **1.04401**, and only two of six observations reached
+the predeclared `1.05` retention threshold. A frameless tail-jump refinement
+removed the helper's call frame but yielded only
+`1.03804 / 1.05613 / 1.04437` (median **1.04437**), providing no incremental
+gain; it was reverted first. A final sequential `ABBAAB` confirmation could not
+produce quiet evidence: its first sample overlapped C++ builds and a PSP recomp
+test (41.3% host CPU busy), and process enumeration timed out during sample two.
+That failed batch is operationally inconclusive and cannot rescue the miss.
+The combined seam is therefore recorded as a genuine roughly **4.4--4.6%**
+exploratory gain, but it failed the >=5% retention gate and was removed without
+spending full G1/G2/G3 time. The result reinforces that broad universally hot
+generated/runtime boundaries matter; it does not justify retaining this added
+ABI and timing-snapshot maintenance surface on its own.
+
 The adversarial review rejected the earlier general wrapper-local inclusive
 timer: slice unwinds can destroy a wrapper host frame and resume in a descendant
 or even at the start PC. A correct non-leaf profiler needs per-CPU logical guest
