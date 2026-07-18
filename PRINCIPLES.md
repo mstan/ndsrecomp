@@ -86,6 +86,21 @@ region is a candidate to be promoted to a recompiled bank. Track these
 regions; shrink the interpreted set over time. It is the *guest's*
 code either way.
 
+## Performance HLE is layered above the proven floor
+
+The boot, BIOS, firmware, recompiled CPU, and software-renderer paths above are
+the accuracy floor. Once that floor passes the independent-oracle gates, a
+measured subsystem or title routine may receive an optimized/HLE replacement.
+That replacement may become the normal path, but the original implementation
+stays linked, forceable, and authoritative for differential verification and
+fallback. An HLE miss returns to the recompiled LLE body, never to Tier-3.
+
+The implementation and promotion contract is in `HLE_ARCHITECTURE.md`. In
+particular, replacements are keyed by content/bank identity rather than bare
+addresses, begin forced/off-default, prove mixed-tier and whole-workload
+behavior, and earn default-on status one item at a time. Accuracy-affecting
+items require an explicit measured error contract and user approval.
+
 ## Dual-CPU semantics (DS-specific, no precedent in sibling projects)
 
 Treat the ARM9 and ARM7 as **two cooperating CPUs**, not one.

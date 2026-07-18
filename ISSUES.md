@@ -96,26 +96,28 @@ frame), not merely clearing 60 FPS, to absorb lower-end hosts and later
    FORCED (the B3 precedent). These may be **always-on / default-on**
    with zero policy tension. *This tier is where the 60 FPS is
    expected to come from.*
-2. **Accuracy-affecting perf HLE** — the user explicitly authorized
-   pursuing modular floating-point/approximate shortcuts when they offer
-   gains comparable to the strongest parity-safe options. The proven
-   faithful LLE renderer must remain intact and selectable; every HLE
-   shortcut must be separately gated, accuracy-diffed against LLE, and
-   measured before any default-on decision. Do not mix several
-   approximations into one unattributable change.
-3. **Enhancements** (widescreen, ultrawide, GL/compute renderer,
-   higher internal resolution) — WS-E, opt-in, later. Not this issue.
+2. **Performance HLE** — the user explicitly authorized modular
+   whole-subsystem and whole-routine replacements, including host floating-point
+   shortcuts, when they produce material gains. The proven faithful LLE path
+   remains linked, selectable, and authoritative in verify mode. Each item is
+   separately forced, differential-tested, measured, and promoted; an
+   accuracy-affecting item needs a declared error contract and explicit user
+   approval before becoming default-on. See `HLE_ARCHITECTURE.md`.
+3. **Enhancements** (widescreen, ultrawide, higher internal resolution,
+   AA/supersampling) — WS-E, opt-in, later. A native-resolution compute renderer
+   used purely as a performance HLE belongs to tier 2, not this tier.
 
 ### What NOT to do
 
-The user's colleague's PS2recomp win came from per-operation FPU
-emulation fast paths (ADD.S/MADD.S/DIV.S/RSQRT.S timings). **That
-class does not exist here**: the NDS has no FPU (ARM946E-S is
-integer-only; SM64DS uses fixed-point + the GX geometry engine + the
-memory-mapped hardware div/sqrt device we already emulate), and our
-recompiled code is already native x86 — there is no per-op emulation
-layer to optimize. Do not import that playbook. SIMD belongs inside
-rasterizer inner loops if profiling justifies it, nowhere else.
+Do not copy PS2 FPU opcode handlers literally: the NDS has no FPU
+(ARM946E-S is integer-only; SM64DS uses fixed-point, the GX geometry
+engine, and memory-mapped division/square-root hardware). Do copy the
+successful process: retain the faithful implementation, identify hot bounded
+seams, add mechanically keyed native replacements, collect misses, run
+same-input and mixed-tier differential tests, reject non-winners, and promote
+validated winners while preserving a force-floor mode. Host floating point and
+SIMD are valid implementation tools inside a modular HLE when profile evidence
+and the item's accuracy contract justify them.
 
 ### P-1: measured gameplay baseline (falls out of ISSUE-1 step 3)
 
@@ -263,6 +265,13 @@ the runner shim does not expose. Scalar floating-point interpolation
 shortcuts are lower priority: review estimates only 1.2--1.8x
 renderer-local and potentially <=10--25% whole-runtime, with edge/depth
 error. Use the null-render ceiling before investing in either path.
+
+The CPU/title seam and promotion contract are now specified in
+`HLE_ARCHITECTURE.md`. Do not hook candidates by bare PC in
+`runtime_dispatch`: immutable banks can make direct generated calls and castle
+overlays reuse the same addresses. Emit candidate-only wrappers that retain the
+original generated body, and select the first math replacement from
+content-qualified dynamic call/time data.
 
 ### Acceptance for ISSUE-2
 
