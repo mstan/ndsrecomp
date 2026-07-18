@@ -36,6 +36,11 @@ extern "C" const unsigned g_dispatch_arm7_bios_len;
 #ifdef NDS_HAVE_SM64DS_BANKS
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm9[];
 extern "C" const unsigned g_dispatch_sm64ds_arm9_len;
+#if defined(NDS_PROFILE_HLE_HEAT)
+extern "C" const NdsHleProfileDescriptor* const
+    g_hle_profile_sm64ds_arm9[];
+extern "C" const unsigned g_hle_profile_sm64ds_arm9_len;
+#endif
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm7[];
 extern "C" const unsigned g_dispatch_sm64ds_arm7_len;
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm7_ram[];
@@ -382,6 +387,11 @@ int main(int argc, char** argv) {
 #ifdef NDS_HAVE_SM64DS_BANKS
         nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
                               g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
+#if defined(NDS_PROFILE_HLE_HEAT)
+        nds_register_hle_profile_descriptors(
+            NDS_ARM9, g_hle_profile_sm64ds_arm9,
+            g_hle_profile_sm64ds_arm9_len);
+#endif
         nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
                               g_dispatch_sm64ds_arm7_len, 0x00000000u);
 #ifdef NDS_HAVE_SM64DS_RAM_BANKS

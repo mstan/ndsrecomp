@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(nds_recompile VERSION 0.0.1 LANGUAGES CXX)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT MSVC)
@@ -26,6 +28,14 @@ add_executable(interpreter_cycle_test
     tests/interpreter_cycle_test.cpp
     armv4t/interpreter.cpp)
 target_link_libraries(interpreter_cycle_test PRIVATE nds_armv4t)
+
+add_executable(hle_manifest_test
+    tests/hle_manifest_test.cpp
+    finder/config.cpp
+    support/sha1.cpp)
+target_include_directories(hle_manifest_test PRIVATE
+    finder support third_party armv4t)
+add_test(NAME hle_manifest_test COMMAND hle_manifest_test)
 
 # The recompiler driver: config + function finder + audit/emit.
 add_executable(nds_recompile

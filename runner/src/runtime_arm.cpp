@@ -9,7 +9,12 @@
 
 #include "runtime_arm.h"
 
+#include <algorithm>
 #include <array>
+#if defined(NDS_PROFILE_HLE_HEAT)
+#include <chrono>
+#include <string>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +23,7 @@
 #include "state.h"
 #include "io.h"
 #include "tier3.h"
+#include "hle_profile.h"
 
 // ── Globals the ABI exposes ─────────────────────────────────────────────
 extern "C" ArmCpuState g_cpu = {};
@@ -64,6 +70,104 @@ struct StaticExecutionGuard {
     bool invalidated = false;
 };
 StaticExecutionGuard g_static_guard;
+
+#if defined(NDS_PROFILE_HLE_HEAT)
+struct HleHeatStats {
+    const NdsHleProfileDescriptor* descriptor = nullptr;
+    int cpu = 0;
+    uint64_t entries = 0;
+    uint64_t start_entries = 0;
+    uint64_t resume_entries = 0;
+    uint64_t normal_segments = 0;
+    uint64_t unwind_segments = 0;
+    uint64_t sampled_segments = 0;
+    uint64_t accepted_samples = 0;
+    uint64_t accepted_normal_samples = 0;
+    uint64_t accepted_unwind_samples = 0;
+    uint64_t irq_rejects = 0;
+    uint64_t instruction_rejects = 0;
+    uint64_t guard_mismatches = 0;
+    uint64_t pc_mismatches = 0;
+    uint64_t nested_entries = 0;
+    uint64_t depth_mismatches = 0;
+    uint32_t max_depth = 0;
+    uint64_t host_ns = 0;
+    uint64_t instructions = 0;
+    uint64_t cycles = 0;
+};
+
+std::vector<HleHeatStats> g_hle_heat;
+uint32_t g_hle_irq_epoch[2]{};
+uint32_t g_hle_active_depth[2]{};
+
+unsigned hle_sample_log2() {
+    static const unsigned value = [] {
+        const char* text = std::getenv("NDS_HLE_SAMPLE_LOG2");
+        if (!text || !*text) return 6u;  // deterministic 1/64 sampling
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(text, &end, 10);
+        if (*end != '\0' || parsed > 16u) {
+            std::fprintf(stderr,
+                "invalid NDS_HLE_SAMPLE_LOG2 (expected 0..16); using 6\n");
+            return 6u;
+        }
+        return static_cast<unsigned>(parsed);
+    }();
+    return value;
+}
+
+uint64_t hle_sample_phase() {
+    static const uint64_t value = [] {
+        const unsigned log2 = hle_sample_log2();
+        const uint64_t limit = uint64_t{1} << log2;
+        const char* text = std::getenv("NDS_HLE_SAMPLE_PHASE");
+        if (!text || !*text) return uint64_t{0};
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(text, &end, 10);
+        if (*end != '\0' || parsed >= limit) {
+            std::fprintf(stderr,
+                "invalid NDS_HLE_SAMPLE_PHASE for current log2; using 0\n");
+            return uint64_t{0};
+        }
+        return static_cast<uint64_t>(parsed);
+    }();
+    return value;
+}
+
+uint64_t hle_host_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+HleHeatStats* hle_stats(const NdsHleProfileDescriptor* descriptor) {
+    for (auto& stats : g_hle_heat)
+        if (stats.descriptor == descriptor) return &stats;
+    return nullptr;
+}
+
+void append_json_string(std::string& out, const char* text) {
+    out.push_back('"');
+    for (const unsigned char c : std::string(text ? text : "")) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20u) {
+                    char escaped[8];
+                    std::snprintf(escaped, sizeof escaped, "\\u%04X", c);
+                    out += escaped;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    out.push_back('"');
+}
+#endif
 
 constexpr uint32_t kDispatchCacheSize = 4096u;
 struct CachedStaticLookup {
@@ -278,6 +382,108 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
     CpuCtx& ctx = g_ctx[cpu & 1];
     ctx.banks.push_back({t, len});
     ctx.exc_base = exc_base;
+}
+
+extern "C" void nds_register_hle_profile_descriptors(
+        int cpu, const NdsHleProfileDescriptor* const* descriptors,
+        unsigned count) {
+#if defined(NDS_PROFILE_HLE_HEAT)
+    for (unsigned index = 0; index < count; ++index) {
+        const NdsHleProfileDescriptor* descriptor = descriptors[index];
+        if (!descriptor || hle_stats(descriptor)) continue;
+        g_hle_heat.push_back(HleHeatStats{descriptor, cpu & 1});
+    }
+#else
+    (void)cpu;
+    (void)descriptors;
+    (void)count;
+#endif
+}
+
+extern "C" NdsHleProfileToken runtime_hle_profile_begin(
+        const NdsHleProfileDescriptor* descriptor) {
+    NdsHleProfileToken token{};
+#if defined(NDS_PROFILE_HLE_HEAT)
+    HleHeatStats* stats = hle_stats(descriptor);
+    if (!stats) return token;
+    ++stats->entries;
+    if (stats->cpu != static_cast<int>(g_nds_active) ||
+        descriptor->validation != g_static_guard.validation) {
+        ++stats->guard_mismatches;
+        return token;
+    }
+    const uint32_t pc = g_cpu.R[15] & ~1u;
+    const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
+    if (thumb != (descriptor->thumb != 0u) ||
+        pc < descriptor->address || pc >= descriptor->end_address) {
+        ++stats->pc_mismatches;
+        return token;
+    }
+    if (pc == descriptor->address) ++stats->start_entries;
+    else ++stats->resume_entries;
+    token.active = 1u;
+    token.depth = ++g_hle_active_depth[g_nds_active];
+    if (token.depth > 1u) ++stats->nested_entries;
+    stats->max_depth = std::max(stats->max_depth, token.depth);
+    const unsigned log2 = hle_sample_log2();
+    const uint64_t mask = (uint64_t{1} << log2) - 1u;
+    const uint64_t eligible = stats->start_entries + stats->resume_entries;
+    if (((eligible - 1u + hle_sample_phase()) & mask) != 0u) return token;
+    ++stats->sampled_segments;
+    token.sampled = 1u;
+    token.irq_epoch = g_hle_irq_epoch[g_nds_active];
+    token.instructions = g_insn_count[g_nds_active];
+    token.cycles = g_runtime_cycles;
+    token.host_ns = hle_host_ns();
+#else
+    (void)descriptor;
+#endif
+    return token;
+}
+
+extern "C" void runtime_hle_profile_end(
+        const NdsHleProfileDescriptor* descriptor,
+        NdsHleProfileToken token) {
+#if defined(NDS_PROFILE_HLE_HEAT)
+    HleHeatStats* stats = hle_stats(descriptor);
+    if (!stats || !token.active) return;
+    if (g_hle_active_depth[g_nds_active] != token.depth) {
+        ++stats->depth_mismatches;
+        g_hle_active_depth[g_nds_active] =
+            token.depth == 0u ? 0u : token.depth - 1u;
+    } else {
+        --g_hle_active_depth[g_nds_active];
+    }
+    const bool unwinding = runtime_unwinding();
+    if (unwinding) {
+        ++stats->unwind_segments;
+    } else {
+        ++stats->normal_segments;
+    }
+    if (!token.sampled) return;
+    const uint64_t end_ns = hle_host_ns();
+    const uint64_t end_instructions = g_insn_count[g_nds_active];
+    const uint64_t end_cycles = g_runtime_cycles;
+    if (token.irq_epoch != g_hle_irq_epoch[g_nds_active]) {
+        ++stats->irq_rejects;
+        return;
+    }
+    const uint64_t instructions = end_instructions - token.instructions;
+    if (instructions == 0u ||
+        instructions > descriptor->instruction_count) {
+        ++stats->instruction_rejects;
+        return;
+    }
+    ++stats->accepted_samples;
+    if (unwinding) ++stats->accepted_unwind_samples;
+    else ++stats->accepted_normal_samples;
+    stats->host_ns += end_ns - token.host_ns;
+    stats->instructions += instructions;
+    stats->cycles += end_cycles - token.cycles;
+#else
+    (void)descriptor;
+    (void)token;
+#endif
 }
 
 extern "C" void nds_set_cycle_cap(unsigned long long cap) { g_cycle_cap = cap; }
@@ -930,6 +1136,9 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
+#if defined(NDS_PROFILE_HLE_HEAT)
+    ++g_hle_irq_epoch[g_nds_active];
+#endif
     nds_note_irq_accept(g_nds_active, return_address);
     uint32_t saved = g_cpu.cpsr;
     runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, 0, saved, 0);
@@ -975,9 +1184,84 @@ extern "C" void runtime_init(void*) {
     }
     g_static_guard = {};
     g_dispatch_cache = {};
+#if defined(NDS_PROFILE_HLE_HEAT)
+    g_hle_heat.clear();
+    g_hle_irq_epoch[0] = 0u;
+    g_hle_irq_epoch[1] = 0u;
+    g_hle_active_depth[0] = 0u;
+    g_hle_active_depth[1] = 0u;
+#endif
     tier3_reset();
 }
 extern "C" void runtime_shutdown(void) {
     g_crs_depth = 0;
     g_deferred_cycles = 0;
+}
+
+std::string nds_hle_profile_json() {
+#if !defined(NDS_PROFILE_HLE_HEAT)
+    return "{\"enabled\":false,\"routines\":[]}";
+#else
+    std::string out = "{\"enabled\":true,\"sample_log2\":" +
+        std::to_string(hle_sample_log2()) + ",\"sample_phase\":" +
+        std::to_string(hle_sample_phase()) + ",\"routines\":[";
+    bool first = true;
+    for (const auto& stats : g_hle_heat) {
+        if (!first) out.push_back(',');
+        first = false;
+        const NdsHleProfileDescriptor& descriptor = *stats.descriptor;
+        out += "{\"id\":";
+        append_json_string(out, descriptor.id);
+        out += ",\"bank\":";
+        append_json_string(out, descriptor.bank);
+        out += ",\"cpu\":" + std::to_string(stats.cpu) +
+               ",\"address\":" + std::to_string(descriptor.address) +
+               ",\"end_address\":" +
+                   std::to_string(descriptor.end_address) +
+               ",\"thumb\":" + std::to_string(descriptor.thumb) +
+               ",\"instruction_count\":" +
+                   std::to_string(descriptor.instruction_count) +
+               ",\"content_sha1\":";
+        append_json_string(out, descriptor.content_sha1);
+        out += ",\"entries\":" + std::to_string(stats.entries) +
+               ",\"start_entries\":" +
+                   std::to_string(stats.start_entries) +
+               ",\"resume_entries\":" +
+                   std::to_string(stats.resume_entries) +
+               ",\"normal_segments\":" +
+                   std::to_string(stats.normal_segments) +
+               ",\"unwind_segments\":" +
+                   std::to_string(stats.unwind_segments) +
+               ",\"sampled_segments\":" +
+                   std::to_string(stats.sampled_segments) +
+               ",\"accepted_samples\":" +
+                   std::to_string(stats.accepted_samples) +
+               ",\"accepted_normal_samples\":" +
+                   std::to_string(stats.accepted_normal_samples) +
+               ",\"accepted_unwind_samples\":" +
+                   std::to_string(stats.accepted_unwind_samples) +
+               ",\"irq_rejects\":" +
+                   std::to_string(stats.irq_rejects) +
+               ",\"instruction_rejects\":" +
+                   std::to_string(stats.instruction_rejects) +
+               ",\"guard_mismatches\":" +
+                   std::to_string(stats.guard_mismatches) +
+               ",\"pc_mismatches\":" +
+                   std::to_string(stats.pc_mismatches) +
+               ",\"nested_entries\":" +
+                   std::to_string(stats.nested_entries) +
+               ",\"depth_mismatches\":" +
+                   std::to_string(stats.depth_mismatches) +
+               ",\"max_depth\":" +
+                   std::to_string(stats.max_depth) +
+               ",\"sample_host_ns\":" +
+                   std::to_string(stats.host_ns) +
+               ",\"sample_instructions\":" +
+                   std::to_string(stats.instructions) +
+               ",\"sample_cycles\":" +
+                   std::to_string(stats.cycles) + "}";
+    }
+    out += "]}";
+    return out;
+#endif
 }

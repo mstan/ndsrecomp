@@ -101,6 +101,38 @@ typedef struct NdsDispatchEntry {
     const NdsStaticValidation* validation;
 } NdsDispatchEntry;
 
+// Candidate-only, compile-time-gated observation ABI for modular performance
+// HLE work. Generated LLE bodies call none of this unless
+// NDS_PROFILE_HLE_HEAT is defined for both the bank and runner.
+typedef struct NdsHleProfileDescriptor {
+    const char* id;
+    const char* bank;
+    uint32_t address;
+    uint32_t end_address;
+    uint8_t thumb;
+    uint32_t instruction_count;
+    const char* content_sha1;
+    const NdsStaticValidation* validation;
+} NdsHleProfileDescriptor;
+
+typedef struct NdsHleProfileToken {
+    unsigned long long host_ns;
+    unsigned long long instructions;
+    unsigned long long cycles;
+    uint32_t irq_epoch;
+    uint32_t active;
+    uint32_t depth;
+    uint32_t sampled;
+} NdsHleProfileToken;
+
+void nds_register_hle_profile_descriptors(
+    int cpu, const NdsHleProfileDescriptor* const* descriptors,
+    unsigned count);
+NdsHleProfileToken runtime_hle_profile_begin(
+    const NdsHleProfileDescriptor* descriptor);
+void runtime_hle_profile_end(const NdsHleProfileDescriptor* descriptor,
+                             NdsHleProfileToken token);
+
 // Convenience accessors. CSR-bit constants follow ARM ARM A2.5.
 #define CPSR_N_BIT (1u << 31)
 #define CPSR_Z_BIT (1u << 30)

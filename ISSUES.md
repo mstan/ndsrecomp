@@ -237,12 +237,16 @@ and forced-ON title navigation halted at ARM9 instruction 54,096,928 with
 `call-return overflow`. Because the control experiment failed identically, it
 was not performance evidence and none of that experiment remains in the tree.
 
-Then rank exact CPU work from evidence. The leading low-risk probe is
-runner-scoped LTO/IPO: generated instructions currently make
-out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,
-`runtime_tick`, ARM9 cycle combine, and memory timing helpers. If full
-LTO establishes a useful ceiling, prefer small CPU-specialized inline
-fast paths with exact fallback over one giant opaque change. Retain raw
+Then rank exact CPU work from evidence. An initial runner-scoped GCC LTO/IPO
+ceiling attempt produced a 663 MB intermediate archive but no linked runner;
+it is incomplete and provides no performance evidence. Do not keep paying its
+whole-program build cost as the selection gate. Generated instructions still
+make out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,
+`runtime_tick`, and memory-timing helpers. The next parity-safe CPU experiment
+is therefore a narrow generated-code specialization of those exact common
+paths, retaining the out-of-line faithful fallback. The earlier fast-poll result
+makes a >=5% gain plausible; reject the experiment if quiet interleaved A/B is
+below that threshold or code growth/i-cache cost erases the saved calls. Retain raw
 `switch_ns`, `switches`, `crs_words`, and `next_event_ns` before
 touching context copies or deadline calculation. Same discipline:
 measure, change, G-gates, measure, commit.
@@ -337,18 +341,54 @@ a finite run that stops with one compute frame pending, harden teardown after a
 catastrophic context-loss/reacquire failure, add focused `RenderXPos` boundary
 and `AbortFrame` tests, and measure the remaining GL-error poll cost.
 
-The CPU-HLE profiler design is candidate-only generated wrappers keyed by the
-selected bank's validation identity, not a bare-PC runtime hook and not whole-
-bank instrumentation. The seven current SM64DS math candidates are present at
-their expected addresses when the RAM source is decoded at its correct
-`0x01FF8000` base. Instrument only their public generated symbols so validated
-dispatch and any generated direct calls share the same seam; retain each
-original generated body behind that wrapper. Profile inclusive host time,
-instructions, cycles, start/interior/unwind segments, nesting, and guard
-mismatches. Profiler-OFF builds must emit the original public body directly
-with zero wrapper overhead. This design still requires focused generator tests
-for same-PC/different-validation banks, interior resume, nesting/recursion,
-guard mismatch, and unwind before implementation.
+The CPU-HLE heat probe is implemented as a candidate-only generated wrapper
+keyed by the selected bank's exact validation identity, not a bare-PC runtime
+hook and not whole-bank instrumentation. Its strict title manifest selects
+static ARM9 `MulVec3Mat4x3` at `0x02052858..0x02052914`; the generator verifies
+the program SHA, exact unsplit 188-byte function, independently derives content
+SHA-1 `4d9db01dcbcbd3b05ce22dfd9ab1eb06ecaa6616`, and proves 47 ARM instructions,
+no calls/branches/SWIs, and one unconditional return. Profiling builds count
+every content-qualified start/interior segment and time a configurable phase of
+every `2^N` segments around the unchanged private LLE body. Clean normal and
+unwind segments are accepted separately; IRQ, invalid-length, nesting/depth,
+guard, and PC contamination remain separate counters. Queries are cumulative
+and passive; measure by subtracting two stopped-route snapshots. Profiler-OFF
+emits the original public body directly; a manual `-O2 -g0` candidate-shard
+object comparison is byte-identical.
+
+Castle VBlank 2600--4400 triage rejects `MulVec3Mat4x3` as a standalone HLE
+lever. Three dispersed 1/64 phases each saw the exact same 149,864 segments and
+79,240 logical starts. Their systematic instrumented body-cost estimates were
+**0.582%, 0.566%, and 0.586%** of route wall time. An all-segment census then
+sampled all 149,864 segments, accepted 149,837, explicitly rejected 24
+IRQ-contaminated and three invalid-length samples, and estimated **0.566%**.
+There were no guard, PC, depth, or nested-entry failures. This is a heat proxy,
+not a formal zero-cost speedup ceiling: timed clock/bookkeeping overhead biases
+the numerator up, unsampled profiler overhead dilutes the denominator, and an
+atomic HLE can also change dispatch/resume cost outside the wrapper. Even with
+those caveats, four concordant measurements put this routine's wrapper-local
+heat below 1% in this castle route window; they do not measure other scenes or
+external dispatch/resume savings. That is no evidence for the 4.76% removable
+share needed for a 5% speedup, so a standalone replacement is deprioritized
+unless broader measurements change its rank. Profiling-ON forced G3 passed
+GX state and both framebuffer byte-locks at every 100M--700M checkpoint. The
+default Profiler-OFF path is object-identical to the no-manifest candidate body
+(SHA-256 `778d8b34b5601bca56e26a575784988b490211083de74b405f5d17c9f379fc8b`)
+and passed G1 8/8, G2 at 2,400 frames with zero underruns/errors and the locked
+FNV pair, and G3 GX/both-screen byte-lock at 100M--700M. The measurement seam is
+green; no CPU-HLE speedup is claimed.
+
+The adversarial review rejected the earlier general wrapper-local inclusive
+timer: slice unwinds can destroy a wrapper host frame and resume in a descendant
+or even at the start PC. A correct non-leaf profiler needs per-CPU logical guest
+frames and call-return-depth lifecycle hooks. That larger mechanism is deferred
+until measured evidence requires a non-leaf candidate. Windows WPR/xperf was
+also tried as zero-code corroboration but this session lacks the system-profile
+privilege it requires. A broad `gprof` build was stopped and rejected after it
+began rebuilding hundreds of unrelated generated firmware TUs; its `mcount`
+overhead, whole-lifetime attribution, multithread denominator, and lack of a
+graceful serve flush make it unsuitable as the selection gate. Neither attempt
+produced performance numbers.
 
 The CPU/title seam and promotion contract are now specified in
 `HLE_ARCHITECTURE.md`. Do not hook candidates by bare PC in

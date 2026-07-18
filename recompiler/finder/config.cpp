@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include "toml.hpp"
 #include "sha1.h"
@@ -51,6 +52,39 @@ std::string hex_lower(const std::string& s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return out;
+}
+
+bool safe_profile_name(const std::string& text) {
+    return !text.empty() && text.size() <= 96u && std::all_of(
+        text.begin(), text.end(), [](unsigned char c) {
+            return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-';
+        });
+}
+
+bool safe_profile_bank(const std::string& text) {
+    if (text.empty() || text.size() > 48u ||
+        !(std::isalpha(static_cast<unsigned char>(text.front())) != 0 ||
+          text.front() == '_'))
+        return false;
+    return std::all_of(text.begin() + 1, text.end(), [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_';
+    });
+}
+
+uint32_t get_manifest_u32(const toml::table& table, std::string_view key,
+                          bool& ok) {
+    const toml::node* node = table.get(key);
+    if (!node) {
+        ok = false;
+        return 0u;
+    }
+    const auto value = node->value<int64_t>();
+    if (!value || *value < 0 ||
+        static_cast<uint64_t>(*value) > UINT32_MAX) {
+        ok = false;
+        return 0u;
+    }
+    return static_cast<uint32_t>(*value);
 }
 
 uint32_t get_u32_field(const toml::table& t, std::string_view key,
@@ -395,6 +429,115 @@ bool validate_cross_section(const Config& cfg) {
 }
 
 }  // namespace
+
+bool load_hle_profile_manifest(const std::string& path,
+                               HleProfileManifest& out) {
+    out = HleProfileManifest{};
+    out.source_path = path;
+
+    toml::table tbl;
+    try {
+        tbl = toml::parse_file(path);
+    } catch (const toml::parse_error& e) {
+        std::fprintf(stderr, "%sHLE manifest parse error in %s: %s\n",
+                     kAbortHeader, path.c_str(), e.what());
+        return false;
+    }
+
+    // The schema intentionally has only these three top-level keys. Requiring
+    // the exact count after checking their types makes misspellings fail
+    // closed without coupling the rest of the config loader to strict mode.
+    const auto version = tbl["version"].value<int64_t>();
+    const auto* program = tbl["program"].as_table();
+    const auto* routines = tbl["routine"].as_array();
+    if (!version || !program || !routines || tbl.size() != 3u) {
+        std::fprintf(stderr,
+            "%sHLE manifest requires exactly version, [program], and "
+            "[[routine]] keys\n", kAbortHeader);
+        return false;
+    }
+    if (*version != 1) {
+        std::fprintf(stderr,
+            "%sHLE manifest version must be 1 (got %lld)\n",
+            kAbortHeader, static_cast<long long>(*version));
+        return false;
+    }
+    out.version = 1u;
+
+    bool ok = true;
+    std::string err;
+    out.bank = get_string_field(*program, "bank", true, ok, err);
+    out.program_sha1 = hex_lower(
+        get_string_field(*program, "sha1", true, ok, err));
+    if (!ok || program->size() != 2u || !safe_profile_bank(out.bank) ||
+        out.program_sha1.size() != 40u ||
+        !std::all_of(out.program_sha1.begin(), out.program_sha1.end(),
+                     [](unsigned char c) { return std::isxdigit(c) != 0; })) {
+        std::fprintf(stderr,
+            "%sHLE [program] requires only non-empty bank and a 40-digit "
+            "SHA-1\n", kAbortHeader);
+        return false;
+    }
+
+    if (routines->empty()) {
+        std::fprintf(stderr,
+            "%sHLE manifest must select at least one routine\n",
+            kAbortHeader);
+        return false;
+    }
+    std::unordered_set<std::string> ids;
+    std::unordered_set<std::string> selectors;
+    for (std::size_t index = 0; index < routines->size(); ++index) {
+        const auto* table = (*routines)[index].as_table();
+        if (!table || table->size() != 4u) {
+            std::fprintf(stderr,
+                "%sHLE [[routine]] %zu requires exactly id, address, "
+                "end_address, and mode\n", kAbortHeader, index);
+            return false;
+        }
+        HleProfileRoutine routine;
+        ok = true;
+        err.clear();
+        routine.id = get_string_field(*table, "id", true, ok, err);
+        routine.address = get_manifest_u32(*table, "address", ok);
+        routine.end_address = get_manifest_u32(*table, "end_address", ok);
+        const std::string mode = get_string_field(
+            *table, "mode", true, ok, err);
+        if (!ok || !safe_profile_name(routine.id) ||
+            !parse_mode(mode, routine.mode)) {
+            std::fprintf(stderr,
+                "%sHLE [[routine]] %zu has an invalid required field%s%s\n",
+                kAbortHeader, index, err.empty() ? "" : ": ", err.c_str());
+            return false;
+        }
+        const uint32_t alignment = routine.mode == CpuMode::Thumb ? 2u : 4u;
+        if ((routine.address % alignment) != 0u ||
+            (routine.end_address % alignment) != 0u ||
+            routine.end_address <= routine.address) {
+            std::fprintf(stderr,
+                "%sHLE [[routine]] %zu has an invalid or unaligned range "
+                "[0x%08X,0x%08X)\n", kAbortHeader, index,
+                routine.address, routine.end_address);
+            return false;
+        }
+        if (!ids.insert(routine.id).second) {
+            std::fprintf(stderr,
+                "%sHLE [[routine]] %zu duplicates id '%s'\n",
+                kAbortHeader, index, routine.id.c_str());
+            return false;
+        }
+        const std::string selector = std::to_string(routine.address) + ":" +
+            std::to_string(routine.end_address) + ":" + mode;
+        if (!selectors.insert(selector).second) {
+            std::fprintf(stderr,
+                "%sHLE [[routine]] %zu duplicates an address/range/mode "
+                "selector\n", kAbortHeader, index);
+            return false;
+        }
+        out.routines.push_back(std::move(routine));
+    }
+    return true;
+}
 
 bool load_config(const std::string& path, Config& out) {
     out = Config{};

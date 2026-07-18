@@ -102,6 +102,25 @@ struct Config {
     std::vector<ConfigExcludeFunc>  exclude_funcs;
 };
 
+// A deliberately small, title-owned manifest selecting generated functions
+// for opt-in heat measurement.  This is separate from the discovery config:
+// it may observe only an already discovered, exact whole function and can
+// never create a code entry point.
+struct HleProfileRoutine {
+    std::string id;
+    uint32_t    address = 0;
+    uint32_t    end_address = 0;
+    CpuMode     mode = CpuMode::Arm;
+};
+
+struct HleProfileManifest {
+    std::string source_path;
+    uint32_t    version = 0;
+    std::string bank;
+    std::string program_sha1;
+    std::vector<HleProfileRoutine> routines;
+};
+
 // Load a TOML config from `path`. On success returns true and
 // populates `out`. On parse/structural error returns false and
 // writes a human-readable diagnostic to stderr.
@@ -109,6 +128,12 @@ struct Config {
 // Identity hash verification is NOT performed here — call
 // verify_identity() against the actual binary bytes after loading.
 bool load_config(const std::string& path, Config& out);
+
+// Load the strict performance-HLE observation manifest. Unknown keys and
+// duplicate routine IDs fail closed so a stale or misspelled selector cannot
+// silently instrument a different guest routine.
+bool load_hle_profile_manifest(const std::string& path,
+                               HleProfileManifest& out);
 
 // Verify the config's identity hashes against the binary bytes.
 // Returns true on match; false and prints a diagnostic on

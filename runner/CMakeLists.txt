@@ -17,6 +17,9 @@ option(NDS_BOOTSTRAP_FIRMWARE
 option(NDS_ENABLE_COMPUTE_RENDERER
     "Build the optional melonDS OpenGL 4.3 compute renderer"
     OFF)
+option(NDS_PROFILE_HLE_HEAT
+    "Build candidate-only sampled leaf heat instrumentation"
+    OFF)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -75,6 +78,8 @@ endif()
 # timing selection without changing generated C or the two-CPU scheduler.
 set(ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c)
 set(ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c)
+set(SM64DS_ARM9_BANK_SOURCES)
+set(SM64DS_HLE_PROFILE_SOURCES)
 foreach(src IN LISTS FW_BANK_BODIES FW_BANK_DISPATCH)
     if(src MATCHES "/fw_arm9_")
         list(APPEND ARM9_BANK_SOURCES ${src})
@@ -85,6 +90,10 @@ endforeach()
 foreach(src IN LISTS SM64DS_BANK_SOURCES)
     if(src MATCHES "sm64ds_arm9_")
         list(APPEND ARM9_BANK_SOURCES ${src})
+        list(APPEND SM64DS_ARM9_BANK_SOURCES ${src})
+        if(src MATCHES "/sm64ds_arm9_([0-9][0-9]|dispatch)\\.c$")
+            list(APPEND SM64DS_HLE_PROFILE_SOURCES ${src})
+        endif()
     elseif(src MATCHES "sm64ds_arm7_")
         list(APPEND ARM7_BANK_SOURCES ${src})
     endif()
@@ -129,6 +138,15 @@ add_executable(nds_runner
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
+if(NDS_PROFILE_HLE_HEAT)
+    # Only title ARM9 sources can contain the selected wrappers/descriptors.
+    # Do not force the hundreds of unrelated firmware-bank TUs to rebuild for
+    # a default-off profiling experiment.
+    set_property(SOURCE ${SM64DS_HLE_PROFILE_SOURCES} APPEND PROPERTY
+        COMPILE_DEFINITIONS NDS_PROFILE_HLE_HEAT=1)
+    set_property(SOURCE src/main.cpp src/runtime_arm.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS NDS_PROFILE_HLE_HEAT=1)
+endif()
 if(NDS_ENABLE_COMPUTE_RENDERER)
     target_sources(nds_runner PRIVATE
         vendor/melonds/GPU3D_Compute.cpp

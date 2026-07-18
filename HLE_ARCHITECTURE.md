@@ -103,6 +103,29 @@ matrix/vector routine is the preferred first shape; floating-point division,
 square root, length, and normalization follow only when their whole-frame value
 justifies their larger error surface.
 
+The first measurement seam is intentionally narrower than a general call-tree
+profiler. A committed title manifest may select only an exact, content-validated
+whole function that the generator proves is a straight-line leaf with one
+unconditional return. In profiling builds only, its public generated symbol
+wraps the unchanged private LLE body. Every validated start/interior segment is
+counted; one configurable phase out of every `2^N` segments is timed. Clean
+normal and unwind segments are both accepted and counted separately; IRQ,
+invalid-length, nested-entry, depth, or guard/PC contamination is reported and
+excluded. Cumulative snapshots are subtracted around a stopped deterministic
+route; there is no arm/reset capture command. Profiler-OFF preprocessing emits
+the original public body directly, with object equivalence tested. This
+produces an optimistic instrumented body-cost estimate, not a formal removal or
+speedup bound. The sample clock and wrapper bookkeeping bias the numerator
+upward, while profiler overhead and work outside the wrapper affect the
+denominator and may bias the reported share in either direction. Multiple
+dispersed phases or an all-segment census are required before triage;
+uninstrumented HLE/LLE A/B remains the decision gate.
+
+A general non-leaf profiler would need per-CPU logical guest frames across host
+unwinds and descendant resumes. That machinery is deferred until a measured
+candidate requires it; wrapper-local wall clocks alone are not accepted for
+non-leaf inclusive attribution.
+
 ## Renderer seam
 
 Renderer HLE uses melonDS's existing `Renderer3D` backend interface, not the CPU
