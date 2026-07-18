@@ -86,8 +86,11 @@ because widescreen/ultrawide enhancements (WS-E) come next and 3D
 rasterization cost scales linearly with pixel count. Primary target
 architecture: x86-64. The practical headroom target is now roughly
 **2x real-time throughput** (about 8.3 ms of host work per 16.7 ms
-frame), not merely clearing 60 FPS, to absorb lower-end hosts and later
-21:9 + anti-aliasing/supersampling cost.
+frame), to absorb lower-end hosts and later 21:9 + anti-aliasing/
+supersampling cost. This is the engineering aspiration, not a binary
+acceptance boundary. Success still requires sustained locked 60 FPS plus
+measured, comfortable margin above 100% real time; merely touching 60 FPS is
+not enough, while falling short of 2x is not by itself a failed optimization.
 
 ### Policy tiers (agreed with the user — respect these boundaries)
 
@@ -168,7 +171,7 @@ Verified facts (2026-07-16, this session):
   `35.76 / 36.28 / 33.96 FPS`; on
   `42.62 / 41.61 / 41.66 FPS` (**16.5% median gain**). P-2 is a
   material default-on win but is still far short of locked 60 and the
-  2x-capacity target.
+  aspirational 2x-capacity target.
 
 ### P-3: B5 — scheduler-round overhead [JUDG]
 
@@ -228,6 +231,12 @@ Tier-3/rejects; G2 2,400 frames with zero underruns/errors/input and exact FNV
 pair `(e333837761ca0d1c,d61d2eb50e96b61d)`; G3 byte-lock at 100M..700M on
 both framebuffers with the established RAM_COUNT sequence.
 
+A broader tick-centric generated yield-call gate was also tried and rejected.
+It built and passed the focused unit tests and a menu soak, but both forced-OFF
+and forced-ON title navigation halted at ARM9 instruction 54,096,928 with
+`call-return overflow`. Because the control experiment failed identically, it
+was not performance evidence and none of that experiment remains in the tree.
+
 Then rank exact CPU work from evidence. The leading low-risk probe is
 runner-scoped LTO/IPO: generated instructions currently make
 out-of-line calls to `runtime_should_yield`, `runtime_code_cycles`,
@@ -248,41 +257,120 @@ after P-2/P-3.
 
 ### P-5: modular performance-HLE escalation (tier 2)
 
-If P-2..P-4 cannot reach the 2x-headroom target, use the measured
-evidence to rank modular HLE candidates, including floating-point or
+To pursue comfortable above-real-time headroom and the aspirational 2x target
+after P-2..P-4, use the measured evidence to rank modular HLE candidates,
+including floating-point or
 approximate raster math. Keep faithful LLE selectable, expose explicit
 A/B control, quantify framebuffer/visual differences, and never
 silently remove fidelity for speed.
 
 Current best architecture candidate is upstream melonDS
 `ComputeRenderer` behind the existing `Renderer3D` seam, with untouched
-`SoftRenderer` as faithful fallback. It is not drop-in: the runner must
-produce real 512-byte flat-VRAM dirty granules for its texture cache,
-add the accelerated capture/readback hook required by CPU GPU2D
-`GetLine`, and provide a GL 4.3 context/frontend path. Classic GL is a
-lower-accuracy compatibility fallback and also expects raw VRAM banks
-the runner shim does not expose. Scalar floating-point interpolation
-shortcuts are lower priority: review estimates only 1.2--1.8x
-renderer-local and potentially <=10--25% whole-runtime, with edge/depth
-error. Use the null-render ceiling before investing in either path.
+`SoftRenderer` as faithful fallback. An opt-in experimental integration now
+exists behind build option `NDS_ENABLE_COMPUTE_RENDERER=ON` and runtime force
+`NDS_3D_RENDERER=compute`; soft remains the runtime default. The runner supplies
+real 512-byte flat-VRAM dirty granules, an OpenGL 4.3 hidden context, shader/GL
+failure checks, and the accelerated capture/readback hook required by CPU
+GPU2D `GetLine`. The runner owns the CPU readback buffer, checks PBO map and
+unmap success, preserves upstream `AbortFrame`/`RenderXPos` line semantics, and
+turns runtime failures into persistent terminal state plus nonzero process
+status. Imported implementation files remain byte-identical to the pinned
+melonDS source; the compatibility shims are explicitly runner-owned.
+
+Current forced-compute evidence is deliberately insufficient for promotion:
+
+- all 33 compute programs compile on an NVIDIA RTX 3080 Ti and a 240-frame
+  forced smoke completes cleanly;
+- paired soft/compute GX state passes through ARM9 700M with the established
+  RAM-count sequence and identical execution/static-coverage counters;
+- framebuffer output is not parity-safe: early title samples differed on the
+  3D screen by 54--56 pixels, and castle-route samples differed by
+  1,144--7,311 3D-screen pixels with maximum channel deltas up to 243; the
+  bottom screen remained exact in those samples;
+- synchronized native-resolution GPU readback costs roughly 0.8--1.0 ms/frame
+  in profiled heavy-route intervals;
+- no performance gain is claimed yet. The available apparent gain came from a
+  profiled, non-interleaved compute run, and a later unprofiled run overlapped
+  unrelated compiler load. Both are contaminated.
+
+Rejected integration experiment: replacing the mapped PBO readback with
+`glGetBufferSubData` made failure observation straightforward but reduced the
+same 240-frame early-boot smoke to **33.72 FPS**, versus **44.40--47.14 FPS**
+after restoring a runner-owned checked map/unmap path (adjacent soft smoke
+**45.47 FPS**). These are smoke numbers, not castle performance evidence; they
+were sufficient to reject and remove the slower readback implementation.
+
+The fresh-process castle-cutscene harness has validated two soft and two
+compute replays to VBlank 2600: per-backend observations are deterministic,
+guest/GX/coverage state agrees, and the bottom-screen route signature is
+`34e37c06faeccc75e67127191c11805de5de4932f88d9e2901d8dda4057b9f8b`.
+Balanced `ABBAAB` timing remains pending: an unrelated orphaned devkitPro
+Python process was consuming most of one CPU core, so starting performance
+sampling would have violated the quiet-host rule. A later full attempt began
+after that process exited, but intermittent host pressure made even host-only
+queries stall and the harness hit its 20-minute outer timeout during checkpoint
+revalidation, before producing any timing sample. That run is inconclusive and
+records no renderer gain; CPU-HLE heat profiling now advances while the
+validated renderer benchmark waits for a genuinely quiet window.
+
+The compute-enabled binary's retained soft floor is green after the integration
+and hardening: G1 passes all eight fresh-pair firmware scenarios with byte-exact
+frames/audio and zero Tier-3/rejects; G2 completes 2,400 frames with zero audio
+errors/underruns and locked FNV pair
+`(e333837761ca0d1c,d61d2eb50e96b61d)` and zero input; default-soft G3 byte-locks
+both screens at every 100M--700M checkpoint. Focused decode/cycle tests pass.
+The changed sources also compile with compute support disabled. A final
+post-hardening 240-frame forced-compute smoke compiles all 33 programs, reports
+the compute backend, raises no GL error, and matches a fresh soft run at that
+checkpoint.
+
+Therefore ComputeRenderer remains a useful tier-2 experiment, opt-in and
+unpromoted. Next run same-binary fresh-process interleaved soft/compute trials
+over one uninterrupted castle interval on a quiet host, with profiling absent
+from timing runs. Then characterize slow-frame tails, audio underruns, resets,
+display capture, representative visual effects, and AMD/Intel behavior. If
+readback erases the renderer gain, the next renderer seam is direct GPU
+composition rather than more CPU-readback tuning. Classic GL remains a
+lower-accuracy compatibility fallback and expects raw VRAM banks the runner
+shim does not expose. Before promotion, also add a non-guest-mutating drain for
+a finite run that stops with one compute frame pending, harden teardown after a
+catastrophic context-loss/reacquire failure, add focused `RenderXPos` boundary
+and `AbortFrame` tests, and measure the remaining GL-error poll cost.
+
+The CPU-HLE profiler design is candidate-only generated wrappers keyed by the
+selected bank's validation identity, not a bare-PC runtime hook and not whole-
+bank instrumentation. The seven current SM64DS math candidates are present at
+their expected addresses when the RAM source is decoded at its correct
+`0x01FF8000` base. Instrument only their public generated symbols so validated
+dispatch and any generated direct calls share the same seam; retain each
+original generated body behind that wrapper. Profile inclusive host time,
+instructions, cycles, start/interior/unwind segments, nesting, and guard
+mismatches. Profiler-OFF builds must emit the original public body directly
+with zero wrapper overhead. This design still requires focused generator tests
+for same-PC/different-validation banks, interior resume, nesting/recursion,
+guard mismatch, and unwind before implementation.
 
 The CPU/title seam and promotion contract are now specified in
 `HLE_ARCHITECTURE.md`. Do not hook candidates by bare PC in
-`runtime_dispatch`: immutable banks can make direct generated calls and castle
-overlays reuse the same addresses. Emit candidate-only wrappers that retain the
-original generated body, and select the first math replacement from
-content-qualified dynamic call/time data.
+`runtime_dispatch`: immutable banks can make direct generated calls and future
+castle bank generations can reuse the same addresses. Emit candidate-only
+wrappers that retain the original generated body, and select the first math
+replacement from content-qualified dynamic call/time data.
 
 ### Acceptance for ISSUE-2
 
 - Sustained locked 60 FPS interactive through title, attract, AND
   castle-grounds gameplay, `underruns=0`, normal process priority
   (extends the WS-B acceptance line in PLAN.md).
-- **Headroom**: target roughly 2x real-time throughput, i.e. average
-  host frame work ≤ ~8.3 ms of the 16.7 ms frame, so lower-end CPUs
-  and future 21:9 widescreen render (~1.75× pixels at equal height,
-  before AA/supersampling) still have usable budget.
-  Report the measured margin, whatever it is.
+- **Required headroom**: measured uncapped throughput must sit comfortably
+  above 100% real time across the representative windows, with slow-frame
+  tails reported; a fragile 60.0 FPS average is not acceptance.
+- **Aspirational headroom**: continue toward roughly 2x real-time throughput,
+  i.e. average host frame work ≤ ~8.3 ms of the 16.7 ms frame, so lower-end
+  CPUs and future 21:9 widescreen render (~1.75× pixels at equal height,
+  before AA/supersampling) retain usable budget. Report the measured margin;
+  missing 2x alone does not classify an otherwise useful optimization as a
+  failure.
 - All three gates green; every tier-1 optimization proven parity-safe
   with its forced-on G3 run; tier-2 backends get explicit visual/error
   and guest-state validation; per-change perf numbers in commits.
@@ -347,6 +435,17 @@ people actually playing.
   builds silently fail). Running exes from bash is fine.
 - **Perf numbers:** interleaved A/B min-of-N on a quiet machine, in
   every commit message. Cross-session absolutes drift ~2×.
+- **Experiment ledger:** document failed, rejected, and inconclusive trials,
+  including the hypothesis, control, exact failure or contamination, observed
+  numbers when valid, and final disposition. Do not silently discard a
+  non-winner, and do not label a useful gain "failed" merely because it did
+  not reach an aspirational aggregate target such as 2x.
+- **Use Terra subagents throughout the project.** Parallelize concrete,
+  independent audits/probes when that shortens the critical path. For every
+  material architecture, correctness, or performance conclusion, assign an
+  adversarial review of the evidence or proposed change and explicitly
+  critique the returns before adopting them. Subagent agreement is not a gate;
+  reproducible measurements and the project oracles remain authoritative.
 - The game repo's `ndsrecomp` junction targets the LIVE framework
   checkout; `ndsrecomp.pin` is documentation. Per-title work goes in
   `supermario64dsrecomp`, framework work in `ndsrecomp`, framework

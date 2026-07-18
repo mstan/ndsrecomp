@@ -56,6 +56,10 @@ void scheduler_profile(NdsSchedulerProfile* out);
 SchedResult scheduler_run(uint64_t arm9_cycle_budget);
 void scheduler_run_round();
 
+// Terminally halt both CPU slots for a fatal device/frontend failure raised
+// outside CPU dispatch. Unlike nds_halt(), this survives the next slice setup.
+void scheduler_terminal_halt_all(const char* reason);
+
 // Inspect a CPU's saved state after a run (for reporting).
 const struct ArmCpuState& scheduler_cpu_state(int cpu);
 uint64_t scheduler_cpu_cycles(int cpu);

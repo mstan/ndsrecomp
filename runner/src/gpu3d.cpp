@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "io.h"
+#include "scheduler.h"
 #include "state.h"
 #include "vram.h"
 
@@ -50,7 +51,26 @@ NdsGpu3dProfile g_gpu3d_profile{};
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 bool g_compute_rendered_frame = false;
 bool g_compute_frame_ready = false;
+bool g_compute_shader_setup_failed = false;
+bool g_compute_runtime_failed = false;
 uint32_t g_compute_zero_line[256] = {};
+uint32_t g_compute_frame[256 * 192] = {};
+uint32_t g_compute_scrolled_line[256] = {};
+
+void clear_compute_gl_errors() {
+    while (glGetError() != GL_NO_ERROR) {}
+}
+
+bool compute_gl_stage_failed(const char* stage) {
+    bool failed = false;
+    for (GLenum error = glGetError(); error != GL_NO_ERROR;
+         error = glGetError()) {
+        std::fprintf(stderr, "[gpu3d] compute %s GL error: 0x%04X\n",
+                     stage, static_cast<unsigned>(error));
+        failed = true;
+    }
+    return failed;
+}
 #endif
 
 bool profiling() {
@@ -139,6 +159,16 @@ bool GPU::MakeVRAMFlat_TexPalCoherent(
 namespace melonDS::Platform {
 
 void Log(LogLevel level, const char* fmt, ...) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    // OpenGLSupport reports a cache miss at Error level even on the normal
+    // successful uncached path. Latch only its real compiler/linker failures
+    // so the runner can reject an unusable forced compute backend.
+    if (level == Error &&
+        (std::strstr(fmt, "OpenGL: failed to compile") != nullptr ||
+         std::strstr(fmt, "OpenGL: failed to link") != nullptr ||
+         std::strstr(fmt, "OpenGL: Cannot") != nullptr))
+        g_compute_shader_setup_failed = true;
+#endif
     if (level == Debug && g_log_budget <= 0) return;
     if (level == Debug) --g_log_budget;
     std::fprintf(stderr, "[gpu3d] ");
@@ -222,17 +252,36 @@ bool nds_gpu3d_compute_renderer_built() {
 #endif
 }
 
+bool nds_gpu3d_compute_runtime_failed() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    return g_compute_runtime_failed;
+#else
+    return false;
+#endif
+}
+
 bool nds_gpu3d_use_compute_renderer() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_compute_shader_setup_failed = false;
+    g_compute_runtime_failed = false;
+    clear_compute_gl_errors();
     auto renderer = melonDS::ComputeRenderer::New();
-    if (!renderer) return false;
+    if (!renderer || compute_gl_stage_failed("initialization")) return false;
     renderer->SetRenderSettings(1, false);
+    if (compute_gl_stage_failed("render settings")) return false;
     while (renderer->NeedsShaderCompile()) {
         int current = 0;
         int count = 0;
         renderer->ShaderCompileStep(current, count);
         std::fprintf(stderr, "[gpu3d] compute shader %d/%d\r",
                      current + 1, count);
+        if (g_compute_shader_setup_failed ||
+            compute_gl_stage_failed("shader setup")) {
+            std::fprintf(stderr,
+                         "[gpu3d] compute shader setup failed at %d/%d\n",
+                         current + 1, count);
+            return false;
+        }
     }
     std::fprintf(stderr, "[gpu3d] compute shaders ready          \n");
     g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(renderer));
@@ -420,8 +469,27 @@ void nds_gpu3d_vcount215() {
 
 const uint32_t* nds_gpu3d_line(int line) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_nds.GPU.GPU3D.IsRendererAccelerated() && !g_compute_frame_ready)
-        return g_compute_zero_line;
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) {
+        if (!g_compute_frame_ready || g_nds.GPU.GPU3D.AbortFrame)
+            return g_compute_zero_line;
+        const uint32_t* raw = &g_compute_frame[256 * line];
+        const uint16_t xpos = g_nds.GPU.GPU3D.GetRenderXPos();
+        if (xpos == 0) return raw;
+        if (xpos & 0x100u) {
+            int i = 0;
+            int j = xpos;
+            for (; j < 512; ++i, ++j) g_compute_scrolled_line[i] = 0;
+            for (j = 0; i < 256; ++i, ++j)
+                g_compute_scrolled_line[i] = raw[j];
+        } else {
+            int i = 0;
+            int j = xpos;
+            for (; j < 256; ++i, ++j)
+                g_compute_scrolled_line[i] = raw[j];
+            for (; i < 256; ++i) g_compute_scrolled_line[i] = 0;
+        }
+        return g_compute_scrolled_line;
+    }
 #endif
     if (!profiling()) return g_nds.GPU.GPU3D.GetLine(line);
     const auto start = ProfileClock::now();
@@ -447,17 +515,47 @@ void nds_gpu3d_start_frame() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
         g_compute_rendered_frame) {
+        const auto sync_start = profiling() ? ProfileClock::now()
+                                            : ProfileClock::time_point{};
         auto& renderer = g_nds.GPU.GPU3D.GetCurrentRenderer();
         // Order the compute shader's image stores before glGetTexImage copies
         // the low-resolution texture into the pixel-pack buffer.
         glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
         renderer.PrepareCaptureFrame();
-        // The runner's sparse 2D paths need not consume 3D on line 0, while
-        // ComputeRenderer maps its PBO only from GetLine(0). Force that map
-        // now so a later first consumer cannot observe stale CPU pixels.
-        (void)renderer.GetLine(0);
+        // Map the bound PBO into runner-owned storage. Upstream GetLine(0)
+        // hides glUnmapBuffer's success result, so reproduce its fast path
+        // here while explicitly checking map and unmap validity.
+        void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        bool readback_valid = mapped != nullptr;
+        if (mapped) {
+            std::memcpy(g_compute_frame, mapped, sizeof(g_compute_frame));
+            if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE)
+                readback_valid = false;
+        }
         g_compute_rendered_frame = false;
+        // Do not clear GL errors before this sequence: the drain must also
+        // catch errors raised by the preceding VCount215 compute render.
+        const bool gl_failed =
+            compute_gl_stage_failed("frame render/readback");
+        if (!readback_valid || gl_failed) {
+            if (profiling()) {
+                profile_add(g_gpu3d_profile.compute_sync_ns, sync_start);
+                ++g_gpu3d_profile.compute_sync_calls;
+            }
+            g_compute_frame_ready = false;
+            if (!g_compute_runtime_failed) {
+                std::fprintf(stderr,
+                             "[gpu3d] compute frame render/readback failed\n");
+                g_compute_runtime_failed = true;
+            }
+            scheduler_terminal_halt_all("compute frame render/readback failure");
+            return;
+        }
         g_compute_frame_ready = true;
+        if (profiling()) {
+            profile_add(g_gpu3d_profile.compute_sync_ns, sync_start);
+            ++g_gpu3d_profile.compute_sync_calls;
+        }
     }
 #endif
 }

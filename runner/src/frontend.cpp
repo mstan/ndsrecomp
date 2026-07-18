@@ -314,6 +314,7 @@ int nds_run_interactive_frontend() {
     nds_set_key_mask(keys);
     nds_set_touch(0, 0, false);
     bool running = true;
+    bool compute_failed = false;
     bool mouse_down = false;
     bool touch_release_pending = false;
     uint32_t touch_frames_held = 0;
@@ -360,6 +361,7 @@ int nds_run_interactive_frontend() {
         if (!nds_compute_host_make_current()) {
             std::fprintf(stderr, "[gpu3d] lost compute GL context: %s\n",
                          SDL_GetError());
+            compute_failed = true;
             running = false;
             break;
         }
@@ -473,6 +475,13 @@ int nds_run_interactive_frontend() {
             }
             if (emu_ticks * 1000u > frequency * 32u) ++slow_frames_32ms;
         }
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        if (nds_gpu3d_compute_runtime_failed()) {
+            compute_failed = true;
+            running = false;
+            break;
+        }
+#endif
         {
             const uint64_t seen =
                 audio_queue.underruns.load(std::memory_order_relaxed);
@@ -632,7 +641,7 @@ int nds_run_interactive_frontend() {
     if (selftest_menu)
         std::fprintf(stderr, "[sdl] menu self-test: %s\n",
                      selftest_failed ? "FAIL" : "PASS");
-    return (audio_failed || selftest_failed) ? 1 : 0;
+    return (audio_failed || selftest_failed || compute_failed) ? 1 : 0;
 }
 
 #else

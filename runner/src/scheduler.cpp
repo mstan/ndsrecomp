@@ -391,6 +391,13 @@ void scheduler_run_round() {
     // run_due_system_events(rendezvous);  // Commit B+
 }
 
+void scheduler_terminal_halt_all(const char* reason) {
+    g_slot[0].halted = true;
+    g_slot[1].halted = true;
+    g_slot[0].reason = reason;
+    g_slot[1].reason = reason;
+}
+
 void scheduler_profile_reset() {
     g_profile = NdsSchedulerProfile{};
     g_profile_rounds = 0;

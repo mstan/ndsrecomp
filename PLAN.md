@@ -212,8 +212,12 @@ phase/underrun stats; never single boot-window runs.
   profiled soak; FNV/G3 pinned. Affine/bitmap/window stay per-pixel.
 - **B5 [JUDG] scheduler round overhead.** Round-granular costs (per-round
   Run(), timer catch-up) if B1 shows them material.
-- Acceptance: sustained 60 FPS interactive through title+attract with
-  underruns=0 at normal process priority; boot ≤1× realtime.
+- Acceptance: sustained locked 60 FPS interactive through title+attract with
+  underruns=0 at normal process priority, plus measured uncapped throughput
+  comfortably above 100% real time rather than a fragile 60.0 FPS average;
+  boot ≤1× realtime. Roughly 2× real-time throughput is the engineering
+  aspiration for lower-end and enhancement headroom, not a binary pass/fail
+  boundary. Report the achieved margin and slow-frame tail.
 
 ### WS-C — in-game audio validation (priority 2)
 - **C1 [MECH harness / JUDG divergences] gameplay audio traversal.**

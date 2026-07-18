@@ -37,16 +37,19 @@ void nds_profile_report(std::FILE* out) {
     NdsGpu3dProfile gpu3d_profile{};
     nds_gpu3d_profile(&gpu3d_profile);
     if (gpu3d_profile.vcount215_calls || gpu3d_profile.getline_calls ||
-        gpu3d_profile.vcount144_calls) {
+        gpu3d_profile.vcount144_calls || gpu3d_profile.compute_sync_calls) {
         std::fprintf(out,
             "  GPU3D profile: submit/render %.3f s (%llu calls), "
-            "GetLine %.3f s (%llu calls), sync144 %.3f s (%llu calls)\n",
+            "GetLine %.3f s (%llu calls), sync144 %.3f s (%llu calls), "
+            "compute readback %.3f s (%llu calls)\n",
             static_cast<double>(gpu3d_profile.vcount215_ns) / 1.0e9,
             (unsigned long long)gpu3d_profile.vcount215_calls,
             static_cast<double>(gpu3d_profile.getline_ns) / 1.0e9,
             (unsigned long long)gpu3d_profile.getline_calls,
             static_cast<double>(gpu3d_profile.vcount144_ns) / 1.0e9,
-            (unsigned long long)gpu3d_profile.vcount144_calls);
+            (unsigned long long)gpu3d_profile.vcount144_calls,
+            static_cast<double>(gpu3d_profile.compute_sync_ns) / 1.0e9,
+            (unsigned long long)gpu3d_profile.compute_sync_calls);
     }
     NdsSchedulerProfile sched{};
     scheduler_profile(&sched);

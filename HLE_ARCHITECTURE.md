@@ -92,13 +92,16 @@ adapter. Whole-routine cycle charging is not automatically exact: making a
 routine atomic can move an IRQ boundary, so timing and interruptibility are part
 of every candidate's accuracy tier.
 
-The first CPU candidate will be selected only from content-qualified dynamic
-data. Castle overlays replace the original game's named math functions at the
-same addresses, so the existing PC-only heat spike is invalid. Profiling must
-attribute calls and inclusive host time to the selected static entry/bank
-generation. If hot, a fixed-point matrix/vector routine is the preferred first
-shape; floating-point division, square root, length, and normalization follow
-only when their whole-frame value justifies their larger error surface.
+The first CPU candidate will be selected from content-qualified dynamic data.
+The current castle captures do contain the seven named math routines at their
+expected addresses (the RAM-bank base is `0x01FF8000`); an earlier contrary
+audit decoded them with an incorrect `0x02000000` base. Bare-PC heat is still
+insufficient architecture: it cannot distinguish future bank generations and
+misses immutable-bank direct calls. Profiling must attribute calls and inclusive
+host time to the selected generated wrapper/bank identity. If hot, a fixed-point
+matrix/vector routine is the preferred first shape; floating-point division,
+square root, length, and normalization follow only when their whole-frame value
+justifies their larger error surface.
 
 ## Renderer seam
 

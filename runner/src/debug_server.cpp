@@ -531,6 +531,10 @@ std::string handle(const std::string& line) {
                ",\"vcount144_ns\":" + std::to_string(gpu3d.vcount144_ns) +
                ",\"vcount144_calls\":" +
                std::to_string(gpu3d.vcount144_calls) +
+               ",\"compute_sync_ns\":" +
+               std::to_string(gpu3d.compute_sync_ns) +
+               ",\"compute_sync_calls\":" +
+               std::to_string(gpu3d.compute_sync_calls) +
                "},\"sched\":{\"sampled_rounds\":" +
                std::to_string(sched.sampled_rounds) +
                ",\"rounds\":" + std::to_string(sched.rounds) +
@@ -910,7 +914,8 @@ void debug_serve(uint16_t port) {
     }
     std::fprintf(stderr, "[debug] listening on 127.0.0.1:%u\n", port);
 
-    for (;;) {
+    bool fatal_backend_failure = false;
+    while (!fatal_backend_failure) {
         socket_t client = accept(listener, nullptr, nullptr);
         if (client == INVALID_SOCKET) continue;
 
@@ -926,8 +931,19 @@ void debug_serve(uint16_t port) {
                 std::string req = buf.substr(0, nl);
                 buf.erase(0, nl + 1);
                 std::string resp = handle(req);
+                const bool request_failed =
+                    nds_gpu3d_compute_runtime_failed();
                 resp.push_back('\n');
                 if (!send_all(client, resp.data(), resp.size())) {
+                    fatal_backend_failure = request_failed;
+                    open = false;
+                    break;
+                }
+                // Preserve the response that observed the terminal failure,
+                // then unwind serve mode so forced-compute automation receives
+                // a nonzero process status from main.
+                if (request_failed) {
+                    fatal_backend_failure = true;
                     open = false;
                     break;
                 }
@@ -935,6 +951,10 @@ void debug_serve(uint16_t port) {
         }
         CLOSESOCK(client);
     }
+    CLOSESOCK(listener);
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 // ── Play-mode pump (psxrecomp handoff model) ────────────────────────────

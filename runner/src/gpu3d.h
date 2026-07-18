@@ -20,6 +20,7 @@ void nds_gpu3d_use_soft_renderer(bool threaded);
 // renderer selected. use_soft_renderer() explicitly restores the fallback.
 bool nds_gpu3d_use_compute_renderer();
 bool nds_gpu3d_compute_renderer_built();
+bool nds_gpu3d_compute_runtime_failed();
 
 struct NdsGpu3dProfile {
     uint64_t vcount215_ns;
@@ -28,6 +29,10 @@ struct NdsGpu3dProfile {
     uint64_t getline_calls;
     uint64_t vcount144_ns;
     uint64_t vcount144_calls;
+    // Accelerated frame-boundary barrier + capture submission + PBO readback.
+    // This is where ComputeRenderer's GPU wait/readback is paid.
+    uint64_t compute_sync_ns;
+    uint64_t compute_sync_calls;
 };
 void nds_gpu3d_profile(NdsGpu3dProfile* out);
 

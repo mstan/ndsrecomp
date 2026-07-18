@@ -459,9 +459,12 @@ int main(int argc, char** argv) {
         debug_set_reset_fn(boot);
         debug_serve(port);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+        const bool compute_failed = nds_gpu3d_compute_runtime_failed();
         nds_compute_host_stop();
+#else
+        const bool compute_failed = false;
 #endif
-        return 0;
+        return compute_failed ? 1 : 0;
     }
 
     std::fprintf(stderr, "[run] dual-CPU from reset, ARM9 budget=%llu cycles\n",
@@ -484,7 +487,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+    const bool compute_failed = nds_gpu3d_compute_runtime_failed();
     nds_compute_host_stop();
+#else
+    const bool compute_failed = false;
 #endif
-    return 0;
+    return compute_failed ? 1 : 0;
 }
