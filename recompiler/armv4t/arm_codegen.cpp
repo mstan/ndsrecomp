@@ -1861,6 +1861,38 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // keeping R15 at the current instruction PC here is only for the
     // exception/IRQ resume state read by runtime_irq/runtime_swi.
     os << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
+    const std::string code_var = code_var_for(ins);
+    // This generated source is shared by both statically CPU-specific bank
+    // builds. The candidate build keeps the literal legacy path available at
+    // runtime; ARM9 Thumb and special/NV paths remain outside this seam.
+    os << "#if defined(NDS_COMBINED_PROLOGUE) && defined(NDS_STATIC_CPU) && "
+          "(NDS_STATIC_CPU == 1";
+    if (!ins.thumb) os << " || NDS_STATIC_CPU == 0";
+    os << ")\n";
+    os << "    uint32_t " << code_var << ";\n";
+    os << "    if (g_runtime_combined_prologue) {\n";
+    if (!ins.thumb) {
+        os << "#if NDS_STATIC_CPU == 0\n";
+        os << "        " << code_var << " = runtime_arm9_arm_prologue("
+           << fmt_hex32(ins.pc) << ");\n";
+        os << "#else\n";
+        os << "        " << code_var << " = runtime_arm7_prologue("
+           << fmt_hex32(ins.pc) << ");\n";
+        os << "#endif\n";
+    } else {
+        os << "        " << code_var << " = runtime_arm7_prologue("
+           << fmt_hex32(ins.pc) << ");\n";
+    }
+    os << "        if (" << code_var
+       << " == RUNTIME_COMBINED_PROLOGUE_YIELD) return;\n";
+    os << "    } else {\n";
+    os << "        if (runtime_should_yield()) return;\n";
+    os << "        ++g_insn_count[g_nds_active];\n";
+    os << "        if (g_insn_hook_armed) runtime_insn_slow();\n";
+    os << "        " << code_var << " = runtime_code_cycles("
+       << fmt_hex32(ins.pc) << ");\n";
+    os << "    }\n";
+    os << "#else\n";
     os << "    if (runtime_should_yield()) return;\n";
     // Retired-insn ordinal (always advances) + armed slow path: the counter
     // bump is inlined (one increment; NDS_STATIC_CPU folds the index) and the
@@ -1878,7 +1910,6 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // matching the interpreter oracle, which pumps the full cost AFTER
     // executing and checks IRQs at the next boundary.
     const std::string cyc_var = cyc_var_for(ins);
-    const std::string code_var = code_var_for(ins);
     const std::string data_var = data_var_for(ins);
     const std::string int_var = int_var_for(ins);
     os << "    uint32_t " << cyc_var << " = 1u;\n";
@@ -1893,6 +1924,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // code on the ARM7 path.
     os << "    uint32_t " << code_var << " = runtime_code_cycles("
        << fmt_hex32(ins.pc) << ");\n";
+    os << "#endif\n";
     os << "    uint32_t " << data_var << " = 0u;\n";
     os << "    uint32_t " << int_var << " = 0u;\n";
 

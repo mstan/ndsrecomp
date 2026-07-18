@@ -22,6 +22,7 @@
 
 #include "state.h"
 #include "runtime_arm.h"
+#include "runtime_hot.h"
 #include "io.h"
 #include "mem_timing_profile.h"
 #include "wifi.h"
@@ -439,6 +440,7 @@ void unmapped(uint32_t addr, bool write, uint32_t width, uint32_t value) {
 // runtime_code_cycles (a sequential fetch is far cheaper than a branch/refill).
 uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
 uint32_t g_last_data_addr[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+Arm9CodeTimingSnapshot g_arm9_code_timing_snapshot{};
 static void reset_arm9_code_timing();
 
 void bus_init() {
@@ -879,6 +881,24 @@ static void reset_arm9_code_timing() {
     g_arm9_code_timing = {};
     g_arm9_region_code_timing = Arm9CodeTiming::Other;
     g_arm9_region_code_timing_valid = false;
+    g_arm9_code_timing_snapshot = {};
+}
+
+void publish_arm9_code_timing(Arm9CodeTiming timing) {
+    switch (timing) {
+        case Arm9CodeTiming::Itcm:
+            g_arm9_code_timing_snapshot = {1u, 1u, 1u};
+            break;
+        case Arm9CodeTiming::Cached:
+            g_arm9_code_timing_snapshot = {1u, 3u, 1u};
+            break;
+        case Arm9CodeTiming::MainRam:
+            g_arm9_code_timing_snapshot = {18u, 18u, 1u};
+            break;
+        case Arm9CodeTiming::Other:
+            g_arm9_code_timing_snapshot = {8u, 8u, 1u};
+            break;
+    }
 }
 
 Arm9CodeTiming arm9_code_timing(uint32_t addr) {
@@ -910,6 +930,7 @@ Arm9CodeTiming arm9_current_code_timing(uint32_t addr) {
     if (!g_arm9_region_code_timing_valid) {
         g_arm9_region_code_timing = arm9_code_timing(addr);
         g_arm9_region_code_timing_valid = true;
+        publish_arm9_code_timing(g_arm9_region_code_timing);
     }
     return g_arm9_region_code_timing;
 }
@@ -917,6 +938,7 @@ Arm9CodeTiming arm9_current_code_timing(uint32_t addr) {
 Arm9CodeTiming arm9_latch_code_timing(uint32_t addr) {
     g_arm9_region_code_timing = arm9_code_timing(addr);
     g_arm9_region_code_timing_valid = true;
+    publish_arm9_code_timing(g_arm9_region_code_timing);
     if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
         return Arm9CodeTiming::Itcm;
     return g_arm9_region_code_timing;

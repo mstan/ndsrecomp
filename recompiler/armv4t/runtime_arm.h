@@ -557,6 +557,15 @@ void runtime_tick(uint32_t cycles);
 // Per-instruction unwind signal (terminal halt only — dispatch miss /
 // unlowered op). Checked at the top of every emitted instruction.
 bool runtime_should_yield(void);
+// Exact optional combined top-of-instruction paths for statically compiled
+// banks. Successful ARM9 returns are raw numC fetch costs; ARM7 returns zero
+// after publishing its code PC. The reserved sentinel means the instruction
+// yielded before retirement. Generated code retains the literal legacy path
+// when the layer is disabled.
+#define RUNTIME_COMBINED_PROLOGUE_YIELD UINT32_MAX
+extern uint32_t g_runtime_combined_prologue;
+uint32_t runtime_arm9_arm_prologue(uint32_t pc);
+uint32_t runtime_arm7_prologue(uint32_t pc);
 // Cooperative slice-yield signal, checked ONLY at backward branches (loop
 // tops, which are dispatch entries). Lets the scheduler preempt a guest
 // spin to run the other core, with a clean re-dispatch on resume. Returns

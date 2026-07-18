@@ -23,6 +23,9 @@ option(NDS_PROFILE_HLE_HEAT
 option(NDS_PROFILE_MEM_TIMING
     "Build candidate-only runtime memory-timing census instrumentation"
     OFF)
+option(NDS_COMBINED_PROLOGUE
+    "Build the runtime-selectable exact combined ARM9/ARM7 prologue layer"
+    OFF)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -105,6 +108,10 @@ set_source_files_properties(${ARM9_BANK_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=0")
 set_source_files_properties(${ARM7_BANK_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=1")
+if(NDS_COMBINED_PROLOGUE)
+    set_property(SOURCE ${ARM9_BANK_SOURCES} ${ARM7_BANK_SOURCES}
+        APPEND PROPERTY COMPILE_DEFINITIONS NDS_COMBINED_PROLOGUE=1)
+endif()
 
 # SHA-1 helper (reused from the recompiler support lib).
 add_library(nds_support STATIC

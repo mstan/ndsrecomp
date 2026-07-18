@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "state.h"
+#include "runtime_hot.h"
 #include "io.h"
 #include "tier3.h"
 #include "hle_profile.h"
@@ -34,6 +35,7 @@ extern "C" unsigned long long g_runtime_cycles = 0;
 // + break-check — no control-flow / cycle effect — so behaviour is unchanged.
 extern "C" unsigned g_runtime_insn_trace = 1;
 extern "C" uint32_t g_runtime_break_pc = 0;
+extern "C" uint32_t g_runtime_combined_prologue = 0;
 
 NdsCpu      g_nds_active = NDS_ARM9;
 bool        g_nds_terminal = false;
@@ -199,6 +201,20 @@ bool configured_cpu_fast_poll() {
                      "invalid NDS_CPU_FAST_POLL value (expected 0 or 1); "
                      "using faithful full polling\n");
         return false;
+    }();
+    return enabled;
+}
+
+uint32_t configured_combined_prologue() {
+    static const uint32_t enabled = [] {
+        const char* value = std::getenv("NDS_COMBINED_PROLOGUE");
+        if (!value || !*value || (value[0] == '0' && value[1] == '\0'))
+            return 0u;
+        if (value[0] == '1' && value[1] == '\0') return 1u;
+        std::fprintf(stderr,
+                     "invalid NDS_COMBINED_PROLOGUE value (expected 0 or 1); "
+                     "using exact legacy prologue\n");
+        return 0u;
     }();
     return enabled;
 }
@@ -650,19 +666,20 @@ bool g_preserved_unwind_state_valid = false;
 ArmCpuState g_preserved_unwind_state{};
 }
 
-extern "C" bool runtime_should_yield(void) {
+namespace {
+
+#if defined(_MSC_VER)
+#define NDS_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define NDS_NOINLINE __attribute__((noinline))
+#else
+#define NDS_NOINLINE
+#endif
+
+NDS_NOINLINE bool runtime_should_yield_slow() {
     // In fast mode rare state transitions eagerly set the hint. While it is
     // clear, only the two per-instruction dynamic predicates remain. The full
     // scan below is unchanged and is also the NDS_CPU_FAST_POLL=0 reference.
-    if (g_cpu_fast_poll && !g_yield_poll_hint) {
-        const bool break_pc_hit =
-            g_runtime_break_pc &&
-            (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u);
-        const bool cycle_cap_hit =
-            g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap;
-        if (!break_pc_hit && !cycle_cap_hit) return false;
-    }
-
     // insn7/insn9 anchor reached → stop at this exact instruction (see io.cpp
     // g_nds_insn_stop). The bisector resets per K, so the mid-function unwind
     // (which does not preserve the call-return stack) is never resumed from.
@@ -695,6 +712,54 @@ extern "C" bool runtime_should_yield(void) {
     if (g_nds_terminal) { g_unwinding = true; return true; }
     g_yield_poll_hint = 0u;
     return false;
+}
+
+inline bool runtime_should_yield_shared(uint32_t current_pc) {
+    // Rare state transitions eagerly set the hint. While it is clear, only
+    // break-PC and the cycle cap remain dynamic per instruction.
+    if (g_cpu_fast_poll && !g_yield_poll_hint) {
+        const bool break_pc_hit =
+            g_runtime_break_pc &&
+            (current_pc & ~1u) == (g_runtime_break_pc & ~1u);
+        const bool cycle_cap_hit =
+            g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap;
+        if (!break_pc_hit && !cycle_cap_hit) return false;
+    }
+    return runtime_should_yield_slow();
+}
+
+}  // namespace
+
+extern "C" bool runtime_should_yield(void) {
+    return runtime_should_yield_shared(g_cpu.R[15]);
+}
+
+extern "C" uint32_t runtime_arm9_arm_prologue(uint32_t pc) {
+    if (runtime_should_yield_shared(pc))
+        return RUNTIME_COMBINED_PROLOGUE_YIELD;
+
+    ++g_insn_count[0];
+    if (g_insn_hook_armed) runtime_insn_slow();
+
+    uint32_t cycles = 0u;
+    if (arm9_arm_code_cycles_fast(pc, &cycles)) return cycles;
+    // Invalid only at reset/redispatch boundaries; the faithful generic path
+    // initializes the region latch for subsequent straight-line fetches.
+    return runtime_code_cycles(pc);
+}
+
+extern "C" uint32_t runtime_arm7_prologue(uint32_t pc) {
+    if (runtime_should_yield_shared(pc))
+        return RUNTIME_COMBINED_PROLOGUE_YIELD;
+
+    ++g_insn_count[1];
+    if (g_insn_hook_armed) runtime_insn_slow();
+
+    // The normal ARM7 tick does not consume runtime_code_cycles' return; its
+    // exact required side effect is the pre-body PC snapshot read later by
+    // arm7_cycle_combine. Special/NV/refill paths remain on the generic helper.
+    g_last_code_pc[1] = pc;
+    return 0u;
 }
 // Cooperative slice preemption: trips once this slice's cycle cap is
 // reached. Checked only at backward branches (loop tops = dispatch
@@ -1174,6 +1239,9 @@ extern "C" void runtime_unimplemented_op(const char* op_name, uint32_t pc) {
 }
 extern "C" void runtime_init(void*) {
     g_cpu_fast_poll = configured_cpu_fast_poll();
+    g_runtime_combined_prologue = configured_combined_prologue();
+    std::fprintf(stderr, "[runtime] combined ARM9/ARM7 prologue: %s\n",
+                 g_runtime_combined_prologue ? "on" : "off");
     request_yield_poll();
     g_crs_depth = 0;
     g_deferred_cycles = 0;

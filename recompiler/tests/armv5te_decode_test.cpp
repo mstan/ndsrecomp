@@ -61,6 +61,69 @@ void check(uint32_t word, IrOp expected, const char* label) {
 
 // Extra structural assertions on selected fields.
 void check_fields() {
+    // Ordinary ARM emission carries CPU-specialized combined helpers plus the
+    // literal legacy fallback. The prologue remains before the runtime
+    // condition guard; Thumb is eligible only for ARM7, while genuine NV
+    // stays entirely outside the seam.
+    Instr arm_mov = ArmDecoder::decode(0xE1A00000u, 0x1000u);  // MOV r0,r0
+    CodegenCtx prologue_ctx;
+    bool arm_mov_ni = false;
+    std::string arm_mov_c = ArmCodegen::emit_instr(
+        arm_mov, prologue_ctx, &arm_mov_ni);
+    const size_t arm9_combined =
+        arm_mov_c.find("runtime_arm9_arm_prologue(");
+    const size_t arm7_combined = arm_mov_c.find("runtime_arm7_prologue(");
+    const size_t runtime_gate =
+        arm_mov_c.find("if (g_runtime_combined_prologue)");
+    const size_t sentinel =
+        arm_mov_c.find("RUNTIME_COMBINED_PROLOGUE_YIELD");
+    const size_t legacy_yield = arm_mov_c.find("runtime_should_yield()");
+    const size_t legacy_fetch = arm_mov_c.find("runtime_code_cycles(");
+    if (arm_mov_ni || arm9_combined == std::string::npos ||
+        arm7_combined == std::string::npos ||
+        runtime_gate == std::string::npos || sentinel == std::string::npos ||
+        legacy_yield == std::string::npos ||
+        legacy_fetch == std::string::npos ||
+        !(runtime_gate < arm9_combined && arm9_combined < sentinel)) {
+        std::printf("  FAIL combined/legacy prologue structure\n");
+        ++g_failures;
+    }
+    Instr arm_moveq = ArmDecoder::decode(0x01A00000u, 0x1004u); // MOVEQ r0,r0
+    bool arm_moveq_ni = false;
+    std::string arm_moveq_c = ArmCodegen::emit_instr(
+        arm_moveq, prologue_ctx, &arm_moveq_ni);
+    size_t moveq_combined =
+        arm_moveq_c.find("runtime_arm9_arm_prologue(");
+    size_t moveq_cond = arm_moveq_c.find("arm_cond_passes(");
+    if (arm_moveq_ni || moveq_combined == std::string::npos ||
+        moveq_cond == std::string::npos || !(moveq_combined < moveq_cond)) {
+        std::printf("  FAIL conditional combined prologue occurs after guard\n");
+        ++g_failures;
+    }
+    Instr thumb_mov = ThumbDecoder::decode(0x1C00u, 0x1000u); // MOV r0,r0
+    bool thumb_mov_ni = false;
+    std::string thumb_mov_c = ArmCodegen::emit_instr(
+        thumb_mov, prologue_ctx, &thumb_mov_ni);
+    if (thumb_mov_ni ||
+        thumb_mov_c.find("runtime_arm7_prologue(") == std::string::npos ||
+        thumb_mov_c.find("runtime_arm9_arm_prologue(") != std::string::npos ||
+        thumb_mov_c.find("runtime_should_yield()") == std::string::npos ||
+        thumb_mov_c.find("runtime_code_cycles(") == std::string::npos) {
+        std::printf("  FAIL Thumb ARM7/legacy combined seam structure\n");
+        ++g_failures;
+    }
+    Instr arm_nv = ArmDecoder::decode(0xF1A00000u, 0x1000u);
+    bool arm_nv_ni = false;
+    std::string arm_nv_c = ArmCodegen::emit_instr(
+        arm_nv, prologue_ctx, &arm_nv_ni);
+    if (arm_nv_ni || arm_nv.cond != Cond::NV ||
+        arm_nv_c.find("runtime_arm9_arm_prologue(") != std::string::npos ||
+        arm_nv_c.find("runtime_arm7_prologue(") != std::string::npos ||
+        arm_nv_c.find("runtime_code_cycles(") == std::string::npos) {
+        std::printf("  FAIL genuine NV emission entered combined seam\n");
+        ++g_failures;
+    }
+
     // CLZ r0, r1
     Instr clz = ArmDecoder::decode(0xE16F0F11u, 0x1000u);
     if (clz.rd != 0 || clz.rm != 1) {
