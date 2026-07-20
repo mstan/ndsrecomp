@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
 
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,6 +61,8 @@ add_library(nds_banks STATIC
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
     ${SM64DS_BANK_SOURCES})
+ndsrecomp_limit_generated_compiles(nds_banks)
+ndsrecomp_limit_link(nds_banks)
 target_include_directories(nds_banks PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
     ${NDS_SM64DS_BANK_DIR})
@@ -141,6 +146,7 @@ add_executable(nds_runner
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
+ndsrecomp_limit_link(nds_runner)
 if(NDS_PROFILE_MEM_TIMING)
     # Keep the production memory-timing helper object unchanged. Only the
     # helper implementation and passive query command see the census define.
