@@ -149,10 +149,12 @@ This repository intentionally contains no Nintendo BIOS, firmware, ROM,
 screenshot, save data, generated recompiled code, or binary embedding those
 materials. The reachable Git history is intended to be source-only as well.
 
-There is not yet a project-wide license grant. Copyright remains with the
-respective authors, and making the source public does not by itself grant
-permission to reuse it. Ported components and the optional oracle have their
-own terms; see [`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md).
+The original code in this repository is released under the MIT License; see
+[`LICENSE`](LICENSE). This grant covers only the project's own source. Ported
+components and the optional oracle retain their own terms and are **not**
+relicensed by it; see
+[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md) for provenance and
+licensing boundaries.
 
 ## Development rules
 
