@@ -103,11 +103,14 @@ struct Config {
 };
 
 // A deliberately small, title-owned manifest selecting generated functions
-// for opt-in heat measurement.  This is separate from the discovery config:
-// it may observe only an already discovered, exact whole function and can
-// never create a code entry point.
+// for opt-in heat measurement and replacement experiments. This is separate
+// from the discovery config: it may select only an already discovered, exact
+// whole function and can never create a code entry point.
 struct HleProfileRoutine {
     std::string id;
+    // Optional C symbol for an opt-in replacement handler. An empty value
+    // leaves this routine observation-only.
+    std::string handler;
     uint32_t    address = 0;
     uint32_t    end_address = 0;
     CpuMode     mode = CpuMode::Arm;
@@ -129,9 +132,10 @@ struct HleProfileManifest {
 // verify_identity() against the actual binary bytes after loading.
 bool load_config(const std::string& path, Config& out);
 
-// Load the strict performance-HLE observation manifest. Unknown keys and
-// duplicate routine IDs fail closed so a stale or misspelled selector cannot
-// silently instrument a different guest routine.
+// Load the strict performance-HLE manifest. A routine may additionally name an
+// opt-in replacement handler. Unknown keys and duplicate IDs fail closed so a
+// stale or misspelled selector cannot silently instrument or replace a
+// different guest routine.
 bool load_hle_profile_manifest(const std::string& path,
                                HleProfileManifest& out);
 

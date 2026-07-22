@@ -381,6 +381,25 @@ and passed G1 8/8, G2 at 2,400 frames with zero underruns/errors and the locked
 FNV pair, and G3 GX/both-screen byte-lock at 100M--700M. The measurement seam is
 green; no CPU-HLE speedup is claimed.
 
+The 2026-07-21 SM64DS HLE fastpath batch rejected the current math/particle
+handlers as performance defaults. `sm64ds.particle_delta` was implemented as a
+bounded buffer transform with LLE fallback and later changed to commit
+in-place for the ordinary run path; a 200k-round post-title window still lost
+to LLE (`19.54 ms/vblank`, 873 hits, `42.7 ms` handler host time vs
+`18.70 ms/vblank` LLE). `sm64ds.mul_vec3_mat4x3` and
+`sm64ds.mul_mat4x3_mat4x3` were then tested with alias-aware handlers and a
+coarse math escape hatch (`NDS_HLE_MATH_COARSE=1`) after the normal atomic
+policy rejected the window. They hit frequently (`6,545` vec3 and `15,704`
+mat4x3 hits in a 50k smoke), but the 200k comparison was worse than LLE:
+coarse HLE `22.54 ms/vblank`, `5,022,288` ARM9 instructions and
+`70,590,462` ARM9 cycles vs LLE `19.05 ms/vblank`, `4,594,225` instructions
+and `65,973,528` cycles. The higher guest work indicates drift/work-shift, not
+a usable speedup. These handlers therefore remain diagnostic/opt-in only; keep
+the LLE fallback authoritative, keep coarse math behind its explicit extra
+environment gate, and do not enable these HLE paths in a performance demo or
+default policy without a fresh, quieter A/B that beats the current LLE-fast
+baseline.
+
 A parity-safe generated retirement-call fusion was also tried and rejected on
 2026-07-18. It replaced each adjacent `runtime_tick(cycles)` plus
 `runtime_unwinding()` ABI pair with one exact `runtime_retire(cycles)` helper;

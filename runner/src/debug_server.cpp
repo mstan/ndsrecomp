@@ -20,6 +20,8 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "hle_profile.h"
+#include "hle_runtime.h"
+#include "function_heat.h"
 #include "mem_timing_profile.h"
 #include "runtime_arm.h"
 #include "spu.h"
@@ -511,6 +513,8 @@ std::string handle(const std::string& line) {
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
     }
     if (cmd == "hle_heat") return nds_hle_profile_json();
+    if (cmd == "function_heat") return nds_function_heat_json();
+    if (cmd == "hle_status") return nds_hle_status_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "profile") {
         // Raw NDS_PROFILE_GPU / NDS_PROFILE_SCHED accumulators (zero unless
@@ -568,10 +572,11 @@ std::string handle(const std::string& line) {
     if (cmd == "sched_state") {
         char buf[768];
         std::snprintf(buf, sizeof(buf),
-            "{\"sys\":%llu,\"arm9\":%llu,\"arm7\":%llu,"
+            "{\"fast_context\":%s,\"sys\":%llu,\"arm9\":%llu,\"arm7\":%llu,"
             "\"next\":%llu,\"spi\":%llu,\"card\":%llu,"
             "\"terminal9\":%s,\"terminal7\":%s,"
             "\"reason9\":\"%s\",\"reason7\":\"%s\"}",
+            scheduler_fast_cpu_context_enabled() ? "true" : "false",
             (unsigned long long)scheduler_system_timestamp(),
             (unsigned long long)scheduler_cpu_cycles(0),
             (unsigned long long)scheduler_cpu_cycles(1),

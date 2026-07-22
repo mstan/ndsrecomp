@@ -52,6 +52,9 @@ struct CodegenCtx {
     uint32_t current_function_end_addr = 0xFFFFFFFFu;
     bool current_function_thumb = false;
     bool force_bx_c_return = false;
+    // Generated profiling builds attach every retired instruction to this
+    // immutable, bank-qualified function descriptor. Empty disables emission.
+    std::string function_heat_descriptor;
 };
 
 class ArmCodegen {

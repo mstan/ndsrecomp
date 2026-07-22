@@ -39,6 +39,14 @@ bool profiling() {
     return enabled;
 }
 
+bool fast_cpu_context() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_FAST_CPU_CONTEXT");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    return enabled;
+}
+
 using ProfileClock = std::chrono::steady_clock;
 
 void profile_add(uint64_t& dst, ProfileClock::time_point start) {
@@ -52,7 +60,20 @@ void profile_add(uint64_t& dst, ProfileClock::time_point start) {
 // g_slot[0].cycles is the ARM9 timestamp (ARM9 cycles); g_slot[1].cycles the ARM7.
 uint64_t           g_sys_timestamp = 0;
 constexpr int      kArm9ClockShift = 1;    // ARM9 runs at 2x the system clock
-constexpr uint64_t kIterCap        = 64;   // system cycles per outer iteration
+constexpr uint64_t kDefaultIterCap = 64;   // system cycles per outer iteration
+
+uint64_t iter_cap() {
+    static const uint64_t cap = [] {
+        const char* value = std::getenv("NDS_SCHED_ITER_CAP");
+        if (!value || !*value) return kDefaultIterCap;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 0);
+        if (end == value || *end != '\0' || parsed < kDefaultIterCap)
+            return kDefaultIterCap;
+        return static_cast<uint64_t>(parsed);
+    }();
+    return cap;
+}
 // Power-on periodic scheduler events in SYSTEM cycles. NextTarget scans RTC,
 // SPU and LCD even before their IRQs are enabled. They phase the 64-cycle CPU
 // rendezvous grid, so omitting a deadline can move an IPCSYNC write across the
@@ -87,10 +108,12 @@ bool g_sample_active = false;
 void save_current() {
     if (g_cur < 0) return;
     g_slot[g_cur].state = g_cpu;
-    g_slot[g_cur].crs_depth = runtime_call_stack_depth();
-    const uint32_t* src = runtime_call_stack_data();
-    for (uint32_t i = 0; i < g_slot[g_cur].crs_depth; ++i)
-        g_slot[g_cur].crs[i] = src[i];
+    if (!fast_cpu_context()) {
+        g_slot[g_cur].crs_depth = runtime_call_stack_depth();
+        const uint32_t* src = runtime_call_stack_data();
+        for (uint32_t i = 0; i < g_slot[g_cur].crs_depth; ++i)
+            g_slot[g_cur].crs[i] = src[i];
+    }
     g_slot[g_cur].deferred_cycles = runtime_deferred_cycles();
 }
 
@@ -99,13 +122,18 @@ void switch_to(int cpu) {
     const auto t0 = g_sample_active ? ProfileClock::now()
                                     : ProfileClock::time_point{};
     ++g_profile.switches;
-    if (g_cur >= 0) g_profile.crs_words += runtime_call_stack_depth();
-    g_profile.crs_words += g_slot[cpu].crs_depth;
+    if (!fast_cpu_context()) {
+        if (g_cur >= 0) g_profile.crs_words += runtime_call_stack_depth();
+        g_profile.crs_words += g_slot[cpu].crs_depth;
+    }
     // Save outgoing: register file AND call-return stack (a preempted
     // spin may be deep in a call chain whose returns must survive).
     save_current();
     g_cpu = g_slot[cpu].state;                       // load incoming
-    runtime_call_stack_restore(g_slot[cpu].crs, g_slot[cpu].crs_depth);
+    if (fast_cpu_context())
+        runtime_call_stack_select(static_cast<uint32_t>(cpu));
+    else
+        runtime_call_stack_restore(g_slot[cpu].crs, g_slot[cpu].crs_depth);
     runtime_deferred_cycles_set(g_slot[cpu].deferred_cycles);
     g_nds_active = (cpu == 0) ? NDS_ARM9 : NDS_ARM7;
     g_cur = cpu;
@@ -260,7 +288,8 @@ void scheduler_run_round() {
                                     : ProfileClock::time_point{};
     auto phase_start = round_start;
 
-    uint64_t planned = g_sys_timestamp + kIterCap;
+    const uint64_t cap = iter_cap();
+    uint64_t planned = g_sys_timestamp + cap;
     const uint64_t ev = next_scheduled_event_time();
     // Idle fast-forward: with both CPUs guest-halted, no wake pending and no
     // DMA owning a bus, no instruction can retire before the next scheduled
@@ -282,15 +311,15 @@ void scheduler_run_round() {
             wake = ev;
         } else {
             // A timer overflow is not a scheduled event: on the incremental
-            // grid its IRQ becomes visible at the first kIterCap step AT or
+            // grid its IRQ becomes visible at the first scheduler step AT or
             // AFTER the overflow (the catch-up tick at that rendezvous raises
             // it), or at the next scheduled event when that event snaps into
             // the same step. Jump to exactly that instant — anything finer
             // would deliver the IRQ earlier than the non-jumping scheduler
             // (and the melonDS oracle) and shift the woken CPU's timeline.
             const uint64_t steps =
-                (tov - g_sys_timestamp + kIterCap - 1u) / kIterCap;
-            const uint64_t grid = g_sys_timestamp + steps * kIterCap;
+                (tov - g_sys_timestamp + cap - 1u) / cap;
+            const uint64_t grid = g_sys_timestamp + steps * cap;
             wake = (ev < grid + 8u) ? ev : grid;
         }
         if (wake > planned) planned = wake;
@@ -408,6 +437,8 @@ void scheduler_profile(NdsSchedulerProfile* out) {
     *out = g_profile;
     out->rounds = g_profile_rounds;
 }
+
+bool scheduler_fast_cpu_context_enabled() { return fast_cpu_context(); }
 
 SchedResult scheduler_run(uint64_t budget) {
     // ARM9 issues ~2 cycles per ARM7 cycle (67 vs 33 MHz). The quantum is

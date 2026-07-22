@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
 
+enable_testing()
+
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
 
@@ -23,9 +25,75 @@ option(NDS_ENABLE_COMPUTE_RENDERER
 option(NDS_PROFILE_HLE_HEAT
     "Build candidate-only sampled leaf heat instrumentation"
     OFF)
+option(NDS_PROFILE_FUNCTION_HEAT
+    "Build flat sampled guest-function heat instrumentation"
+    OFF)
+option(NDS_ENABLE_HLE
+    "Build opt-in title-routine HLE candidate wrappers"
+    OFF)
 option(NDS_PROFILE_MEM_TIMING
     "Build candidate-only runtime memory-timing census instrumentation"
     OFF)
+set(NDS_HLE_HANDLER_SOURCES "" CACHE STRING
+    "Semicolon-separated title HLE handler sources linked into nds_runner")
+set(NDS_SM64DS_BANK_OPT_LEVEL "-O2" CACHE STRING
+    "Optimization level for generated SM64DS bank C sources")
+
+set(NDS_HLE_RESOLVED_HANDLER_SOURCES)
+if(NDS_HLE_HANDLER_SOURCES)
+    if(NOT NDS_ENABLE_HLE)
+        message(FATAL_ERROR
+            "NDS_HLE_HANDLER_SOURCES requires NDS_ENABLE_HLE=ON")
+    endif()
+    foreach(src IN LISTS NDS_HLE_HANDLER_SOURCES)
+        if(IS_ABSOLUTE "${src}")
+            set(resolved "${src}")
+        else()
+            get_filename_component(resolved "${src}" ABSOLUTE
+                BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        endif()
+        if(NOT EXISTS "${resolved}" OR IS_DIRECTORY "${resolved}")
+            message(FATAL_ERROR
+                "NDS_HLE_HANDLER_SOURCES entry does not exist: ${src}")
+        endif()
+        list(APPEND NDS_HLE_RESOLVED_HANDLER_SOURCES "${resolved}")
+    endforeach()
+endif()
+
+add_executable(hle_runtime_test
+    tests/hle_runtime_test.cpp
+    src/hle_runtime.cpp)
+target_compile_definitions(hle_runtime_test PRIVATE NDS_ENABLE_HLE=1)
+target_include_directories(hle_runtime_test PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+add_test(NAME hle_runtime_test COMMAND hle_runtime_test)
+add_executable(hle_runtime_disabled_test
+    tests/hle_runtime_test.cpp
+    src/hle_runtime.cpp)
+target_include_directories(hle_runtime_disabled_test PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+add_test(NAME hle_runtime_disabled_test COMMAND hle_runtime_disabled_test)
+add_executable(hle_atomic_policy_test tests/hle_atomic_policy_test.cpp)
+target_include_directories(hle_atomic_policy_test PRIVATE src)
+add_test(NAME hle_atomic_policy_test COMMAND hle_atomic_policy_test)
+add_executable(function_heat_test
+    tests/function_heat_test.cpp
+    src/function_heat.cpp)
+target_compile_definitions(function_heat_test PRIVATE
+    NDS_PROFILE_FUNCTION_HEAT=1)
+target_include_directories(function_heat_test PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+add_test(NAME function_heat_test COMMAND function_heat_test)
+add_executable(function_heat_disabled_test
+    tests/function_heat_test.cpp
+    src/function_heat.cpp)
+target_include_directories(function_heat_disabled_test PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+add_test(NAME function_heat_disabled_test COMMAND function_heat_disabled_test)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -78,7 +146,7 @@ if(SM64DS_BANK_SOURCES AND NOT MSVC)
     # sound engine); boot correctness is gate-proven (G1/G2/G3), so compile
     # them optimized. -g0 keeps the large generated TUs cheap to link.
     set_source_files_properties(${SM64DS_BANK_SOURCES}
-        PROPERTIES COMPILE_OPTIONS "-w;-O2;-g0")
+        PROPERTIES COMPILE_OPTIONS "-w;${NDS_SM64DS_BANK_OPT_LEVEL};-g0")
 endif()
 
 # Every immutable bank is CPU-specific even though both use one runtime ABI.
@@ -129,6 +197,8 @@ target_include_directories(nds_armv4t PUBLIC
 
 add_executable(nds_runner
     src/runtime_arm.cpp
+    src/hle_runtime.cpp
+    src/function_heat.cpp
     src/bus.cpp
     src/cp15.cpp
     src/io.cpp
@@ -143,6 +213,7 @@ add_executable(nds_runner
     src/debug_server.cpp
     src/frontend.cpp
     src/main.cpp
+    ${NDS_HLE_RESOLVED_HANDLER_SOURCES}
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
@@ -161,6 +232,23 @@ if(NDS_PROFILE_HLE_HEAT)
         COMPILE_DEFINITIONS NDS_PROFILE_HLE_HEAT=1)
     set_property(SOURCE src/main.cpp src/runtime_arm.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS NDS_PROFILE_HLE_HEAT=1)
+endif()
+if(NDS_PROFILE_FUNCTION_HEAT)
+    # Flat profiling covers immutable and runtime-RAM title banks on both
+    # CPUs. Firmware/BIOS objects remain byte-identical and do not rebuild.
+    if(SM64DS_BANK_SOURCES)
+        set_property(SOURCE ${SM64DS_BANK_SOURCES} APPEND PROPERTY
+            COMPILE_DEFINITIONS NDS_PROFILE_FUNCTION_HEAT=1)
+    endif()
+    target_compile_definitions(nds_runner PRIVATE
+        NDS_PROFILE_FUNCTION_HEAT=1)
+endif()
+if(NDS_ENABLE_HLE)
+    if(SM64DS_HLE_PROFILE_SOURCES)
+        set_property(SOURCE ${SM64DS_HLE_PROFILE_SOURCES} APPEND PROPERTY
+            COMPILE_DEFINITIONS NDS_ENABLE_HLE=1)
+    endif()
+    target_compile_definitions(nds_runner PRIVATE NDS_ENABLE_HLE=1)
 endif()
 if(NDS_ENABLE_COMPUTE_RENDERER)
     target_sources(nds_runner PRIVATE

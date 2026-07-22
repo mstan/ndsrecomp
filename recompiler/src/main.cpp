@@ -157,6 +157,16 @@ bool same_function(const Function& fn, const HleProfileRoutine& routine) {
            fn.mode == routine.mode;
 }
 
+bool same_entry(const Function& fn, const HleProfileRoutine& routine) {
+    return fn.addr == routine.address && fn.mode == routine.mode;
+}
+
+bool handler_entry_function(const Function& fn,
+                            const HleProfileRoutine& routine) {
+    return !routine.handler.empty() && same_entry(fn, routine) &&
+           fn.end_addr <= routine.end_address;
+}
+
 bool verify_sampled_leaf(const Function& fn, const uint8_t* rom,
                          std::size_t rom_size, uint32_t rom_base,
                          uint32_t* instruction_count) {
@@ -191,6 +201,34 @@ bool verify_sampled_leaf(const Function& fn, const uint8_t* rom,
     return count != 0u;
 }
 
+bool count_decodable_range(CpuMode mode, uint32_t address, uint32_t end_address,
+                           uint32_t source, const uint8_t* rom,
+                           std::size_t rom_size, uint32_t rom_base,
+                           uint32_t* instruction_count) {
+    const uint32_t step = mode == CpuMode::Thumb ? 2u : 4u;
+    const uint64_t size = uint64_t{end_address} - address;
+    if (source < rom_base || uint64_t{source - rom_base} + size > rom_size)
+        return false;
+    uint32_t count = 0u;
+    for (uint32_t pc = address; pc < end_address; pc += step) {
+        const std::size_t offset = static_cast<std::size_t>(
+            source - rom_base + (pc - address));
+        const armv4t::Instr ins = mode == CpuMode::Thumb
+            ? armv4t::ThumbDecoder::decode(
+                static_cast<uint16_t>(rom[offset] |
+                    (uint16_t{rom[offset + 1u]} << 8u)), pc)
+            : armv4t::ArmDecoder::decode(
+                uint32_t{rom[offset]} |
+                (uint32_t{rom[offset + 1u]} << 8u) |
+                (uint32_t{rom[offset + 2u]} << 16u) |
+                (uint32_t{rom[offset + 3u]} << 24u), pc);
+        if (ins.is_undefined) return false;
+        ++count;
+    }
+    *instruction_count = count;
+    return count != 0u;
+}
+
 bool resolve_hle_routines(const HleProfileManifest& manifest,
                           const Config& cfg, const std::string& bank,
                           const std::vector<Function>& discovered,
@@ -218,7 +256,8 @@ bool resolve_hle_routines(const HleProfileManifest& manifest,
         const HleProfileRoutine& routine = manifest.routines[index];
         const Function* found = nullptr;
         for (const Function& fn : discovered) {
-            if (same_function(fn, routine)) {
+            if (same_function(fn, routine) ||
+                handler_entry_function(fn, routine)) {
                 if (found) {
                     std::fprintf(stderr,
                         "[emit] HLE routine '%s' resolves ambiguously\n",
@@ -230,31 +269,46 @@ bool resolve_hle_routines(const HleProfileManifest& manifest,
         }
         if (!found) {
             std::fprintf(stderr,
-                "[emit] HLE routine '%s' is not an exact discovered function "
-                "[0x%08X,0x%08X)\n", routine.id.c_str(), routine.address,
-                routine.end_address);
+                "[emit] HLE routine '%s' is not a discovered function or "
+                "handler entry [0x%08X,0x%08X)\n", routine.id.c_str(),
+                routine.address, routine.end_address);
             return false;
         }
         unsigned emitted_matches = 0u;
         for (const Function& fn : emitted)
-            if (same_function(fn, routine)) ++emitted_matches;
+            if (same_function(fn, routine) ||
+                handler_entry_function(fn, routine))
+                ++emitted_matches;
         if (emitted_matches != 1u) {
             std::fprintf(stderr,
-                "[emit] HLE routine '%s' was split or changed before emission\n",
-                routine.id.c_str());
+                "[emit] HLE routine '%s' entry was split or changed before "
+                "emission\n", routine.id.c_str());
             return false;
         }
         ResolvedHleRoutine resolved;
         resolved.manifest = routine;
         resolved.source_address = found->source_addr
             ? found->source_addr : found->addr;
-        if (!verify_sampled_leaf(*found, rom, rom_size,
-                                 cfg.program.load_address,
-                                 &resolved.instruction_count)) {
-            std::fprintf(stderr,
-                "[emit] HLE routine '%s' is not a straight-line leaf with "
-                "one final return\n", routine.id.c_str());
-            return false;
+        if (routine.handler.empty()) {
+            if (!verify_sampled_leaf(*found, rom, rom_size,
+                                     cfg.program.load_address,
+                                     &resolved.instruction_count)) {
+                std::fprintf(stderr,
+                    "[emit] HLE routine '%s' is not a straight-line leaf with "
+                    "one final return\n", routine.id.c_str());
+                return false;
+            }
+        } else {
+            if (!count_decodable_range(routine.mode, routine.address,
+                                       routine.end_address,
+                                       resolved.source_address, rom, rom_size,
+                                       cfg.program.load_address,
+                                       &resolved.instruction_count)) {
+                std::fprintf(stderr,
+                    "[emit] HLE routine '%s' is not fully decodable\n",
+                    routine.id.c_str());
+                return false;
+            }
         }
         const uint32_t size = routine.end_address - routine.address;
         resolved.content_sha1 = gba::sha1(
@@ -271,7 +325,9 @@ const ResolvedHleRoutine* find_hle_routine(
         const std::vector<ResolvedHleRoutine>& routines,
         const Function& fn) {
     for (const auto& routine : routines)
-        if (same_function(fn, routine.manifest)) return &routine;
+        if (same_function(fn, routine.manifest) ||
+            handler_entry_function(fn, routine.manifest))
+            return &routine;
     return nullptr;
 }
 
@@ -284,13 +340,15 @@ void emit_function_body(std::FILE* f, const Function& fn,
                         const uint8_t* rom, std::size_t rom_size,
                         uint32_t rom_base,
                         const std::unordered_map<uint64_t, std::string>&
-                            func_names_by_key) {
+                            func_names_by_key,
+                        const std::string& function_heat_descriptor) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
     ctx.names_by_key = &func_names_by_key;
     ctx.current_function_addr = fn.addr;
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
+    ctx.function_heat_descriptor = function_heat_descriptor;
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
 
     // Every decoded instruction is a resumable static entry. Normal calls
@@ -551,11 +609,14 @@ void write_bank_dispatch(const std::string& dir,
     }
 
     if (!hle_routines.empty()) {
-        std::fputs("#ifdef NDS_PROFILE_HLE_HEAT\n", f);
+        std::fputs(
+            "#if defined(NDS_PROFILE_HLE_HEAT) || defined(NDS_ENABLE_HLE)\n",
+            f);
         for (const auto& routine : hle_routines) {
             std::size_t function_index = funcs.size();
             for (std::size_t index = 0; index < funcs.size(); ++index) {
-                if (same_function(funcs[index], routine.manifest)) {
+                if (same_function(funcs[index], routine.manifest) ||
+                    handler_entry_function(funcs[index], routine.manifest)) {
                     function_index = index;
                     break;
                 }
@@ -580,6 +641,7 @@ void write_bank_dispatch(const std::string& dir,
                 routine.instruction_count, routine.content_sha1.c_str(),
                 validation_symbols[function_index].c_str());
         }
+        std::fputs("#endif\n\n#ifdef NDS_PROFILE_HLE_HEAT\n", f);
         std::fprintf(f,
             "const NdsHleProfileDescriptor* const g_hle_profile_%s[] = {\n",
             names.bank.c_str());
@@ -668,18 +730,48 @@ void write_bank_body(const std::string& dir,
     std::fputs("\n", f);
     for (std::size_t index = first; index < last; ++index) {
         const auto& fn = funcs[index];
+        const uint32_t function_size = fn.end_addr - fn.addr;
+        const uint32_t function_source = fn.source_addr
+            ? fn.source_addr : fn.addr;
+        std::string function_sha1;
+        if (function_source >= rom_base &&
+            uint64_t(function_source - rom_base) + function_size <= rom_size) {
+            function_sha1 = gba::sha1(
+                rom + (function_source - rom_base), function_size).hex();
+        }
+        const std::string function_heat_descriptor =
+            "g_function_heat_" + names.bank + "_" + std::to_string(index);
+        std::fprintf(f,
+            "#ifdef NDS_PROFILE_FUNCTION_HEAT\n"
+            "static const NdsFunctionHeatDescriptor %s = {\n"
+            "    \"%s\", \"%s\", 0x%08Xu, 0x%08Xu, %uu, \"%s\"\n"
+            "};\n"
+            "#endif\n",
+            function_heat_descriptor.c_str(), fn.name.c_str(),
+            names.bank.c_str(), fn.addr, fn.end_addr,
+            fn.mode == CpuMode::Thumb ? 1u : 0u, function_sha1.c_str());
         const ResolvedHleRoutine* hle = find_hle_routine(hle_routines, fn);
         if (hle) {
+            const bool candidate = !hle->manifest.handler.empty();
+            const std::string handler_declaration = candidate
+                ? "#ifdef NDS_ENABLE_HLE\nextern const NdsHleHandler " +
+                  hle->manifest.handler + ";\n#endif\n"
+                : std::string{};
             std::fprintf(f,
-                "#ifdef NDS_PROFILE_HLE_HEAT\n"
+                "%s\n"
                 "extern const NdsHleProfileDescriptor %s;\n"
+                "%s"
                 "#define NDS_HLE_BODY_STORAGE static\n"
                 "#define NDS_HLE_BODY_NAME %s%s__lle\n"
                 "#else\n"
                 "#define NDS_HLE_BODY_STORAGE\n"
                 "#define NDS_HLE_BODY_NAME %s%s\n"
                 "#endif\n",
-                hle->descriptor_symbol.c_str(), names.fn_prefix.c_str(),
+                candidate
+                    ? "#if defined(NDS_PROFILE_HLE_HEAT) || defined(NDS_ENABLE_HLE)"
+                    : "#ifdef NDS_PROFILE_HLE_HEAT",
+                hle->descriptor_symbol.c_str(),
+                handler_declaration.c_str(), names.fn_prefix.c_str(),
                 fn.name.c_str(), names.fn_prefix.c_str(), fn.name.c_str());
         }
         std::fprintf(f,
@@ -691,20 +783,41 @@ void write_bank_body(const std::string& dir,
             hle ? "NDS_HLE_BODY_STORAGE " : "",
             hle ? "NDS_HLE_BODY_NAME" :
                   (names.fn_prefix + fn.name).c_str());
-        emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key);
+        emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key,
+                           function_heat_descriptor);
         std::fprintf(f, "}\n\n");
         if (hle) {
+            const bool candidate = !hle->manifest.handler.empty();
+            char entry_pc[11];
+            std::snprintf(entry_pc, sizeof entry_pc, "0x%08X",
+                          hle->manifest.address);
+            const std::string candidate_attempt = candidate
+                ? "#ifdef NDS_ENABLE_HLE\n"
+                  "    if (g_cpu.R[15] == " + std::string{entry_pc} +
+                  "u && runtime_hle_try(&" + hle->descriptor_symbol +
+                  ", " + names.fn_prefix + fn.name + "__lle, &" +
+                  hle->manifest.handler + ")) return;\n#endif\n"
+                : std::string{};
             std::fprintf(f,
-                "#ifdef NDS_PROFILE_HLE_HEAT\n"
+                "%s\n"
                 "void %s%s(void) {\n"
+                "%s"
+                "#ifdef NDS_PROFILE_HLE_HEAT\n"
                 "    NdsHleProfileToken token = runtime_hle_profile_begin(&%s);\n"
+                "#endif\n"
                 "    %s%s__lle();\n"
+                "#ifdef NDS_PROFILE_HLE_HEAT\n"
                 "    runtime_hle_profile_end(&%s, token);\n"
+                "#endif\n"
                 "}\n"
                 "#endif\n"
                 "#undef NDS_HLE_BODY_NAME\n"
                 "#undef NDS_HLE_BODY_STORAGE\n\n",
+                candidate
+                    ? "#if defined(NDS_PROFILE_HLE_HEAT) || defined(NDS_ENABLE_HLE)"
+                    : "#ifdef NDS_PROFILE_HLE_HEAT",
                 names.fn_prefix.c_str(), fn.name.c_str(),
+                candidate_attempt.c_str(),
                 hle->descriptor_symbol.c_str(), names.fn_prefix.c_str(),
                 fn.name.c_str(), hle->descriptor_symbol.c_str());
         }

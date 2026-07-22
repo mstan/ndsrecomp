@@ -71,6 +71,27 @@ bool safe_profile_bank(const std::string& text) {
     });
 }
 
+bool safe_handler_symbol(const std::string& text) {
+    if (text.empty() || text.size() > 96u ||
+        !(std::isalpha(static_cast<unsigned char>(text.front())) != 0 ||
+          text.front() == '_'))
+        return false;
+    if (!std::all_of(text.begin() + 1, text.end(), [](unsigned char c) {
+        return std::isalnum(c) != 0 || c == '_';
+    })) return false;
+    static const std::unordered_set<std::string> reserved = {
+        "auto", "break", "case", "char", "const", "continue", "default",
+        "do", "double", "else", "enum", "extern", "float", "for", "goto",
+        "if", "inline", "int", "long", "register", "restrict", "return",
+        "short", "signed", "sizeof", "static", "struct", "switch",
+        "typedef", "union", "unsigned", "void", "volatile", "while",
+        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+        "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+        "bool", "true", "false"
+    };
+    return reserved.find(text) == reserved.end();
+}
+
 uint32_t get_manifest_u32(const toml::table& table, std::string_view key,
                           bool& ok) {
     const toml::node* node = table.get(key);
@@ -489,21 +510,28 @@ bool load_hle_profile_manifest(const std::string& path,
     std::unordered_set<std::string> selectors;
     for (std::size_t index = 0; index < routines->size(); ++index) {
         const auto* table = (*routines)[index].as_table();
-        if (!table || table->size() != 4u) {
+        if (!table || (table->size() != 4u && table->size() != 5u)) {
             std::fprintf(stderr,
                 "%sHLE [[routine]] %zu requires exactly id, address, "
-                "end_address, and mode\n", kAbortHeader, index);
+                "end_address, mode, and optional handler\n",
+                kAbortHeader, index);
             return false;
         }
         HleProfileRoutine routine;
         ok = true;
         err.clear();
         routine.id = get_string_field(*table, "id", true, ok, err);
+        if (table->contains("handler"))
+            routine.handler = get_string_field(
+                *table, "handler", true, ok, err);
         routine.address = get_manifest_u32(*table, "address", ok);
         routine.end_address = get_manifest_u32(*table, "end_address", ok);
         const std::string mode = get_string_field(
             *table, "mode", true, ok, err);
         if (!ok || !safe_profile_name(routine.id) ||
+            (!routine.handler.empty() &&
+             !safe_handler_symbol(routine.handler)) ||
+            (table->size() == 5u && routine.handler.empty()) ||
             !parse_mode(mode, routine.mode)) {
             std::fprintf(stderr,
                 "%sHLE [[routine]] %zu has an invalid required field%s%s\n",

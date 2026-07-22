@@ -22,6 +22,7 @@
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "hle_runtime.h"
 #include "profile_report.h"
 #include "sha1.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -228,6 +229,9 @@ int main(int argc, char** argv) {
     }
 
     g_discover_static_misses = discover_static_misses;
+
+    if (!nds_hle_configure_from_environment()) return 2;
+    nds_hle_print_policy();
 
     bool compute_requested = false;
     if (const char* renderer = std::getenv("NDS_3D_RENDERER")) {

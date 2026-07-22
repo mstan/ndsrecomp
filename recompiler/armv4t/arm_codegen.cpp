@@ -50,6 +50,14 @@ uint32_t stm_pc_store_value(const Instr& ins) {
     return ((ins.pc + 4u) & ~2u) + 4u;
 }
 
+void emit_mem_write_trace(std::ostringstream& body, const char* indent,
+                          const Instr& ins, const std::string& addr,
+                          const std::string& value, uint32_t width) {
+    body << indent << "if (g_runtime_deep_trace) runtime_trace_event("
+         << "RUNTIME_TRACE_MEM_WRITE, " << fmt_hex32(ins.pc) << ", "
+         << addr << ", " << value << ", " << width << "u);\n";
+}
+
 // True when this op writes PC and is NOT a branch — i.e. it incurs the
 // +2 pipeline-refill surcharge in the interpreter's cycle model (branch
 // refill is already folded into instr_cycle_base). Statically known
@@ -1158,23 +1166,22 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
         }
         switch (ins.op) {
             case IrOp::STR:
-                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-                     << fmt_hex32(ins.pc) << ", " << ea_var << " & ~3u, "
-                     << val_expr << ", 4u);\n";
+                emit_mem_write_trace(body, indent, ins, ea_var + " & ~3u",
+                                     val_expr, 4u);
                 body << indent << "bus_write_u32(" << ea_var << " & ~3u, "
                      << val_expr << ");\n";
                 break;
             case IrOp::STRB:
-                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-                     << fmt_hex32(ins.pc) << ", " << ea_var << ", (uint32_t)("
-                     << val_expr << " & 0xFFu), 1u);\n";
+                emit_mem_write_trace(body, indent, ins, ea_var,
+                                     "(uint32_t)(" + val_expr + " & 0xFFu)",
+                                     1u);
                 body << indent << "bus_write_u8(" << ea_var << ", (uint8_t)("
                      << val_expr << " & 0xFFu));\n";
                 break;
             case IrOp::STRH:
-                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-                     << fmt_hex32(ins.pc) << ", " << ea_var << " & ~1u, (uint32_t)("
-                     << val_expr << " & 0xFFFFu), 2u);\n";
+                emit_mem_write_trace(body, indent, ins, ea_var + " & ~1u",
+                                     "(uint32_t)(" + val_expr + " & 0xFFFFu)",
+                                     2u);
                 body << indent << "bus_write_u16(" << ea_var << " & ~1u, (uint16_t)("
                      << val_expr << " & 0xFFFFu));\n";
                 break;
@@ -1242,9 +1249,8 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
             body << indent << "runtime_dispatch_with_exchange(" << pcv << ");\n";
             body << indent << "return;\n";
         } else {
-            body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-                 << fmt_hex32(ins.pc) << ", " << addr_var << " & ~3u, "
-                 << fmt_hex32(stm_pc_store_value(ins)) << ", 4u);\n";
+            emit_mem_write_trace(body, indent, ins, addr_var + " & ~3u",
+                                 fmt_hex32(stm_pc_store_value(ins)), 4u);
             body << indent << "bus_write_u32(" << addr_var << " & ~3u, "
                  << fmt_hex32(stm_pc_store_value(ins)) << ");\n";
             if (blk.writeback) {
@@ -1333,9 +1339,8 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                     : ((blk.s_bit ? "runtime_read_user_reg(" : "g_cpu.R[") +
                        std::to_string(r) + (blk.s_bit ? "u)" : "]"));
             }
-            body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-                 << fmt_hex32(ins.pc) << ", " << addr_var << " & ~3u, "
-                 << store_val << ", 4u);\n";
+            emit_mem_write_trace(body, indent, ins, addr_var + " & ~3u",
+                                 store_val, 4u);
             body << indent << "bus_write_u32(" << addr_var
                  << " & ~3u, " << store_val << ");\n";
         }
@@ -1503,9 +1508,11 @@ bool emit_swap(std::ostringstream& body, const Instr& ins,
         body << indent << "{ uint32_t _rot = (" << av << " & 3u) * 8u; "
              << "if (_rot) " << ov << " = (" << ov << " >> _rot) | ("
              << ov << " << (32u - _rot)); }\n";
-        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-             << fmt_hex32(ins.pc) << ", " << av << " & ~3u, g_cpu.R["
-             << static_cast<unsigned>(ins.rm) << "], 4u);\n";
+        emit_mem_write_trace(body, indent, ins, av + " & ~3u",
+                             "g_cpu.R[" +
+                                 std::to_string(static_cast<unsigned>(ins.rm)) +
+                                 "]",
+                             4u);
         body << indent << "{ uint32_t _m = runtime_mem_cycles(" << av
              << " & ~3u, 4u, 0u); " << cyc_var_for(ins) << " += _m; "
              << data_var_for(ins) << " += _m; }\n";
@@ -1524,9 +1531,11 @@ bool emit_swap(std::ostringstream& body, const Instr& ins,
              << ", 1u, 0u); " << cyc_var_for(ins) << " += _m; "
              << data_var_for(ins) << " += _m; }\n";
         body << indent << "uint8_t " << ov << " = bus_read_u8(" << av << ");\n";
-        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-             << fmt_hex32(ins.pc) << ", " << av << ", (uint32_t)(g_cpu.R["
-             << static_cast<unsigned>(ins.rm) << "] & 0xFFu), 1u);\n";
+        emit_mem_write_trace(body, indent, ins, av,
+                             "(uint32_t)(g_cpu.R[" +
+                                 std::to_string(static_cast<unsigned>(ins.rm)) +
+                                 "] & 0xFFu)",
+                             1u);
         body << indent << "{ uint32_t _m = runtime_mem_cycles(" << av
              << ", 1u, 0u); " << cyc_var_for(ins) << " += _m; "
              << data_var_for(ins) << " += _m; }\n";
@@ -1609,14 +1618,13 @@ bool emit_doubleword(std::ostringstream& body, const Instr& ins,
                  << "] = " << (mem.pre_indexed ? ea_var : post_var) << ";\n";
         }
     } else {  // STRD
-        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-             << fmt_hex32(ins.pc) << ", " << ea_var << " & ~3u, g_cpu.R["
-             << rd << "], 4u);\n";
+        emit_mem_write_trace(body, indent, ins, ea_var + " & ~3u",
+                             "g_cpu.R[" + std::to_string(rd) + "]", 4u);
         body << indent << "bus_write_u32(" << ea_var << " & ~3u, g_cpu.R["
              << rd << "]);\n";
-        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
-             << fmt_hex32(ins.pc) << ", (" << ea_var << " & ~3u) + 4u, g_cpu.R["
-             << rd1 << "], 4u);\n";
+        emit_mem_write_trace(body, indent, ins,
+                             "(" + ea_var + " & ~3u) + 4u",
+                             "g_cpu.R[" + std::to_string(rd1) + "]", 4u);
         body << indent << "bus_write_u32((" << ea_var << " & ~3u) + 4u, g_cpu.R["
              << rd1 << "]);\n";
         if (mem.writeback || !mem.pre_indexed) {
@@ -1839,6 +1847,12 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         s << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
         s << "    ++g_insn_count[g_nds_active];\n";
         s << "    if (g_insn_hook_armed) runtime_insn_slow();\n";
+        if (!ctx.function_heat_descriptor.empty()) {
+            s << "#if defined(NDS_PROFILE_FUNCTION_HEAT)\n";
+            s << "    runtime_function_heat_retire(&"
+              << ctx.function_heat_descriptor << ");\n";
+            s << "#endif\n";
+        }
         s << "    g_cpu.R[15] = "
           << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
         // No _cyc/_data/_int accumulators exist on this early-return path (a
@@ -1869,6 +1883,12 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // (not-executed) instruction is not counted or fingerprinted.
     os << "    ++g_insn_count[g_nds_active];\n";
     os << "    if (g_insn_hook_armed) runtime_insn_slow();\n";
+    if (!ctx.function_heat_descriptor.empty()) {
+        os << "#if defined(NDS_PROFILE_FUNCTION_HEAT)\n";
+        os << "    runtime_function_heat_retire(&"
+           << ctx.function_heat_descriptor << ");\n";
+        os << "#endif\n";
+    }
 
     // Per-instruction cycle accumulator. Starts at the cond-fail cost
     // (1S fetch); the cond-pass block raises it to the full execute cost,

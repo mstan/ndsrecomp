@@ -101,9 +101,9 @@ typedef struct NdsDispatchEntry {
     const NdsStaticValidation* validation;
 } NdsDispatchEntry;
 
-// Candidate-only, compile-time-gated observation ABI for modular performance
-// HLE work. Generated LLE bodies call none of this unless
-// NDS_PROFILE_HLE_HEAT is defined for both the bank and runner.
+// Content-qualified identity shared by candidate execution and optional heat
+// observation. Generated LLE bodies call none of the profiling API unless
+// NDS_PROFILE_HLE_HEAT is defined; HLE wrappers exist only with NDS_ENABLE_HLE.
 typedef struct NdsHleProfileDescriptor {
     const char* id;
     const char* bank;
@@ -114,6 +114,26 @@ typedef struct NdsHleProfileDescriptor {
     const char* content_sha1;
     const NdsStaticValidation* validation;
 } NdsHleProfileDescriptor;
+
+// Execution and profiling deliberately share the same content-qualified
+// identity aggregate.
+typedef NdsHleProfileDescriptor NdsHleDescriptor;
+
+// Flat instruction-sampling identity. Unlike a bare guest PC, bank plus
+// content hash distinguishes overlapping runtime-RAM generations.
+typedef struct NdsFunctionHeatDescriptor {
+    const char* name;
+    const char* bank;
+    uint32_t address;
+    uint32_t end_address;
+    uint8_t thumb;
+    const char* content_sha1;
+} NdsFunctionHeatDescriptor;
+
+extern uint64_t g_nds_function_heat_sample_mask;
+extern uint64_t g_nds_function_heat_sample_phase;
+void runtime_function_heat_sample(
+    const NdsFunctionHeatDescriptor* descriptor);
 
 typedef struct NdsHleProfileToken {
     unsigned long long host_ns;
@@ -132,6 +152,53 @@ NdsHleProfileToken runtime_hle_profile_begin(
     const NdsHleProfileDescriptor* descriptor);
 void runtime_hle_profile_end(const NdsHleProfileDescriptor* descriptor,
                              NdsHleProfileToken token);
+
+// Opt-in title-routine HLE ABI. Generated candidate wrappers pass their
+// exact, bank-qualified descriptor and a direct handler pointer. The retained
+// LLE body is always passed separately and remains the fallback/oracle.
+typedef void (*NdsHleLleFn)(void);
+
+typedef enum NdsHleRunResult {
+    NDS_HLE_RUN_UNSUPPORTED = 0,
+    NDS_HLE_RUN_HANDLED = 1
+} NdsHleRunResult;
+
+typedef enum NdsHleVerifyResult {
+    NDS_HLE_VERIFY_UNSUPPORTED = 0,
+    NDS_HLE_VERIFY_MATCH = 1,
+    NDS_HLE_VERIFY_MISMATCH = 2
+} NdsHleVerifyResult;
+
+typedef struct NdsHleHandler {
+    const char* id;
+    // UNSUPPORTED must leave all guest and runtime state unchanged so the
+    // wrapper can immediately execute its LLE fallback. HANDLED owns the
+    // complete routine contract, including PC, cycles, and retired counts.
+    NdsHleRunResult (*run)(const NdsHleProfileDescriptor* descriptor);
+    // The verifier owns input capture, both executions, and comparison. It
+    // must leave the LLE result authoritative for every return value.
+    NdsHleVerifyResult (*verify)(
+        const NdsHleProfileDescriptor* descriptor, NdsHleLleFn lle);
+    // Proven lower bound on cycles required to finish atomically. The generic
+    // wrapper uses it only for a cheap early rejection; the handler must still
+    // gate its exact/upper-bound cost before committing state. Zero disables
+    // the generic preflight.
+    uint32_t minimum_atomic_cycles;
+    // Optional handler-owned JSON object appended to `hle_status`. It is
+    // diagnostic only and must not mutate guest or runtime state.
+    const char* (*diagnostics_json)(void);
+} NdsHleHandler;
+
+// Returns true when the wrapper must return without invoking LLE again.
+// Returns false only when the wrapper should execute its retained LLE body.
+bool runtime_hle_try(const NdsHleProfileDescriptor* descriptor,
+                     NdsHleLleFn lle, const NdsHleHandler* handler);
+
+// Conservative gate for an ARM9 handler that will commit a whole guest
+// routine atomically. `max_cycles` is a proven upper bound for that handler;
+// false means the generated wrapper must execute its interruptible LLE body.
+// This query never arms an unwind or otherwise changes runtime state.
+bool runtime_hle_atomic_allowed(uint32_t max_cycles);
 
 // Convenience accessors. CSR-bit constants follow ARM ARM A2.5.
 #define CPSR_N_BIT (1u << 31)
@@ -455,7 +522,11 @@ void runtime_call_cancel_return(uint32_t return_pc);
 uint32_t        runtime_call_stack_depth(void);
 const uint32_t* runtime_call_stack_data(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
-                                           uint32_t depth);
+                                            uint32_t depth);
+// Selects resident host call-return storage for a CPU. The scheduler uses
+// this only in its opt-in fast context mode; guest-visible CPU state and
+// execution ordering are unchanged.
+void            runtime_call_stack_select(uint32_t cpu);
 
 // melonDS normally commits ARM::Cycles at an instruction boundary, but HALT
 // exits ARM::Execute before that commit and carries the final instruction's
@@ -545,6 +616,16 @@ uint32_t runtime_fp_count(void);
 // banks generated before this scheme (it bumps the same counters through
 // the runtime), so old- and new-emission banks each count exactly once.
 extern uint64_t g_insn_count[2];   // [0]=ARM9, [1]=ARM7 retired-insn ordinals
+
+// Generated sources invoke this only inside NDS_PROFILE_FUNCTION_HEAT. The
+// cheap ordinal gate is inline, so the runtime is entered only on a sample.
+static inline void runtime_function_heat_retire(
+        const NdsFunctionHeatDescriptor* descriptor) {
+    if ((g_insn_count[g_nds_active] & g_nds_function_heat_sample_mask) ==
+        g_nds_function_heat_sample_phase) {
+        runtime_function_heat_sample(descriptor);
+    }
+}
 extern uint32_t g_insn_hook_armed; // nonzero → per-insn runtime_insn_slow()
 void runtime_insn_slow(void);      // armed-path payload; no counter bump
 // Write the whole ring (oldest-first) as a compact binary file: a 16-byte

@@ -50,6 +50,7 @@ struct NdsSchedulerProfile {
 // NDS_PROFILE_SCHED is present in the environment.
 void scheduler_profile_reset();
 void scheduler_profile(NdsSchedulerProfile* out);
+bool scheduler_fast_cpu_context_enabled();
 
 // Interleave both CPUs until ARM9 reaches `arm9_cycle_budget` or both CPUs
 // have terminally halted. ARM9 runs ~2× the cycles per round (clock ratio).

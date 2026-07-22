@@ -59,7 +59,8 @@ static void title_routine_lle(void) {
 
 void title_routine(void) {
     if (g_cpu.R[15] == ROUTINE_START &&
-        runtime_hle_try(&title_routine_descriptor, title_routine_lle))
+        runtime_hle_try(&title_routine_descriptor, title_routine_lle,
+                        &title_routine_handler))
         return;
     title_routine_lle();
 }
@@ -71,11 +72,23 @@ existing byte/provenance guard still runs before the wrapper. The wrapper symbol
 and descriptor identify the exact bank generation; the selector is not keyed by
 bare PC.
 
-Only configured candidates pay selector overhead. A per-title manifest owns
-candidate address, CPU/mode, bank identity, handler symbol, accuracy tier,
-register and memory footprint, cycle/interrupt contract, and comparison policy.
+Only configured candidates pay selector overhead. The version-1 manifest owns
+candidate address/range, mode, bank/content identity, and an optional handler
+symbol. Accuracy tier, register and memory footprint, cycle/interrupt contract,
+and comparison policy remain handler-owned until the manifest schema can
+represent and validate them without weakening the current fail-closed format.
 The framework owns wrapper emission, selection, controls, counters, and the
 diagnostic ring. Generated C is never edited by hand.
+
+Candidate execution has two independent opt-ins. Configure with
+`-DNDS_ENABLE_HLE=ON`, then enable the runtime master and math policies, for
+example `NDS_HLE=on NDS_HLE_MATH=on`. A default build emits no candidate
+wrapper. An HLE-capable build still starts with both policies off. `on` falls
+back on a missing or unsupported handler; `verify` delegates same-input
+differential execution to the handler adapter and requires it to leave the LLE
+result authoritative. `force` is a testing-only miss detector and halts instead
+of hiding an unsupported case. Startup and the debug server's `hle_status`
+command expose effective policy, counters, and recent decisions.
 
 ### Differential execution
 
@@ -125,6 +138,76 @@ A general non-leaf profiler would need per-CPU logical guest frames across host
 unwinds and descendant resumes. That machinery is deferred until a measured
 candidate requires it; wrapper-local wall clocks alone are not accepted for
 non-leaf inclusive attribution.
+
+## Optimizer-facing effect metadata
+
+The recompiler also has a conservative, codegen-independent instruction effect
+classifier. It distinguishes memory reads/writes, direct and indirect control
+flow, processor-state changes, exceptions, and undefined instructions, and can
+identify arithmetic-only regions eligible for future local-state lowering.
+This is analysis scaffolding only: it does not currently combine instructions,
+move timing ticks, or change generated execution. Any future superblock pass
+must separately prove scheduler, IRQ, debugger, and cycle-boundary safety before
+executing a region atomically.
+
+## Scheduler and serialization boundary
+
+The faithful scheduler rendezvous is currently capped at 64 system cycles,
+which gives ARM9 at most 128 cycles before ARM7 catch-up. This is a correctness
+boundary, not merely a tuning constant: a wider unconditional lead has already
+moved IPC handshakes across peer polling points. Consequently, a handler larger
+than one slice cannot be made correct by charging all of its cycles at return.
+
+Handlers declare a proven `minimum_atomic_cycles` for a cheap generic miss when
+the current slice cannot possibly contain them. A handler that passes that
+preflight still computes and checks its exact or proven-upper-bound cost before
+committing state. This avoids doing an expensive semantic prediction followed
+by the complete LLE body on the common short-slice rejection path.
+
+Larger semantic regions require one of these stronger contracts:
+
+- a proof that the peer CPU is unable to observe or interfere before the next
+  system deadline, allowing a deadline-bounded scheduler lead;
+- a resumable HLE continuation with guest-cycle checkpoints for visible writes,
+  IRQ delivery, and final register state; or
+- an effect transaction whose timestamped writes are committed while ARM7 and
+  devices catch up on the ordinary scheduler timeline.
+
+Each path must fall back before mutation when its proof is unavailable. Running
+both host CPU threads speculatively, increasing the global rendezvous quantum,
+or treating ARM7 as a vector coprocessor is not an accepted shortcut.
+
+The scheduler also has an independent, parity-safe context-switch experiment.
+`NDS_FAST_CPU_CONTEXT=1` selects resident per-CPU host call-return stacks rather
+than copying the active stack at every rendezvous. It does not change guest CPU
+state, timestamps, or ordering; the default copy path remains the same-binary
+reference until deterministic endpoint and performance gates pass.
+
+## SM64DS carve order
+
+The first measured leaf, `MulVec3Mat4x3`, accounts for only about 0.6% of prior
+castle wrapper heat. It is an ABI/correctness pilot, not a route to 60 FPS by
+itself. The next candidates are ordered by expected inclusive work and contract
+quality, pending fresh bank-qualified heat measurements:
+
+1. Skeletal animation and bone batches: `ModelComponents::UpdateBones`, channel
+   interpolation, and hierarchy matrix composition. These cover roughly
+   1.3-2.0 KiB of reachable kernels repeated per bone and operate on bounded
+   model/animation arrays without MMIO.
+2. Collision query batches: ray, sphere, and ground tests over the registered
+   collider set. These are likely castle-hot, but unknown virtual collider
+   types must miss to LLE and verification must include touched result objects.
+3. The exact fixed-point math cluster, beginning with `MulMat4x3Mat4x3`, then
+   vector add/subtract/dot/cross. Division, square root, length, and normalize
+   stay separate until DS arithmetic-unit timing/state is modeled.
+4. Software OAM construction, bounded before the later hardware load step.
+5. Model/GX command submission only after an ordered command-stream verifier
+   exists; FIFO stalls and geometry timing make ordinary memory comparison
+   insufficient.
+
+Decompression remains useful for load latency but does not target steady-state
+frame rate. ARM7/audio HLE requires bank-qualified profiling first; the DS ARM7
+normally services audio and I/O rather than performing the title's matrix work.
 
 ## Renderer seam
 

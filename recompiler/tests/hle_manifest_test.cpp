@@ -19,6 +19,12 @@ bool parses(const std::filesystem::path& path, const std::string& text) {
     return ndsrecomp::load_hle_profile_manifest(path.string(), manifest);
 }
 
+bool loads(const std::filesystem::path& path, const std::string& text,
+           ndsrecomp::HleProfileManifest& manifest) {
+    return write_text(path, text) &&
+           ndsrecomp::load_hle_profile_manifest(path.string(), manifest);
+}
+
 }  // namespace
 
 int main() {
@@ -38,6 +44,34 @@ int main() {
     int failures = 0;
     if (!parses(path, valid)) {
         std::fprintf(stderr, "valid manifest was rejected\n");
+        ++failures;
+    }
+    ndsrecomp::HleProfileManifest replacement_manifest;
+    std::string replacement = valid;
+    replacement += "handler = \"sm64ds_mul_vec3_mat4x3\"\n";
+    if (!loads(path, replacement, replacement_manifest)) {
+        std::fprintf(stderr, "valid replacement manifest was rejected\n");
+        ++failures;
+    } else if (replacement_manifest.version != 1u ||
+               replacement_manifest.routines.size() != 1u ||
+               replacement_manifest.routines[0].handler !=
+                   "sm64ds_mul_vec3_mat4x3") {
+        std::fprintf(stderr, "replacement handler was not preserved\n");
+        ++failures;
+    }
+    std::string unsafe_handler = replacement;
+    const std::string handler_symbol = "sm64ds_mul_vec3_mat4x3";
+    unsafe_handler.replace(unsafe_handler.rfind(handler_symbol),
+                           handler_symbol.size(), "sm64ds_handler();");
+    if (parses(path, unsafe_handler)) {
+        std::fprintf(stderr, "unsafe replacement handler was accepted\n");
+        ++failures;
+    }
+    std::string keyword_handler = replacement;
+    keyword_handler.replace(keyword_handler.rfind(handler_symbol),
+                            handler_symbol.size(), "for");
+    if (parses(path, keyword_handler)) {
+        std::fprintf(stderr, "C keyword replacement handler was accepted\n");
         ++failures;
     }
     std::string unsafe_bank = valid;

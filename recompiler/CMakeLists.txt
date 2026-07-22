@@ -18,7 +18,8 @@ add_library(nds_armv4t STATIC
     armv4t/arm_decode.cpp
     armv4t/thumb_decode.cpp
     armv4t/arm_ir.cpp
-    armv4t/arm_codegen.cpp)
+    armv4t/arm_codegen.cpp
+    armv4t/region_analysis.cpp)
 target_include_directories(nds_armv4t PUBLIC armv4t)
 
 # Decode + codegen coverage for the ARMv5TE extensions (not exercised by
@@ -31,6 +32,15 @@ add_executable(interpreter_cycle_test
     tests/interpreter_cycle_test.cpp
     armv4t/interpreter.cpp)
 target_link_libraries(interpreter_cycle_test PRIVATE nds_armv4t)
+
+add_executable(region_analysis_test tests/region_analysis_test.cpp)
+target_link_libraries(region_analysis_test PRIVATE nds_armv4t)
+add_test(NAME region_analysis_test COMMAND region_analysis_test)
+
+add_executable(function_heat_codegen_test
+    tests/function_heat_codegen_test.cpp)
+target_link_libraries(function_heat_codegen_test PRIVATE nds_armv4t)
+add_test(NAME function_heat_codegen_test COMMAND function_heat_codegen_test)
 
 add_executable(hle_manifest_test
     tests/hle_manifest_test.cpp

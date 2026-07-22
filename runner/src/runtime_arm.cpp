@@ -24,6 +24,9 @@
 #include "io.h"
 #include "tier3.h"
 #include "hle_profile.h"
+#include "hle_atomic_policy.h"
+#include "hle_runtime.h"
+#include "function_heat.h"
 
 // ── Globals the ABI exposes ─────────────────────────────────────────────
 extern "C" ArmCpuState g_cpu = {};
@@ -710,6 +713,34 @@ extern "C" bool runtime_slice_yield(void) {
     return false;
 }
 extern "C" bool runtime_unwinding(void) { return g_unwinding; }
+extern "C" bool runtime_hle_atomic_allowed(uint32_t max_cycles) {
+    uint32_t blockers = 0u;
+    blockers |= g_nds_active != NDS_ARM9 ? 1u << 0u : 0u;
+    blockers |= g_unwinding ? 1u << 1u : 0u;
+    blockers |= g_nds_terminal ? 1u << 2u : 0u;
+    blockers |= g_runtime_deep_trace ? 1u << 3u : 0u;
+    blockers |= g_insn_hook_armed ? 1u << 4u : 0u;
+    blockers |= g_runtime_break_pc ? 1u << 5u : 0u;
+    blockers |= g_nds_insn_stop ? 1u << 6u : 0u;
+    blockers |= nds_event_break_hit() ? 1u << 7u : 0u;
+    blockers |= nds_cpu_halted(NDS_ARM9) ? 1u << 8u : 0u;
+    blockers |= nds_dma_cpu_stalled(NDS_ARM9) ? 1u << 9u : 0u;
+    blockers |= active_static_code_changed() ? 1u << 10u : 0u;
+
+    // A masked IRQ cannot become deliverable inside a handler that performs
+    // only private RAM work. An already deliverable IRQ must retain the LLE
+    // routine's first-instruction exception boundary.
+    const uint32_t pending = g_cpu_fast_poll
+        ? g_nds_irq_pending_cache[NDS_ARM9]
+        : nds_irq_pending(NDS_ARM9);
+    if (!(g_cpu.cpsr & CPSR_I_BIT) && pending != 0u) {
+        blockers |= 1u << 11u;
+    }
+
+    return nds_hle_atomic_policy_allows(
+        blockers, g_deferred_cycles, g_runtime_cycles, g_cycle_cap,
+        max_cycles);
+}
 extern "C" void nds_clear_unwinding(void) {
     g_unwinding = false;
     g_preserved_unwind_state_valid = false;
@@ -994,42 +1025,55 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 // ── Call-return stack (verbatim) ────────────────────────────────────────
 namespace {
 constexpr uint32_t kCRS = 1024;
-uint32_t g_crs[kCRS] = {};
-uint32_t g_crs_depth = 0;
+uint32_t g_crs[2][kCRS] = {};
+uint32_t g_crs_depth[2] = {};
+uint32_t g_crs_cpu = 0;
 }  // namespace
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
     uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
-    if (g_crs_depth >= kCRS) { nds_halt("call-return overflow"); return; }
-    g_crs[g_crs_depth++] = key;
-    runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 1u);
+    uint32_t& depth = g_crs_depth[g_crs_cpu];
+    if (depth >= kCRS) { nds_halt("call-return overflow"); return; }
+    g_crs[g_crs_cpu][depth++] = key;
+    runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, depth, 1u);
 }
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
     uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
-    for (uint32_t i = g_crs_depth; i != 0; --i)
-        if (g_crs[i - 1u] == key) {
-            runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth,
-                                (i == g_crs_depth) ? 2u : 5u);
-            g_crs_depth = i - 1u; return 1;
+    uint32_t& depth = g_crs_depth[g_crs_cpu];
+    uint32_t* entries = g_crs[g_crs_cpu];
+    for (uint32_t i = depth; i != 0; --i)
+        if (entries[i - 1u] == key) {
+            runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, depth,
+                                (i == depth) ? 2u : 5u);
+            depth = i - 1u; return 1;
         }
     runtime_trace_event(RUNTIME_TRACE_CALL, pc,
-        g_crs_depth ? (g_crs[g_crs_depth - 1u] & ~1u) : 0xFFFFFFFFu,
-        g_crs_depth, 3u);
+        depth ? (entries[depth - 1u] & ~1u) : 0xFFFFFFFFu, depth, 3u);
     return 0;
 }
 extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
-    if (g_crs_depth && (g_crs[g_crs_depth - 1u] & ~1u) == pc) {
-        runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 4u);
-        --g_crs_depth;
+    uint32_t& depth = g_crs_depth[g_crs_cpu];
+    uint32_t* entries = g_crs[g_crs_cpu];
+    if (depth && (entries[depth - 1u] & ~1u) == pc) {
+        runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, depth, 4u);
+        --depth;
     }
 }
-extern "C" uint32_t runtime_call_stack_depth(void) { return g_crs_depth; }
-extern "C" const uint32_t* runtime_call_stack_data(void) { return g_crs; }
+extern "C" uint32_t runtime_call_stack_depth(void) {
+    return g_crs_depth[g_crs_cpu];
+}
+extern "C" const uint32_t* runtime_call_stack_data(void) {
+    return g_crs[g_crs_cpu];
+}
 extern "C" void runtime_call_stack_restore(const uint32_t* e, uint32_t d) {
-    if (d > kCRS) d = kCRS; g_crs_depth = d;
-    for (uint32_t i = 0; i < d; ++i) g_crs[i] = e[i];
+    if (d > kCRS) d = kCRS;
+    g_crs_depth[g_crs_cpu] = d;
+    for (uint32_t i = 0; i < d; ++i) g_crs[g_crs_cpu][i] = e[i];
+}
+extern "C" void runtime_call_stack_select(uint32_t cpu) {
+    g_crs_cpu = cpu < 2u ? cpu : 0u;
 }
 extern "C" uint32_t runtime_deferred_cycles(void) {
     return g_deferred_cycles;
@@ -1175,7 +1219,9 @@ extern "C" void runtime_unimplemented_op(const char* op_name, uint32_t pc) {
 extern "C" void runtime_init(void*) {
     g_cpu_fast_poll = configured_cpu_fast_poll();
     request_yield_poll();
-    g_crs_depth = 0;
+    g_crs_cpu = 0;
+    g_crs_depth[0] = 0;
+    g_crs_depth[1] = 0;
     g_deferred_cycles = 0;
     g_discovery_seen.clear();
     for (CpuCtx& ctx : g_ctx) {
@@ -1184,6 +1230,8 @@ extern "C" void runtime_init(void*) {
     }
     g_static_guard = {};
     g_dispatch_cache = {};
+    nds_hle_reset_diagnostics();
+    nds_function_heat_reset();
 #if defined(NDS_PROFILE_HLE_HEAT)
     g_hle_heat.clear();
     g_hle_irq_epoch[0] = 0u;
@@ -1194,7 +1242,9 @@ extern "C" void runtime_init(void*) {
     tier3_reset();
 }
 extern "C" void runtime_shutdown(void) {
-    g_crs_depth = 0;
+    g_crs_cpu = 0;
+    g_crs_depth[0] = 0;
+    g_crs_depth[1] = 0;
     g_deferred_cycles = 0;
 }
 
