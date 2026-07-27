@@ -170,11 +170,11 @@ struct alignas(64) CachedStaticLookup {
     uint32_t pc = 0u;
     uint32_t generation[2]{};
     const uint32_t* generation_ptr[2]{};
-    const DispatchEntry* entry = nullptr;
+    void (*fn)(void) = nullptr;
+    const NdsStaticValidation* validation = nullptr;
     uint8_t page_count = 0u;
     uint8_t thumb = 0u;
     uint8_t occupied = 0u;
-    uint8_t callable = 0u;
 };
 static_assert(sizeof(CachedStaticLookup) == 64u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
@@ -264,7 +264,7 @@ bool cached_lookup_live(const CachedStaticLookup& cached) {
     // writable-RAM validation. Keep the common immutable-bank hit entirely
     // inside the cache line instead of chasing entry->validation.
     if (cached.page_count == 0u) return true;
-    const uint32_t first_page = cached.entry->validation->addr & ~0xFFFu;
+    const uint32_t first_page = cached.validation->addr & ~0xFFFu;
     for (uint32_t i = 0; i < cached.page_count; ++i) {
         const uint32_t live_generation = cached.generation_ptr[i]
             ? *cached.generation_ptr[i]
@@ -275,15 +275,15 @@ bool cached_lookup_live(const CachedStaticLookup& cached) {
     return true;
 }
 
-const DispatchEntry* lookup_static_cached(const CpuCtx& c, uint32_t pc,
-                                          bool thumb) {
+const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
+                                               bool thumb) {
     auto& cache = g_dispatch_cache[g_nds_active];
     CachedStaticLookup& slot =
         cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
               (kDispatchCacheSize - 1u)];
     if (slot.occupied && slot.pc == pc && slot.thumb == uint8_t{thumb} &&
         cached_lookup_live(slot))
-        return slot.callable ? slot.entry : nullptr;
+        return slot.fn ? &slot : nullptr;
 
     uint32_t candidate_count = 0u;
     const DispatchEntry* inactive_candidate = nullptr;
@@ -299,20 +299,21 @@ const DispatchEntry* lookup_static_cached(const CpuCtx& c, uint32_t pc,
     slot = {};
     slot.pc = pc;
     slot.thumb = static_cast<uint8_t>(thumb);
-    slot.entry = hit ? hit : inactive_candidate;
-    slot.callable = static_cast<uint8_t>(hit != nullptr);
+    const DispatchEntry* const candidate = hit ? hit : inactive_candidate;
+    slot.fn = hit ? hit->fn : nullptr;
+    slot.validation = candidate ? candidate->validation : nullptr;
     slot.occupied = 1u;
-    if (slot.entry && slot.entry->validation) {
-        const uint64_t end = uint64_t{slot.entry->validation->addr} +
-                             slot.entry->validation->size;
-        const uint32_t first_page = slot.entry->validation->addr & ~0xFFFu;
+    if (slot.validation) {
+        const uint64_t end =
+            uint64_t{slot.validation->addr} + slot.validation->size;
+        const uint32_t first_page = slot.validation->addr & ~0xFFFu;
         const uint32_t last_page =
             static_cast<uint32_t>(end - 1u) & ~0xFFFu;
         slot.page_count = static_cast<uint8_t>(
             ((last_page - first_page) >> 12u) + 1u);
         if (slot.page_count > 2u) {
             slot = {};
-            return hit;
+            return nullptr;
         }
         for (uint32_t i = 0; i < slot.page_count; ++i)
         {
@@ -332,7 +333,7 @@ const DispatchEntry* lookup_static_cached(const CpuCtx& c, uint32_t pc,
             }
         }
     }
-    return hit;
+    return hit ? &slot : nullptr;
 }
 
 bool arm_static_guard(const NdsStaticValidation* validation,
@@ -396,7 +397,7 @@ struct StaticGuardScope {
         g_static_guard = saved;
         if (saved && saved->invalidated) request_yield_poll();
     }
-    bool call(const DispatchEntry* hit) {
+    bool call(const CachedStaticLookup* hit) {
         if (!hit || !hit->fn ||
             !arm_static_guard(hit->validation, active))
             return false;
