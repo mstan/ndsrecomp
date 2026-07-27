@@ -190,7 +190,7 @@ void     bus_write_u8_slow (uint32_t addr, uint8_t  val);
 void runtime_note_code_write(void);
 
 // Deep-trace policy flag — full declaration/comment further down; the
-// inline fast path needs it in scope here.
+// inline fast paths and Tier 3 need it in scope here.
 extern uint32_t g_runtime_deep_trace;
 
 // One fast-map window: a directly addressable, mirrored, power-of-two
@@ -504,11 +504,11 @@ void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
 void runtime_trace_reset(void);
 void runtime_trace_dump_recent(uint32_t max_entries);
 
-// Deep-trace policy: gates the per-access payloads (mem_r/mem_w trace events
-// and the per-instruction register-image ring entry). Architectural event
-// counters (insn9/insn7) always advance regardless. Default on; the
-// interactive frontend turns it off because it exposes no query surface for
-// those rings, while --serve and batch (exit tail dump) keep it on.
+// Deep-trace policy: gates diagnostic runtime events and Tier-3 instruction
+// entries. Architectural event counters (insn9/insn7) always advance
+// regardless. Default on; the interactive frontend turns it off because it
+// exposes no query surface for those rings, while --serve and batch (exit tail
+// dump) keep it on.
 extern uint32_t g_runtime_deep_trace;
 void runtime_set_deep_trace(uint32_t on);
 

@@ -231,7 +231,9 @@ void tier3_run(uint32_t /*entry*/) {
     ++g_stats.entries[cpu_index];
     CPUState ic;
     sync_in(ic);
-    const bool trace_this_entry = (g_nds_active == NDS_ARM9) || trace_pc(ic.R[15]);
+    const bool trace_this_entry =
+        g_runtime_deep_trace &&
+        ((g_nds_active == NDS_ARM9) || trace_pc(ic.R[15]));
     if (trace_this_entry) trace_push(ic, 0, ic.R[15], 0, ic.R[15], 0);
 
     long guard = 0;
@@ -302,7 +304,9 @@ void tier3_run(uint32_t /*entry*/) {
             ? armv4t::ThumbDecoder::decode(g_bus.read16(pc & ~1u), pc & ~1u)
             : armv4t::ArmDecoder::decode(g_bus.read32(pc & ~3u), pc & ~3u);
         const bool condition_passed = Interpreter::cond_passes(in.cond, ic.cpsr);
-        const bool traced = (g_nds_active == NDS_ARM9) || trace_pc(pc);
+        const bool traced =
+            g_runtime_deep_trace &&
+            ((g_nds_active == NDS_ARM9) || trace_pc(pc));
         if (traced) trace_push(ic, 1, pc, in.raw, ic.R[15], 0);
 
         g_bus.begin_instruction();
@@ -479,7 +483,8 @@ void tier3_run(uint32_t /*entry*/) {
             return;
         }
     }
-    if ((g_nds_active == NDS_ARM9) || trace_pc(ic.R[15]))
+    if (g_runtime_deep_trace &&
+        ((g_nds_active == NDS_ARM9) || trace_pc(ic.R[15])))
         trace_push(ic, 3, ic.R[15], 0, ic.R[15], 0);
     sync_out(ic);
 }
