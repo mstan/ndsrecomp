@@ -169,7 +169,7 @@ void append_json_string(std::string& out, const char* text) {
 }
 #endif
 
-constexpr uint32_t kDispatchCacheSize = 4096u;
+constexpr uint32_t kDispatchCacheSize = 16384u;
 struct CachedStaticLookup {
     uint32_t pc = 0u;
     uint32_t generation[2]{};
