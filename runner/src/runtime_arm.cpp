@@ -70,7 +70,7 @@ struct StaticExecutionGuard {
     uint32_t page_count = 0u;
     bool invalidated = false;
 };
-StaticExecutionGuard g_static_guard;
+StaticExecutionGuard* g_static_guard = nullptr;
 
 #if defined(NDS_PROFILE_HLE_HEAT)
 struct HleHeatStats {
@@ -333,8 +333,9 @@ StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
     return hit;
 }
 
-bool arm_static_guard(const NdsStaticValidation* validation) {
-    g_static_guard = {};
+bool arm_static_guard(const NdsStaticValidation* validation,
+                      StaticExecutionGuard& guard) {
+    guard = {};
     if (!validation) return true;
     const uint64_t begin = validation->addr;
     const uint64_t end = begin + validation->size;
@@ -344,23 +345,21 @@ bool arm_static_guard(const NdsStaticValidation* validation) {
         static_cast<uint32_t>(end - 1u) & ~0xFFFu;
     const uint32_t page_count = ((last_page - first_page) >> 12u) + 1u;
     if (page_count > 2u) return false;
-    g_static_guard.validation = validation;
-    g_static_guard.page_count = page_count;
+    guard.validation = validation;
+    guard.page_count = page_count;
     for (uint32_t i = 0; i < page_count; ++i) {
         const uint32_t page = first_page + (i << 12u);
-        g_static_guard.page_addr[i] = page;
+        guard.page_addr[i] = page;
         // Main RAM's generation storage is stable for a runtime instance.
         // Keep the exact counter used by the dispatch cache so every nested
         // static return does not resolve the same virtual page again.
         if (page - 0x02000000u < 0x01000000u && g_busf_main.gen) {
             const uint32_t offset = page & g_busf_main.mask;
-            g_static_guard.generation_ptr[i] =
+            guard.generation_ptr[i] =
                 g_busf_main.gen + (offset >> 12u);
-            g_static_guard.generation[i] =
-                *g_static_guard.generation_ptr[i];
+            guard.generation[i] = *guard.generation_ptr[i];
         } else {
-            g_static_guard.generation[i] =
-                bus_exec_page_generation(page);
+            guard.generation[i] = bus_exec_page_generation(page);
         }
     }
     return true;
@@ -379,28 +378,29 @@ bool guard_generation_changed(const StaticExecutionGuard& guard) {
 }
 
 bool active_static_code_changed() {
-    return g_static_guard.invalidated;
+    return g_static_guard && g_static_guard->invalidated;
 }
 
 struct StaticGuardScope {
-    StaticExecutionGuard saved;
-    StaticGuardScope() : saved(g_static_guard) { g_static_guard = {}; }
+    StaticExecutionGuard active;
+    StaticExecutionGuard* saved;
+    StaticGuardScope() : saved(g_static_guard) { g_static_guard = nullptr; }
     ~StaticGuardScope() {
         // A nested static call may write through an alias of its caller's
         // backing page. Revalidate the saved guard once on unwind so that
         // write cannot be lost when the outer guard becomes active again.
-        if (!saved.invalidated && guard_generation_changed(saved))
-            saved.invalidated = true;
+        if (saved && !saved->invalidated && guard_generation_changed(*saved))
+            saved->invalidated = true;
         g_static_guard = saved;
-        if (saved.invalidated) request_yield_poll();
+        if (saved && saved->invalidated) request_yield_poll();
+    }
+    bool call(const StaticLookup& hit) {
+        if (!hit.fn || !arm_static_guard(hit.validation, active)) return false;
+        g_static_guard = &active;
+        hit.fn();
+        return true;
     }
 };
-
-bool guarded_static_call(const StaticLookup& hit) {
-    if (!hit.fn || !arm_static_guard(hit.validation)) return false;
-    hit.fn();
-    return true;
-}
 
 // Bracket the static function range containing `pc` in a dispatch table
 // (sorted by addr): [*start, *end). Returns false if the table is empty or
@@ -426,9 +426,9 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 extern "C" void runtime_request_yield_poll(void) { request_yield_poll(); }
 
 extern "C" void runtime_note_code_write(void) {
-    if (!g_static_guard.invalidated &&
-        guard_generation_changed(g_static_guard)) {
-        g_static_guard.invalidated = true;
+    if (g_static_guard && !g_static_guard->invalidated &&
+        guard_generation_changed(*g_static_guard)) {
+        g_static_guard->invalidated = true;
         request_yield_poll();
     }
 }
@@ -466,7 +466,8 @@ extern "C" NdsHleProfileToken runtime_hle_profile_begin(
     if (!stats) return token;
     ++stats->entries;
     if (stats->cpu != static_cast<int>(g_nds_active) ||
-        descriptor->validation != g_static_guard.validation) {
+        !g_static_guard ||
+        descriptor->validation != g_static_guard->validation) {
         ++stats->guard_mismatches;
         return token;
     }
@@ -917,7 +918,7 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     const CpuCtx& c = g_ctx[g_nds_active];
     StaticGuardScope guard_scope;
-    if (guarded_static_call(lookup_static_cached(c, pc, thumb))) return;
+    if (guard_scope.call(lookup_static_cached(c, pc, thumb))) return;
     if (g_discover_static_misses && static_bios_pc(pc)) {
         runtime_discovery_note_static(pc, thumb ? 1u : 0u);
         tier3_run(pc);
@@ -1235,7 +1236,7 @@ extern "C" void runtime_init(void*) {
         ctx.banks.clear();
         ctx.exc_base = 0u;
     }
-    g_static_guard = {};
+    g_static_guard = nullptr;
     g_dispatch_cache = {};
 #if defined(NDS_PROFILE_HLE_HEAT)
     g_hle_heat.clear();
