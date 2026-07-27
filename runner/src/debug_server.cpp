@@ -510,6 +510,42 @@ std::string handle(const std::string& line) {
                ",\"freq\":" + std::to_string(s.freq) +
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
     }
+    if (cmd == "black_band_scan") {
+        const bool enabled = json_bool(line, "on", true);
+        const bool reset = json_bool(line, "reset", false);
+        nds_frontend_black_band_scan(enabled, reset);
+        return "{\"enabled\":" + std::to_string(enabled ? 1 : 0) + "}";
+    }
+    if (cmd == "black_band_capture") {
+        NdsFrontendBlackBandCapture capture{};
+        nds_frontend_black_band_capture(&capture);
+        std::string rgb;
+        if (capture.has_capture) {
+            rgb.reserve(256u * 192u * 6u);
+            for (size_t i = 0; i < 256u * 192u; ++i) {
+                const uint32_t px = capture.top_pixels[i];
+                const uint8_t c[3] = {
+                    static_cast<uint8_t>(px >> 16),
+                    static_cast<uint8_t>(px >> 8),
+                    static_cast<uint8_t>(px),
+                };
+                append_hex(rgb, c, sizeof(c));
+            }
+        }
+        return "{\"enabled\":" + std::to_string(capture.enabled) +
+               ",\"has_capture\":" + std::to_string(capture.has_capture) +
+               ",\"scanned_frames\":" +
+               std::to_string(capture.scanned_frames) +
+               ",\"band_frames\":" + std::to_string(capture.band_frames) +
+               ",\"worst_frame\":" + std::to_string(capture.worst_frame) +
+               ",\"worst_system_timestamp\":" +
+               std::to_string(capture.worst_system_timestamp) +
+               ",\"worst_start_row\":" +
+               std::to_string(capture.worst_start_row) +
+               ",\"worst_row_count\":" +
+               std::to_string(capture.worst_row_count) +
+               ",\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
+    }
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "profile") {

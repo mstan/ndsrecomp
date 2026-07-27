@@ -26,6 +26,47 @@ namespace {
 // thread by the `frontend_stats` debug command at the debug_pump() safe
 // point. Stays all-zero (active=0) when no frontend is running.
 NdsFrontendLiveStats g_live_stats{};
+NdsFrontendBlackBandCapture g_black_band{};
+
+void observe_top_black_bands(const uint32_t* pixels, uint64_t frame) {
+    if (!g_black_band.enabled || !pixels) return;
+    ++g_black_band.scanned_frames;
+
+    uint32_t current_start = 0;
+    uint32_t current_rows = 0;
+    uint32_t longest_start = 0;
+    uint32_t longest_rows = 0;
+    for (uint32_t y = 0; y < 192; ++y) {
+        uint32_t black_pixels = 0;
+        for (uint32_t x = 0; x < 256; ++x) {
+            if ((pixels[y * 256 + x] & 0x00FFFFFFu) == 0)
+                ++black_pixels;
+        }
+        if (black_pixels >= 252) {
+            if (current_rows == 0) current_start = y;
+            ++current_rows;
+            if (current_rows > longest_rows) {
+                longest_start = current_start;
+                longest_rows = current_rows;
+            }
+        } else {
+            current_rows = 0;
+        }
+    }
+
+    // Ignore an intentional full-screen fade. The reported artifact is a
+    // partial band surrounded by otherwise-published image rows.
+    if (longest_rows < 8 || longest_rows >= 192) return;
+    ++g_black_band.band_frames;
+    if (longest_rows <= g_black_band.worst_row_count) return;
+    g_black_band.has_capture = 1;
+    g_black_band.worst_frame = frame;
+    g_black_band.worst_system_timestamp = scheduler_system_timestamp();
+    g_black_band.worst_start_row = longest_start;
+    g_black_band.worst_row_count = longest_rows;
+    std::memcpy(g_black_band.top_pixels, pixels,
+                sizeof(g_black_band.top_pixels));
+}
 }  // namespace
 
 #if defined(NDS_HAVE_SDL2)
@@ -348,6 +389,7 @@ int nds_run_interactive_frontend() {
     g_live_stats = {};
     g_live_stats.active = 1;
     g_live_stats.freq = frequency;
+    g_black_band = {};
     uint64_t max_emu_ticks = 0;
     uint64_t max_emu_frame = 0;
     uint64_t slow_frames_32ms = 0;
@@ -500,9 +542,12 @@ int nds_run_interactive_frontend() {
         }
 
         const uint64_t phase1 = SDL_GetPerformanceCounter();
-        SDL_UpdateTexture(top, nullptr, nds_gpu2d_framebuffer(0),
+        const uint32_t* const top_pixels = nds_gpu2d_framebuffer(0);
+        const uint32_t* const bottom_pixels = nds_gpu2d_framebuffer(1);
+        observe_top_black_bands(top_pixels, shown_frames);
+        SDL_UpdateTexture(top, nullptr, top_pixels,
                           kScreenWidth * sizeof(uint32_t));
-        SDL_UpdateTexture(bottom, nullptr, nds_gpu2d_framebuffer(1),
+        SDL_UpdateTexture(bottom, nullptr, bottom_pixels,
                           kScreenWidth * sizeof(uint32_t));
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
@@ -661,4 +706,13 @@ void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
     if (g_live_stats.active)
         out->now_ticks = SDL_GetPerformanceCounter();
 #endif
+}
+
+void nds_frontend_black_band_scan(bool enabled, bool reset) {
+    if (reset) g_black_band = {};
+    g_black_band.enabled = enabled ? 1 : 0;
+}
+
+void nds_frontend_black_band_capture(NdsFrontendBlackBandCapture* out) {
+    if (out) *out = g_black_band;
 }

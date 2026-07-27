@@ -490,7 +490,7 @@ private:
 
     bool Enabled;
 
-    bool FrameIdentical;
+    bool FrameIdentical = false;
 
     // threading
 
@@ -498,6 +498,10 @@ private:
     Platform::Thread* RenderThread;
     std::atomic_bool RenderThreadRunning;
     std::atomic_bool RenderThreadRendering;
+
+    // Number of top-to-bottom scanlines complete in the current threaded
+    // frame. This remains line-specific when 2D skips unused 3D scanlines.
+    std::atomic_int RenderedScanlines {192};
 
     // Used by the main thread to tell the render thread to start rendering a frame
     Platform::Semaphore* Sema_RenderStart;

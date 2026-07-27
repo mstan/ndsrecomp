@@ -91,6 +91,8 @@ void SoftRenderer::EnableRenderThread()
 {
     if (Threaded && Sema_RenderStart)
     {
+        RenderedScanlines.store(0, std::memory_order_release);
+        Platform::Semaphore_Reset(Sema_ScanlineCount);
         Platform::Semaphore_Post(Sema_RenderStart);
     }
 }
@@ -1723,15 +1725,21 @@ void SoftRenderer::RenderPolygons(const GPU& gpu, bool threaded, Polygon** polyg
         ScanlineFinalPass(gpu.GPU3D, y-1);
 
         if (threaded)
+        {
             // Notify the main thread that we're done with a scanline.
+            RenderedScanlines.store(y, std::memory_order_release);
             Platform::Semaphore_Post(Sema_ScanlineCount);
+        }
     }
 
     ScanlineFinalPass(gpu.GPU3D, 191);
 
     if (threaded)
+    {
         // If this renderer is threaded, notify the main thread that we're done with the frame.
+        RenderedScanlines.store(192, std::memory_order_release);
         Platform::Semaphore_Post(Sema_ScanlineCount);
+    }
 }
 
 void SoftRenderer::VCount144(GPU& gpu)
@@ -1753,7 +1761,7 @@ void SoftRenderer::RenderFrame(GPU& gpu)
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
         // "Render thread, you're up! Get moving."
-        Platform::Semaphore_Post(Sema_RenderStart);
+        EnableRenderThread();
     }
     else if (!FrameIdentical)
     {
@@ -1785,6 +1793,7 @@ void SoftRenderer::RenderThreadFunc(GPU& gpu)
         RenderThreadRendering = true;
         if (FrameIdentical)
         { // If no rendering is needed, just say we're done.
+            RenderedScanlines.store(192, std::memory_order_release);
             Platform::Semaphore_Post(Sema_ScanlineCount, 192);
         }
         else
@@ -1806,10 +1815,12 @@ u32* SoftRenderer::GetLine(int line)
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
         if (line < 192)
-            // We need a scanline, so let's wait for the render thread to finish it.
-            // (both threads process scanlines from top-to-bottom,
-            // so we don't need to wait for a specific row)
-            Platform::Semaphore_Wait(Sema_ScanlineCount);
+        {
+            // Earlier 3D scanlines may be unused by the 2D renderer. Check
+            // actual progress so a stale token cannot release a later row.
+            while (RenderedScanlines.load(std::memory_order_acquire) <= line)
+                Platform::Semaphore_Wait(Sema_ScanlineCount);
+        }
     }
 
     return &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];

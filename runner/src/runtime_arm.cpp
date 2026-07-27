@@ -210,7 +210,8 @@ bool static_bios_pc(uint32_t pc) {
 }
 
 StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
-                       uint32_t pc, bool thumb) {
+                       uint32_t pc, bool thumb, uint32_t* candidate_count,
+                       StaticLookup* inactive_candidate) {
     if (!table) return {};
     unsigned lo = 0, hi = len;
     while (lo < hi) {
@@ -220,6 +221,7 @@ StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
     }
     for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
         if ((table[i].thumb != 0) != thumb) continue;
+        if (candidate_count) ++*candidate_count;
         const NdsStaticValidation* validation = table[i].validation;
         if (validation) {
             // Captured firmware variants are executable only after the LLE
@@ -231,17 +233,26 @@ StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
                                                 validation->size) ||
                 !bus_live_bytes_equal(validation->addr,
                                       validation->expected,
-                                      validation->size))
+                                      validation->size)) {
+                if (inactive_candidate)
+                    *inactive_candidate = {table[i].fn, validation};
                 continue;
+            }
         }
         return {table[i].fn, validation};
     }
     return {};
 }
 
-StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb) {
+StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb,
+                           uint32_t* candidate_count,
+                           StaticLookup* inactive_candidate) {
+    if (candidate_count) *candidate_count = 0u;
+    if (inactive_candidate) *inactive_candidate = {};
     for (const DispatchBank& bank : c.banks) {
-        StaticLookup hit = lookup_in(bank.table, bank.len, pc, thumb);
+        StaticLookup hit = lookup_in(
+            bank.table, bank.len, pc, thumb, candidate_count,
+            inactive_candidate);
         if (hit.fn) return hit;
     }
     return {};
@@ -266,17 +277,28 @@ StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
         cached_lookup_live(slot))
         return slot.hit;
 
-    const StaticLookup hit = lookup_static(c, pc, thumb);
-    if (!hit.fn) return {};
+    uint32_t candidate_count = 0u;
+    StaticLookup inactive_candidate{};
+    const StaticLookup hit = lookup_static(
+        c, pc, thumb, &candidate_count, &inactive_candidate);
+    // Copied RAM code has no static entry and is handled by Tier 3. Remember
+    // that definitive miss so every interpreted block does not binary-search
+    // every static bank again. A single inactive validation candidate is also
+    // safe to cache: its backing-page generations invalidate the entry after
+    // a guest write. Multiple variants are left uncached because any one of
+    // their distinct backing ranges could become live.
+    if (!hit.fn && candidate_count > 1u) return {};
     slot = {};
     slot.pc = pc;
     slot.thumb = static_cast<uint8_t>(thumb);
-    slot.hit = hit;
+    slot.hit = hit.fn
+        ? hit
+        : StaticLookup{nullptr, inactive_candidate.validation};
     slot.occupied = 1u;
-    if (hit.validation) {
-        const uint64_t end = uint64_t{hit.validation->addr} +
-                             hit.validation->size;
-        const uint32_t first_page = hit.validation->addr & ~0xFFFu;
+    if (slot.hit.validation) {
+        const uint64_t end = uint64_t{slot.hit.validation->addr} +
+                             slot.hit.validation->size;
+        const uint32_t first_page = slot.hit.validation->addr & ~0xFFFu;
         const uint32_t last_page =
             static_cast<uint32_t>(end - 1u) & ~0xFFFu;
         slot.page_count = static_cast<uint8_t>(
@@ -382,6 +404,8 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
     CpuCtx& ctx = g_ctx[cpu & 1];
     ctx.banks.push_back({t, len});
     ctx.exc_base = exc_base;
+    // A PC cached as absent before a newly registered bank may now resolve.
+    g_dispatch_cache[cpu & 1] = {};
 }
 
 extern "C" void nds_register_hle_profile_descriptors(

@@ -22,7 +22,10 @@ Play-mode extras: `frontend_stats` (cumulative presented-frame/phase/
 underrun counters + host perf clock — diff two samples for fps),
 `profile` (raw NDS_PROFILE_GPU/SCHED accumulators), `deep_trace`
 (`{"on":0|1}` — live toggle for the per-access payload policy; the
-inline bus fast path engages while off, the default in play mode).
+inline bus fast path engages while off, the default in play mode),
+`black_band_scan` (`{"on":0|1,"reset":0|1}` — opt-in partial-black-row
+observer), and `black_band_capture` (counts plus the worst retained top-screen
+RGB frame).
 
 ## Sync on hardware events, never frame indices
 

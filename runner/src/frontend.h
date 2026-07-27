@@ -22,3 +22,21 @@ struct NdsFrontendLiveStats {
     uint64_t underruns;       // audio underruns so far
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
+
+// Opt-in visual-artifact observer for the interactive TCP surface. A partial
+// black band is a run of 8..191 nearly-all-black top-screen rows; full-black
+// frames are excluded because fades legitimately produce them. Observation is
+// disabled until `black_band_scan` arms it, so normal perf runs pay nothing.
+struct NdsFrontendBlackBandCapture {
+    int enabled;
+    int has_capture;
+    uint64_t scanned_frames;
+    uint64_t band_frames;
+    uint64_t worst_frame;
+    uint64_t worst_system_timestamp;
+    uint32_t worst_start_row;
+    uint32_t worst_row_count;
+    uint32_t top_pixels[256 * 192];
+};
+void nds_frontend_black_band_scan(bool enabled, bool reset);
+void nds_frontend_black_band_capture(NdsFrontendBlackBandCapture* out);
