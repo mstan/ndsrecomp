@@ -26,6 +26,8 @@ namespace {
 // registers we accept and store but do not yet act on. Behavior that the
 // bus needs (control + TCM) is mirrored into g_cp15.
 uint32_t g_mpu_region[8] = {};
+uint64_t g_mpu_region_base[8] = {};
+uint64_t g_mpu_region_end[8] = {};
 uint32_t g_cache_cfg[8]  = {};   // c2 (cachability) / c3 (bufferability)
 uint32_t g_access_perm[8] = {};  // c5 (access permissions)
 
@@ -43,8 +45,13 @@ void apply_control(uint32_t v) {
     g_cp15.itcm_enable  = (v & (1u << 18)) != 0;
 }
 
-bool mpu_region_contains(uint32_t reg, uint32_t addr) {
-    if (!(reg & 1u)) return false;
+void set_mpu_region(uint32_t index, uint32_t reg) {
+    g_mpu_region[index] = reg;
+    if (!(reg & 1u)) {
+        g_mpu_region_base[index] = 0u;
+        g_mpu_region_end[index] = 0u;
+        return;
+    }
     // ARM946E-S MPU encoding: region size is 2^(N+1) bytes (minimum
     // architectural N=11 => 4 KiB), unlike the c9 TCM size encoding's
     // 512<<N formula.  Use 64-bit math so the 4 GiB encoding remains
@@ -52,8 +59,14 @@ bool mpu_region_contains(uint32_t reg, uint32_t addr) {
     const uint32_t n = (reg >> 1u) & 0x1Fu;
     const uint64_t size = uint64_t{1} << (n + 1u);
     const uint64_t base = uint64_t{reg & 0xFFFFF000u} & ~(size - 1u);
+    g_mpu_region_base[index] = base;
+    g_mpu_region_end[index] = base + size;
+}
+
+bool mpu_region_contains(uint32_t index, uint32_t addr) {
+    const uint64_t end = g_mpu_region_end[index];
     const uint64_t a = addr;
-    return a >= base && a < base + size;
+    return end != 0u && a >= g_mpu_region_base[index] && a < end;
 }
 
 }  // namespace
@@ -78,8 +91,7 @@ bool cp15_code_cacheable(uint32_t addr) {
     if (!(g_cp15.control & 1u)) return true;               // MPU disabled: global cache bit
     const uint32_t icache_bits = g_cache_cfg[1];           // c2,c0,1 = instr cacheable
     for (int i = 7; i >= 0; --i) {
-        uint32_t r = g_mpu_region[i];
-        if (mpu_region_contains(r, addr))
+        if (mpu_region_contains(static_cast<uint32_t>(i), addr))
             return (icache_bits >> i) & 1u;
     }
     return false;
@@ -90,8 +102,7 @@ bool cp15_data_cacheable(uint32_t addr) {
     if (!(g_cp15.control & 1u)) return true;               // MPU disabled: global cache bit
     const uint32_t dcache_bits = g_cache_cfg[0];           // c2,c0,0 = data cacheable
     for (int i = 7; i >= 0; --i) {
-        uint32_t r = g_mpu_region[i];
-        if (mpu_region_contains(r, addr))
+        if (mpu_region_contains(static_cast<uint32_t>(i), addr))
             return (dcache_bits >> i) & 1u;
     }
     return false;
@@ -139,7 +150,7 @@ extern "C" void runtime_coproc_write(uint32_t cp_num, uint32_t op1,
             g_access_perm[op2 & 7] = value;
             break;
         case 6:  // protection-region base/size (c6,c0..c7,0)
-            g_mpu_region[crm & 7] = value;
+            set_mpu_region(crm & 7u, value);
             break;
         case 7:  // cache/write-buffer ops, wait-for-interrupt — no state
             break;
