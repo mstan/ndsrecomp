@@ -171,7 +171,7 @@ void append_json_string(std::string& out, const char* text) {
 #endif
 
 constexpr uint32_t kDispatchCacheSize = 65536u;
-struct CachedStaticLookup {
+struct alignas(64) CachedStaticLookup {
     uint32_t pc = 0u;
     uint32_t generation[2]{};
     const uint32_t* generation_ptr[2]{};
@@ -180,6 +180,7 @@ struct CachedStaticLookup {
     uint8_t thumb = 0u;
     uint8_t occupied = 0u;
 };
+static_assert(sizeof(CachedStaticLookup) == 64u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
     g_dispatch_cache{};
 
