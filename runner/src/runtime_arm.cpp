@@ -260,7 +260,10 @@ const DispatchEntry* lookup_static(
 }
 
 bool cached_lookup_live(const CachedStaticLookup& cached) {
-    if (!cached.entry || !cached.entry->validation) return true;
+    // page_count is populated exactly when the cached candidate has a
+    // writable-RAM validation. Keep the common immutable-bank hit entirely
+    // inside the cache line instead of chasing entry->validation.
+    if (cached.page_count == 0u) return true;
     const uint32_t first_page = cached.entry->validation->addr & ~0xFFFu;
     for (uint32_t i = 0; i < cached.page_count; ++i) {
         const uint32_t live_generation = cached.generation_ptr[i]
