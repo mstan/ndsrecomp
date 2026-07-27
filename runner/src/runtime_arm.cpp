@@ -173,6 +173,7 @@ constexpr uint32_t kDispatchCacheSize = 4096u;
 struct CachedStaticLookup {
     uint32_t pc = 0u;
     uint32_t generation[2]{};
+    const uint32_t* generation_ptr[2]{};
     StaticLookup hit{};
     uint8_t page_count = 0u;
     uint8_t thumb = 0u;
@@ -261,10 +262,13 @@ StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb,
 bool cached_lookup_live(const CachedStaticLookup& cached) {
     if (!cached.hit.validation) return true;
     const uint32_t first_page = cached.hit.validation->addr & ~0xFFFu;
-    for (uint32_t i = 0; i < cached.page_count; ++i)
-        if (bus_exec_page_generation(first_page + (i << 12u)) !=
-            cached.generation[i])
+    for (uint32_t i = 0; i < cached.page_count; ++i) {
+        const uint32_t live_generation = cached.generation_ptr[i]
+            ? *cached.generation_ptr[i]
+            : bus_exec_page_generation(first_page + (i << 12u));
+        if (live_generation != cached.generation[i])
             return false;
+    }
     return true;
 }
 
@@ -308,8 +312,22 @@ StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
             return hit;
         }
         for (uint32_t i = 0; i < slot.page_count; ++i)
-            slot.generation[i] =
-                bus_exec_page_generation(first_page + (i << 12u));
+        {
+            const uint32_t page = first_page + (i << 12u);
+            // Main RAM's generation backing is stable for the lifetime of a
+            // runtime instance. Cache its exact page counter so the dispatch
+            // hot path does not resolve the same address on every hit.
+            if (page - 0x02000000u < 0x01000000u &&
+                g_busf_main.gen) {
+                const uint32_t offset = page & g_busf_main.mask;
+                slot.generation_ptr[i] =
+                    g_busf_main.gen + (offset >> 12u);
+                slot.generation[i] = *slot.generation_ptr[i];
+            } else {
+                slot.generation[i] =
+                    bus_exec_page_generation(page);
+            }
+        }
     }
     return hit;
 }
