@@ -54,11 +54,6 @@ struct CpuCtx {
 };
 CpuCtx g_ctx[2];
 
-struct StaticLookup {
-    void (*fn)(void) = nullptr;
-    const NdsStaticValidation* validation = nullptr;
-};
-
 // Generated firmware functions are capped at 512 guest bytes, so a function
 // can overlap at most two 4 KiB executable pages. A larger future validation
 // is rejected safely instead of running without an active-code guard.
@@ -175,10 +170,11 @@ struct alignas(64) CachedStaticLookup {
     uint32_t pc = 0u;
     uint32_t generation[2]{};
     const uint32_t* generation_ptr[2]{};
-    StaticLookup hit{};
+    const DispatchEntry* entry = nullptr;
     uint8_t page_count = 0u;
     uint8_t thumb = 0u;
     uint8_t occupied = 0u;
+    uint8_t callable = 0u;
 };
 static_assert(sizeof(CachedStaticLookup) == 64u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
@@ -212,10 +208,11 @@ bool static_bios_pc(uint32_t pc) {
         : (pc < 0x00004000u);
 }
 
-StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
-                       uint32_t pc, bool thumb, uint32_t* candidate_count,
-                       StaticLookup* inactive_candidate) {
-    if (!table) return {};
+const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
+                               uint32_t pc, bool thumb,
+                               uint32_t* candidate_count,
+                               const DispatchEntry** inactive_candidate) {
+    if (!table) return nullptr;
     unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
@@ -238,32 +235,33 @@ StaticLookup lookup_in(const DispatchEntry* table, unsigned len,
                                       validation->expected,
                                       validation->size)) {
                 if (inactive_candidate)
-                    *inactive_candidate = {table[i].fn, validation};
+                    *inactive_candidate = &table[i];
                 continue;
             }
         }
-        return {table[i].fn, validation};
+        return &table[i];
     }
-    return {};
+    return nullptr;
 }
 
-StaticLookup lookup_static(const CpuCtx& c, uint32_t pc, bool thumb,
-                           uint32_t* candidate_count,
-                           StaticLookup* inactive_candidate) {
+const DispatchEntry* lookup_static(
+        const CpuCtx& c, uint32_t pc, bool thumb,
+        uint32_t* candidate_count,
+        const DispatchEntry** inactive_candidate) {
     if (candidate_count) *candidate_count = 0u;
-    if (inactive_candidate) *inactive_candidate = {};
+    if (inactive_candidate) *inactive_candidate = nullptr;
     for (const DispatchBank& bank : c.banks) {
-        StaticLookup hit = lookup_in(
+        const DispatchEntry* hit = lookup_in(
             bank.table, bank.len, pc, thumb, candidate_count,
             inactive_candidate);
-        if (hit.fn) return hit;
+        if (hit) return hit;
     }
-    return {};
+    return nullptr;
 }
 
 bool cached_lookup_live(const CachedStaticLookup& cached) {
-    if (!cached.hit.validation) return true;
-    const uint32_t first_page = cached.hit.validation->addr & ~0xFFFu;
+    if (!cached.entry || !cached.entry->validation) return true;
+    const uint32_t first_page = cached.entry->validation->addr & ~0xFFFu;
     for (uint32_t i = 0; i < cached.page_count; ++i) {
         const uint32_t live_generation = cached.generation_ptr[i]
             ? *cached.generation_ptr[i]
@@ -274,18 +272,19 @@ bool cached_lookup_live(const CachedStaticLookup& cached) {
     return true;
 }
 
-StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
+const DispatchEntry* lookup_static_cached(const CpuCtx& c, uint32_t pc,
+                                          bool thumb) {
     auto& cache = g_dispatch_cache[g_nds_active];
     CachedStaticLookup& slot =
         cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
               (kDispatchCacheSize - 1u)];
     if (slot.occupied && slot.pc == pc && slot.thumb == uint8_t{thumb} &&
         cached_lookup_live(slot))
-        return slot.hit;
+        return slot.callable ? slot.entry : nullptr;
 
     uint32_t candidate_count = 0u;
-    StaticLookup inactive_candidate{};
-    const StaticLookup hit = lookup_static(
+    const DispatchEntry* inactive_candidate = nullptr;
+    const DispatchEntry* hit = lookup_static(
         c, pc, thumb, &candidate_count, &inactive_candidate);
     // Copied RAM code has no static entry and is handled by Tier 3. Remember
     // that definitive miss so every interpreted block does not binary-search
@@ -293,18 +292,17 @@ StaticLookup lookup_static_cached(const CpuCtx& c, uint32_t pc, bool thumb) {
     // safe to cache: its backing-page generations invalidate the entry after
     // a guest write. Multiple variants are left uncached because any one of
     // their distinct backing ranges could become live.
-    if (!hit.fn && candidate_count > 1u) return {};
+    if (!hit && candidate_count > 1u) return nullptr;
     slot = {};
     slot.pc = pc;
     slot.thumb = static_cast<uint8_t>(thumb);
-    slot.hit = hit.fn
-        ? hit
-        : StaticLookup{nullptr, inactive_candidate.validation};
+    slot.entry = hit ? hit : inactive_candidate;
+    slot.callable = static_cast<uint8_t>(hit != nullptr);
     slot.occupied = 1u;
-    if (slot.hit.validation) {
-        const uint64_t end = uint64_t{slot.hit.validation->addr} +
-                             slot.hit.validation->size;
-        const uint32_t first_page = slot.hit.validation->addr & ~0xFFFu;
+    if (slot.entry && slot.entry->validation) {
+        const uint64_t end = uint64_t{slot.entry->validation->addr} +
+                             slot.entry->validation->size;
+        const uint32_t first_page = slot.entry->validation->addr & ~0xFFFu;
         const uint32_t last_page =
             static_cast<uint32_t>(end - 1u) & ~0xFFFu;
         slot.page_count = static_cast<uint8_t>(
@@ -395,10 +393,12 @@ struct StaticGuardScope {
         g_static_guard = saved;
         if (saved && saved->invalidated) request_yield_poll();
     }
-    bool call(const StaticLookup& hit) {
-        if (!hit.fn || !arm_static_guard(hit.validation, active)) return false;
+    bool call(const DispatchEntry* hit) {
+        if (!hit || !hit->fn ||
+            !arm_static_guard(hit->validation, active))
+            return false;
         g_static_guard = &active;
-        hit.fn();
+        hit->fn();
         return true;
     }
 };
@@ -559,7 +559,7 @@ extern "C" void nds_reschedule_slice(unsigned long long system_deadline) {
 // decide when to hand control back to the dispatcher / scheduler.)
 extern "C" int nds_has_bank(uint32_t pc, int thumb) {
     const CpuCtx& c = g_ctx[g_nds_active];
-    return lookup_static_cached(c, pc & ~1u, thumb != 0).fn ? 1 : 0;
+    return lookup_static_cached(c, pc & ~1u, thumb != 0) ? 1 : 0;
 }
 extern "C" int nds_slice_over(void) {
     return (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) ? 1 : 0;
