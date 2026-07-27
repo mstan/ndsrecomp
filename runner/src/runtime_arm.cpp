@@ -66,6 +66,7 @@ struct StaticExecutionGuard {
     const NdsStaticValidation* validation = nullptr;
     uint32_t page_addr[2] = {};
     uint32_t generation[2] = {};
+    const uint32_t* generation_ptr[2] = {};
     uint32_t page_count = 0u;
     bool invalidated = false;
 };
@@ -348,17 +349,32 @@ bool arm_static_guard(const NdsStaticValidation* validation) {
     for (uint32_t i = 0; i < page_count; ++i) {
         const uint32_t page = first_page + (i << 12u);
         g_static_guard.page_addr[i] = page;
-        g_static_guard.generation[i] = bus_exec_page_generation(page);
+        // Main RAM's generation storage is stable for a runtime instance.
+        // Keep the exact counter used by the dispatch cache so every nested
+        // static return does not resolve the same virtual page again.
+        if (page - 0x02000000u < 0x01000000u && g_busf_main.gen) {
+            const uint32_t offset = page & g_busf_main.mask;
+            g_static_guard.generation_ptr[i] =
+                g_busf_main.gen + (offset >> 12u);
+            g_static_guard.generation[i] =
+                *g_static_guard.generation_ptr[i];
+        } else {
+            g_static_guard.generation[i] =
+                bus_exec_page_generation(page);
+        }
     }
     return true;
 }
 
 bool guard_generation_changed(const StaticExecutionGuard& guard) {
     if (!guard.validation) return false;
-    for (uint32_t i = 0; i < guard.page_count; ++i)
-        if (bus_exec_page_generation(guard.page_addr[i]) !=
-            guard.generation[i])
+    for (uint32_t i = 0; i < guard.page_count; ++i) {
+        const uint32_t live_generation = guard.generation_ptr[i]
+            ? *guard.generation_ptr[i]
+            : bus_exec_page_generation(guard.page_addr[i]);
+        if (live_generation != guard.generation[i])
             return true;
+    }
     return false;
 }
 
