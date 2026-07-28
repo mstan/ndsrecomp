@@ -256,3 +256,10 @@ endif()
 if(WIN32)
     target_link_libraries(nds_runner PRIVATE ws2_32)
 endif()
+# The dual-CPU boot nests deeply enough to exhaust the 8 MB main-thread stack
+# macOS gives a process by default, faulting in ___chkstk_darwin before the
+# firmware hands off. Linux's 8 MB soft limit is raisable per-shell; the macOS
+# main thread size is fixed at link time, so ask for it here.
+if(APPLE)
+    target_link_options(nds_runner PRIVATE -Wl,-stack_size,0x4000000)
+endif()
