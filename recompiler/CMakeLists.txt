@@ -3,6 +3,7 @@ project(nds_recompile VERSION 0.0.1 LANGUAGES CXX)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsTomlPlusPlus.cmake")
 
 enable_testing()
 
@@ -37,7 +38,8 @@ add_executable(hle_manifest_test
     finder/config.cpp
     support/sha1.cpp)
 target_include_directories(hle_manifest_test PRIVATE
-    finder support third_party armv4t)
+    finder support armv4t)
+ndsrecomp_link_tomlpp(hle_manifest_test)
 add_test(NAME hle_manifest_test COMMAND hle_manifest_test)
 
 # The recompiler driver: config + function finder + audit/emit.
@@ -47,5 +49,6 @@ add_executable(nds_recompile
     finder/function_finder.cpp
     support/sha1.cpp)
 target_include_directories(nds_recompile PRIVATE
-    finder support third_party armv4t)
+    finder support armv4t)
+ndsrecomp_link_tomlpp(nds_recompile)
 target_link_libraries(nds_recompile PRIVATE nds_armv4t)
