@@ -494,7 +494,7 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
     if (!is_link &&
         target >= ctx.current_function_addr &&
         target < ctx.current_function_end_addr &&
-        target < branch_pc) {
+        target != branch_pc) {
         s << indent << "runtime_trace_event(RUNTIME_TRACE_BRANCH, "
           << fmt_hex32(branch_pc) << ", " << fmt_hex32(target)
           << ", 0u, 0u);\n";
@@ -502,11 +502,18 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
           << branch_tick_expr(refill_target)
           << ");\n";
         s << indent << "if (runtime_unwinding()) return;\n";
-        // Preemption point: a backward branch (loop top) is a dispatch
-        // entry, so it is a SAFE place to yield to the scheduler — the
-        // resume re-dispatches `target` cleanly. This is how a tight
-        // guest spin (e.g. an IPCSYNC wait) is broken to let the other
-        // core run, without ever resuming mid-function.
+        // Preemption point: every intra-function branch target is a
+        // dispatch entry (taken branches previously dispatched to it), so
+        // it is a SAFE place to yield to the scheduler — the resume
+        // re-dispatches `target` cleanly. This is how a tight guest spin
+        // (e.g. an IPCSYNC wait) is broken to let the other core run,
+        // without ever resuming mid-function. Forward targets take the
+        // same local `goto` as backward ones: every instruction PC in the
+        // body has an `L_%08X` label, and the enclosing content guard plus
+        // the per-instruction code-change unwind cover both directions
+        // identically. A branch to itself (`b .`) keeps the dispatch path
+        // so the guest spin is preempted through the dispatcher exactly as
+        // before.
         s << indent << "if (runtime_slice_yield()) { g_cpu.R[15] = "
           << fmt_hex32(target) << "; return; }\n";
         s << indent << "goto " << label_for_addr(target) << ";\n";
