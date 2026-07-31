@@ -16,6 +16,12 @@ void nds_gpu2d_finish_frame();
 // StartScanline order.
 void nds_gpu2d_vblank();
 const uint32_t* nds_gpu2d_framebuffer(int screen);
+// Host-only adaptive presentation surface. Returns the native framebuffer
+// with width=256 when no enhanced surface is active for this physical LCD.
+const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width);
+// Title capability for repairing uncovered pixels at a cylindrical skybox
+// seam after the host widens the horizontal field of view.
+void nds_gpu2d_set_adaptive_skybox_fill(bool enabled);
 
 struct NdsGpu2dProfile {
     uint64_t render_ns;

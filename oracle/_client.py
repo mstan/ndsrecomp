@@ -39,8 +39,8 @@ class DebugClient:
         r = self.cmd("read_region", region=region)
         return bytes.fromhex(r["hex"] if isinstance(r, dict) else r)
 
-    def framebuffer(self, engine):
-        r = self.cmd("framebuffer", engine=engine)
+    def framebuffer(self, engine, adaptive=False):
+        r = self.cmd("framebuffer", engine=engine, adaptive=adaptive)
         return r["w"], r["h"], bytes.fromhex(r["rgb"])
 
     def event_counts(self):

@@ -57,8 +57,37 @@ bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out) {
     return false;
 }
 
+bool nds_parse_startup_mode(const std::string& value,
+                            NdsStartupMode* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "preserve" || normalized == "firmware" ||
+        normalized == "default") {
+        *out = NdsStartupMode::Preserve;
+        return true;
+    }
+    if (normalized == "manual" || normalized == "menu") {
+        *out = NdsStartupMode::Manual;
+        return true;
+    }
+    if (normalized == "automatic" || normalized == "auto" ||
+        normalized == "slot-1" || normalized == "slot1") {
+        *out = NdsStartupMode::Automatic;
+        return true;
+    }
+    return false;
+}
+
 const char* nds_screen_layout_name(NdsScreenLayout value) {
     return value == NdsScreenLayout::Separate ? "separate" : "stacked";
+}
+
+const char* nds_startup_mode_name(NdsStartupMode value) {
+    switch (value) {
+        case NdsStartupMode::Manual: return "manual";
+        case NdsStartupMode::Automatic: return "automatic";
+        default: return "preserve";
+    }
 }
 
 const char* nds_adaptive_screens_name(uint8_t value) {
@@ -85,27 +114,43 @@ bool nds_load_frontend_config(const std::string& path,
         return false;
     }
 
-    const toml::table* display = root["display"].as_table();
-    if (!display) return true;
-
-    if (const auto value = (*display)["screen_layout"].value<std::string>()) {
-        if (!nds_parse_screen_layout(*value, &options->screen_layout)) {
-            if (error) {
-                *error = "display.screen_layout must be stacked or separate";
+    if (const toml::table* system = root["system"].as_table()) {
+        if (const auto value =
+                (*system)["startup_mode"].value<std::string>()) {
+            if (!nds_parse_startup_mode(*value, &options->startup_mode)) {
+                if (error) {
+                    *error =
+                        "system.startup_mode must be preserve, manual, or "
+                        "automatic";
+                }
+                return false;
             }
-            return false;
         }
     }
-    if (const auto value =
-            (*display)["adaptive_widescreen"].value<std::string>()) {
-        if (!nds_parse_adaptive_screens(*value,
-                                        &options->adaptive_screens)) {
-            if (error) {
-                *error =
-                    "display.adaptive_widescreen must be none, top, bottom, "
-                    "or both";
+
+    if (const toml::table* display = root["display"].as_table()) {
+        if (const auto value =
+                (*display)["screen_layout"].value<std::string>()) {
+            if (!nds_parse_screen_layout(*value,
+                                         &options->screen_layout)) {
+                if (error) {
+                    *error =
+                        "display.screen_layout must be stacked or separate";
+                }
+                return false;
             }
-            return false;
+        }
+        if (const auto value =
+                (*display)["adaptive_widescreen"].value<std::string>()) {
+            if (!nds_parse_adaptive_screens(*value,
+                                            &options->adaptive_screens)) {
+                if (error) {
+                    *error =
+                        "display.adaptive_widescreen must be none, top, "
+                        "bottom, or both";
+                }
+                return false;
+            }
         }
     }
     return true;

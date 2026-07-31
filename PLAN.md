@@ -251,9 +251,15 @@ phase/underrun stats; never single boot-window runs.
 ### WS-E — enhancements (priority 3; strictly opt-in, parity default)
 All enhancements live behind flags, default off; gates always run in
 parity mode. Enhancement builds must never alter guest-visible state.
-- **E1 [SPEC] widescreen 3D.** Wider aspect via GPU3D projection/viewport
-  adjustment at the device-model boundary (16:9 render + 2D letterboxing
-  policy). Straightforward in the vendored soft renderer.
+- **E1 [SPEC] widescreen 3D — FIRST TITLE LANDED 2026-07-31.** The host-only
+  soft-renderer surface now scales from 256 to 448 pixels while preserving
+  native vertical projection and pixel scale. Per-title capability masks
+  expose none/top/bottom/both and fail closed. SM64DS EU enables top-only
+  21:9, anchors HUD OBJ bands to left/center/right, pillarboxes unsupported
+  2D scenes, and repairs its authored cylindrical skybox seam. Native output
+  remains byte-locked. Follow-up: replace the castle sky presentation repair
+  with a decomp-side model-visibility/culling adjustment, then audit actors at
+  the extreme frustum in more stages.
 - **E2 [JUDG] increased 3D internal resolution.** The vendored soft
   rasterizer is 256×192-wired; 2× requires scanline-width generalization
   (melonDS's GL renderer is the alternative but drags in a GL stack and
@@ -261,12 +267,24 @@ parity mode. Enhancement builds must never alter guest-visible state.
 - **E3** (later) texture filtering/replacement, MSAA-style edge smoothing.
 
 ### WS-F — host shell / UX (priority 3, parallel-friendly)
-- **F1 [MECH] detached top/bottom screen windows.** SDL multi-window with
-  per-window scale/rotation and layouts (stacked / side-by-side / focus
-  one screen). Host-only; FNV + soak gate it.
-- **F2 [MECH] input rebinding + config file;** touch-on-gamepad mapping.
-- **F3** (later) save states — `Savestate.h` is already vendored for the
-  3D engine; whole-runner serialization is its own project.
+- **F1 [MECH] detached top/bottom screen windows — COMPLETE 2026-07-31.**
+  `display.screen_layout = stacked|separate`; separate windows scale and move
+  independently, keyboard state is shared, and pointer input is accepted only
+  in the physical bottom screen's native content rectangle. Both layouts pass
+  the 681-frame menu input/FNV self-test.
+- **F2 [MECH] input rebinding + config file.** Evaluate recomp-ui for the
+  ordinary DS button profile once it has an NDS platform/backend. Keep the
+  touchscreen as a separate native pointer surface initially; do not force
+  stylus coordinates into the controller abstraction.
+- **F3** (later) save states — `Savestate.h` covers only the vendored 3D
+  engine today. Shift+F1-F12 save / F1-F12 load requires a new atomic
+  whole-runner boundary across both CPUs, scheduler, bus/RAM, DMA/timers/IRQ,
+  2D/3D, SPU, SPI, cartridge/save state, and host queues. Do not ship partial
+  device states.
+- **F4 [SPEC] authentic Slot-1 automatic boot — COMPLETE 2026-07-31.**
+  `system.startup_mode = preserve|manual|automatic` updates both redundant
+  retail firmware user-setting copies and CRCs in memory. Automatic follows
+  the real BIOS/firmware/card path; the dump on disk is untouched.
 
 ### WS-G — real-hardware validation loop (as needed)
 A DS + flash carts are available for homebrew probes over the network.

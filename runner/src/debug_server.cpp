@@ -404,6 +404,59 @@ std::string handle(const std::string& line) {
             s.num_commands, s.cur_command, s.param_count, s.total_params);
         return buf;
     }
+    if (cmd == "gx_polygon") {
+        const uint64_t index = json_u64(line, "index", UINT64_MAX);
+        NdsGpu3dPolygonSnapshot polygon{};
+        if (index > UINT32_MAX ||
+            !nds_gpu3d_render_polygon(static_cast<uint32_t>(index),
+                                      &polygon)) {
+            return "{\"found\":false,\"count\":" +
+                std::to_string(nds_gpu3d_render_polygon_count()) + "}";
+        }
+        char result[512];
+        std::snprintf(
+            result, sizeof(result),
+            "{\"found\":true,\"count\":%u,\"index\":%llu,"
+            "\"submission_index\":%u,\"vertex_count\":%u,"
+            "\"attr\":%u,\"tex_param\":%u,\"tex_palette\":%u,"
+            "\"min_x\":%d,\"max_x\":%d,\"min_y\":%d,\"max_y\":%d,"
+            "\"min_z\":%u,\"max_z\":%u}",
+            nds_gpu3d_render_polygon_count(),
+            static_cast<unsigned long long>(index),
+            polygon.submission_index, polygon.vertex_count,
+            polygon.attr, polygon.tex_param, polygon.tex_palette,
+            polygon.min_x, polygon.max_x, polygon.min_y, polygon.max_y,
+            polygon.min_z, polygon.max_z);
+        return result;
+    }
+    if (cmd == "gx_polygons") {
+        const uint32_t count = nds_gpu3d_render_polygon_count();
+        std::string result =
+            "{\"count\":" + std::to_string(count) + ",\"polygons\":[";
+        for (uint32_t index = 0; index < count; ++index) {
+            NdsGpu3dPolygonSnapshot polygon{};
+            if (!nds_gpu3d_render_polygon(index, &polygon)) continue;
+            if (result.back() != '[') result += ',';
+            result +=
+                "{\"index\":" + std::to_string(index) +
+                ",\"submission_index\":" +
+                    std::to_string(polygon.submission_index) +
+                ",\"vertex_count\":" +
+                    std::to_string(polygon.vertex_count) +
+                ",\"attr\":" + std::to_string(polygon.attr) +
+                ",\"tex_param\":" + std::to_string(polygon.tex_param) +
+                ",\"tex_palette\":" +
+                    std::to_string(polygon.tex_palette) +
+                ",\"min_x\":" + std::to_string(polygon.min_x) +
+                ",\"max_x\":" + std::to_string(polygon.max_x) +
+                ",\"min_y\":" + std::to_string(polygon.min_y) +
+                ",\"max_y\":" + std::to_string(polygon.max_y) +
+                ",\"min_z\":" + std::to_string(polygon.min_z) +
+                ",\"max_z\":" + std::to_string(polygon.max_z) + "}";
+        }
+        result += "]}";
+        return result;
+    }
     if (cmd == "gx_write_sample") {
         const uint64_t count = json_u64(line, "count", 0);
         if (count == 0) {
@@ -882,11 +935,15 @@ std::string handle(const std::string& line) {
     if (cmd == "framebuffer") {
         const std::string engine = json_str(line, "engine", "A");
         const int screen = (engine == "B" || engine == "b") ? 1 : 0;
-        const uint32_t* fb = nds_gpu2d_framebuffer(screen);
+        uint16_t width = 256;
+        const bool adaptive = json_bool(line, "adaptive", false);
+        const uint32_t* fb = adaptive
+            ? nds_gpu2d_adaptive_framebuffer(screen, &width)
+            : nds_gpu2d_framebuffer(screen);
         if (!fb) return "{\"error\":\"framebuffer not ready\"}";
         std::string rgb;
-        rgb.reserve(256u * 192u * 6u);
-        for (size_t i = 0; i < 256u * 192u; ++i) {
+        rgb.reserve(size_t{width} * 192u * 6u);
+        for (size_t i = 0; i < size_t{width} * 192u; ++i) {
             const uint32_t px = fb[i];
             const uint8_t c[3] = {
                 static_cast<uint8_t>(px >> 16),
@@ -895,7 +952,8 @@ std::string handle(const std::string& line) {
             };
             append_hex(rgb, c, sizeof(c));
         }
-        return "{\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
+        return "{\"w\":" + std::to_string(width) +
+            ",\"h\":192,\"rgb\":\"" + rgb + "\"}";
     }
     if (cmd == "touch") {
         const uint16_t x = static_cast<uint16_t>(json_u64(line, "x", 0));

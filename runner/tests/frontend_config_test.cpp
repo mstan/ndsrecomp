@@ -29,12 +29,24 @@ int main() {
         !require(!nds_parse_adaptive_screens("automatic", &adaptive)))
         return 2;
 
+    NdsStartupMode startup = NdsStartupMode::Preserve;
+    if (!require(nds_parse_startup_mode("automatic", &startup)) ||
+        !require(startup == NdsStartupMode::Automatic) ||
+        !require(nds_parse_startup_mode("menu", &startup)) ||
+        !require(startup == NdsStartupMode::Manual) ||
+        !require(nds_parse_startup_mode("firmware", &startup)) ||
+        !require(startup == NdsStartupMode::Preserve) ||
+        !require(!nds_parse_startup_mode("fast", &startup)))
+        return 3;
+
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() /
         "ndsrecomp_frontend_config_test.toml";
     {
         std::ofstream file(path);
-        file << "[display]\n"
+        file << "[system]\n"
+                "startup_mode = \"automatic\"\n"
+                "[display]\n"
                 "screen_layout = \"separate\"\n"
                 "adaptive_widescreen = \"bottom\"\n";
     }
@@ -42,8 +54,9 @@ int main() {
     std::string error;
     if (!require(nds_load_frontend_config(path.string(), &options, &error)) ||
         !require(options.screen_layout == NdsScreenLayout::Separate) ||
+        !require(options.startup_mode == NdsStartupMode::Automatic) ||
         !require(options.adaptive_screens == NDS_ADAPTIVE_BOTTOM))
-        return 3;
+        return 4;
 
     {
         std::ofstream file(path);
@@ -52,7 +65,7 @@ int main() {
     }
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
-        return 4;
+        return 5;
     std::filesystem::remove(path);
     return 0;
 }

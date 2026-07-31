@@ -163,6 +163,7 @@ void Vertex::DoSavestate(Savestate* file) noexcept
 void GPU3D::SetCurrentRenderer(std::unique_ptr<Renderer3D>&& renderer) noexcept
 {
     CurrentRenderer = std::move(renderer);
+    CurrentRenderer->SetRenderWidth(RenderWidth);
     CurrentRenderer->Reset(NDS.GPU);
 }
 
@@ -999,7 +1000,6 @@ void GPU3D::SubmitPolygon() noexcept
     dot = ((s64)v1->Position[0] * normalX) + ((s64)v1->Position[1] * normalY) + ((s64)v1->Position[3] * normalZ);
 
     bool facingview = (dot <= 0);
-
     if (dot < 0)
     {
         if (!(CurPolygonAttr & (1<<7)))
@@ -1113,6 +1113,12 @@ void GPU3D::SubmitPolygon() noexcept
         // note: the DS performs these divisions using a 32-bit divider
         // thus, if W is greater than 0xFFFF, some precision is sacrificed
         // to make the numbers fit into the divider
+        const bool enhanced_full_viewport =
+            RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256;
+        const u32 viewport_width =
+            enhanced_full_viewport ? RenderWidth : Viewport[4];
+        const u32 viewport_x = enhanced_full_viewport
+            ? 0 : Viewport[0] + (RenderWidth - 256) / 2;
         u32 posX, posY;
         u32 w = vtx->Position[3];
         if (w == 0)
@@ -1134,7 +1140,7 @@ void GPU3D::SubmitPolygon() noexcept
             }
 
             den <<= 1;
-            posX = ((posX * Viewport[4]) / den) + Viewport[0];
+            posX = ((posX * viewport_width) / den) + viewport_x;
             posY = ((posY * Viewport[5]) / den) + Viewport[3];
         }
 
@@ -1145,7 +1151,7 @@ void GPU3D::SubmitPolygon() noexcept
         // to consider: only do this when using the GL renderer? apply the aforementioned quirk to this?
         if (w != 0)
         {
-            posX = ((((s64)(vtx->Position[0] + w) * Viewport[4]) << 4) / (((s64)w) << 1)) + (Viewport[0] << 4);
+            posX = ((((s64)(vtx->Position[0] + w) * viewport_width) << 4) / (((s64)w) << 1)) + (viewport_x << 4);
             posY = ((((s64)(-vtx->Position[1] + w) * Viewport[5]) << 4) / (((s64)w) << 1)) + (Viewport[3] << 4);
 
             vtx->HiresPosition[0] = posX & 0x1FFF;
@@ -1274,7 +1280,7 @@ void GPU3D::SubmitPolygon() noexcept
 
     u32 vtop = 0, vbot = 0;
     s32 ytop = 192, ybot = 0;
-    s32 xtop = 256, xbot = 0;
+    s32 xtop = static_cast<s32>(RenderWidth), xbot = 0;
     u32 wsize = 0;
 
     for (int i = 0; i < nverts; i++)
@@ -1365,6 +1371,14 @@ void GPU3D::SubmitVertex() noexcept
     vertextrans->Position[1] = (vertex[0]*ClipMatrix[1] + vertex[1]*ClipMatrix[5] + vertex[2]*ClipMatrix[9] + vertex[3]*ClipMatrix[13]) >> 12;
     vertextrans->Position[2] = (vertex[0]*ClipMatrix[2] + vertex[1]*ClipMatrix[6] + vertex[2]*ClipMatrix[10] + vertex[3]*ClipMatrix[14]) >> 12;
     vertextrans->Position[3] = (vertex[0]*ClipMatrix[3] + vertex[1]*ClipMatrix[7] + vertex[2]*ClipMatrix[11] + vertex[3]*ClipMatrix[15]) >> 12;
+    // Preserve the native horizontal pixel scale while expanding the clip
+    // volume and full-width viewport. Scaling clip X by 256/output_width is
+    // equivalent to a wider horizontal projection; the vertical projection,
+    // depth, guest matrices, and hardware registers remain unchanged.
+    if (RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256)
+        vertextrans->Position[0] = static_cast<s32>(
+            (static_cast<s64>(vertextrans->Position[0]) * 256) /
+            RenderWidth);
 
     // this probably shouldn't be.
     // the way color is handled during clipping needs investigation. TODO
@@ -2545,6 +2559,14 @@ void GPU3D::SetRenderXPos(u16 xpos) noexcept
     RenderXPos = xpos & 0x01FF;
 }
 
+void GPU3D::SetRenderWidth(u32 width) noexcept
+{
+    if (width < 256) width = 256;
+    if (width > 448) width = 448;
+    if (width & 1) width--;
+    RenderWidth = width;
+    if (CurrentRenderer) CurrentRenderer->SetRenderWidth(width);
+}
 
 u32* GPU3D::GetLine(int line) noexcept
 {
@@ -2558,27 +2580,64 @@ u32* GPU3D::GetLine(int line) noexcept
 
         if (RenderXPos & 0x100)
         {
-            int i = 0, j = RenderXPos;
-            for (; j < 512; i++, j++)
+            int i = 0;
+            int shift = 512 - RenderXPos;
+            if (shift > static_cast<int>(RenderWidth))
+                shift = static_cast<int>(RenderWidth);
+            for (; i < shift; i++)
                 ScrolledLine[i] = 0;
-            for (j = 0; i < 256; i++, j++)
+            for (int j = 0; i < static_cast<int>(RenderWidth); i++, j++)
                 ScrolledLine[i] = rawline[j];
         }
         else
         {
             int i = 0, j = RenderXPos;
-            for (; j < 256; i++, j++)
+            for (; j < static_cast<int>(RenderWidth); i++, j++)
                 ScrolledLine[i] = rawline[j];
-            for (; i < 256; i++)
+            for (; i < static_cast<int>(RenderWidth); i++)
                 ScrolledLine[i] = 0;
         }
     }
     else
     {
-        memset(ScrolledLine, 0, 256*4);
+        memset(ScrolledLine, 0, RenderWidth*4);
     }
 
     return ScrolledLine;
+}
+
+const u32* GPU3D::GetAttrLine(int line) noexcept
+{
+    if (AbortFrame)
+    {
+        memset(ScrolledAttrLine, 0, RenderWidth * sizeof(u32));
+        return ScrolledAttrLine;
+    }
+
+    const u32* rawline = CurrentRenderer->GetAttrLine(line);
+    if (!rawline) return nullptr;
+    if (RenderXPos == 0) return rawline;
+
+    if (RenderXPos & 0x100)
+    {
+        int i = 0;
+        int shift = 512 - RenderXPos;
+        if (shift > static_cast<int>(RenderWidth))
+            shift = static_cast<int>(RenderWidth);
+        for (; i < shift; i++)
+            ScrolledAttrLine[i] = 0;
+        for (int j = 0; i < static_cast<int>(RenderWidth); i++, j++)
+            ScrolledAttrLine[i] = rawline[j];
+    }
+    else
+    {
+        int i = 0, j = RenderXPos;
+        for (; j < static_cast<int>(RenderWidth); i++, j++)
+            ScrolledAttrLine[i] = rawline[j];
+        for (; i < static_cast<int>(RenderWidth); i++)
+            ScrolledAttrLine[i] = 0;
+    }
+    return ScrolledAttrLine;
 }
 
 bool GPU3D::IsRendererAccelerated() const noexcept
@@ -3006,4 +3065,3 @@ Renderer3D::Renderer3D(bool Accelerated)
 { }
 
 }
-

@@ -40,6 +40,8 @@ public:
     void RenderFrame(GPU& gpu) override;
     void RestartFrame(GPU& gpu) override;
     u32* GetLine(int line) override;
+    const u32* GetAttrLine(int line) override;
+    void SetRenderWidth(u32 width) override;
 
     void SetupRenderThread(GPU& gpu);
     void EnableRenderThread();
@@ -461,13 +463,15 @@ private:
 
     void RenderThreadFunc(GPU& gpu);
 
-    // buffer dimensions are 258x194 to add a offscreen 1px border
+    // Buffer capacity is 450x194: up to a 448-pixel 21:9 output plus a
+    // one-pixel offscreen border on each side.
     // which simplifies edge marking tests
     // buffer is duplicated to keep track of the two topmost pixels
     // TODO: check if the hardware can accidentally plot pixels
     // offscreen in that border
 
-    static constexpr int ScanlineWidth = 258;
+    static constexpr int MaxRenderWidth = 448;
+    static constexpr int ScanlineWidth = MaxRenderWidth + 2;
     static constexpr int NumScanlines = 194;
     static constexpr int BufferSize = ScanlineWidth * NumScanlines;
     static constexpr int FirstPixelOffset = ScanlineWidth + 1;
@@ -485,7 +489,8 @@ private:
     // bit22: translucent flag
     // bit24-29: polygon ID for opaque pixels
 
-    u8 StencilBuffer[256*2];
+    u8 StencilBuffer[MaxRenderWidth*2];
+    int RenderWidth = 256;
     bool PrevIsShadowMask;
 
     bool Enabled;

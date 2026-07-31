@@ -317,6 +317,49 @@ void nds_gpu3d_state(NdsGxStateSnapshot* out) {
     };
 }
 
+uint32_t nds_gpu3d_render_polygon_count() {
+    return g_nds.GPU.GPU3D.RenderNumPolygons;
+}
+
+bool nds_gpu3d_render_polygon(uint32_t index,
+                              NdsGpu3dPolygonSnapshot* out) {
+    if (!out || index >= g_nds.GPU.GPU3D.RenderNumPolygons)
+        return false;
+    const melonDS::Polygon* const polygon =
+        g_nds.GPU.GPU3D.RenderPolygonRAM[index];
+    if (!polygon || polygon->NumVertices == 0u)
+        return false;
+    const ptrdiff_t absolute_index =
+        polygon - g_nds.GPU.GPU3D.PolygonRAM;
+    out->submission_index =
+        static_cast<uint32_t>(absolute_index) & 0x7FFu;
+    out->vertex_count = polygon->NumVertices;
+    out->attr = polygon->Attr;
+    out->tex_param = polygon->TexParam;
+    out->tex_palette = polygon->TexPalette;
+    out->min_x = 0x7FFFFFFF;
+    out->max_x = -0x7FFFFFFF;
+    out->min_y = 0x7FFFFFFF;
+    out->max_y = -0x7FFFFFFF;
+    out->min_z = 0xFFFFFFFFu;
+    out->max_z = 0u;
+    for (uint32_t vertex = 0; vertex < polygon->NumVertices; ++vertex) {
+        out->min_x = std::min(out->min_x,
+                              polygon->Vertices[vertex]->FinalPosition[0]);
+        out->max_x = std::max(out->max_x,
+                              polygon->Vertices[vertex]->FinalPosition[0]);
+        out->min_y = std::min(out->min_y,
+                              polygon->Vertices[vertex]->FinalPosition[1]);
+        out->max_y = std::max(out->max_y,
+                              polygon->Vertices[vertex]->FinalPosition[1]);
+        const uint32_t z =
+            static_cast<uint32_t>(polygon->FinalZ[vertex]);
+        out->min_z = std::min(out->min_z, z);
+        out->max_z = std::max(out->max_z, z);
+    }
+    return true;
+}
+
 uint64_t nds_gpu3d_write_trace_count() { return g_gx_write_trace_count; }
 
 bool nds_gpu3d_write_trace_get(uint64_t count, NdsGxWriteTraceEntry* out) {
@@ -491,12 +534,43 @@ const uint32_t* nds_gpu3d_line(int line) {
         return g_compute_scrolled_line;
     }
 #endif
-    if (!profiling()) return g_nds.GPU.GPU3D.GetLine(line);
+    if (!profiling()) {
+        const uint32_t* result = g_nds.GPU.GPU3D.GetLine(line);
+        return result + (g_nds.GPU.GPU3D.GetRenderWidth() - 256u) / 2u;
+    }
     const auto start = ProfileClock::now();
     const uint32_t* result = g_nds.GPU.GPU3D.GetLine(line);
     profile_add(g_gpu3d_profile.getline_ns, start);
     ++g_gpu3d_profile.getline_calls;
-    return result;
+    return result + (g_nds.GPU.GPU3D.GetRenderWidth() - 256u) / 2u;
+}
+
+bool nds_gpu3d_set_output_width(uint16_t width) {
+    if (width < 256u || width > 448u || (width & 1u)) return false;
+    if (width != 256u && g_nds.GPU.GPU3D.IsRendererAccelerated())
+        return false;
+    g_nds.GPU.GPU3D.SetRenderWidth(width);
+    return true;
+}
+
+uint16_t nds_gpu3d_output_width() {
+    return static_cast<uint16_t>(g_nds.GPU.GPU3D.GetRenderWidth());
+}
+
+const uint32_t* nds_gpu3d_wide_line(int line) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated())
+        return nds_gpu3d_line(line);
+#endif
+    return g_nds.GPU.GPU3D.GetLine(line);
+}
+
+const uint32_t* nds_gpu3d_wide_attr_line(int line) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated())
+        return nullptr;
+#endif
+    return g_nds.GPU.GPU3D.GetAttrLine(line);
 }
 
 void nds_gpu3d_set_render_xpos(uint16_t value) {

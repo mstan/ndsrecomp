@@ -174,6 +174,35 @@ bool normalize_touch_calibration(std::vector<uint8_t>& fw) {
     return true;
 }
 
+bool apply_startup_mode(std::vector<uint8_t>& fw, NdsStartupMode mode) {
+    if (mode == NdsStartupMode::Preserve) return true;
+    if (fw.size() < 0x22u) return false;
+    const size_t user = size_t{fw[0x20]} << 3u |
+                        size_t{fw[0x21]} << 11u;
+    if (user + 0x200u > fw.size()) return false;
+
+    auto get16 = [&](size_t off) {
+        return static_cast<uint16_t>(
+            uint16_t{fw[off]} | (uint16_t{fw[off + 1u]} << 8u));
+    };
+    auto put16 = [&](size_t off, uint16_t value) {
+        fw[off] = static_cast<uint8_t>(value);
+        fw[off + 1u] = static_cast<uint8_t>(value >> 8u);
+    };
+    for (unsigned copy = 0; copy < 2; ++copy) {
+        const size_t base = user + size_t{copy} * 0x100u;
+        uint16_t language_and_flags = get16(base + 0x64u);
+        if (mode == NdsStartupMode::Automatic)
+            language_and_flags |= 1u << 6u;
+        else
+            language_and_flags &= ~(1u << 6u);
+        put16(base + 0x64u, language_and_flags);
+        put16(base + 0x72u,
+              firmware_crc16(fw.data() + base, 0x70u, 0xFFFFu));
+    }
+    return true;
+}
+
 void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
     std::fprintf(stderr, "  %s: PC=%08X CPSR=%08X SP=%08X LR=%08X "
                  "R0=%08X R12=%08X  cycles=%llu\n",
@@ -189,6 +218,7 @@ int main(int argc, char** argv) {
     std::string config_path = "game.toml";
     std::string cli_screen_layout;
     std::string cli_adaptive_screens;
+    std::string cli_startup_mode;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -221,6 +251,8 @@ int main(int argc, char** argv) {
             cli_screen_layout = argv[++i];
         } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
             cli_adaptive_screens = argv[++i];
+        } else if (a == "--startup-mode" && i + 1 < argc) {
+            cli_startup_mode = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -228,6 +260,7 @@ int main(int argc, char** argv) {
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
+                "[--startup-mode preserve|manual|automatic] "
                 "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
             return 0;
@@ -270,6 +303,15 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (const char* value = std::getenv("NDS_STARTUP_MODE")) {
+        if (!nds_parse_startup_mode(value,
+                                    &frontend_options.startup_mode)) {
+            std::fprintf(stderr,
+                         "invalid NDS_STARTUP_MODE "
+                         "(expected preserve, manual, or automatic)\n");
+            return 2;
+        }
+    }
     if (!cli_screen_layout.empty() &&
         !nds_parse_screen_layout(cli_screen_layout,
                                  &frontend_options.screen_layout)) {
@@ -284,6 +326,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "invalid --adaptive-widescreen "
                      "(expected none, top, bottom, or both)\n");
+        return 2;
+    }
+    if (!cli_startup_mode.empty() &&
+        !nds_parse_startup_mode(cli_startup_mode,
+                                &frontend_options.startup_mode)) {
+        std::fprintf(stderr,
+                     "invalid --startup-mode "
+                     "(expected preserve, manual, or automatic)\n");
         return 2;
     }
 
@@ -331,6 +381,7 @@ int main(int argc, char** argv) {
     auto fw = read_file(dir + "/firmware.bin");
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
+    bool sm64ds_wide_policy = false;
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
@@ -344,6 +395,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
                      rom.size(), rom_sha1.c_str());
     }
+#ifdef NDS_HAVE_SM64DS_BANKS
+    // Capabilities are tied to the exact title image whose projection,
+    // culling, and HUD policy was audited.
+    if (rom_sha1 == "1367529f2cb23e76ef295cb1727333ae8f0a6cd7") {
+        frontend_options.adaptive_supported = NDS_ADAPTIVE_TOP;
+        frontend_options.adaptive_max_width[0] = 448;  // 21:9 at 192 high
+        sm64ds_wide_policy = true;
+    }
+#endif
     if (interactive &&
         (frontend_options.adaptive_screens &
          ~frontend_options.adaptive_supported) != 0u) {
@@ -354,10 +414,24 @@ int main(int argc, char** argv) {
             nds_adaptive_screens_name(frontend_options.adaptive_supported));
         return 2;
     }
+    if (interactive && frontend_options.adaptive_screens != NDS_ADAPTIVE_NONE &&
+        compute_requested) {
+        std::fprintf(stderr,
+            "adaptive widescreen currently requires the soft 3D renderer\n");
+        return 2;
+    }
+    nds_gpu2d_set_adaptive_skybox_fill(sm64ds_wide_policy);
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
     }
+    if (!apply_startup_mode(fw, frontend_options.startup_mode)) {
+        std::fprintf(stderr,
+                     "refusing to start: cannot apply firmware startup mode\n");
+        return 1;
+    }
+    std::fprintf(stderr, "[firmware] startup mode: %s\n",
+                 nds_startup_mode_name(frontend_options.startup_mode));
 
     // Full power-on init, reusable so the debug server can honour `reset`
     // (the bisector compares fresh-from-reset at each event count).

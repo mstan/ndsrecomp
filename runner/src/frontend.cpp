@@ -142,7 +142,7 @@ uint16_t key_bit(SDL_Scancode key) {
 }
 
 void set_touch_from_mouse(int window_x, int window_y, bool down,
-                          NdsScreenLayout layout) {
+                          NdsScreenLayout layout, int logical_width) {
     // SDL_RenderSetLogicalSize also maps absolute mouse events into the
     // renderer's logical coordinate system. Calling RenderWindowToLogical a
     // second time halves coordinates at 2x scale (and turns bottom-screen
@@ -151,13 +151,15 @@ void set_touch_from_mouse(int window_x, int window_y, bool down,
     const float y = static_cast<float>(window_y);
     const float bottom_origin =
         layout == NdsScreenLayout::Separate ? 0.0f : kScreenHeight;
-    if (!down || x < 0.0f || x >= kScreenWidth ||
+    const float left =
+        static_cast<float>((logical_width - kScreenWidth) / 2);
+    if (!down || x < left || x >= left + kScreenWidth ||
         y < bottom_origin || y >= bottom_origin + kScreenHeight) {
         nds_set_touch(0, 0, false);
         return;
     }
     const auto touch_x = static_cast<uint16_t>(std::clamp<int>(
-        static_cast<int>(x), 0, kScreenWidth - 1));
+        static_cast<int>(x - left), 0, kScreenWidth - 1));
     const auto touch_y = static_cast<uint16_t>(std::clamp<int>(
         static_cast<int>(y - bottom_origin), 0, kScreenHeight - 1));
     nds_set_touch(touch_x, touch_y, true);
@@ -252,6 +254,8 @@ struct FrontendPresentation {
     SDL_Renderer* renderers[2]{};
     SDL_Texture* textures[2]{};
     uint32_t window_ids[2]{};
+    int screen_widths[2]{kScreenWidth, kScreenWidth};
+    int canvas_width = kScreenWidth;
 };
 
 void destroy_presentation(FrontendPresentation& presentation) {
@@ -285,6 +289,17 @@ bool create_presentation(const NdsFrontendOptions& options,
                          FrontendPresentation& presentation) {
     presentation.separate =
         options.screen_layout == NdsScreenLayout::Separate;
+    for (int screen = 0; screen < 2; ++screen) {
+        const uint8_t bit = static_cast<uint8_t>(1u << screen);
+        if ((options.adaptive_screens & bit) &&
+            (options.adaptive_supported & bit)) {
+            presentation.screen_widths[screen] =
+                options.adaptive_max_width[screen];
+        }
+    }
+    presentation.canvas_width = std::max(
+        presentation.screen_widths[0],
+        presentation.screen_widths[1]);
     const int first_height = presentation.separate
         ? kScreenHeight * kWindowScale
         : kScreenHeight * 2 * kWindowScale;
@@ -292,7 +307,9 @@ bool create_presentation(const NdsFrontendOptions& options,
         presentation.separate ? "ndsrecomp - Top Screen"
                               : "ndsrecomp firmware preview",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        kScreenWidth * kWindowScale, first_height,
+        (presentation.separate ? presentation.screen_widths[0]
+                               : presentation.canvas_width) * kWindowScale,
+        first_height,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!presentation.windows[0]) {
         std::fprintf(stderr, "[sdl] window failed: %s\n", SDL_GetError());
@@ -311,8 +328,10 @@ bool create_presentation(const NdsFrontendOptions& options,
         SDL_GetWindowPosition(presentation.windows[0], &top_x, &top_y);
         presentation.windows[1] = SDL_CreateWindow(
             "ndsrecomp - Bottom Screen",
-            top_x + kScreenWidth * kWindowScale + 32, top_y,
-            kScreenWidth * kWindowScale, kScreenHeight * kWindowScale,
+            top_x + presentation.screen_widths[0] * kWindowScale + 32,
+            top_y,
+            presentation.screen_widths[1] * kWindowScale,
+            kScreenHeight * kWindowScale,
             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
         if (!presentation.windows[1]) {
             std::fprintf(stderr, "[sdl] bottom window failed: %s\n",
@@ -339,13 +358,17 @@ bool create_presentation(const NdsFrontendOptions& options,
                 ? kScreenHeight * 2 : kScreenHeight;
         if (screen == 0 || presentation.separate) {
             SDL_RenderSetLogicalSize(presentation.renderers[screen],
-                                     kScreenWidth, logical_height);
+                presentation.separate
+                    ? presentation.screen_widths[screen]
+                    : presentation.canvas_width,
+                logical_height);
             SDL_RenderSetIntegerScale(presentation.renderers[screen],
                                       SDL_TRUE);
         }
         presentation.textures[screen] = SDL_CreateTexture(
             presentation.renderers[screen], SDL_PIXELFORMAT_ARGB8888,
-            SDL_TEXTUREACCESS_STREAMING, kScreenWidth, kScreenHeight);
+            SDL_TEXTUREACCESS_STREAMING,
+            presentation.screen_widths[screen], kScreenHeight);
         if (!presentation.textures[screen]) {
             std::fprintf(stderr, "[sdl] texture failed: %s\n",
                          SDL_GetError());
@@ -360,18 +383,25 @@ bool create_presentation(const NdsFrontendOptions& options,
 
 void present_screens(FrontendPresentation& presentation,
                      const uint32_t* top_pixels,
-                     const uint32_t* bottom_pixels) {
+                     int top_width,
+                     const uint32_t* bottom_pixels,
+                     int bottom_width) {
     SDL_UpdateTexture(presentation.textures[0], nullptr, top_pixels,
-                      kScreenWidth * sizeof(uint32_t));
+                      top_width * sizeof(uint32_t));
     SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
-                      kScreenWidth * sizeof(uint32_t));
+                      bottom_width * sizeof(uint32_t));
     if (!presentation.separate) {
         SDL_Renderer* renderer = presentation.renderers[0];
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
-        const SDL_Rect top_rect{0, 0, kScreenWidth, kScreenHeight};
+        const SDL_Rect top_rect{
+            (presentation.canvas_width -
+             presentation.screen_widths[0]) / 2,
+            0, presentation.screen_widths[0], kScreenHeight};
         const SDL_Rect bottom_rect{
-            0, kScreenHeight, kScreenWidth, kScreenHeight};
+            (presentation.canvas_width -
+             presentation.screen_widths[1]) / 2,
+            kScreenHeight, presentation.screen_widths[1], kScreenHeight};
         SDL_RenderCopy(renderer, presentation.textures[0], nullptr,
                        &top_rect);
         SDL_RenderCopy(renderer, presentation.textures[1], nullptr,
@@ -380,8 +410,9 @@ void present_screens(FrontendPresentation& presentation,
         return;
     }
 
-    const SDL_Rect screen_rect{0, 0, kScreenWidth, kScreenHeight};
     for (int screen = 0; screen < 2; ++screen) {
+        const SDL_Rect screen_rect{
+            0, 0, presentation.screen_widths[screen], kScreenHeight};
         SDL_Renderer* renderer = presentation.renderers[screen];
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
@@ -415,10 +446,26 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         SDL_Quit();
         return 1;
     }
+    const int bottom_logical_width = presentation.separate
+        ? presentation.screen_widths[1]
+        : presentation.canvas_width;
+    const int bottom_content_left =
+        (bottom_logical_width - kScreenWidth) / 2;
     std::fprintf(stderr,
         "[sdl] layout=%s adaptive=%s\n",
         nds_screen_layout_name(options.screen_layout),
         nds_adaptive_screens_name(options.adaptive_screens));
+    const uint16_t output_width = static_cast<uint16_t>(std::max(
+        presentation.screen_widths[0],
+        presentation.screen_widths[1]));
+    if (!nds_gpu3d_set_output_width(output_width)) {
+        std::fprintf(stderr,
+                     "[sdl] adaptive 3D width %u is unavailable\n",
+                     output_width);
+        destroy_presentation(presentation);
+        SDL_Quit();
+        return 1;
+    }
 
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     // Activate only after every fallible visible-frontend allocation. From
@@ -553,7 +600,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 injected.button.button = SDL_BUTTON_LEFT;
                 // SDL transforms window-tagged mouse events from physical
                 // window pixels into the renderer's logical coordinates.
-                injected.button.x = 127 * kWindowScale;
+                injected.button.x =
+                    (bottom_content_left + 127) * kWindowScale;
                 injected.button.y = (presentation.separate
                     ? 180 : 192 + 180) * kWindowScale;
                 selftest_event_error |= SDL_PushEvent(&injected) < 0;
@@ -564,7 +612,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 injected.type = SDL_MOUSEBUTTONUP;
                 injected.button.windowID = presentation.window_ids[1];
                 injected.button.button = SDL_BUTTON_LEFT;
-                injected.button.x = 127 * kWindowScale;
+                injected.button.x =
+                    (bottom_content_left + 127) * kWindowScale;
                 injected.button.y = (presentation.separate
                     ? 180 : 192 + 180) * kWindowScale;
                 selftest_event_error |= SDL_PushEvent(&injected) < 0;
@@ -595,6 +644,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
+                event.button.x >= bottom_content_left &&
+                event.button.x < bottom_content_left + kScreenWidth &&
                 (presentation.separate ||
                  event.button.y >= kScreenHeight)) {
                 mouse_down = true;
@@ -604,7 +655,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 touch_release_pending = false;
                 touch_frames_held = 0;
                 set_touch_from_mouse(event.button.x, event.button.y, true,
-                                     options.screen_layout);
+                                     options.screen_layout,
+                                     bottom_logical_width);
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
                 event.button.button == SDL_BUTTON_LEFT &&
@@ -618,12 +670,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     touch_release_pending = true;
                 else
                     set_touch_from_mouse(event.button.x, event.button.y, false,
-                                         options.screen_layout);
+                                         options.screen_layout,
+                                         bottom_logical_width);
             }
             if (event.type == SDL_MOUSEMOTION && mouse_down &&
                 event.motion.windowID == presentation.window_ids[1])
                 set_touch_from_mouse(event.motion.x, event.motion.y, true,
-                                     options.screen_layout);
+                                     options.screen_layout,
+                                     bottom_logical_width);
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down &&
                 event.window.windowID == presentation.window_ids[1]) {
@@ -678,10 +732,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         }
 
         const uint64_t phase1 = SDL_GetPerformanceCounter();
-        const uint32_t* const top_pixels = nds_gpu2d_framebuffer(0);
-        const uint32_t* const bottom_pixels = nds_gpu2d_framebuffer(1);
-        observe_top_black_bands(top_pixels, shown_frames);
-        present_screens(presentation, top_pixels, bottom_pixels);
+        const uint32_t* const native_top = nds_gpu2d_framebuffer(0);
+        const uint32_t* top_pixels = native_top;
+        const uint32_t* bottom_pixels = nds_gpu2d_framebuffer(1);
+        uint16_t top_width = 256;
+        uint16_t bottom_width = 256;
+        if (options.adaptive_screens & NDS_ADAPTIVE_TOP)
+            top_pixels =
+                nds_gpu2d_adaptive_framebuffer(0, &top_width);
+        if (options.adaptive_screens & NDS_ADAPTIVE_BOTTOM)
+            bottom_pixels =
+                nds_gpu2d_adaptive_framebuffer(1, &bottom_width);
+        observe_top_black_bands(native_top, shown_frames);
+        present_screens(presentation, top_pixels, top_width,
+                        bottom_pixels, bottom_width);
         phase_present_ticks += SDL_GetPerformanceCounter() - phase1;
         if (audio && audio_started) {
             const uint32_t queued = audio_queue_count(audio, audio_queue);
@@ -813,7 +877,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const bool selftest_failed = selftest_menu &&
         (selftest_event_error || !selftest_key_up || !selftest_touch_up ||
          host_key_presses != 1 || host_touch_presses != 1 ||
-         last_touch_event_x != 127 ||
+         last_touch_event_x != bottom_content_left + 127 ||
          last_touch_event_y != (presentation.separate ? 180 : 372) ||
          top_hash != 0xa0f41b93e4eefa55ull ||
          bottom_hash != 0x6c43b370e9cda730ull);

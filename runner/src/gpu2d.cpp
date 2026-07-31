@@ -45,10 +45,14 @@ struct Pixel {
 
 std::array<Unit,2> g_unit{};
 using Frame = std::array<uint32_t, 256 * 192>;
+constexpr int kMaxAdaptiveWidth = 448;
+using AdaptiveFrame = std::array<uint32_t, kMaxAdaptiveWidth * 192>;
 // melonDS draws into the back buffer during the active frame and publishes it
 // only in GPU::FinishFrame, after VBlank. Keeping the same lifecycle matters
 // for instruction-precise framebuffer queries made while VCount is 192..262.
 std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
+std::array<AdaptiveFrame, 2> g_adaptive_frame{};
+bool g_adaptive_skybox_fill = false;
 int g_front = 0;
 uint64_t g_render_ns = 0;
 uint64_t g_obj_ns = 0;
@@ -388,18 +392,18 @@ void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
     }
 }
 
-void put_obj(std::array<Pixel,256>& line, int x, const Pixel& p) {
-    if (x < 0 || x >= 256 || !p.valid) return;
+void put_obj(Pixel* line, int width, int x, const Pixel& p) {
+    if (x < 0 || x >= width || !p.valid) return;
     // OAM index is resolved by visiting entries from 127 down to 0: an equal
     // priority pixel written later therefore has the lower (winning) index.
     // A numerically worse priority must not replace an existing front pixel.
     if (!line[x].valid || p.priority <= line[x].priority) line[x]=p;
 }
 
-void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
+void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
                      const uint8_t* oam, const uint8_t* palette,
                      const NdsVramRendererView& vram) {
-    out.fill({});
+    std::fill_n(out, out_width, Pixel{});
     const Unit& u=g_unit[engine];
     if (!(u.dispcnt&0x1000u)) return;
     static constexpr int widths[16]={8,16,8,8,16,32,8,8,32,32,16,8,64,64,32,8};
@@ -419,7 +423,21 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
             int row=(line_y-sy)&0xFF;
             if (row>=bh) continue;
             int sx=static_cast<int16_t>(a1<<7)>>7;
-            if (sx<=-bw || sx>=256) continue;
+            int output_sx = sx;
+            if (out_width > 256) {
+                const int extra = (out_width - 256) / 2;
+                const int center = sx + bw / 2;
+                // SM64DS uses main-engine OBJ for its gameplay HUD while the
+                // world is 3D. Keep center overlays centered and move the
+                // authored left/right HUD bands to the enhanced corners.
+                if (engine == 0 && center < 96)
+                    output_sx = sx;
+                else if (engine == 0 && center >= 160)
+                    output_sx = sx + extra * 2;
+                else
+                    output_sx = sx + extra;
+            }
+            if (output_sx<=-bw || output_sx>=out_width) continue;
             const int mode=(a0>>10)&3;
             if (mode==2) continue; // OBJ-window is handled when window modes land.
             const bool color256=a0&0x2000u;
@@ -454,8 +472,9 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                 const bool use_extpal=(u.dispcnt&0x80000000u)!=0u;
                 const uint32_t extpal_base=((a2>>12)&0xFu)<<9;
                 const uint32_t pal16=pal_base+(((a2>>12)&0xFu)<<5);
-                int dx=sx<0?-sx:0;
-                const int dx_end=sx+bw>256?256-sx:bw;
+                int dx=output_sx<0?-output_sx:0;
+                const int dx_end=output_sx+bw>out_width
+                    ? out_width-output_sx:bw;
                 Pixel p{0,0x10u,alpha,static_cast<uint8_t>(priority),0,true};
                 while(dx<dx_end){
                     const int px=hflip?w-1-dx:dx;
@@ -472,7 +491,7 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                             if(use_extpal)color=static_cast<uint16_t>(nds_vram_read_obj_extpal(engine,extpal_base+(index<<1),2));
                             else color=view16(palette,pal_base+(index<<1));
                             p.color=rgb6(color);
-                            put_obj(out,sx+dx+k,p);
+                            put_obj(out,out_width,output_sx+dx+k,p);
                         }
                     }else{
                         const uint32_t addr=(tile_index<<5)+((py&7)<<2)+((px>>3)<<5);
@@ -482,7 +501,7 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                             const uint8_t index=(rowbits>>((pxk&7)*4))&0xFu;
                             if(!index)continue;
                             p.color=rgb6(view16(palette,pal16+(index<<1)));
-                            put_obj(out,sx+dx+k,p);
+                            put_obj(out,out_width,output_sx+dx+k,p);
                         }
                     }
                     dx+=run;
@@ -499,7 +518,8 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                     px=(a1&0x1000u)?w-1-dx:dx;
                     py=(a1&0x2000u)?h-1-row:row;
                 }
-                const int screen_x=sx+dx;if(screen_x<0||screen_x>=256)continue;
+                const int screen_x=output_sx+dx;
+                if(screen_x<0||screen_x>=out_width)continue;
                 uint16_t color=0; uint8_t index=0;
                 if(mode==3){
                     const uint32_t bitmap_alpha = (a2 >> 12) & 0xFu;
@@ -538,7 +558,7 @@ void render_obj_line(int engine, int line_y, std::array<Pixel,256>& out,
                 Pixel p{rgb6(color), 0x10u, alpha,
                         static_cast<uint8_t>(priority), 0, true};
                 if(mode==3)p.alpha=static_cast<uint8_t>(std::min(16u,((a2>>12)&0xFu)+1u));
-                put_obj(out,screen_x,p);
+                put_obj(out,out_width,screen_x,p);
             }
     }
 }
@@ -585,7 +605,7 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
     std::array<Pixel,256> obj{};
     const auto obj_start = profiling() ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
-    render_obj_line(engine, y, obj, oam, palette, vram);
+    render_obj_line(engine, y, obj.data(), 256, oam, palette, vram);
     if (profiling()) {
         g_obj_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -820,7 +840,7 @@ void render_engine_line(int engine, int y) {
     std::array<Pixel,256> obj{};
     const auto obj_start = profiling() ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
-    render_obj_line(engine,y,obj,oam,palette,vram);
+    render_obj_line(engine,y,obj.data(),256,oam,palette,vram);
     if (profiling()) {
         g_obj_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1135,6 +1155,162 @@ const uint32_t* nds_gpu2d_framebuffer(int screen){
     const bool normal=(nds_powercontrol9()&0x8000u)!=0;
     const int engine=normal?screen:(screen^1);
     return g_fb[g_front][engine&1].data();
+}
+void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
+    g_adaptive_skybox_fill = enabled;
+}
+
+const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
+    const uint32_t* native = nds_gpu2d_framebuffer(screen);
+    const bool normal = (nds_powercontrol9() & 0x8000u) != 0;
+    const int engine = normal ? screen : (screen ^ 1);
+    const int output_width = nds_gpu3d_output_width();
+    if (output_width <= 256) {
+        if (width) *width = 256;
+        return native;
+    }
+
+    AdaptiveFrame& adaptive = g_adaptive_frame[screen & 1];
+    if (width) *width = static_cast<uint16_t>(output_width);
+    std::fill_n(adaptive.data(),
+                static_cast<size_t>(output_width) * 192u,
+                0xFF000000u);
+    const int extra = (output_width - 256) / 2;
+    if (engine != 0) {
+        for (int y = 0; y < 192; ++y)
+            std::copy_n(native + y * 256, 256,
+                        adaptive.data() + y * output_width + extra);
+        return adaptive.data();
+    }
+
+    Unit& u = g_unit[0];
+    const uint8_t* const palette = nds_vram_renderer_palette(0);
+    const uint8_t* const oam = nds_vram_renderer_oam(0);
+    const NdsVramRendererView* const vram = nds_vram_renderer_view(0);
+    const uint32_t mode = (u.dispcnt >> 16) & 3u;
+    const bool bg0_3d = (u.dispcnt & 0x8u) != 0 &&
+                        (u.dispcnt & 0x100u) != 0;
+    // Known-safe adaptive scene: main-engine 3D with its HUD in OBJ and no
+    // additional 2D background plane. Menus, fades, and unknown composites
+    // retain a centered native image with black side margins.
+    const bool supported_scene =
+        palette && oam && vram && !(u.dispcnt & 0x80u) &&
+        mode == 1u && bg0_3d && (u.dispcnt & 0x0E00u) == 0u;
+    if (!supported_scene) {
+        for (int y = 0; y < 192; ++y)
+            std::copy_n(native + y * 256, 256,
+                        adaptive.data() + y * output_width + extra);
+        return adaptive.data();
+    }
+
+    const uint16_t backdrop15 = view16(palette, 0);
+    const Pixel backdrop{
+        rgb6(backdrop15), 0x20u, 0, 4, 5, true};
+    const uint8_t prio3d = static_cast<uint8_t>(u.bgcnt[0] & 3u);
+    const uint32_t mbmode = u.master_bright >> 14;
+    const uint32_t mb =
+        std::min<uint32_t>(16, u.master_bright & 0x1Fu);
+    std::array<Pixel, kMaxAdaptiveWidth> obj{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_left{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_indices{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
+    std::array<int16_t, kMaxAdaptiveWidth> black_run{};
+    std::array<uint32_t, kMaxAdaptiveWidth> repaired_3d{};
+    for (int y = 0; y < 192; ++y) {
+        render_obj_line(0, y, obj.data(), output_width,
+                        oam, palette, *vram);
+        const uint32_t* const line3d = nds_gpu3d_wide_line(y);
+        const uint32_t* const attr3d =
+            g_adaptive_skybox_fill ? nds_gpu3d_wide_attr_line(y) : nullptr;
+        const uint32_t* composited_3d = line3d;
+        if (attr3d) {
+            int last_sky = -1;
+            int sky_count = 0;
+            int previous = -1;
+            std::fill_n(sky_rank.data(), output_width,
+                        static_cast<int16_t>(-1));
+            for (int x = 0; x < output_width; ++x) {
+                const uint32_t rgb = line3d[x] & 0x003F3F3Fu;
+                const bool sky =
+                    ((line3d[x] >> 24) & 0x1Fu) != 0u &&
+                    rgb != 0u &&
+                    (attr3d[x] & 0x3F000000u) == 0x02000000u;
+                if (sky) {
+                    last_sky = x;
+                    previous = x;
+                    sky_indices[sky_count] = static_cast<int16_t>(x);
+                    sky_rank[x] = static_cast<int16_t>(sky_count);
+                    ++sky_count;
+                }
+                sky_left[x] = static_cast<int16_t>(previous);
+            }
+            if (sky_count > 1) {
+                std::copy_n(line3d, output_width, repaired_3d.data());
+                for (int start = 0; start < output_width;) {
+                    if ((line3d[start] & 0x003F3F3Fu) != 0u) {
+                        black_run[start++] = 0;
+                        continue;
+                    }
+                    int end = start + 1;
+                    while (end < output_width &&
+                           (line3d[end] & 0x003F3F3Fu) == 0u)
+                        ++end;
+                    const int16_t length =
+                        static_cast<int16_t>(end - start);
+                    std::fill(black_run.begin() + start,
+                              black_run.begin() + end, length);
+                    start = end;
+                }
+                for (int x = 0; x < output_width; ++x) {
+                    const uint32_t alpha =
+                        (line3d[x] >> 24) & 0x1Fu;
+                    const uint32_t rgb =
+                        line3d[x] & 0x003F3F3Fu;
+                    const bool skybox_black =
+                        alpha != 0u && rgb == 0u &&
+                        black_run[x] >= 8;
+                    if (alpha != 0u && !skybox_black) continue;
+                    int left = sky_left[x];
+                    if (left < 0) left = last_sky - output_width;
+                    const int left_index =
+                        (left + output_width) % output_width;
+                    int rank = sky_rank[left_index];
+                    if (rank < 0) rank = sky_count - 1;
+                    rank = (rank + (x - left)) % sky_count;
+                    repaired_3d[x] =
+                        line3d[sky_indices[rank]];
+                }
+                composited_3d = repaired_3d.data();
+            }
+        }
+        uint32_t* const dst =
+            adaptive.data() + y * output_width;
+        for (int x = 0; x < output_width; ++x) {
+            Pixel top = backdrop;
+            Pixel below = backdrop;
+            const uint32_t c3 = composited_3d[x];
+            const uint8_t a3 =
+                static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
+            if (a3) {
+                top = Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
+                            prio3d, 1, true, a3};
+            }
+            if (obj[x].valid &&
+                (obj[x].priority < top.priority ||
+                 (obj[x].priority == top.priority &&
+                  obj[x].order < top.order))) {
+                below = top;
+                top = obj[x];
+            }
+            uint32_t color = compose(u, top, below);
+            if (mbmode == 1u)
+                color = brighten(color, mb, 0u);
+            else if (mbmode == 2u)
+                color = darken(color, mb, 15u);
+            dst[x] = to_rgb32(color);
+        }
+    }
+    return adaptive.data();
 }
 void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     if (!out) return;

@@ -154,16 +154,37 @@ independent:
 [display]
 screen_layout = "stacked"          # stacked | separate
 adaptive_widescreen = "none"       # none | top | bottom | both
+
+[system]
+startup_mode = "preserve"          # preserve | manual | automatic
 ```
 
 `screen_layout = "separate"` creates independently movable top and bottom
 windows. Pointer input is accepted only from the physical bottom-screen
 window; keyboard input remains shared by the DS session. Adaptive widescreen
 is a title capability, not framebuffer stretching: unsupported screen choices
-are rejected. The equivalent one-run overrides are
+are rejected. A title may expose the top screen, bottom screen, or both
+independently. The native 256x192 compositor remains the parity path; adaptive
+output is opt-in and currently uses the software 3D renderer. HUD sprites can
+be anchored to the widened left/right corners while center overlays remain
+centered. The equivalent one-run overrides are
 `NDS_SCREEN_LAYOUT` / `NDS_ADAPTIVE_WIDESCREEN` and the
 `--screen-layout` / `--adaptive-widescreen` CLI flags. Precedence is TOML,
 then environment, then CLI.
+
+`startup_mode = "automatic"` sets the retail firmware's Automatic-mode flag
+in the runner's private in-memory firmware image. With a Slot-1 cartridge
+inserted, the real BIOS/firmware/card path then launches it without navigating
+the menu; this is not direct-boot HLE and never modifies `firmware.bin` on
+disk. `manual` forces the DS menu and `preserve` honors the dumped setting.
+The one-run overrides are `NDS_STARTUP_MODE` and `--startup-mode`.
+
+Whole-machine save states are not implemented yet. The vendored 3D device has
+serialization support, but a correct state must atomically include both CPUs,
+the scheduler, bus/RAM, DMA/timers/IRQs, 2D and 3D engines, audio, SPI,
+cartridge/save devices, and host queues. F1-F12 bindings will be added only
+with that complete boundary; partial GPU-only states would silently corrupt a
+running game.
 
 ## Copyright and licensing
 

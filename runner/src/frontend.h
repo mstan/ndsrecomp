@@ -11,6 +11,15 @@ enum class NdsScreenLayout : uint8_t {
     Separate,
 };
 
+// How the authentic firmware handles an inserted Slot-1 cartridge. Preserve
+// leaves the dumped user setting untouched; Manual and Automatic override the
+// corresponding retail firmware flag in the runner's private in-memory copy.
+enum class NdsStartupMode : uint8_t {
+    Preserve,
+    Manual,
+    Automatic,
+};
+
 enum NdsAdaptiveScreen : uint8_t {
     NDS_ADAPTIVE_NONE = 0,
     NDS_ADAPTIVE_TOP = 1u << 0,
@@ -20,6 +29,7 @@ enum NdsAdaptiveScreen : uint8_t {
 
 struct NdsFrontendOptions {
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
+    NdsStartupMode startup_mode = NdsStartupMode::Preserve;
     uint8_t adaptive_screens = NDS_ADAPTIVE_NONE;
     // Title-owned capability mask. A requested screen must be present here;
     // unsupported adaptive output fails closed instead of stretching pixels.
@@ -34,8 +44,11 @@ bool nds_load_frontend_config(const std::string& path,
                               std::string* error);
 bool nds_parse_screen_layout(const std::string& value,
                              NdsScreenLayout* out);
+bool nds_parse_startup_mode(const std::string& value,
+                            NdsStartupMode* out);
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
+const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_adaptive_screens_name(uint8_t value);
 
 int nds_run_interactive_frontend(const NdsFrontendOptions& options);

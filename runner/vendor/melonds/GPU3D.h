@@ -112,7 +112,10 @@ public:
 
     void SetRenderXPos(u16 xpos) noexcept;
     [[nodiscard]] u16 GetRenderXPos() const noexcept { return RenderXPos; }
+    void SetRenderWidth(u32 width) noexcept;
+    [[nodiscard]] u32 GetRenderWidth() const noexcept { return RenderWidth; }
     u32* GetLine(int line) noexcept;
+    const u32* GetAttrLine(int line) noexcept;
 
     void WriteToGXFIFO(u32 val) noexcept;
 
@@ -190,6 +193,9 @@ private:
     std::unique_ptr<Renderer3D> CurrentRenderer = nullptr;
 
     u16 RenderXPos = 0;
+    // Host-only enhanced output width. The hardware-visible viewport and
+    // registers remain untouched; 256 is the exact native path.
+    u32 RenderWidth = 256;
 
 public:
     FIFO<CmdFIFOEntry, 256> CmdFIFO {};
@@ -326,7 +332,8 @@ public:
 
     u32 FlushRequest = 0;
     u32 FlushAttributes = 0;
-    u32 ScrolledLine[256]; // not part of the hardware state, don't serialize
+    u32 ScrolledLine[448]; // not part of the hardware state, don't serialize
+    u32 ScrolledAttrLine[448]; // host presentation metadata
 };
 
 class Renderer3D
@@ -349,6 +356,8 @@ public:
     virtual void RenderFrame(GPU& gpu) = 0;
     virtual void RestartFrame(GPU& gpu) {};
     virtual u32* GetLine(int line) = 0;
+    virtual const u32* GetAttrLine(int line) { return nullptr; }
+    virtual void SetRenderWidth(u32 width) {}
     virtual void Blit(const GPU& gpu) {};
 
     virtual void SetupAccelFrame() {}

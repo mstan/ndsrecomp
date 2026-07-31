@@ -82,6 +82,14 @@ void nds_gpu3d_start_frame();
 // returned 256-entry buffer is valid until the next call.
 const uint32_t* nds_gpu3d_line(int line);
 
+// Opt-in host-only widened raster surface. The native line API above always
+// returns the centered 256-pixel hardware viewport for the faithful 2D
+// compositor; wide_line exposes the complete enhanced surface.
+bool nds_gpu3d_set_output_width(uint16_t width);
+uint16_t nds_gpu3d_output_width();
+const uint32_t* nds_gpu3d_wide_line(int line);
+const uint32_t* nds_gpu3d_wide_attr_line(int line);
+
 // Engine A BG0HOFS writes dual-purpose into the 3D scroll register
 // (melonDS GPU2D Write8/16 case 0x010, forwarded before the power gate;
 // SetRenderXPos itself ignores writes while rendering is powered off).
@@ -141,3 +149,23 @@ struct NdsGxStateSnapshot {
     uint32_t total_params;
 };
 void nds_gpu3d_state(NdsGxStateSnapshot* out);
+
+// Read-only inspection of the most recently submitted render list. `index`
+// follows the renderer's draw order; submission_index recovers the guest FIFO
+// order before opaque/translucent partitioning and Y sorting.
+struct NdsGpu3dPolygonSnapshot {
+    uint32_t submission_index;
+    uint32_t vertex_count;
+    uint32_t attr;
+    uint32_t tex_param;
+    uint32_t tex_palette;
+    int32_t min_x;
+    int32_t max_x;
+    int32_t min_y;
+    int32_t max_y;
+    uint32_t min_z;
+    uint32_t max_z;
+};
+uint32_t nds_gpu3d_render_polygon_count();
+bool nds_gpu3d_render_polygon(uint32_t index,
+                              NdsGpu3dPolygonSnapshot* out);

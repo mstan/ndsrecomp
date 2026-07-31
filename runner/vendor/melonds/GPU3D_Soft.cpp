@@ -140,6 +140,13 @@ void SoftRenderer::SetThreaded(bool threaded, GPU& gpu) noexcept
     }
 }
 
+void SoftRenderer::SetRenderWidth(u32 width)
+{
+    RenderWidth = std::clamp<int>(static_cast<int>(width),
+                                  256, MaxRenderWidth);
+    FrameIdentical = false;
+}
+
 void SoftRenderer::TextureLookup(const GPU& gpu, u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const
 {
     u32 vramaddr = (texparam & 0xFFFF) << 3;
@@ -726,7 +733,7 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
         fnDepthTest = DepthTest_LessThan;
 
     if (!PrevIsShadowMask)
-        memset(&StencilBuffer[256 * (y&0x1)], 0, 256);
+        memset(&StencilBuffer[MaxRenderWidth * (y&0x1)], 0, RenderWidth);
 
     PrevIsShadowMask = true;
 
@@ -855,7 +862,7 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
     edge = yedge | 0x1;
     xlimit = xstart+l_edgelen;
     if (xlimit > xend+1) xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
 
     if (!l_filledge) x = xlimit;
     else
@@ -869,13 +876,13 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
         u32 dstattr = AttrBuffer[pixeladdr];
 
         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
         }
     }
 
@@ -883,7 +890,7 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
     edge = yedge;
     xlimit = xend-r_edgelen+1;
     if (xlimit > xend+1) xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
     if (wireframe && !edge) x = std::max(x, xlimit);
     else for (; x < xlimit; x++)
     {
@@ -895,20 +902,20 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
         u32 dstattr = AttrBuffer[pixeladdr];
 
         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
         }
     }
 
     // part 3: right edge
     edge = yedge | 0x2;
     xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
 
     if (r_filledge)
     for (; x < xlimit; x++)
@@ -921,13 +928,13 @@ void SoftRenderer::RenderShadowMaskScanline(const GPU3D& gpu3d, RendererPolygon*
         u32 dstattr = AttrBuffer[pixeladdr];
 
         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
         }
     }
 
@@ -1104,7 +1111,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
     edge = yedge | 0x1;
     xlimit = xstart+l_edgelen;
     if (xlimit > xend+1) xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
     if (l_edgecov & (1<<31))
     {
         xcov = (l_edgecov >> 12) & 0x3FF;
@@ -1121,7 +1128,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1205,7 +1212,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
     edge = yedge;
     xlimit = xend-r_edgelen+1;
     if (xlimit > xend+1) xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
 
     if (wireframe && !edge) x = std::max(x, xlimit);
     else
@@ -1217,7 +1224,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1293,7 +1300,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
     // part 3: right edge
     edge = yedge | 0x2;
     xlimit = xend+1;
-    if (xlimit > 256) xlimit = 256;
+    if (xlimit > RenderWidth) xlimit = RenderWidth;
     if (r_edgecov & (1<<31))
     {
         xcov = (r_edgecov >> 12) & 0x3FF;
@@ -1309,7 +1316,7 @@ void SoftRenderer::RenderPolygonScanline(const GPU& gpu, RendererPolygon* rp, s3
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1460,7 +1467,7 @@ void SoftRenderer::ScanlineFinalPass(const GPU3D& gpu3d, s32 y)
         // edge marking
         // only applied to topmost pixels
 
-        for (int x = 0; x < 256; x++)
+        for (int x = 0; x < RenderWidth; x++)
         {
             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
 
@@ -1508,7 +1515,7 @@ void SoftRenderer::ScanlineFinalPass(const GPU3D& gpu3d, s32 y)
         u32 fogB = (gpu3d.RenderFogColor >> 9) & 0x3E; if (fogB) fogB++;
         u32 fogA = (gpu3d.RenderFogColor >> 16) & 0x1F;
 
-        for (int x = 0; x < 256; x++)
+        for (int x = 0; x < RenderWidth; x++)
         {
             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
             u32 density, srccolor, srcR, srcG, srcB, srcA;
@@ -1573,7 +1580,7 @@ void SoftRenderer::ScanlineFinalPass(const GPU3D& gpu3d, s32 y)
         // edges were flagged and their coverages calculated during rendering
         // this is where such edge pixels are blended with the pixels underneath
 
-        for (int x = 0; x < 256; x++)
+        for (int x = 0; x < RenderWidth; x++)
         {
             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
 
@@ -1638,9 +1645,9 @@ void SoftRenderer::ClearBuffers(const GPU& gpu)
         ColorBuffer[x] = 0;
         DepthBuffer[x] = clearz;
         AttrBuffer[x] = polyid;
-        ColorBuffer[x+257] = 0;
-        DepthBuffer[x+257] = clearz;
-        AttrBuffer[x+257] = polyid;
+        ColorBuffer[x+RenderWidth+1] = 0;
+        DepthBuffer[x+RenderWidth+1] = clearz;
+        AttrBuffer[x+RenderWidth+1] = polyid;
     }
 
     for (int x = ScanlineWidth*193; x < ScanlineWidth*194; x++)
@@ -1659,7 +1666,7 @@ void SoftRenderer::ClearBuffers(const GPU& gpu)
 
         for (int y = 0; y < ScanlineWidth*192; y+=ScanlineWidth)
         {
-            for (int x = 0; x < 256; x++)
+            for (int x = 0; x < RenderWidth; x++)
             {
                 u16 val2 = gpu.ReadVRAMFlat_Texture<u16>(0x40000 + (yoff << 9) + (xoff << 1));
                 u16 val3 = gpu.ReadVRAMFlat_Texture<u16>(0x60000 + (yoff << 9) + (xoff << 1));
@@ -1697,7 +1704,7 @@ void SoftRenderer::ClearBuffers(const GPU& gpu)
 
         for (int y = 0; y < ScanlineWidth*192; y+=ScanlineWidth)
         {
-            for (int x = 0; x < 256; x++)
+            for (int x = 0; x < RenderWidth; x++)
             {
                 u32 pixeladdr = FirstPixelOffset + y + x;
                 ColorBuffer[pixeladdr] = color;
@@ -1824,6 +1831,11 @@ u32* SoftRenderer::GetLine(int line)
     }
 
     return &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];
+}
+
+const u32* SoftRenderer::GetAttrLine(int line)
+{
+    return &AttrBuffer[(line * ScanlineWidth) + FirstPixelOffset];
 }
 
 }
