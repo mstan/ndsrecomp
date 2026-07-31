@@ -10,6 +10,7 @@
 
 #include "state.h"
 #include "runtime_arm.h"
+#include "dispatch_stats.h"
 #include "io.h"
 #include "gpu3d.h"
 #include "spu.h"
@@ -156,6 +157,7 @@ void run_slice(int cpu, uint32_t quantum) {
         uint32_t pc = g_cpu.R[15];
         uint32_t t  = (g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u;
         nds_clear_unwinding();   // a fresh dispatch is a real entry, not an unwind
+        ++g_nds_dispatch_stats[cpu & 1].resume_dispatch;
         runtime_dispatch(pc | t);
         // An exact-index stop reached in Tier 3 may have unwound through a
         // nested static IRQ dispatch. Restore the captured guest state after

@@ -591,6 +591,18 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     runtime_dispatch_miss(target_pc);
 }
 
+extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
+    runtime_dispatch(target_pc);
+}
+
+extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
+    runtime_dispatch(target_pc);
+}
+
+extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
+    runtime_dispatch(target_pc);
+}
+
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;

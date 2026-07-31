@@ -24,6 +24,41 @@
 #include "io.h"
 #include "tier3.h"
 #include "hle_profile.h"
+#include "dispatch_stats.h"
+
+// ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
+NdsDispatchStats g_nds_dispatch_stats[2] = {};
+
+std::string nds_dispatch_stats_json() {
+    std::string out = "{";
+    const char* cpus[2] = {"arm9", "arm7"};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        const NdsDispatchStats& s = g_nds_dispatch_stats[cpu];
+        if (cpu) out += ",";
+        out += std::string("\"") + cpus[cpu] + "\":{" +
+            "\"resume_dispatch\":" + std::to_string(s.resume_dispatch) +
+            ",\"dispatch_total\":" + std::to_string(s.dispatch_total) +
+            ",\"dispatch_slice_yield\":" +
+                std::to_string(s.dispatch_slice_yield) +
+            ",\"dispatch_exchange\":" + std::to_string(s.dispatch_exchange) +
+            ",\"literal_branch\":" + std::to_string(s.literal_branch) +
+            ",\"literal_call\":" + std::to_string(s.literal_call) +
+            ",\"literal_fallthrough\":" +
+                std::to_string(s.literal_fallthrough) +
+            ",\"exception_dispatch\":" +
+                std::to_string(s.exception_dispatch) +
+            ",\"cache_hit\":" + std::to_string(s.cache_hit) +
+            ",\"cache_hit_absent\":" + std::to_string(s.cache_hit_absent) +
+            ",\"cache_slow_lookup\":" +
+                std::to_string(s.cache_slow_lookup) +
+            ",\"crs_push\":" + std::to_string(s.crs_push) +
+            ",\"crs_hit\":" + std::to_string(s.crs_hit) +
+            ",\"crs_miss\":" + std::to_string(s.crs_miss) +
+            ",\"crs_scan_iters\":" + std::to_string(s.crs_scan_iters) + "}";
+    }
+    out += "}";
+    return out;
+}
 
 // ── Globals the ABI exposes ─────────────────────────────────────────────
 extern "C" ArmCpuState g_cpu = {};
@@ -282,8 +317,13 @@ const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
         cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
               (kDispatchCacheSize - 1u)];
     if (slot.occupied && slot.pc == pc && slot.thumb == uint8_t{thumb} &&
-        cached_lookup_live(slot))
-        return slot.fn ? &slot : nullptr;
+        cached_lookup_live(slot)) {
+        auto& stats = g_nds_dispatch_stats[g_nds_active];
+        if (slot.fn) { ++stats.cache_hit; return &slot; }
+        ++stats.cache_hit_absent;
+        return nullptr;
+    }
+    ++g_nds_dispatch_stats[g_nds_active].cache_slow_lookup;
 
     uint32_t candidate_count = 0u;
     const DispatchEntry* inactive_candidate = nullptr;
@@ -909,12 +949,17 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t ci, uint32_t r
 // ── Dispatch ────────────────────────────────────────────────────────────
 extern "C" void runtime_dispatch(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
+    ++g_nds_dispatch_stats[g_nds_active].dispatch_total;
     // Slice-preemption point. `pc` is a dispatch entry, so this is a safe
     // place to yield to the scheduler — including for loops whose back-edge
     // is an INDIRECT transfer (BX / pop pc / computed jump) and therefore
     // has no backward-branch yield site. runtime_slice_yield() arms the
     // unwind so pending BL/BLX returns are preserved.
-    if (runtime_slice_yield()) { g_cpu.R[15] = pc; return; }
+    if (runtime_slice_yield()) {
+        ++g_nds_dispatch_stats[g_nds_active].dispatch_slice_yield;
+        g_cpu.R[15] = pc;
+        return;
+    }
     // CPSR.T owns the instruction-set state. Some interpreted BX/POP paths
     // preserve the interworking bit in their target value; generated bank
     // prologues and the architectural register view require aligned R15.
@@ -965,8 +1010,21 @@ extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
     }
 }
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
+    ++g_nds_dispatch_stats[g_nds_active].dispatch_exchange;
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;
     runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc, 0, 0);
+    runtime_dispatch(target_pc);
+}
+extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
+    ++g_nds_dispatch_stats[g_nds_active].literal_branch;
+    runtime_dispatch(target_pc);
+}
+extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
+    ++g_nds_dispatch_stats[g_nds_active].literal_call;
+    runtime_dispatch(target_pc);
+}
+extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
+    ++g_nds_dispatch_stats[g_nds_active].literal_fallthrough;
     runtime_dispatch(target_pc);
 }
 
@@ -1060,18 +1118,24 @@ extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
     uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
     if (g_crs_depth >= kCRS) { nds_halt("call-return overflow"); return; }
+    ++g_nds_dispatch_stats[g_nds_active].crs_push;
     g_crs[g_crs_depth++] = key;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 1u);
 }
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
     uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
-    for (uint32_t i = g_crs_depth; i != 0; --i)
+    auto& stats = g_nds_dispatch_stats[g_nds_active];
+    for (uint32_t i = g_crs_depth; i != 0; --i) {
+        ++stats.crs_scan_iters;
         if (g_crs[i - 1u] == key) {
+            ++stats.crs_hit;
             runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth,
                                 (i == g_crs_depth) ? 2u : 5u);
             g_crs_depth = i - 1u; return 1;
         }
+    }
+    ++stats.crs_miss;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc,
         g_crs_depth ? (g_crs[g_crs_depth - 1u] & ~1u) : 0xFFFFFFFFu,
         g_crs_depth, 3u);
@@ -1192,6 +1256,7 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_tick(g_nds_active == NDS_ARM9
                      ? arm9_refill_cycles(base + 0x08u)
                      : arm7_refill_cycles(base + 0x08u));
+    ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
@@ -1221,6 +1286,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
     } else {
         runtime_tick(refill);
     }
+    ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
     runtime_dispatch(base + 0x18u);
 }
 

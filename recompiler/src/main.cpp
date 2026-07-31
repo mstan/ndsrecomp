@@ -482,7 +482,7 @@ void emit_function_body(std::FILE* f, const Function& fn,
     std::fprintf(f,
         "    /* fall-through to 0x%08X */\n"
         "    g_cpu.R[15] = 0x%08Xu;\n"
-        "    runtime_dispatch(0x%08Xu);\n"
+        "    runtime_dispatch_literal_fallthrough(0x%08Xu);\n"
         "    return;\n",
         fn.end_addr, fn.end_addr, fn.end_addr);
 }

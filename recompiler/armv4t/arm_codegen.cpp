@@ -579,7 +579,10 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
         if (!is_link && target == ctx.current_function_addr) {
             // See known-name self-loop case above.
         } else {
-            s << indent << "runtime_dispatch(" << fmt_hex32(target) << ");\n";
+            s << indent
+              << (is_link ? "runtime_dispatch_literal_call("
+                          : "runtime_dispatch_literal_branch(")
+              << fmt_hex32(target) << ");\n";
         }
     }
     // B is a tail-call: never return to this caller, so emit

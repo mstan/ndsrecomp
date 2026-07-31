@@ -435,6 +435,9 @@ void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t c_in, uint32_t result);
 // Misses route to runtime_dispatch_miss for logging + fallback.
 
 void runtime_dispatch(uint32_t target_pc);
+void runtime_dispatch_literal_branch(uint32_t target_pc);
+void runtime_dispatch_literal_call(uint32_t target_pc);
+void runtime_dispatch_literal_fallthrough(uint32_t target_pc);
 void runtime_discovery_note_static(uint32_t pc, uint32_t thumb);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);

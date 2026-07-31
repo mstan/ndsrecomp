@@ -20,6 +20,7 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "hle_profile.h"
+#include "dispatch_stats.h"
 #include "mem_timing_profile.h"
 #include "runtime_arm.h"
 #include "spu.h"
@@ -548,6 +549,7 @@ std::string handle(const std::string& line) {
     }
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
+    if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
     if (cmd == "profile") {
         // Raw NDS_PROFILE_GPU / NDS_PROFILE_SCHED accumulators (zero unless
         // the corresponding env var armed sampling at process start).

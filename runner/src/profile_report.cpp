@@ -2,11 +2,39 @@
 
 #include "profile_report.h"
 
+#include "dispatch_stats.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "scheduler.h"
 
 void nds_profile_report(std::FILE* out) {
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        const NdsDispatchStats& d = g_nds_dispatch_stats[cpu];
+        if (!d.dispatch_total && !d.crs_push) continue;
+        std::fprintf(out,
+            "  Dispatch %s: total=%llu (resume=%llu yield=%llu exchange=%llu) "
+            "literal branch/call/fallthrough=%llu/%llu/%llu exception=%llu; "
+            "cache hit/absent/slow=%llu/%llu/%llu; calls=%llu returns "
+            "hit/miss=%llu/%llu scan=%.2f/return\n",
+            cpu == 0 ? "arm9" : "arm7",
+            (unsigned long long)d.dispatch_total,
+            (unsigned long long)d.resume_dispatch,
+            (unsigned long long)d.dispatch_slice_yield,
+            (unsigned long long)d.dispatch_exchange,
+            (unsigned long long)d.literal_branch,
+            (unsigned long long)d.literal_call,
+            (unsigned long long)d.literal_fallthrough,
+            (unsigned long long)d.exception_dispatch,
+            (unsigned long long)d.cache_hit,
+            (unsigned long long)d.cache_hit_absent,
+            (unsigned long long)d.cache_slow_lookup,
+            (unsigned long long)d.crs_push,
+            (unsigned long long)d.crs_hit,
+            (unsigned long long)d.crs_miss,
+            static_cast<double>(d.crs_scan_iters) /
+                static_cast<double>((d.crs_hit + d.crs_miss)
+                                        ? (d.crs_hit + d.crs_miss) : 1));
+    }
     NdsGpu2dProfile gpu_profile{};
     nds_gpu2d_profile(&gpu_profile);
     if (gpu_profile.scanlines) {

@@ -50,11 +50,11 @@ Main-thread RIP profile, consistent across menu/attract/gameplay:
 Per guest instruction the generated code makes 4 out-of-line calls
 (5 with a memory access); each opaque call also forces GCC to spill and
 reload cached guest state. Every BL to a non-same-shard target, every
-cross-unit branch, and every unmatched return funnels through
-`runtime_dispatch` (hash probe + content-generation validation done
-TWICE per hit + indirect call). ARM9 banks are all `--validate-live-bytes`,
-so no direct C-to-C calls exist anywhere on ARM9 (confirmed: zero in all
-sampled shards).
+cross-unit branch, every generated body fallthrough, and every unmatched
+return funnels through `runtime_dispatch` (hash probe +
+content-generation validation done TWICE per hit + indirect call). ARM9
+banks are all `--validate-live-bytes`, so no direct C-to-C calls exist
+anywhere on ARM9 (confirmed: zero in all sampled shards).
 
 ## Knob inventory (all semantics-identical)
 
@@ -83,26 +83,27 @@ sampled shards).
 
 ### B. Dispatch/transfer cluster (~30%)
 
-- **B0. Composition counters FIRST.** Cheap always-on counters splitting
+- **B0. Composition counters — COMPLETE.** Cheap always-on counters splitting
   dispatch volume by cause: BL-call dispatch, cross-unit direct branch,
-  return CRS-hit vs CRS-miss, computed (BX/LDR-pc/LDM-pc), IRQ/SWI
-  vectoring, cache hit/miss/inactive-revalidation. Queryable via debug
-  server; printed by `nds_profile_report`. The 07-31 forward-goto lesson:
-  the mechanism was real but the volume estimate was wrong — measure
-  composition before optimizing it.
+  generated body fallthrough, return CRS-hit vs CRS-miss, computed
+  (BX/LDR-pc/LDM-pc), IRQ/SWI vectoring, slice-yield exits, and cache
+  hit/absent/slow-lookup. Queryable via debug server; printed by
+  `nds_profile_report`. The first residual-only draft was rejected in
+  review because it mislabeled dynamic PC writes, fallthrough, and
+  exceptions as literal branches; source-tagged emission replaced it.
 - **B1. Guard-snapshot dedup**: `StaticGuardScope::call` currently
   recomputes (`arm_static_guard`) the same page/generation snapshot that
   `cached_lookup_live` just validated. Copy the snapshot from the
   `CachedStaticLookup` slot instead. Runtime-only, no regen.
-- **B2. Validated direct calls for BL** (needs B0 evidence): emit
-  `if (inline generation check for callee) callee_sym(); else
-  runtime_dispatch(target);` at BL sites with compile-time-known targets,
-  including cross-shard (requires cross-shard symbol declarations or a
-  per-bank extern table). Preserves the exact validation predicate;
-  skips hash probe + indirect call; host stack mirrors guest calls.
-  SIZE UP / SPEED UP. The current "no direct calls under
-  --validate-live-bytes" rule exists only because calls bypassed
-  validation — inlining the validation removes the reason.
+- **B2. Validated direct calls for BL**: B0 measured only
+  ~1.6K–3.1K literal BL dispatches/frame on ARM9, so this is no longer
+  projected as the dominant dispatch win. A safe implementation must
+  preserve ordered overlapping-bank selection and install the same nested
+  static guard as `runtime_dispatch`; a same-bank byte/generation check is
+  insufficient. Keep plain `B` out of this design: it is a tail transfer,
+  and `callee(); return` can grow the host stack around cross-function
+  cycles and skip dispatch preemption. Reconsider after B1/A1 and the
+  fallthrough work are measured.
 - **B3. Per-callsite monomorphic inline cache** for computed transfers
   (BX reg / LDR pc / LDM pc): a static per-site slot {target, fn,
   generation snapshot}; hit = compare + call, miss = dispatch + refill.
@@ -112,9 +113,11 @@ sampled shards).
   `--max-function-bytes 512`; every unit-crossing branch dispatches.
   Any unit ≤4 KiB still spans ≤2 4-KiB pages (the guard limit), so the
   cap can rise ~8x, converting cross-unit dispatches into intra-unit
-  gotos (the forward-goto generalization already handles both
-  directions). Needs B0 to confirm RAM-bank cross-unit volume; also
-  re-check capture tool assumptions before changing.
+  gotos and removing artificial body fallthroughs (the forward-goto
+  generalization already handles both directions). B0 makes this more
+  interesting for fallthrough reduction than for literal branches;
+  first split the dynamic counts by bank and re-check capture-tool
+  assumptions.
 - **B5. Dispatch entry for with_exchange**: `runtime_dispatch_with_exchange`
   fires two gated trace-event calls per invocation (its own + the
   delegated one); fold when tracing is off. Micro; bundle with B1.
@@ -137,7 +140,10 @@ sampled shards).
 
 - **D1. Superblock emission**: extend straight-line emission across
   fall-through chains / hot traces within one validated region to
-  amortize entry/exit overhead further.
+  amortize entry/exit overhead further. B0 promoted this: generated body
+  fallthrough accounts for ~79–87% of ARM9 dispatch entries in the
+  measured phases. Any implementation must avoid unbounded host recursion,
+  retain slice preemption, and preserve ordered-bank validation/guarding.
 - **D2. GPU2D per-scanline cost** (5.6–9.8%) and ARM7 share (~26% of
   scheduler samples): separate workstreams once the two machinery
   clusters are paid down.
@@ -157,6 +163,23 @@ sampled shards).
   finder splits at branch targets). Retained as a neutral uniformity
   fix; NOT a perf win. Lesson: measure dispatch composition (B0) before
   the next dispatch swing.
+- 2026-07-31 **B0 source-aware dispatch composition**: the first draft's
+  residual attribution was rejected in adversarial review. The landed
+  counters tag literal B, literal BL, generated fallthrough, exception,
+  resume, exchange, slice-yield, CRS, and cache outcomes at their sources.
+  One quiet headed full-path run (`20260731-dispatch-composition-v3`) found
+  ARM9 generated fallthrough at **32.8K–115.7K/frame**, literal B at
+  **3.2K–14.6K/frame**, and literal BL at **1.6K–3.1K/frame**. Thus
+  fallthrough is ~79–87% of ARM9 dispatch entries and the earlier
+  “38K–125K literal B/BL” conclusion is retracted. ARM7 fallthrough was
+  15.8K–30.2K/frame. G1 8/8, G2 2,400 frames with zero underruns and the
+  pinned FNV pair, and G3 100M..700M with exact GX state and both screens
+  pass. Instrumentation-cost A/B remains pending: one quiet control run
+  completed, but three matching B attempts were discarded when unrelated
+  compiler processes appeared. Do not use the instrumented binary for a
+  headline FPS claim until that A/B closes. Re-ranked next work:
+  **B1 guard-snapshot dedup → A1/A2 helper inlining → validated
+  nonrecursive fallthrough/body-coalescing design**, then re-profile.
 
 ## Reproduction crib
 
