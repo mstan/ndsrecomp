@@ -143,6 +143,28 @@ cmake --build runner/build
 SDL2 is optional at configure time; without it, the runner is headless and
 interactive presentation is unavailable.
 
+### Interactive display configuration
+
+The interactive runner reads an optional `game.toml` in its working directory,
+or a file selected with `--config <path>`. Host display settings live in a
+separate table so recompilation and hardware-parity configuration remain
+independent:
+
+```toml
+[display]
+screen_layout = "stacked"          # stacked | separate
+adaptive_widescreen = "none"       # none | top | bottom | both
+```
+
+`screen_layout = "separate"` creates independently movable top and bottom
+windows. Pointer input is accepted only from the physical bottom-screen
+window; keyboard input remains shared by the DS session. Adaptive widescreen
+is a title capability, not framebuffer stretching: unsupported screen choices
+are rejected. The equivalent one-run overrides are
+`NDS_SCREEN_LAYOUT` / `NDS_ADAPTIVE_WIDESCREEN` and the
+`--screen-layout` / `--adaptive-widescreen` CLI flags. Precedence is TOML,
+then environment, then CLI.
+
 ## Copyright and licensing
 
 This repository intentionally contains no Nintendo BIOS, firmware, ROM,

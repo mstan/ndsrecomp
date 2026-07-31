@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -185,10 +186,15 @@ void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
 int main(int argc, char** argv) {
     std::string dir = "bios";
     std::string rom_path;
+    std::string config_path = "game.toml";
+    std::string cli_screen_layout;
+    std::string cli_adaptive_screens;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
+    bool config_explicit = false;
     bool discover_static_misses = false;
+    NdsFrontendOptions frontend_options{};
     uint16_t port = 19842;
     int positional = 0;
     for (int i = 1; i < argc; ++i) {
@@ -208,10 +214,20 @@ int main(int argc, char** argv) {
             port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (a == "--rom" && i + 1 < argc) {
             rom_path = argv[++i];
+        } else if (a == "--config" && i + 1 < argc) {
+            config_path = argv[++i];
+            config_explicit = true;
+        } else if (a == "--screen-layout" && i + 1 < argc) {
+            cli_screen_layout = argv[++i];
+        } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
+            cli_adaptive_screens = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
+                "[--config game.toml] "
+                "[--screen-layout stacked|separate] "
+                "[--adaptive-widescreen none|top|bottom|both] "
                 "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
             return 0;
@@ -225,6 +241,50 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
         }
+    }
+
+    if (config_explicit || std::filesystem::exists(config_path)) {
+        std::string config_error;
+        if (!nds_load_frontend_config(config_path, &frontend_options,
+                                      &config_error)) {
+            std::fprintf(stderr, "invalid frontend config %s: %s\n",
+                         config_path.c_str(), config_error.c_str());
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_SCREEN_LAYOUT")) {
+        if (!nds_parse_screen_layout(value,
+                                     &frontend_options.screen_layout)) {
+            std::fprintf(stderr,
+                         "invalid NDS_SCREEN_LAYOUT "
+                         "(expected stacked or separate)\n");
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_ADAPTIVE_WIDESCREEN")) {
+        if (!nds_parse_adaptive_screens(
+                value, &frontend_options.adaptive_screens)) {
+            std::fprintf(stderr,
+                         "invalid NDS_ADAPTIVE_WIDESCREEN "
+                         "(expected none, top, bottom, or both)\n");
+            return 2;
+        }
+    }
+    if (!cli_screen_layout.empty() &&
+        !nds_parse_screen_layout(cli_screen_layout,
+                                 &frontend_options.screen_layout)) {
+        std::fprintf(stderr,
+                     "invalid --screen-layout "
+                     "(expected stacked or separate)\n");
+        return 2;
+    }
+    if (!cli_adaptive_screens.empty() &&
+        !nds_parse_adaptive_screens(cli_adaptive_screens,
+                                    &frontend_options.adaptive_screens)) {
+        std::fprintf(stderr,
+                     "invalid --adaptive-widescreen "
+                     "(expected none, top, bottom, or both)\n");
+        return 2;
     }
 
     g_discover_static_misses = discover_static_misses;
@@ -270,6 +330,7 @@ int main(int argc, char** argv) {
     auto a7 = read_file(dir + "/biosnds7.rom");
     auto fw = read_file(dir + "/firmware.bin");
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
+    std::string rom_sha1;
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
@@ -279,9 +340,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "refusing to start: cartridge image is missing or truncated\n");
             return 1;
         }
-        const std::string rom_sha1 = gba::sha1(rom.data(), rom.size()).hex();
+        rom_sha1 = gba::sha1(rom.data(), rom.size()).hex();
         std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
                      rom.size(), rom_sha1.c_str());
+    }
+    if (interactive &&
+        (frontend_options.adaptive_screens &
+         ~frontend_options.adaptive_supported) != 0u) {
+        std::fprintf(stderr,
+            "adaptive widescreen '%s' is unsupported by this title "
+            "(supported: %s); refusing to stretch the native framebuffer\n",
+            nds_adaptive_screens_name(frontend_options.adaptive_screens),
+            nds_adaptive_screens_name(frontend_options.adaptive_supported));
+        return 2;
     }
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
@@ -451,7 +522,7 @@ int main(int argc, char** argv) {
         debug_set_reset_fn(boot);
         debug_pump_start(port);
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
-        const int rc = nds_run_interactive_frontend();
+        const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
         return rc;
     }

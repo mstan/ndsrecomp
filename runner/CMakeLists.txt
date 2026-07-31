@@ -3,6 +3,8 @@ project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsTomlPlusPlus.cmake")
+enable_testing()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
@@ -141,6 +143,7 @@ add_executable(nds_runner
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
+    src/frontend_config.cpp
     src/frontend.cpp
     src/main.cpp
     vendor/melonds/GPU3D.cpp
@@ -183,6 +186,7 @@ target_include_directories(nds_runner PRIVATE
     vendor/melonds                                     # vendored melonDS GPU3D + shims (GPL-3.0-or-later)
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
+ndsrecomp_link_tomlpp(nds_runner)
 if(NOT MSVC)
     # Unmodified upstream melonDS sources carry their own warning posture;
     # keep the runner's -Wall -Wextra signal clean without editing vendored
@@ -256,3 +260,10 @@ endif()
 if(WIN32)
     target_link_libraries(nds_runner PRIVATE ws2_32)
 endif()
+
+add_executable(frontend_config_test
+    tests/frontend_config_test.cpp
+    src/frontend_config.cpp)
+target_include_directories(frontend_config_test PRIVATE src)
+ndsrecomp_link_tomlpp(frontend_config_test)
+add_test(NAME frontend_config_test COMMAND frontend_config_test)

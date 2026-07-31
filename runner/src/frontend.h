@@ -1,11 +1,44 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 // Run the native, human-facing firmware preview. The emulation remains on the
 // same scheduler/device path used by the deterministic debug verifier; SDL is
 // only the host presentation and input/audio transport.
-int nds_run_interactive_frontend();
+enum class NdsScreenLayout : uint8_t {
+    Stacked,
+    Separate,
+};
+
+enum NdsAdaptiveScreen : uint8_t {
+    NDS_ADAPTIVE_NONE = 0,
+    NDS_ADAPTIVE_TOP = 1u << 0,
+    NDS_ADAPTIVE_BOTTOM = 1u << 1,
+    NDS_ADAPTIVE_BOTH = NDS_ADAPTIVE_TOP | NDS_ADAPTIVE_BOTTOM,
+};
+
+struct NdsFrontendOptions {
+    NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
+    uint8_t adaptive_screens = NDS_ADAPTIVE_NONE;
+    // Title-owned capability mask. A requested screen must be present here;
+    // unsupported adaptive output fails closed instead of stretching pixels.
+    uint8_t adaptive_supported = NDS_ADAPTIVE_NONE;
+    uint16_t adaptive_max_width[2] = {256, 256};
+};
+
+// Parse [display] settings from a game TOML. Missing [display] is valid.
+// Returns false for an unreadable file or an invalid recognized value.
+bool nds_load_frontend_config(const std::string& path,
+                              NdsFrontendOptions* options,
+                              std::string* error);
+bool nds_parse_screen_layout(const std::string& value,
+                             NdsScreenLayout* out);
+bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
+const char* nds_screen_layout_name(NdsScreenLayout value);
+const char* nds_adaptive_screens_name(uint8_t value);
+
+int nds_run_interactive_frontend(const NdsFrontendOptions& options);
 
 // Live frontend counters for the play-mode debug surface (`frontend_stats`).
 // Cumulative since frontend start; a client samples twice and derives fps /

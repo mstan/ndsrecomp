@@ -141,22 +141,25 @@ uint16_t key_bit(SDL_Scancode key) {
     }
 }
 
-void set_touch_from_mouse(int window_x, int window_y, bool down) {
+void set_touch_from_mouse(int window_x, int window_y, bool down,
+                          NdsScreenLayout layout) {
     // SDL_RenderSetLogicalSize also maps absolute mouse events into the
     // renderer's logical coordinate system. Calling RenderWindowToLogical a
     // second time halves coordinates at 2x scale (and turns bottom-screen
     // clicks into top-screen clicks), so consume the event coordinates as-is.
     const float x = static_cast<float>(window_x);
     const float y = static_cast<float>(window_y);
+    const float bottom_origin =
+        layout == NdsScreenLayout::Separate ? 0.0f : kScreenHeight;
     if (!down || x < 0.0f || x >= kScreenWidth ||
-        y < kScreenHeight || y >= kScreenHeight * 2) {
+        y < bottom_origin || y >= bottom_origin + kScreenHeight) {
         nds_set_touch(0, 0, false);
         return;
     }
     const auto touch_x = static_cast<uint16_t>(std::clamp<int>(
         static_cast<int>(x), 0, kScreenWidth - 1));
     const auto touch_y = static_cast<uint16_t>(std::clamp<int>(
-        static_cast<int>(y) - kScreenHeight, 0, kScreenHeight - 1));
+        static_cast<int>(y - bottom_origin), 0, kScreenHeight - 1));
     nds_set_touch(touch_x, touch_y, true);
 }
 
@@ -243,9 +246,154 @@ uint64_t framebuffer_rgb_fnv(int screen) {
     return hash;
 }
 
+struct FrontendPresentation {
+    bool separate = false;
+    SDL_Window* windows[2]{};
+    SDL_Renderer* renderers[2]{};
+    SDL_Texture* textures[2]{};
+    uint32_t window_ids[2]{};
+};
+
+void destroy_presentation(FrontendPresentation& presentation) {
+    for (SDL_Texture*& texture : presentation.textures) {
+        if (texture) SDL_DestroyTexture(texture);
+        texture = nullptr;
+    }
+    if (presentation.separate && presentation.renderers[1])
+        SDL_DestroyRenderer(presentation.renderers[1]);
+    if (presentation.renderers[0])
+        SDL_DestroyRenderer(presentation.renderers[0]);
+    presentation.renderers[0] = nullptr;
+    presentation.renderers[1] = nullptr;
+    if (presentation.separate && presentation.windows[1])
+        SDL_DestroyWindow(presentation.windows[1]);
+    if (presentation.windows[0])
+        SDL_DestroyWindow(presentation.windows[0]);
+    presentation.windows[0] = nullptr;
+    presentation.windows[1] = nullptr;
+}
+
+SDL_Renderer* create_renderer(SDL_Window* window) {
+    SDL_Renderer* renderer = SDL_CreateRenderer(
+        window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer)
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    return renderer;
+}
+
+bool create_presentation(const NdsFrontendOptions& options,
+                         FrontendPresentation& presentation) {
+    presentation.separate =
+        options.screen_layout == NdsScreenLayout::Separate;
+    const int first_height = presentation.separate
+        ? kScreenHeight * kWindowScale
+        : kScreenHeight * 2 * kWindowScale;
+    presentation.windows[0] = SDL_CreateWindow(
+        presentation.separate ? "ndsrecomp - Top Screen"
+                              : "ndsrecomp firmware preview",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        kScreenWidth * kWindowScale, first_height,
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!presentation.windows[0]) {
+        std::fprintf(stderr, "[sdl] window failed: %s\n", SDL_GetError());
+        return false;
+    }
+    presentation.renderers[0] = create_renderer(presentation.windows[0]);
+    if (!presentation.renderers[0]) {
+        std::fprintf(stderr, "[sdl] renderer failed: %s\n", SDL_GetError());
+        destroy_presentation(presentation);
+        return false;
+    }
+
+    if (presentation.separate) {
+        int top_x = 0;
+        int top_y = 0;
+        SDL_GetWindowPosition(presentation.windows[0], &top_x, &top_y);
+        presentation.windows[1] = SDL_CreateWindow(
+            "ndsrecomp - Bottom Screen",
+            top_x + kScreenWidth * kWindowScale + 32, top_y,
+            kScreenWidth * kWindowScale, kScreenHeight * kWindowScale,
+            SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        if (!presentation.windows[1]) {
+            std::fprintf(stderr, "[sdl] bottom window failed: %s\n",
+                         SDL_GetError());
+            destroy_presentation(presentation);
+            return false;
+        }
+        presentation.renderers[1] =
+            create_renderer(presentation.windows[1]);
+        if (!presentation.renderers[1]) {
+            std::fprintf(stderr, "[sdl] bottom renderer failed: %s\n",
+                         SDL_GetError());
+            destroy_presentation(presentation);
+            return false;
+        }
+    } else {
+        presentation.windows[1] = presentation.windows[0];
+        presentation.renderers[1] = presentation.renderers[0];
+    }
+
+    for (int screen = 0; screen < 2; ++screen) {
+        const int logical_height =
+            !presentation.separate && screen == 0
+                ? kScreenHeight * 2 : kScreenHeight;
+        if (screen == 0 || presentation.separate) {
+            SDL_RenderSetLogicalSize(presentation.renderers[screen],
+                                     kScreenWidth, logical_height);
+            SDL_RenderSetIntegerScale(presentation.renderers[screen],
+                                      SDL_TRUE);
+        }
+        presentation.textures[screen] = SDL_CreateTexture(
+            presentation.renderers[screen], SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_STREAMING, kScreenWidth, kScreenHeight);
+        if (!presentation.textures[screen]) {
+            std::fprintf(stderr, "[sdl] texture failed: %s\n",
+                         SDL_GetError());
+            destroy_presentation(presentation);
+            return false;
+        }
+        presentation.window_ids[screen] =
+            SDL_GetWindowID(presentation.windows[screen]);
+    }
+    return true;
+}
+
+void present_screens(FrontendPresentation& presentation,
+                     const uint32_t* top_pixels,
+                     const uint32_t* bottom_pixels) {
+    SDL_UpdateTexture(presentation.textures[0], nullptr, top_pixels,
+                      kScreenWidth * sizeof(uint32_t));
+    SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
+                      kScreenWidth * sizeof(uint32_t));
+    if (!presentation.separate) {
+        SDL_Renderer* renderer = presentation.renderers[0];
+        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
+        SDL_RenderClear(renderer);
+        const SDL_Rect top_rect{0, 0, kScreenWidth, kScreenHeight};
+        const SDL_Rect bottom_rect{
+            0, kScreenHeight, kScreenWidth, kScreenHeight};
+        SDL_RenderCopy(renderer, presentation.textures[0], nullptr,
+                       &top_rect);
+        SDL_RenderCopy(renderer, presentation.textures[1], nullptr,
+                       &bottom_rect);
+        SDL_RenderPresent(renderer);
+        return;
+    }
+
+    const SDL_Rect screen_rect{0, 0, kScreenWidth, kScreenHeight};
+    for (int screen = 0; screen < 2; ++screen) {
+        SDL_Renderer* renderer = presentation.renderers[screen];
+        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, presentation.textures[screen], nullptr,
+                       &screen_rect);
+        SDL_RenderPresent(renderer);
+    }
+}
+
 } // namespace
 
-int nds_run_interactive_frontend() {
+int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     SDL_SetMainReady();
     // SDL_INIT_TIMER matters on Windows: it raises the OS timer resolution
     // to 1 ms (SDL_HINT_TIMER_RESOLUTION default). Without it SDL_Delay(1)
@@ -262,53 +410,22 @@ int nds_run_interactive_frontend() {
                      SDL_GetError());
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-    SDL_Window* window = SDL_CreateWindow(
-        "ndsrecomp firmware preview",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        kScreenWidth * kWindowScale, kScreenHeight * 2 * kWindowScale,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!window) {
-        std::fprintf(stderr, "[sdl] window failed: %s\n", SDL_GetError());
+    FrontendPresentation presentation{};
+    if (!create_presentation(options, presentation)) {
         SDL_Quit();
         return 1;
     }
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(
-        window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer)
-        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    if (!renderer) {
-        std::fprintf(stderr, "[sdl] renderer failed: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-    SDL_RenderSetLogicalSize(renderer, kScreenWidth, kScreenHeight * 2);
-    SDL_RenderSetIntegerScale(renderer, SDL_TRUE);
-
-    SDL_Texture* top = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING, kScreenWidth, kScreenHeight);
-    SDL_Texture* bottom = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING, kScreenWidth, kScreenHeight);
-    if (!top || !bottom) {
-        std::fprintf(stderr, "[sdl] texture failed: %s\n", SDL_GetError());
-        if (top) SDL_DestroyTexture(top);
-        if (bottom) SDL_DestroyTexture(bottom);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
+    std::fprintf(stderr,
+        "[sdl] layout=%s adaptive=%s\n",
+        nds_screen_layout_name(options.screen_layout),
+        nds_adaptive_screens_name(options.adaptive_screens));
 
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     // Activate only after every fallible visible-frontend allocation. From
     // here onward teardown always destroys the compute renderer while this
     // context is current.
     if (!nds_compute_host_start()) {
-        SDL_DestroyTexture(bottom);
-        SDL_DestroyTexture(top);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
+        destroy_presentation(presentation);
         SDL_Quit();
         return 1;
     }
@@ -432,18 +549,24 @@ int nds_run_interactive_frontend() {
             if (!selftest_touch_down && g_insn_count[0] >= 42300000) {
                 injected = {};
                 injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.windowID = presentation.window_ids[1];
                 injected.button.button = SDL_BUTTON_LEFT;
-                injected.button.x = 127;
-                injected.button.y = 192 + 180;
+                // SDL transforms window-tagged mouse events from physical
+                // window pixels into the renderer's logical coordinates.
+                injected.button.x = 127 * kWindowScale;
+                injected.button.y = (presentation.separate
+                    ? 180 : 192 + 180) * kWindowScale;
                 selftest_event_error |= SDL_PushEvent(&injected) < 0;
                 selftest_touch_down = true;
             } else if (selftest_touch_down && !selftest_touch_up &&
                        counts.vblank9 >= 116) {
                 injected = {};
                 injected.type = SDL_MOUSEBUTTONUP;
+                injected.button.windowID = presentation.window_ids[1];
                 injected.button.button = SDL_BUTTON_LEFT;
-                injected.button.x = 127;
-                injected.button.y = 192 + 180;
+                injected.button.x = 127 * kWindowScale;
+                injected.button.y = (presentation.separate
+                    ? 180 : 192 + 180) * kWindowScale;
                 selftest_event_error |= SDL_PushEvent(&injected) < 0;
                 selftest_touch_up = true;
             }
@@ -451,6 +574,9 @@ int nds_run_interactive_frontend() {
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) running = false;
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_CLOSE)
+                running = false;
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                     running = false;
@@ -467,17 +593,23 @@ int nds_run_interactive_frontend() {
                 }
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
-                event.button.button == SDL_BUTTON_LEFT) {
+                event.button.button == SDL_BUTTON_LEFT &&
+                event.button.windowID == presentation.window_ids[1] &&
+                (presentation.separate ||
+                 event.button.y >= kScreenHeight)) {
                 mouse_down = true;
                 ++host_touch_presses;
                 last_touch_event_x = event.button.x;
                 last_touch_event_y = event.button.y;
                 touch_release_pending = false;
                 touch_frames_held = 0;
-                set_touch_from_mouse(event.button.x, event.button.y, true);
+                set_touch_from_mouse(event.button.x, event.button.y, true,
+                                     options.screen_layout);
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
-                event.button.button == SDL_BUTTON_LEFT) {
+                event.button.button == SDL_BUTTON_LEFT &&
+                event.button.windowID == presentation.window_ids[1] &&
+                mouse_down) {
                 mouse_down = false;
                 // A host click can begin and end while the emulation thread is
                 // rendering one slow frame. Keep such a click asserted long
@@ -485,12 +617,16 @@ int nds_run_interactive_frontend() {
                 if (touch_frames_held < 2)
                     touch_release_pending = true;
                 else
-                    set_touch_from_mouse(event.button.x, event.button.y, false);
+                    set_touch_from_mouse(event.button.x, event.button.y, false,
+                                         options.screen_layout);
             }
-            if (event.type == SDL_MOUSEMOTION && mouse_down)
-                set_touch_from_mouse(event.motion.x, event.motion.y, true);
+            if (event.type == SDL_MOUSEMOTION && mouse_down &&
+                event.motion.windowID == presentation.window_ids[1])
+                set_touch_from_mouse(event.motion.x, event.motion.y, true,
+                                     options.screen_layout);
             if (event.type == SDL_WINDOWEVENT &&
-                event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down) {
+                event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down &&
+                event.window.windowID == presentation.window_ids[1]) {
                 mouse_down = false;
                 if (touch_frames_held < 2)
                     touch_release_pending = true;
@@ -545,17 +681,7 @@ int nds_run_interactive_frontend() {
         const uint32_t* const top_pixels = nds_gpu2d_framebuffer(0);
         const uint32_t* const bottom_pixels = nds_gpu2d_framebuffer(1);
         observe_top_black_bands(top_pixels, shown_frames);
-        SDL_UpdateTexture(top, nullptr, top_pixels,
-                          kScreenWidth * sizeof(uint32_t));
-        SDL_UpdateTexture(bottom, nullptr, bottom_pixels,
-                          kScreenWidth * sizeof(uint32_t));
-        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
-        SDL_RenderClear(renderer);
-        const SDL_Rect top_rect{0, 0, kScreenWidth, kScreenHeight};
-        const SDL_Rect bottom_rect{0, kScreenHeight, kScreenWidth, kScreenHeight};
-        SDL_RenderCopy(renderer, top, nullptr, &top_rect);
-        SDL_RenderCopy(renderer, bottom, nullptr, &bottom_rect);
-        SDL_RenderPresent(renderer);
+        present_screens(presentation, top_pixels, bottom_pixels);
         phase_present_ticks += SDL_GetPerformanceCounter() - phase1;
         if (audio && audio_started) {
             const uint32_t queued = audio_queue_count(audio, audio_queue);
@@ -599,9 +725,19 @@ int nds_run_interactive_frontend() {
             const double seconds = static_cast<double>(counter - fps_start) /
                                    static_cast<double>(frequency);
             const double fps = static_cast<double>(fps_frames) / seconds;
-            const std::string title = "ndsrecomp firmware preview - " +
+            const std::string fps_text =
                 std::to_string(fps).substr(0, 4) + " FPS";
-            SDL_SetWindowTitle(window, title.c_str());
+            const std::string top_title = presentation.separate
+                ? "ndsrecomp - Top Screen - " + fps_text
+                : "ndsrecomp firmware preview - " + fps_text;
+            SDL_SetWindowTitle(presentation.windows[0],
+                               top_title.c_str());
+            if (presentation.separate) {
+                const std::string bottom_title =
+                    "ndsrecomp - Bottom Screen - " + fps_text;
+                SDL_SetWindowTitle(presentation.windows[1],
+                                   bottom_title.c_str());
+            }
             fps_frames = 0;
             fps_start = counter;
         }
@@ -633,10 +769,7 @@ int nds_run_interactive_frontend() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     nds_compute_host_stop();
 #endif
-    SDL_DestroyTexture(bottom);
-    SDL_DestroyTexture(top);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    destroy_presentation(presentation);
     SDL_Quit();
     std::fprintf(stderr, "[sdl] closed after %llu presented frames\n",
                  static_cast<unsigned long long>(shown_frames));
@@ -680,7 +813,8 @@ int nds_run_interactive_frontend() {
     const bool selftest_failed = selftest_menu &&
         (selftest_event_error || !selftest_key_up || !selftest_touch_up ||
          host_key_presses != 1 || host_touch_presses != 1 ||
-         last_touch_event_x != 127 || last_touch_event_y != 372 ||
+         last_touch_event_x != 127 ||
+         last_touch_event_y != (presentation.separate ? 180 : 372) ||
          top_hash != 0xa0f41b93e4eefa55ull ||
          bottom_hash != 0x6c43b370e9cda730ull);
     if (selftest_menu)
@@ -691,7 +825,7 @@ int nds_run_interactive_frontend() {
 
 #else
 
-int nds_run_interactive_frontend() {
+int nds_run_interactive_frontend(const NdsFrontendOptions&) {
     std::fprintf(stderr,
         "[sdl] this runner was built without SDL2; install SDL2 and reconfigure\n");
     return 1;
