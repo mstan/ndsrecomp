@@ -35,6 +35,10 @@ struct NdsFrontendOptions {
     // unsupported adaptive output fails closed instead of stretching pixels.
     uint8_t adaptive_supported = NDS_ADAPTIVE_NONE;
     uint16_t adaptive_max_width[2] = {256, 256};
+    // Host presentation quality. These are deliberately post-composition:
+    // they never alter guest-visible DS rasterization or framebuffer bytes.
+    uint8_t supersampling = 1;  // 1x..4x presentation reconstruction
+    uint8_t antialiasing = 0;   // 0/2/4/8 sample-quality preset
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.
@@ -47,6 +51,8 @@ bool nds_parse_screen_layout(const std::string& value,
 bool nds_parse_startup_mode(const std::string& value,
                             NdsStartupMode* out);
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
+bool nds_parse_supersampling(const std::string& value, uint8_t* out);
+bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_adaptive_screens_name(uint8_t value);

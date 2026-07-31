@@ -141,6 +141,36 @@ uint16_t key_bit(SDL_Scancode key) {
     }
 }
 
+uint16_t controller_bit(SDL_GameControllerButton button) {
+    switch (button) {
+        case SDL_CONTROLLER_BUTTON_A:             return 1u << 0;
+        case SDL_CONTROLLER_BUTTON_B:             return 1u << 1;
+        case SDL_CONTROLLER_BUTTON_BACK:          return 1u << 2;
+        case SDL_CONTROLLER_BUTTON_START:         return 1u << 3;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:    return 1u << 4;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:     return 1u << 5;
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:       return 1u << 6;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:     return 1u << 7;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return 1u << 8;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return 1u << 9;
+        case SDL_CONTROLLER_BUTTON_X:             return 1u << 10;
+        case SDL_CONTROLLER_BUTTON_Y:             return 1u << 11;
+        default:                                  return 0;
+    }
+}
+
+SDL_GameController* open_first_controller() {
+    for (int index = 0; index < SDL_NumJoysticks(); ++index) {
+        if (!SDL_IsGameController(index)) continue;
+        if (SDL_GameController* controller = SDL_GameControllerOpen(index)) {
+            std::fprintf(stderr, "[sdl] Player 1 controller: %s\n",
+                         SDL_GameControllerName(controller));
+            return controller;
+        }
+    }
+    return nullptr;
+}
+
 void set_touch_from_mouse(int window_x, int window_y, bool down,
                           NdsScreenLayout layout, int logical_width) {
     // SDL_RenderSetLogicalSize also maps absolute mouse events into the
@@ -253,12 +283,18 @@ struct FrontendPresentation {
     SDL_Window* windows[2]{};
     SDL_Renderer* renderers[2]{};
     SDL_Texture* textures[2]{};
+    SDL_Texture* sample_targets[2]{};
     uint32_t window_ids[2]{};
     int screen_widths[2]{kScreenWidth, kScreenWidth};
     int canvas_width = kScreenWidth;
+    int sample_scale = 1;
 };
 
 void destroy_presentation(FrontendPresentation& presentation) {
+    for (SDL_Texture*& texture : presentation.sample_targets) {
+        if (texture) SDL_DestroyTexture(texture);
+        texture = nullptr;
+    }
     for (SDL_Texture*& texture : presentation.textures) {
         if (texture) SDL_DestroyTexture(texture);
         texture = nullptr;
@@ -279,7 +315,7 @@ void destroy_presentation(FrontendPresentation& presentation) {
 
 SDL_Renderer* create_renderer(SDL_Window* window) {
     SDL_Renderer* renderer = SDL_CreateRenderer(
-        window, -1, SDL_RENDERER_ACCELERATED);
+        window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
     if (!renderer)
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     return renderer;
@@ -289,6 +325,11 @@ bool create_presentation(const NdsFrontendOptions& options,
                          FrontendPresentation& presentation) {
     presentation.separate =
         options.screen_layout == NdsScreenLayout::Separate;
+    const int aa_scale = options.antialiasing >= 8 ? 4 :
+                         options.antialiasing >= 4 ? 3 :
+                         options.antialiasing >= 2 ? 2 : 1;
+    presentation.sample_scale =
+        std::max<int>(options.supersampling, aa_scale);
     for (int screen = 0; screen < 2; ++screen) {
         const uint8_t bit = static_cast<uint8_t>(1u << screen);
         if ((options.adaptive_screens & bit) &&
@@ -375,10 +416,40 @@ bool create_presentation(const NdsFrontendOptions& options,
             destroy_presentation(presentation);
             return false;
         }
+        if (presentation.sample_scale > 1) {
+            presentation.sample_targets[screen] = SDL_CreateTexture(
+                presentation.renderers[screen], SDL_PIXELFORMAT_ARGB8888,
+                SDL_TEXTUREACCESS_TARGET,
+                presentation.screen_widths[screen] *
+                    presentation.sample_scale,
+                kScreenHeight * presentation.sample_scale);
+            if (!presentation.sample_targets[screen]) {
+                std::fprintf(stderr,
+                             "[sdl] supersample target failed: %s\n",
+                             SDL_GetError());
+                destroy_presentation(presentation);
+                return false;
+            }
+        }
         presentation.window_ids[screen] =
             SDL_GetWindowID(presentation.windows[screen]);
     }
     return true;
+}
+
+void render_screen(FrontendPresentation& presentation, int screen,
+                   const SDL_Rect& destination) {
+    SDL_Renderer* renderer = presentation.renderers[screen];
+    SDL_Texture* source = presentation.textures[screen];
+    if (presentation.sample_targets[screen]) {
+        SDL_SetRenderTarget(renderer, presentation.sample_targets[screen]);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, source, nullptr, nullptr);
+        SDL_SetRenderTarget(renderer, nullptr);
+        source = presentation.sample_targets[screen];
+    }
+    SDL_RenderCopy(renderer, source, nullptr, &destination);
 }
 
 void present_screens(FrontendPresentation& presentation,
@@ -402,10 +473,8 @@ void present_screens(FrontendPresentation& presentation,
             (presentation.canvas_width -
              presentation.screen_widths[1]) / 2,
             kScreenHeight, presentation.screen_widths[1], kScreenHeight};
-        SDL_RenderCopy(renderer, presentation.textures[0], nullptr,
-                       &top_rect);
-        SDL_RenderCopy(renderer, presentation.textures[1], nullptr,
-                       &bottom_rect);
+        render_screen(presentation, 0, top_rect);
+        render_screen(presentation, 1, bottom_rect);
         SDL_RenderPresent(renderer);
         return;
     }
@@ -416,8 +485,7 @@ void present_screens(FrontendPresentation& presentation,
         SDL_Renderer* renderer = presentation.renderers[screen];
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, presentation.textures[screen], nullptr,
-                       &screen_rect);
+        render_screen(presentation, screen, screen_rect);
         SDL_RenderPresent(renderer);
     }
 }
@@ -432,7 +500,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     // overshoots every frame, pinning the loop at ~57 FPS and cyclically
     // starving the audio queue (the audible boot crackle).
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
-                 SDL_INIT_TIMER) != 0) {
+                 SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "[sdl] init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -440,7 +508,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::fprintf(stderr, "[sdl] thread priority unchanged: %s\n",
                      SDL_GetError());
 
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
+                (options.supersampling > 1 || options.antialiasing > 0)
+                    ? "1" : "0");
     FrontendPresentation presentation{};
     if (!create_presentation(options, presentation)) {
         SDL_Quit();
@@ -452,9 +522,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const int bottom_content_left =
         (bottom_logical_width - kScreenWidth) / 2;
     std::fprintf(stderr,
-        "[sdl] layout=%s adaptive=%s\n",
+        "[sdl] layout=%s adaptive=%s supersampling=%ux aa=%ux\n",
         nds_screen_layout_name(options.screen_layout),
-        nds_adaptive_screens_name(options.adaptive_screens));
+        nds_adaptive_screens_name(options.adaptive_screens),
+        static_cast<unsigned>(options.supersampling),
+        static_cast<unsigned>(options.antialiasing));
     const uint16_t output_width = static_cast<uint16_t>(std::max(
         presentation.screen_widths[0],
         presentation.screen_widths[1]));
@@ -512,11 +584,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::fprintf(stderr, "[sdl] audio unavailable: %s\n", SDL_GetError());
 
     std::fprintf(stderr,
-        "[sdl] controls: mouse=touch | arrows=D-pad | Z=A X=B | "
+        "[sdl] controls: gamepad=Player 1 | mouse=touch | arrows=D-pad | Z=A X=B | "
         "A=Y S=X | Q=L W=R | Enter=Start Backspace=Select | Esc=quit\n");
 
-    uint16_t keys = 0x0FFFu;
-    nds_set_key_mask(keys);
+    SDL_GameController* controller = open_first_controller();
+    SDL_JoystickID controller_id = controller
+        ? SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller))
+        : -1;
+    uint16_t keyboard_pressed = 0;
+    uint16_t controller_pressed = 0;
+    auto publish_keys = [&]() {
+        nds_set_key_mask(static_cast<uint16_t>(
+            0x0FFFu & ~(keyboard_pressed | controller_pressed)));
+    };
+    publish_keys();
     nds_set_touch(0, 0, false);
     bool running = true;
     bool compute_failed = false;
@@ -631,14 +712,48 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     running = false;
                 } else if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
                     ++host_key_presses;
-                    keys &= static_cast<uint16_t>(~bit);
-                    nds_set_key_mask(keys);
+                    keyboard_pressed |= bit;
+                    publish_keys();
                 }
             }
             if (event.type == SDL_KEYUP && !event.key.repeat) {
                 if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
-                    keys |= bit;
-                    nds_set_key_mask(keys);
+                    keyboard_pressed &= static_cast<uint16_t>(~bit);
+                    publish_keys();
+                }
+            }
+            if (event.type == SDL_CONTROLLERDEVICEADDED && !controller) {
+                controller = SDL_GameControllerOpen(event.cdevice.which);
+                if (controller) {
+                    controller_id = SDL_JoystickInstanceID(
+                        SDL_GameControllerGetJoystick(controller));
+                    std::fprintf(stderr,
+                                 "[sdl] Player 1 controller: %s\n",
+                                 SDL_GameControllerName(controller));
+                }
+            }
+            if (event.type == SDL_CONTROLLERDEVICEREMOVED &&
+                controller && event.cdevice.which == controller_id) {
+                SDL_GameControllerClose(controller);
+                controller = nullptr;
+                controller_id = -1;
+                controller_pressed = 0;
+                publish_keys();
+            }
+            if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+                if (const uint16_t bit = controller_bit(
+                        static_cast<SDL_GameControllerButton>(
+                            event.cbutton.button))) {
+                    controller_pressed |= bit;
+                    publish_keys();
+                }
+            }
+            if (event.type == SDL_CONTROLLERBUTTONUP) {
+                if (const uint16_t bit = controller_bit(
+                        static_cast<SDL_GameControllerButton>(
+                            event.cbutton.button))) {
+                    controller_pressed &= static_cast<uint16_t>(~bit);
+                    publish_keys();
                 }
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
@@ -833,6 +948,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     nds_compute_host_stop();
 #endif
+    if (controller) SDL_GameControllerClose(controller);
     destroy_presentation(presentation);
     SDL_Quit();
     std::fprintf(stderr, "[sdl] closed after %llu presented frames\n",

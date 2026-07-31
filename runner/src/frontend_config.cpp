@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <exception>
+#include <cstdlib>
 
 #include "toml.hpp"
 
@@ -55,6 +56,27 @@ bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out) {
         return true;
     }
     return false;
+}
+
+bool nds_parse_supersampling(const std::string& value, uint8_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed < 1 || parsed > 4) return false;
+    *out = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+bool nds_parse_antialiasing(const std::string& value, uint8_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' ||
+        (parsed != 0 && parsed != 2 && parsed != 4 && parsed != 8)) {
+        return false;
+    }
+    *out = static_cast<uint8_t>(parsed);
+    return true;
 }
 
 bool nds_parse_startup_mode(const std::string& value,
@@ -148,6 +170,24 @@ bool nds_load_frontend_config(const std::string& path,
                     *error =
                         "display.adaptive_widescreen must be none, top, "
                         "bottom, or both";
+                }
+                return false;
+            }
+        }
+        if (const auto value =
+                (*display)["supersampling"].value<int64_t>()) {
+            if (!nds_parse_supersampling(std::to_string(*value),
+                                         &options->supersampling)) {
+                if (error) *error = "display.supersampling must be 1..4";
+                return false;
+            }
+        }
+        if (const auto value =
+                (*display)["antialiasing"].value<int64_t>()) {
+            if (!nds_parse_antialiasing(std::to_string(*value),
+                                        &options->antialiasing)) {
+                if (error) {
+                    *error = "display.antialiasing must be 0, 2, 4, or 8";
                 }
                 return false;
             }

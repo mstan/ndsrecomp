@@ -218,6 +218,8 @@ int main(int argc, char** argv) {
     std::string config_path = "game.toml";
     std::string cli_screen_layout;
     std::string cli_adaptive_screens;
+    std::string cli_supersampling;
+    std::string cli_antialiasing;
     std::string cli_startup_mode;
     uint64_t budget = 4000000ull;
     bool serve = false;
@@ -251,6 +253,10 @@ int main(int argc, char** argv) {
             cli_screen_layout = argv[++i];
         } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
             cli_adaptive_screens = argv[++i];
+        } else if (a == "--supersampling" && i + 1 < argc) {
+            cli_supersampling = argv[++i];
+        } else if (a == "--antialiasing" && i + 1 < argc) {
+            cli_antialiasing = argv[++i];
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
         } else if (a == "--help" || a == "-h") {
@@ -260,6 +266,8 @@ int main(int argc, char** argv) {
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
+                "[--supersampling 1|2|3|4] "
+                "[--antialiasing 0|2|4|8] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
@@ -303,6 +311,23 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (const char* value = std::getenv("NDS_SUPERSAMPLING")) {
+        if (!nds_parse_supersampling(value,
+                                     &frontend_options.supersampling)) {
+            std::fprintf(stderr,
+                         "invalid NDS_SUPERSAMPLING (expected 1..4)\n");
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_ANTIALIASING")) {
+        if (!nds_parse_antialiasing(value,
+                                    &frontend_options.antialiasing)) {
+            std::fprintf(stderr,
+                         "invalid NDS_ANTIALIASING "
+                         "(expected 0, 2, 4, or 8)\n");
+            return 2;
+        }
+    }
     if (const char* value = std::getenv("NDS_STARTUP_MODE")) {
         if (!nds_parse_startup_mode(value,
                                     &frontend_options.startup_mode)) {
@@ -326,6 +351,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "invalid --adaptive-widescreen "
                      "(expected none, top, bottom, or both)\n");
+        return 2;
+    }
+    if (!cli_supersampling.empty() &&
+        !nds_parse_supersampling(cli_supersampling,
+                                 &frontend_options.supersampling)) {
+        std::fprintf(stderr,
+                     "invalid --supersampling (expected 1..4)\n");
+        return 2;
+    }
+    if (!cli_antialiasing.empty() &&
+        !nds_parse_antialiasing(cli_antialiasing,
+                                &frontend_options.antialiasing)) {
+        std::fprintf(stderr,
+                     "invalid --antialiasing "
+                     "(expected 0, 2, 4, or 8)\n");
         return 2;
     }
     if (!cli_startup_mode.empty() &&

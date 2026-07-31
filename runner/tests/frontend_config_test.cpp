@@ -29,6 +29,15 @@ int main() {
         !require(!nds_parse_adaptive_screens("automatic", &adaptive)))
         return 2;
 
+    uint8_t quality = 0;
+    if (!require(nds_parse_supersampling("4", &quality)) ||
+        !require(quality == 4) ||
+        !require(!nds_parse_supersampling("0", &quality)) ||
+        !require(nds_parse_antialiasing("8", &quality)) ||
+        !require(quality == 8) ||
+        !require(!nds_parse_antialiasing("3", &quality)))
+        return 3;
+
     NdsStartupMode startup = NdsStartupMode::Preserve;
     if (!require(nds_parse_startup_mode("automatic", &startup)) ||
         !require(startup == NdsStartupMode::Automatic) ||
@@ -37,7 +46,7 @@ int main() {
         !require(nds_parse_startup_mode("firmware", &startup)) ||
         !require(startup == NdsStartupMode::Preserve) ||
         !require(!nds_parse_startup_mode("fast", &startup)))
-        return 3;
+        return 4;
 
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() /
@@ -48,15 +57,19 @@ int main() {
                 "startup_mode = \"automatic\"\n"
                 "[display]\n"
                 "screen_layout = \"separate\"\n"
-                "adaptive_widescreen = \"bottom\"\n";
+                "adaptive_widescreen = \"bottom\"\n"
+                "supersampling = 3\n"
+                "antialiasing = 4\n";
     }
     NdsFrontendOptions options{};
     std::string error;
     if (!require(nds_load_frontend_config(path.string(), &options, &error)) ||
         !require(options.screen_layout == NdsScreenLayout::Separate) ||
         !require(options.startup_mode == NdsStartupMode::Automatic) ||
-        !require(options.adaptive_screens == NDS_ADAPTIVE_BOTTOM))
-        return 4;
+        !require(options.adaptive_screens == NDS_ADAPTIVE_BOTTOM) ||
+        !require(options.supersampling == 3) ||
+        !require(options.antialiasing == 4))
+        return 5;
 
     {
         std::ofstream file(path);
@@ -65,7 +78,7 @@ int main() {
     }
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
-        return 5;
+        return 6;
     std::filesystem::remove(path);
     return 0;
 }
