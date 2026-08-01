@@ -445,6 +445,35 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   material headroom win, but it is not ISSUE-2 acceptance yet: the worst
   transition remains about **16.28 ms emulation/frame**, above the 12.8 ms
   goal, and initial attract still presents at about 56 FPS.
+- 2026-08-01 **post-superblock RIP re-profile**: the prior ranking is no
+  longer current. In `adventure_to_file_select`, the main-thread leaders are
+  `lookup_static_cached` **8.79%**, `runtime_code_cycles` **6.30%**,
+  GPU2D `render_engine_line` **5.84%**, `runtime_should_yield` **5.42%**,
+  `runtime_tick` **4.20%**, `runtime_dispatch` **4.19%**, and
+  `runtime_mem_cycles` **4.14%**. In settled Yoshi, lookup is **11.90%**,
+  dispatch **5.51%**, code cycles **4.14%**, yield **3.95%**, executable-page
+  generation **3.81%**, tick **3.78%**, and memory cycles **3.63%**. Artifacts:
+  `20260801-superblocks-reprofile-{file-select,yoshi}`. Dispatch is no longer
+  the ~30% leading cluster; residual lookup/validation, per-instruction timing,
+  GPU2D, and ARM7 now require separate evidence.
+- 2026-08-01 **ARM7 runtime-RAM superblock extension**: REJECTED and
+  reverted. The already validated ARM7 RAM capture offered only **258**
+  eligible same-page edges among 7,247 emitted functions. G3 remained exact
+  at every 100M..700M stop on both screens, but those edges were cold:
+  file-select ARM7 fall-throughs changed only
+  **28,427.1 -> 28,411.0/frame (0.06%)**, and settled Yoshi was statistically
+  unchanged (**24,378.6 -> 24,380.2/frame**).
+
+  One quiet detached-two-window/adaptive-top candidate/baseline pair was
+  sufficient to reject the no-coverage extension. Whole-route FPS was
+  **59.471 / 59.518**. File-select emulation was
+  **16.452 / 16.349 ms/frame** (**0.63% worse**), settled Yoshi was
+  **11.620 / 11.530 ms/frame** (**0.78% worse**), and the nine phase results
+  ranged from 3.43% better to 1.28% worse without a coherent signal. The
+  candidate was only 107,074 bytes smaller. Artifacts:
+  `20260801-arm7-superblocks-{B1,A1}`. The large residual ARM7 fall-through
+  count comes from nonadjacent finder/entry-point structure, not the contiguous
+  edge class handled by D1; changing that structure needs a different design.
 
 ## Reproduction crib
 
