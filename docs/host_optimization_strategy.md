@@ -493,6 +493,73 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   with an isolated title-bank build or a substantially smaller representation,
   not by invalidating the full firmware-bank matrix.
 
+- 2026-08-01 **post-D1 GPU2D component census**: passive
+  `NDS_PROFILE_GPU=1` attribution over the full detached-two-window/adaptive-top
+  route measured total GPU2D work at **1.59--2.32 ms/frame**. Engine B led the
+  castle intervals at up to **1.84 ms/frame**; OBJ was **0.26--0.39 ms/frame**
+  and is already included in the engine totals. The renderer already has
+  direct VRAM chunk mappings, batched tile rows, an OBJ row fast path, a
+  no-background path, and a no-effects compositor. A 5% whole-emulation win
+  would require removing roughly **27--44%** of the entire measured renderer,
+  so no bounded scanline micro-optimization is justified by this census.
+  Temporal reuse remains a larger candidate, but it first needs classification
+  counters plus fine-grained dirty/generation evidence for aliased VRAM,
+  palettes, OAM, registers, display capture, 3D, and mid-frame writes.
+  Artifact: `20260801-superblocks-gpu2d-census`; its wall timing is
+  instrumented and is not a performance claim.
+- 2026-08-01 **post-D1 dispatch-cache validation census**: REJECTED cache
+  micro-optimization direction. Temporary diagnostic counters in the exact
+  target mode found that **98.99--99.88%** of positive ARM9 cache hits across
+  the route were one-page live-code validations. Immutable hits were only
+  **0.06--0.38%**, two-page validations **0.07--0.79%**, and stale generations
+  were negligible. Full searches were also rare: the retained run's cache
+  fast-hit rates were **99.77%** in file select and **98.50%** in settled
+  Yoshi. Thus the sampled `lookup_static_cached` share is primarily the exact
+  required generation predicate, not collision/search overhead. Hash size,
+  associativity, another inline hit path, or sticky RAM selection cannot
+  credibly clear the 5% gate. Artifact:
+  `20260801-superblocks-lookup-census`. All diagnostic source was reverted and
+  the canonical runner restored.
+- 2026-08-01 **same-superblock literal-B goto coverage probe**: REJECTED
+  before implementing the optimization. An adversarial review identified one
+  conservative extension: a non-link `B` to an exact, same-mode, unique,
+  unshadowed entry label inside the already-active validated ARM9 RAM
+  superblock could use the existing local-goto sequence without another
+  dispatch or generation read. Static census found **5,544 / 10,524**
+  literal-B sites eligible, but site count overstated dynamic heat.
+
+  A temporary coverage-only build tagged those branches while preserving the
+  ordinary dispatcher. Eligible traffic was only **71.82%** of literal-B
+  dispatches in initial attract, **46.68%** in the title/menu transition,
+  **47.42%** in file select, and **41.70%** in the following new-game load.
+  Given post-D1 lookup+dispatch shares, the idea needed approximately
+  **88--94%** of literal-B traffic to make a 5% whole-emulation win plausible.
+  It therefore fails the evidence gate without paying for an optimized
+  candidate or correctness gates. The probe used diagnostic `-O0` title banks,
+  so its FPS is intentionally discarded. Two earlier release-link attempts
+  hit the established ten-minute ceiling after a first shared-header design
+  invalidated the firmware matrix; both exact build process trees were stopped.
+  All probe code was reverted, canonical banks regenerated, and the exact
+  retained runner SHA-256
+  `938F8B97BF8461ACD598A12C379F213E0CEC05BC3CAA952BD185AEB53BCABA6A`
+  restored. Artifact: `20260801-superblock-branch-coverage-file`.
+- 2026-08-01 **target-mode health confirmation after D1**: one fresh,
+  non-interleaved detached-two-window/adaptive-top run on the canonical runner
+  completed the full route without a runtime failure. Presentation ranged
+  **56.03--59.81 FPS** and emulation cost **11.38--16.14 ms/frame**; the
+  sustained castle/Yoshi intervals in this leg were about **14--15 ms/frame**.
+  This is a health check, not a replacement for the retained quiet B/A/B:
+  it confirms the shipping defaults still need additional headroom and should
+  not be described as comfortably locked 60. Artifact:
+  `20260801-superblocks-target-confirm`.
+- 2026-08-01 **ComputeRenderer target-mode constraint**: no
+  soft/compute A/B was run because the current runner deliberately refuses
+  `NDS_3D_RENDERER=compute` when adaptive widescreen is active. Compute remains
+  a useful tier-2 renderer experiment in native presentation, but it is not a
+  candidate for the user's detached/adaptive-top acceptance mode until the
+  adaptive path can consume GPU-composited output without synchronized CPU
+  readback. Do not quote a compute gain for this workstream.
+
 ## Reproduction crib
 
 ```powershell
@@ -512,7 +579,11 @@ modes.
 16.7 ms = break-even, **12.8 ms = 1.3x (goal), 8.3 ms = 2x (aspiration)**.
 2026-07-31 state: Yoshi 59.8 FPS at ~14.6 ms (locked but thin); worst
 menu phase 43.5 FPS at 22.4 ms.
-2026-08-01 separate-window/adaptive-top state after the coherent snapshot:
-weighted emulation+presentation 19.14/20.40 ms across two candidate runs;
-settled Yoshi 19.11/20.22 ms (49.1-51.4 FPS). Presentation is no longer the
-dominant gap; CPU emulation is again the primary burndown target.
+2026-08-01 retained D1 B/A/B state in separate-window/adaptive-top mode:
+settled Yoshi **11.41 ms emulation** by the two candidate-leg mean and
+castle/water **12.51 ms**, both inside the 12.8 ms headroom goal; the
+file-select transition remains about **16.28 ms** and initial attract still
+presents near 56 FPS. A later single health leg showed 14--15 ms sustained
+gameplay under that host state, so acceptance is not yet robust. Presentation
+is no longer the dominant gap; CPU emulation and host variance remain the
+primary burndown targets.
