@@ -296,6 +296,17 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   underruns/errors/input and exact FNV pair
   `e333837761ca0d1c,d61d2eb50e96b61d`. Decode, interpreter-cycle,
   HLE-manifest, frontend-config, and battery-save tests pass.
+- 2026-08-01 **validated ARM7 fallthrough trampoline extension**: REJECTED
+  and reverted. The extension enabled the same loop only for the exact live
+  `CachedStaticLookup` hit carrying validation metadata; that metadata is
+  currently coupled to `--validate-live-bytes` and therefore to generated
+  direct calls being disabled. Unvalidated ARM7 ROM/BIOS bodies retained the
+  recursive reference path. G3 remained exact through 700M, but quiet target
+  B/A/B whole-route FPS was **54.089 / 54.133 / 54.135**. Settled-Yoshi
+  emulation time was **16.665 / 16.530 / 16.439 ms/frame**: the candidate mean
+  was **0.13% slower** than baseline, with other gameplay phases also flat.
+  Large dynamic call count did not translate into removable frame time; do
+  not broaden the trampoline to ARM7 without new profile evidence.
 
 ## Reproduction crib
 
