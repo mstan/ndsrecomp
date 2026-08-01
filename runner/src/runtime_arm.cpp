@@ -408,6 +408,29 @@ bool arm_static_guard(const NdsStaticValidation* validation,
     return true;
 }
 
+bool cached_static_guard(const CachedStaticLookup& cached,
+                         StaticExecutionGuard& guard) {
+    guard = {};
+    if (!cached.validation) return true;
+    // lookup_static_cached() just proved this exact slot live using these
+    // generation values. Copy that validated snapshot into the active guard
+    // instead of resolving and rereading the same pages a second time.
+    // Fall back to the reference builder if a future cache representation
+    // does not carry the complete guard snapshot.
+    if (cached.page_count == 0u || cached.page_count > 2u)
+        return arm_static_guard(cached.validation, guard);
+
+    guard.validation = cached.validation;
+    guard.page_count = cached.page_count;
+    const uint32_t first_page = cached.validation->addr & ~0xFFFu;
+    for (uint32_t i = 0; i < cached.page_count; ++i) {
+        guard.page_addr[i] = first_page + (i << 12u);
+        guard.generation[i] = cached.generation[i];
+        guard.generation_ptr[i] = cached.generation_ptr[i];
+    }
+    return true;
+}
+
 bool guard_generation_changed(const StaticExecutionGuard& guard) {
     if (!guard.validation) return false;
     for (uint32_t i = 0; i < guard.page_count; ++i) {
@@ -439,7 +462,7 @@ struct StaticGuardScope {
     }
     bool call(const CachedStaticLookup* hit) {
         if (!hit || !hit->fn ||
-            !arm_static_guard(hit->validation, active))
+            !cached_static_guard(*hit, active))
             return false;
         g_static_guard = &active;
         hit->fn();

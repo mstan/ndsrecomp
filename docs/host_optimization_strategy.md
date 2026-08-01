@@ -91,10 +91,11 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   `nds_profile_report`. The first residual-only draft was rejected in
   review because it mislabeled dynamic PC writes, fallthrough, and
   exceptions as literal branches; source-tagged emission replaced it.
-- **B1. Guard-snapshot dedup**: `StaticGuardScope::call` currently
-  recomputes (`arm_static_guard`) the same page/generation snapshot that
-  `cached_lookup_live` just validated. Copy the snapshot from the
-  `CachedStaticLookup` slot instead. Runtime-only, no regen.
+- **B1. Guard-snapshot dedup — COMPLETE**: `StaticGuardScope::call`
+  copies the page/generation snapshot that `cached_lookup_live` just
+  validated instead of recomputing it through `arm_static_guard`. The
+  reference builder remains as the safe fallback for any future cache slot
+  without a complete snapshot. Runtime-only; no generated-bank change.
 - **B2. Validated direct calls for BL**: B0 measured only
   ~1.6K–3.1K literal BL dispatches/frame on ARM9, so this is no longer
   projected as the dominant dispatch win. A safe implementation must
@@ -187,6 +188,18 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   castle courtyard. The sky model is not a single safely scalable surface;
   revisit only with model/draw-aware capture or a title-side skybox patch.
   This result is visual-correctness evidence, not a performance result.
+- 2026-07-31 **B1 guard-snapshot dedup**: four quiet interleaved full-path
+  pairs, with the last pair fully warmed and launch order counterbalanced,
+  produced weighted emulation-time wins of **10.16%, 23.78%, 1.57%, and
+  4.80%**. The four-run medians were 16.694→15.478 ms/frame (**7.29%**);
+  fastest-vs-fastest was 15.563→14.816 (**4.80%**). Worst-phase median was
+  21.889→20.786 (**5.04%**); Yoshi median was 14.766→14.383 (**2.59%**),
+  with fastest Yoshi 14.111→13.361 (**5.32%**). Retained conservatively as
+  an ABI-neutral simplification that removes a provably duplicated snapshot,
+  not as a double-digit headline win. Gates: G1 8/8 exact with Tier-3 zero;
+  G2 2,400 headed frames at 57.863 FPS, zero underruns/queue errors/input,
+  exact FNV pair `e333837761ca0d1c,d61d2eb50e96b61d`; G3 byte-lock exact at
+  every 100M..700M stop on both screens.
 
 ## Reproduction crib
 
