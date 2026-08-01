@@ -371,6 +371,36 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   so its result agrees with the prior 1-2% cache-hit-inline experiments.
   Further work must eliminate validation boundaries (selection-safe
   page/superblock coalescing), not add another per-boundary cache.
+- 2026-08-01 **selection-safe 4 KiB page leases**: REJECTED and reverted.
+  Static owner-order closure qualified 88.38% of runtime-bank and 53.31% of
+  gameplay-bank fallthrough targets. The generated candidate used 409 shared
+  exact-page descriptors across 56,244 sites, proved the ordinary ordered-bank
+  winner once per site, and carried a page-generation snapshot through the
+  nonrecursive tail loop. Same-page linked boundaries then performed no lookup
+  and no generation read. At the 700M G3 endpoint the forced candidate recorded
+  **264,350,851 lease reuses**, **40,386,777 establishments**, and
+  **17,585,638 safe fallbacks**; both screens remained byte-exact at every
+  100M..700M stop.
+
+  The first timing candidate accidentally repeated a full 4 KiB
+  provenance/byte comparison for every rejected boundary. It was negative and
+  is retained only as implementation evidence: whole-route FPS was
+  **56.112 / 56.195 / 55.551** in candidate/baseline/candidate order, while
+  settled-Yoshi emulation was **15.657 / 14.906 / 15.079 ms/frame**.
+  A corrected tri-state page cache memoized both success and rejection for the
+  current generation and passed G3 again.
+
+  The corrected quiet detached-screen/adaptive-top B/A/B still lost:
+  whole-route FPS was **55.535 / 57.879 / 57.042** (candidate mean
+  **2.75% lower**), and settled-Yoshi emulation was
+  **13.979 / 13.213 / 15.036 ms/frame** (candidate mean **9.80% worse**).
+  Castle/water emulation was **14.773 / 14.068 / 14.500 ms/frame** (candidate
+  mean **4.04% worse**), and everyone-present was
+  **17.713 / 16.699 / 17.268 ms/frame** (**4.74% worse**). The executable grew
+  300,344,569 -> 316,419,486 bytes (**+16.07 MB / +5.35%**). Dynamic coverage
+  was ample; the distributed call-site and code-footprint cost outweighed the
+  eliminated lookup/generation work. Do not pursue generated per-site page
+  linking again without a substantially smaller representation.
 
 ## Reproduction crib
 
