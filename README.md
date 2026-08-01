@@ -178,6 +178,11 @@ sha1 = "40-lowercase-hex-digits"
 [display]
 screen_layout = "stacked"          # stacked | separate
 adaptive_widescreen = "none"       # none | top | bottom | both
+adaptive_capability = "top"        # exact-ROM capability; same choices
+adaptive_width = 448               # even width from 256 through 448
+adaptive_skybox_fill = false       # optional title-audited repair
+adaptive_hud_anchor = false        # title-audited text HUD band placement
+adaptive_hud_center_width = 64     # centered source band; multiple of 8
 
 [system]
 startup_mode = "preserve"          # preserve | manual | automatic
@@ -195,7 +200,17 @@ are rejected. A title may expose the top screen, bottom screen, or both
 independently. The native 256x192 compositor remains the parity path; adaptive
 output is opt-in and currently uses the software 3D renderer. HUD sprites can
 be anchored to the widened left/right corners while center overlays remain
-centered. The equivalent one-run overrides are
+centered. `adaptive_capability` requires an exact `[game].sha1`, allowing new
+title projects to opt into audited screens without adding their ROM hashes to
+the framework. `adaptive_skybox_fill` remains off unless a title explicitly
+needs and audits the cylindrical-sky repair heuristic. The equivalent one-run
+`adaptive_hud_anchor` permits transparent text-tile HUD planes to be split
+into authored left, center, and right bands over the wide 3D scene; affine,
+bitmap, and windowed layouts still fail closed.
+`adaptive_hud_center_width` keeps wider centered assemblies such as location
+names and energy bars intact while the remaining bands move outward. The
+equivalent one-run
+overrides are
 `NDS_SCREEN_LAYOUT` / `NDS_ADAPTIVE_WIDESCREEN` and the
 `--screen-layout` / `--adaptive-widescreen` CLI flags. Precedence is TOML,
 then environment, then CLI.

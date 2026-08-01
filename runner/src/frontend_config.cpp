@@ -219,6 +219,68 @@ bool nds_load_frontend_config(const std::string& path,
             }
         }
         if (const auto value =
+                (*display)["adaptive_capability"].value<std::string>()) {
+            if (!nds_parse_adaptive_screens(*value,
+                                            &options->adaptive_supported)) {
+                if (error) {
+                    *error =
+                        "display.adaptive_capability must be none, top, "
+                        "bottom, or both";
+                }
+                return false;
+            }
+        }
+        if (const auto value =
+                (*display)["adaptive_width"].value<int64_t>()) {
+            if (*value < 256 || *value > 448 || (*value & 1) != 0) {
+                if (error) {
+                    *error =
+                        "display.adaptive_width must be an even value from "
+                        "256 through 448";
+                }
+                return false;
+            }
+            const uint16_t width = static_cast<uint16_t>(*value);
+            if (options->adaptive_supported & NDS_ADAPTIVE_TOP)
+                options->adaptive_max_width[0] = width;
+            if (options->adaptive_supported & NDS_ADAPTIVE_BOTTOM)
+                options->adaptive_max_width[1] = width;
+        } else {
+            if (options->adaptive_supported & NDS_ADAPTIVE_TOP)
+                options->adaptive_max_width[0] = 448;
+            if (options->adaptive_supported & NDS_ADAPTIVE_BOTTOM)
+                options->adaptive_max_width[1] = 448;
+        }
+        if (const auto value =
+                (*display)["adaptive_skybox_fill"].value<bool>()) {
+            options->adaptive_skybox_fill = *value;
+        }
+        if (const auto value =
+                (*display)["adaptive_hud_anchor"].value<bool>()) {
+            options->adaptive_hud_anchor = *value;
+        }
+        if (const auto value =
+                (*display)["adaptive_hud_center_width"].value<int64_t>()) {
+            if (*value < 8 || *value > 256 || (*value & 7) != 0) {
+                if (error) {
+                    *error =
+                        "display.adaptive_hud_center_width must be a "
+                        "multiple of 8 from 8 through 256";
+                }
+                return false;
+            }
+            options->adaptive_hud_center_width =
+                static_cast<uint16_t>(*value);
+        }
+        if (options->adaptive_supported != NDS_ADAPTIVE_NONE &&
+            options->expected_rom_sha1.empty()) {
+            if (error) {
+                *error =
+                    "display.adaptive_capability requires an exact game.sha1";
+            }
+            return false;
+        }
+        if (const auto value =
                 (*display)["supersampling"].value<int64_t>()) {
             if (!nds_parse_supersampling(std::to_string(*value),
                                          &options->supersampling)) {

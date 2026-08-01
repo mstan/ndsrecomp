@@ -70,6 +70,8 @@ std::array<AdaptiveFrame, 2> g_wide_3d_frame{};
 std::array<AdaptiveFrame, 2> g_wide_3d_attr_frame{};
 std::array<uint16_t, 2> g_wide_3d_width{};
 bool g_adaptive_skybox_fill = false;
+bool g_adaptive_hud_anchor = false;
+int g_adaptive_hud_center_width = 64;
 int g_front = 0;
 uint64_t g_render_ns = 0;
 uint64_t g_obj_ns = 0;
@@ -698,12 +700,15 @@ void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
             if (out_width > 256) {
                 const int extra = (out_width - 256) / 2;
                 const int center = sx + bw / 2;
-                // SM64DS uses main-engine OBJ for its gameplay HUD while the
-                // world is 3D. Keep center overlays centered and move the
-                // authored left/right HUD bands to the enhanced corners.
-                if (engine == 0 && center < 96)
+                const int center_left =
+                    (256 - g_adaptive_hud_center_width) / 2;
+                const int center_right =
+                    center_left + g_adaptive_hud_center_width;
+                // Keep the title-configured center HUD band together and move
+                // authored left/right OBJ bands to the enhanced corners.
+                if (engine == 0 && center < center_left)
                     output_sx = sx;
-                else if (engine == 0 && center >= 160)
+                else if (engine == 0 && center >= center_right)
                     output_sx = sx + extra * 2;
                 else
                     output_sx = sx + extra;
@@ -1462,6 +1467,13 @@ void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
     g_adaptive_skybox_fill = enabled;
 }
 
+void nds_gpu2d_set_adaptive_hud_anchor(bool enabled,
+                                       uint16_t center_width) {
+    g_adaptive_hud_anchor = enabled;
+    g_adaptive_hud_center_width =
+        std::clamp<int>(center_width, 8, 256);
+}
+
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
     const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
@@ -1492,12 +1504,23 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t mode = (u.dispcnt >> 16) & 3u;
     const bool bg0_3d = (u.dispcnt & 0x8u) != 0 &&
                         (u.dispcnt & 0x100u) != 0;
-    // Known-safe adaptive scene: main-engine 3D with its HUD in OBJ and no
-    // additional 2D background plane. Menus, fades, and unknown composites
-    // retain a centered native image with black side margins.
+    // Known-safe adaptive scenes use main-engine 3D plus OBJ. A title may
+    // additionally opt into anchored transparent text HUD planes: left,
+    // center, and right authored bands are moved to their corresponding wide
+    // positions. Affine/bitmap backgrounds and windowed composites still
+    // retain a centered native image.
+    bool supported_hud_bgs = true;
+    for (int bg = 1; bg < 4; ++bg) {
+        if ((u.dispcnt & (0x100u << bg)) &&
+            (!g_adaptive_hud_anchor || bg_kind(u, bg) != BgKind::Text)) {
+            supported_hud_bgs = false;
+            break;
+        }
+    }
+    const bool windows_enabled = (u.dispcnt & 0xE000u) != 0u;
     const bool supported_scene =
         palette && oam && vram && !(u.dispcnt & 0x80u) &&
-        mode == 1u && bg0_3d && (u.dispcnt & 0x0E00u) == 0u;
+        mode == 1u && bg0_3d && supported_hud_bgs && !windows_enabled;
     if (!supported_scene) {
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
@@ -1518,11 +1541,23 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
     std::array<int16_t, kMaxAdaptiveWidth> black_run{};
     std::array<uint32_t, kMaxAdaptiveWidth> repaired_3d{};
+    std::array<BgLine, 3> hud_bg_lines{};
+    int hud_bgs[3]{};
+    size_t hud_bg_count = 0;
+    if (g_adaptive_hud_anchor) {
+        for (int bg = 1; bg < 4; ++bg) {
+            if (u.dispcnt & (0x100u << bg))
+                hud_bgs[hud_bg_count++] = bg;
+        }
+    }
     const bool snapshot_matches =
         g_wide_3d_width[g_front] == output_width;
     for (int y = 0; y < 192; ++y) {
         render_obj_line(0, y, obj.data(), output_width,
                         oam, palette, *vram);
+        for (size_t i = 0; i < hud_bg_count; ++i)
+            decode_bg_line(0, hud_bgs[i], y, palette, *vram,
+                           hud_bg_lines[i]);
         const uint32_t* const line3d = snapshot_matches
             ? g_wide_3d_frame[g_front].data() +
                   static_cast<size_t>(y) * output_width
@@ -1596,23 +1631,53 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
         }
         uint32_t* const dst =
             adaptive.data() + y * output_width;
+        auto ahead = [](const Pixel& a, const Pixel& b) {
+            return a.priority < b.priority ||
+                   (a.priority == b.priority && a.order < b.order);
+        };
+        const int hud_center_left =
+            (256 - g_adaptive_hud_center_width) / 2;
+        const int hud_center_right =
+            hud_center_left + g_adaptive_hud_center_width;
         for (int x = 0; x < output_width; ++x) {
             Pixel top = backdrop;
             Pixel below = backdrop;
+            auto push = [&](const Pixel& pixel) {
+                if (ahead(pixel, top)) {
+                    below = top;
+                    top = pixel;
+                } else if (ahead(pixel, below)) {
+                    below = pixel;
+                }
+            };
+            int hud_x = -1;
+            if (x < hud_center_left) {
+                hud_x = x;
+            } else if (x >= extra + hud_center_left &&
+                       x < extra + hud_center_right) {
+                hud_x = x - extra;
+            } else if (x >= output_width -
+                                (256 - hud_center_right)) {
+                hud_x = x - (output_width - 256);
+            }
+            if (hud_x >= 0) {
+                for (size_t i = 0; i < hud_bg_count; ++i) {
+                    const uint16_t c = hud_bg_lines[i].color[hud_x];
+                    if (!(c & 0x8000u)) continue;
+                    const BgLine& line = hud_bg_lines[i];
+                    push(Pixel{
+                        rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
+                        line.target, 0, line.prio, line.order, true});
+                }
+            }
             const uint32_t c3 = composited_3d[x];
             const uint8_t a3 =
                 static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
             if (a3) {
-                top = Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
-                            prio3d, 1, true, a3};
+                push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
+                           prio3d, 1, true, a3});
             }
-            if (obj[x].valid &&
-                (obj[x].priority < top.priority ||
-                 (obj[x].priority == top.priority &&
-                  obj[x].order < top.order))) {
-                below = top;
-                top = obj[x];
-            }
+            if (obj[x].valid) push(obj[x]);
             uint32_t color = compose(u, top, below);
             if (mbmode == 1u)
                 color = brighten(color, mb, 0u);

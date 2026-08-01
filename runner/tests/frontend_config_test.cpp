@@ -67,7 +67,12 @@ int main() {
                 "startup_mode = \"automatic\"\n"
                 "[display]\n"
                 "screen_layout = \"separate\"\n"
-                "adaptive_widescreen = \"bottom\"\n"
+                "adaptive_widescreen = \"top\"\n"
+                "adaptive_capability = \"top\"\n"
+                "adaptive_width = 448\n"
+                "adaptive_skybox_fill = true\n"
+                "adaptive_hud_anchor = true\n"
+                "adaptive_hud_center_width = 128\n"
                 "supersampling = 3\n"
                 "antialiasing = 4\n"
                 "[cartridge]\n"
@@ -81,7 +86,13 @@ int main() {
                  "90164d1ac127ee5f9815ea4ae7de798c7b5fc629") ||
         !require(options.screen_layout == NdsScreenLayout::Separate) ||
         !require(options.startup_mode == NdsStartupMode::Automatic) ||
-        !require(options.adaptive_screens == NDS_ADAPTIVE_BOTTOM) ||
+        !require(options.adaptive_screens == NDS_ADAPTIVE_TOP) ||
+        !require(options.adaptive_supported == NDS_ADAPTIVE_TOP) ||
+        !require(options.adaptive_max_width[0] == 448) ||
+        !require(options.adaptive_max_width[1] == 256) ||
+        !require(options.adaptive_skybox_fill) ||
+        !require(options.adaptive_hud_anchor) ||
+        !require(options.adaptive_hud_center_width == 128) ||
         !require(options.supersampling == 3) ||
         !require(options.antialiasing == 4) ||
         !require(options.cartridge_save.type ==
@@ -116,6 +127,39 @@ int main() {
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
         return 9;
+
+    {
+        std::ofstream file(path);
+        file << "[display]\n"
+                "adaptive_capability = \"top\"\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 10;
+
+    {
+        std::ofstream file(path);
+        file << "[game]\n"
+                "sha1 = \"90164d1ac127ee5f9815ea4ae7de798c7b5fc629\"\n"
+                "[display]\n"
+                "adaptive_capability = \"top\"\n"
+                "adaptive_width = 447\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 11;
+
+    {
+        std::ofstream file(path);
+        file << "[display]\n"
+                "adaptive_hud_center_width = 70\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 12;
     std::filesystem::remove(path);
     return 0;
 }

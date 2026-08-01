@@ -23,6 +23,9 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width);
 // Title capability for repairing uncovered pixels at a cylindrical skybox
 // seam after the host widens the horizontal field of view.
 void nds_gpu2d_set_adaptive_skybox_fill(bool enabled);
+// Title-audited transparent text HUD composition for wide 3D scenes.
+void nds_gpu2d_set_adaptive_hud_anchor(bool enabled,
+                                       uint16_t center_width);
 
 struct NdsGpu2dProfile {
     uint64_t render_ns;

@@ -40,6 +40,17 @@ struct NdsFrontendOptions {
     // unsupported adaptive output fails closed instead of stretching pixels.
     uint8_t adaptive_supported = NDS_ADAPTIVE_NONE;
     uint16_t adaptive_max_width[2] = {256, 256};
+    // Optional title-owned compositor repair for cylindrical sky geometry.
+    // This is deliberately separate from generic adaptive output: most games
+    // should leave the heuristic off.
+    bool adaptive_skybox_fill = false;
+    // Re-anchor transparent text-tile HUD bands over a wide 3D scene. This
+    // remains title-owned because arbitrary 2D backgrounds are not safe to
+    // split or reposition.
+    bool adaptive_hud_anchor = false;
+    // Width of the authored center HUD band that stays centered. Pixels on
+    // either side are anchored to the corresponding wide edge.
+    uint16_t adaptive_hud_center_width = 64;
     // Host presentation quality. These are deliberately post-composition:
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction

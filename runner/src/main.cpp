@@ -536,7 +536,13 @@ int main(int argc, char** argv) {
         }
     }
     nds_gpu2d_set_adaptive_skybox_fill(
-        sm64ds_wide_policy && adaptive_sky_repair);
+        (frontend_options.adaptive_skybox_fill || sm64ds_wide_policy) &&
+        adaptive_sky_repair &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
+    nds_gpu2d_set_adaptive_hud_anchor(
+        frontend_options.adaptive_hud_anchor &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u,
+        frontend_options.adaptive_hud_center_width);
     nds_title_patches_set_sm64ds_adaptive(
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
