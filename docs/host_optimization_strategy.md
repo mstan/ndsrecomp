@@ -559,6 +559,74 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   candidate for the user's detached/adaptive-top acceptance mode until the
   adaptive path can consume GPU-composited output without synchronized CPU
   readback. Do not quote a compute gain for this workstream.
+- 2026-08-01 **wide ComputeRenderer compatibility + readback overlap**:
+  the compute backend now allocates and compiles its resources at the selected
+  256..448-pixel width, exposes the centered native crop and full adaptive
+  surface, preserves polygon ID in otherwise-unused RGB high bits, and passes
+  a complete saved-File-A adaptive traversal. A late-VBlank PBO submission
+  switch (`NDS_COMPUTE_READBACK_OVERLAP=0/1`) reduced fallback readback wait,
+  but it did not make readback-based compute promotable. One continuously
+  contention-gated clean pair on binary
+  `173c64bc34dbb170267a850f3e8647c39e29a6c168e3a62f2781b24942708836`
+  measured **55.36 FPS software vs 53.36 FPS compute-overlap overall
+  (-3.60%)**. Treat the overlap knob as a transitional mechanism, not an
+  optimization win. Clean artifact legs:
+  `20260801-gl43-overlap-saved-ab3-01-soft` and
+  `20260801-gl43-overlap-saved-ab4-01-compute`.
+- 2026-08-01 **direct OpenGL adaptive presentation candidate**:
+  `NDS_COMPUTE_DIRECT_PRESENT=1` gives the detached adaptive top window
+  exclusive ownership of the OpenGL 4.3 context. Supported SM64DS gameplay
+  samples the compute renderer's integer RGB6/alpha5 texture directly,
+  uploads packed CPU-rendered OBJ/HUD metadata, and reproduces priority,
+  blend, brightness, and RenderXPos rules in the presentation shader. The
+  bottom screen remains on the faithful CPU GPU2D/SDL path. Unsupported
+  scenes, screen routing, and DISPCAPCNT retain the PBO readback and complete
+  CPU compositor. The top fallback and HUD textures are double-buffered.
+
+  A continuously contention-gated same-binary profiled direct/software pair
+  measured **51.96 vs 53.62 FPS overall (-3.09%)** without overlap, but direct
+  settled gameplay improved **52.45 -> 57.53 FPS (+9.68%)** and emulation cost
+  **17.53 -> 13.64 ms/frame (-22.16%)**. Enabling the retained VBlank overlap
+  removed most unsupported-scene regression: **54.48 FPS overall (+1.60%)**,
+  initial attract flat, and settled gameplay **58.09 FPS (+10.74%)** at
+  **12.98 ms/frame (-25.95%)**. The latter is near, but not robustly inside,
+  the 12.8 ms headroom goal and still recorded 19 audio underruns. Artifacts:
+  `20260801-gl43-direct-ab1-{01-direct,02-soft,03-direct-overlap}`.
+  A desktop capture (`20260801-gl43-direct-visual-desktop.png`) confirms the
+  21:9 orientation and adaptive HUD corner placement.
+
+  The decisive unprofiled comparison retained two continuously gated clean
+  samples per side from candidate binary
+  `69237ba3bd35b0f2f4aa4f72a9eb0948abf6d86b80ad74b5c0fd469b94dc4426`
+  (one automatically launched soft leg was excluded because its contention
+  monitor lost coverage). Median settled gameplay improved
+  **55.88 -> 58.72 FPS (+5.07%)**, while emulation cost fell
+  **16.32 -> 12.46 ms/frame (-23.66%)**, clearing the 12.8 ms headroom goal
+  for that phase. The whole shortened route regressed
+  **56.55 -> 55.86 FPS (-1.23%)**: initial attract was -4.04%, the
+  file-load interval -4.88%, and audio underruns remained nonzero. Clean legs:
+  `20260801-gl43-direct-ab2-{01-direct,03-soft,04-direct,05-soft}`.
+
+  The finalized binary
+  `07eaf9f65bb0210a32ef1d67d8ba884aa97033c931f8d11769e54622b60df05e`
+  adds an explicit synchronized fallback for framebuffer/hash/screenshot
+  consumers and avoids OpenGL teardown calls when the default software path
+  never created a context. A forced direct-path profile completed the full
+  saved route; settled gameplay ran at **58.51 FPS and 12.65 ms emulation
+  time/frame**, with 368/420 frames presented GPU-resident and the remaining
+  frames deliberately synchronized for diagnostics. Treat this as final-path
+  correctness evidence, not an additional A/B leg. G1 passes all eight
+  fresh-pair firmware scenarios with Tier-3 zero; G2 passes 2,400 default-soft
+  headed frames at 57.816 FPS with zero underruns/errors/input and the exact
+  FNV pair `e333837761ca0d1c,d61d2eb50e96b61d`; G3 byte-locks both screens at
+  every 100M..700M stop. Decode, interpreter-cycle, HLE-manifest,
+  frontend-config, battery-save, and compute-disabled build checks pass.
+
+  This is a promising experimental seam, not a default promotion: the full
+  route does not yet clear the 5% complexity gate, and forced capture, parity,
+  and multi-vendor coverage remain pending. The evidence supports continuing
+  GPU-resident composition; it does not support claiming that OpenGL alone
+  fixes firmware/title CPU cost.
 
 ## Reproduction crib
 

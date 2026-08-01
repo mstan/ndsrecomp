@@ -604,6 +604,13 @@ std::string handle(const std::string& line) {
                std::to_string(capture.worst_row_count) +
                ",\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
     }
+    if (cmd == "framebuffer_sync") {
+        NdsFrontendLiveStats stats{};
+        nds_frontend_live_stats(&stats);
+        if (stats.active) nds_gpu2d_force_cpu_frames(2);
+        return "{\"active\":" + std::to_string(stats.active) +
+               ",\"frames\":" + std::to_string(stats.frames) + "}";
+    }
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
@@ -635,6 +642,10 @@ std::string handle(const std::string& line) {
                ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
                ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +
+               ",\"direct_overlay_ns\":" +
+               std::to_string(gpu.direct_overlay_ns) +
+               ",\"direct_frames\":" +
+               std::to_string(gpu.direct_frames) +
                ",\"scanlines\":" + std::to_string(gpu.scanlines) +
                "},\"gpu3d\":{\"vcount215_ns\":" +
                std::to_string(gpu3d.vcount215_ns) +
@@ -649,6 +660,14 @@ std::string handle(const std::string& line) {
                std::to_string(gpu3d.compute_sync_ns) +
                ",\"compute_sync_calls\":" +
                std::to_string(gpu3d.compute_sync_calls) +
+               ",\"compute_submit_ns\":" +
+               std::to_string(gpu3d.compute_submit_ns) +
+               ",\"compute_submit_calls\":" +
+               std::to_string(gpu3d.compute_submit_calls) +
+               ",\"compute_map_ns\":" +
+               std::to_string(gpu3d.compute_map_ns) +
+               ",\"compute_map_calls\":" +
+               std::to_string(gpu3d.compute_map_calls) +
                "},\"sched\":{\"sampled_rounds\":" +
                std::to_string(sched.sampled_rounds) +
                ",\"rounds\":" + std::to_string(sched.rounds) +

@@ -18,6 +18,7 @@
 
 #include "GPU3D_Compute.h"
 
+#include <algorithm>
 #include <assert.h>
 
 #include "OpenGLSupport.h"
@@ -48,6 +49,8 @@ bool ComputeRenderer::CompileShader(GLuint& shader, const std::string& source, c
     shaderSource += std::to_string(ScreenWidth);
     shaderSource += "\n#define ScreenHeight ";
     shaderSource += std::to_string(ScreenHeight);
+    shaderSource += "\n#define RenderScale ";
+    shaderSource += std::to_string(ScaleFactor);
     shaderSource += "\n#define MaxWorkTiles ";
     shaderSource += std::to_string(MaxWorkTiles);
 
@@ -201,8 +204,6 @@ std::unique_ptr<ComputeRenderer> ComputeRenderer::New()
 
     glGenTextures(1, &result->YSpanIndicesTexture);
     glGenTextures(1, &result->LowResFramebuffer);
-    glBindTexture(GL_TEXTURE_2D, result->LowResFramebuffer);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8UI, 256, 192);
 
     glGenBuffers(1, &result->MetaUniformMemory);
     glBindBuffer(GL_UNIFORM_BUFFER, result->MetaUniformMemory);
@@ -222,8 +223,6 @@ std::unique_ptr<ComputeRenderer> ComputeRenderer::New()
     }
 
     glGenBuffers(1, &result->PixelBuffer);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, result->PixelBuffer);
-    glBufferData(GL_PIXEL_PACK_BUFFER, 256*192*4, NULL, GL_DYNAMIC_READ);
 
     return result;
 }
@@ -242,6 +241,7 @@ ComputeRenderer::~ComputeRenderer()
     glDeleteBuffers(1, &YSpanIndicesTextureMemory);
     glDeleteTextures(1, &YSpanIndicesTexture);
     glDeleteTextures(1, &Framebuffer);
+    glDeleteTextures(1, &LowResFramebuffer);
     glDeleteBuffers(1, &MetaUniformMemory);
 
     glDeleteSamplers(9, Samplers);
@@ -307,7 +307,7 @@ void ComputeRenderer::SetRenderSettings(int scale, bool highResolutionCoordinate
     ShaderStepIdx = 0;
 
     ScaleFactor = scale;
-    ScreenWidth = 256 * ScaleFactor;
+    ScreenWidth = RenderWidth * ScaleFactor;
     ScreenHeight = 192 * ScaleFactor;
 
     TilesPerLine = ScreenWidth/TileSize;
@@ -342,6 +342,16 @@ void ComputeRenderer::SetRenderSettings(int scale, bool highResolutionCoordinate
     glBindTexture(GL_TEXTURE_2D, Framebuffer);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, ScreenWidth, ScreenHeight);
 
+    if (LowResFramebuffer != 0)
+        glDeleteTextures(1, &LowResFramebuffer);
+    glGenTextures(1, &LowResFramebuffer);
+    glBindTexture(GL_TEXTURE_2D, LowResFramebuffer);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8UI, RenderWidth, 192);
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, PixelBuffer);
+    glBufferData(GL_PIXEL_PACK_BUFFER, RenderWidth*192*4, NULL,
+                 GL_DYNAMIC_READ);
+
     // eh those are pretty bad guesses
     // though real hw shouldn't be eable to render all 2048 polygons on every line either
     int maxYSpanIndices = 64*2048 * ScaleFactor;
@@ -355,6 +365,18 @@ void ComputeRenderer::SetRenderSettings(int scale, bool highResolutionCoordinate
 
     glBindTexture(GL_TEXTURE_BUFFER, YSpanIndicesTexture);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA16UI, YSpanIndicesTextureMemory);
+}
+
+void ComputeRenderer::SetRenderWidth(u32 width)
+{
+    const int newWidth =
+        std::clamp<int>(static_cast<int>(width), 256, 448) & ~1;
+    // ScreenWidth is compiled into the shaders and sizes all result buffers.
+    // The runner configures width before SetRenderSettings; changing it later
+    // requires a complete renderer reconstruction.
+    assert(ScaleFactor == -1 || RenderWidth == newWidth);
+    if (ScaleFactor == -1)
+        RenderWidth = newWidth;
 }
 
 void ComputeRenderer::VCount144(GPU& gpu)
@@ -1094,14 +1116,17 @@ void ComputeRenderer::RestartFrame(GPU& gpu)
 
 u32* ComputeRenderer::GetLine(int line)
 {
-    int stride = 256;
+    int stride = RenderWidth;
 
     if (line == 0)
     {
         glBindBuffer(GL_PIXEL_PACK_BUFFER, PixelBuffer);
         u8* data = (u8*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-        if (data) memcpy(&FramebufferCPU[0], data, 4*stride*192);
-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        if (data)
+        {
+            memcpy(&FramebufferCPU[0], data, 4*stride*192);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        }
     }
 
     return &FramebufferCPU[stride * line];

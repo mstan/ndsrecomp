@@ -44,6 +44,7 @@ public:
     void Reset(GPU& gpu) override;
 
     void SetRenderSettings(int scale, bool highResolutionCoordinates);
+    void SetRenderWidth(u32 width) override;
 
     void VCount144(GPU& gpu) override;
 
@@ -55,6 +56,10 @@ public:
     void PrepareCaptureFrame() override;
 
     void BindOutputTexture(int buffer) override;
+    [[nodiscard]] GLuint GetLowResTexture() const noexcept
+    {
+        return LowResFramebuffer;
+    }
 
     void Blit(const GPU& gpu) override;
     void Stop(const GPU& gpu) override;
@@ -216,9 +221,10 @@ private:
     GLuint LowResFramebuffer;
     GLuint PixelBuffer;
 
-    u32 FramebufferCPU[256*192];
+    u32 FramebufferCPU[448*192];
 
     int ScreenWidth, ScreenHeight;
+    int RenderWidth = 256;
     int TilesPerLine, TileLines;
     int ScaleFactor = -1;
     int MaxWorkTiles;

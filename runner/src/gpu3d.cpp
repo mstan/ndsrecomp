@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "io.h"
+#include "gpu2d.h"
 #include "scheduler.h"
 #include "state.h"
 #include "vram.h"
@@ -48,14 +49,21 @@ NdsGxWriteTraceEntry g_gx_write_trace[kGxWriteTraceSize] = {};
 uint64_t g_gx_write_trace_count = 0;
 
 NdsGpu3dProfile g_gpu3d_profile{};
+using ProfileClock = std::chrono::steady_clock;
+bool profiling();
+void profile_add(uint64_t& dst, ProfileClock::time_point start);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 bool g_compute_rendered_frame = false;
+bool g_compute_readback_pending = false;
 bool g_compute_frame_ready = false;
 bool g_compute_shader_setup_failed = false;
 bool g_compute_runtime_failed = false;
-uint32_t g_compute_zero_line[256] = {};
-uint32_t g_compute_frame[256 * 192] = {};
-uint32_t g_compute_scrolled_line[256] = {};
+constexpr uint32_t kComputeMaxWidth = 448u;
+uint32_t g_compute_zero_line[kComputeMaxWidth] = {};
+uint32_t g_compute_frame[kComputeMaxWidth * 192u] = {};
+uint32_t g_compute_attr_frame[kComputeMaxWidth * 192u] = {};
+uint32_t g_compute_scrolled_line[kComputeMaxWidth] = {};
+uint32_t g_compute_scrolled_attr_line[kComputeMaxWidth] = {};
 
 void clear_compute_gl_errors() {
     while (glGetError() != GL_NO_ERROR) {}
@@ -71,14 +79,101 @@ bool compute_gl_stage_failed(const char* stage) {
     }
     return failed;
 }
+
+bool compute_readback_overlap() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_COMPUTE_READBACK_OVERLAP");
+        if (!value || !*value || std::strcmp(value, "0") == 0) return false;
+        if (std::strcmp(value, "1") == 0) return true;
+        std::fprintf(stderr,
+            "[gpu3d] invalid NDS_COMPUTE_READBACK_OVERLAP "
+            "(expected 0/1); using 0\n");
+        return false;
+    }();
+    return enabled;
+}
+
+void compute_readback_failed(const char* stage) {
+    g_compute_rendered_frame = false;
+    g_compute_readback_pending = false;
+    g_compute_frame_ready = false;
+    if (!g_compute_runtime_failed) {
+        std::fprintf(stderr, "[gpu3d] compute frame %s failed\n", stage);
+        g_compute_runtime_failed = true;
+    }
+    scheduler_terminal_halt_all("compute frame render/readback failure");
+}
+
+void compute_submit_readback() {
+    if (!g_compute_rendered_frame || g_compute_readback_pending) return;
+    const auto start = profiling() ? ProfileClock::now()
+                                   : ProfileClock::time_point{};
+    auto& renderer = g_nds.GPU.GPU3D.GetCurrentRenderer();
+    // Order the compute shader's image stores before queuing the low-resolution
+    // texture copy into its pixel-pack buffer.
+    glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    renderer.PrepareCaptureFrame();
+    g_compute_rendered_frame = false;
+    const bool failed =
+        compute_gl_stage_failed("frame render/readback submit");
+    if (profiling()) {
+        profile_add(g_gpu3d_profile.compute_submit_ns, start);
+        profile_add(g_gpu3d_profile.compute_sync_ns, start);
+        ++g_gpu3d_profile.compute_submit_calls;
+    }
+    if (failed) {
+        if (profiling()) ++g_gpu3d_profile.compute_sync_calls;
+        compute_readback_failed("render/readback submit");
+        return;
+    }
+    g_compute_readback_pending = true;
+}
+
+void compute_finish_readback() {
+    if (!g_compute_readback_pending) return;
+    const auto start = profiling() ? ProfileClock::now()
+                                   : ProfileClock::time_point{};
+    // PrepareCaptureFrame left the renderer's PBO bound. Mapping waits only
+    // for copy work that did not finish during the scanline overlap.
+    void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+    bool valid = mapped != nullptr;
+    if (mapped) {
+        const size_t frame_bytes =
+            static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
+            192u * sizeof(uint32_t);
+        std::memcpy(g_compute_frame, mapped, frame_bytes);
+        const size_t pixel_count = frame_bytes / sizeof(uint32_t);
+        for (size_t i = 0; i < pixel_count; ++i) {
+            const uint32_t packed = g_compute_frame[i];
+            const uint32_t polygon_id =
+                ((packed >> 6) & 0x03u) |
+                (((packed >> 14) & 0x03u) << 2) |
+                (((packed >> 22) & 0x03u) << 4);
+            g_compute_attr_frame[i] = polygon_id << 24;
+            g_compute_frame[i] = packed & 0xFF3F3F3Fu;
+        }
+        if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE) valid = false;
+    }
+    g_compute_readback_pending = false;
+    const bool failed = compute_gl_stage_failed("frame readback map");
+    if (profiling()) {
+        profile_add(g_gpu3d_profile.compute_map_ns, start);
+        profile_add(g_gpu3d_profile.compute_sync_ns, start);
+        ++g_gpu3d_profile.compute_map_calls;
+        ++g_gpu3d_profile.compute_sync_calls;
+    }
+    if (!valid || failed) {
+        compute_readback_failed("readback map");
+        return;
+    }
+    g_compute_frame_ready = true;
+}
 #endif
 
 bool profiling() {
     static const bool enabled = std::getenv("NDS_PROFILE_GPU") != nullptr;
     return enabled;
 }
-
-using ProfileClock = std::chrono::steady_clock;
 
 void profile_add(uint64_t& dst, ProfileClock::time_point start) {
     dst += static_cast<uint64_t>(
@@ -238,6 +333,7 @@ void nds_gpu3d_use_soft_renderer(bool threaded) {
         g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(replacement));
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         g_compute_rendered_frame = false;
+        g_compute_readback_pending = false;
         g_compute_frame_ready = false;
 #endif
     }
@@ -260,13 +356,34 @@ bool nds_gpu3d_compute_runtime_failed() {
 #endif
 }
 
+uint32_t nds_gpu3d_compute_output_texture() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    return renderer ? renderer->GetLowResTexture() : 0u;
+#else
+    return 0u;
+#endif
+}
+
 bool nds_gpu3d_use_compute_renderer() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     g_compute_shader_setup_failed = false;
     g_compute_runtime_failed = false;
     clear_compute_gl_errors();
+    const uint32_t render_width = g_nds.GPU.GPU3D.GetRenderWidth();
+    if (render_width < 256u || render_width > kComputeMaxWidth ||
+        (render_width % 64u) != 0u) {
+        std::fprintf(stderr,
+                     "[gpu3d] compute render width %u is unsupported\n",
+                     render_width);
+        return false;
+    }
     auto renderer = melonDS::ComputeRenderer::New();
     if (!renderer || compute_gl_stage_failed("initialization")) return false;
+    // Width is a shader constant and determines every framebuffer/PBO
+    // allocation. Establish it before settings allocate or compile anything.
+    renderer->SetRenderWidth(render_width);
     renderer->SetRenderSettings(1, false);
     if (compute_gl_stage_failed("render settings")) return false;
     while (renderer->NeedsShaderCompile()) {
@@ -284,8 +401,11 @@ bool nds_gpu3d_use_compute_renderer() {
         }
     }
     std::fprintf(stderr, "[gpu3d] compute shaders ready          \n");
+    std::fprintf(stderr, "[gpu3d] compute readback overlap: %s\n",
+                 compute_readback_overlap() ? "on" : "off");
     g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(renderer));
     g_compute_rendered_frame = false;
+    g_compute_readback_pending = false;
     g_compute_frame_ready = false;
     return true;
 #else
@@ -398,6 +518,7 @@ void nds_gpu3d_reset() {
     g_gpu3d_profile = NdsGpu3dProfile{};
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     g_compute_rendered_frame = false;
+    g_compute_readback_pending = false;
     g_compute_frame_ready = false;
 #endif
     nds_gxfifo_set_stall(false);
@@ -497,6 +618,9 @@ void nds_gpu3d_vcount215() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         if (g_nds.GPU.GPU3D.IsRendererAccelerated())
             g_compute_rendered_frame = true;
+        if (g_compute_rendered_frame && compute_readback_overlap() &&
+            nds_gpu2d_requires_3d_readback())
+            compute_submit_readback();
 #endif
         return;
     }
@@ -508,30 +632,39 @@ void nds_gpu3d_vcount215() {
 #endif
     profile_add(g_gpu3d_profile.vcount215_ns, start);
     ++g_gpu3d_profile.vcount215_calls;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_compute_rendered_frame && compute_readback_overlap() &&
+        nds_gpu2d_requires_3d_readback())
+        compute_submit_readback();
+#endif
 }
 
 const uint32_t* nds_gpu3d_line(int line) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     if (g_nds.GPU.GPU3D.IsRendererAccelerated()) {
+        const uint32_t width = g_nds.GPU.GPU3D.GetRenderWidth();
         if (!g_compute_frame_ready || g_nds.GPU.GPU3D.AbortFrame)
-            return g_compute_zero_line;
-        const uint32_t* raw = &g_compute_frame[256 * line];
+            return g_compute_zero_line + (width - 256u) / 2u;
+        const uint32_t* raw = &g_compute_frame[width * line];
         const uint16_t xpos = g_nds.GPU.GPU3D.GetRenderXPos();
-        if (xpos == 0) return raw;
+        if (xpos == 0) return raw + (width - 256u) / 2u;
         if (xpos & 0x100u) {
             int i = 0;
-            int j = xpos;
-            for (; j < 512; ++i, ++j) g_compute_scrolled_line[i] = 0;
-            for (j = 0; i < 256; ++i, ++j)
+            int shift = 512 - xpos;
+            if (shift > static_cast<int>(width))
+                shift = static_cast<int>(width);
+            for (; i < shift; ++i) g_compute_scrolled_line[i] = 0;
+            for (int j = 0; i < static_cast<int>(width); ++i, ++j)
                 g_compute_scrolled_line[i] = raw[j];
         } else {
             int i = 0;
             int j = xpos;
-            for (; j < 256; ++i, ++j)
+            for (; j < static_cast<int>(width); ++i, ++j)
                 g_compute_scrolled_line[i] = raw[j];
-            for (; i < 256; ++i) g_compute_scrolled_line[i] = 0;
+            for (; i < static_cast<int>(width); ++i)
+                g_compute_scrolled_line[i] = 0;
         }
-        return g_compute_scrolled_line;
+        return g_compute_scrolled_line + (width - 256u) / 2u;
     }
 #endif
     if (!profiling()) {
@@ -547,7 +680,8 @@ const uint32_t* nds_gpu3d_line(int line) {
 
 bool nds_gpu3d_set_output_width(uint16_t width) {
     if (width < 256u || width > 448u || (width & 1u)) return false;
-    if (width != 256u && g_nds.GPU.GPU3D.IsRendererAccelerated())
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
+        width != g_nds.GPU.GPU3D.GetRenderWidth())
         return false;
     g_nds.GPU.GPU3D.SetRenderWidth(width);
     return true;
@@ -559,16 +693,62 @@ uint16_t nds_gpu3d_output_width() {
 
 const uint32_t* nds_gpu3d_wide_line(int line) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_nds.GPU.GPU3D.IsRendererAccelerated())
-        return nds_gpu3d_line(line);
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) {
+        const uint32_t width = g_nds.GPU.GPU3D.GetRenderWidth();
+        if (!g_compute_frame_ready || g_nds.GPU.GPU3D.AbortFrame)
+            return g_compute_zero_line;
+        const uint32_t* raw = &g_compute_frame[width * line];
+        const uint16_t xpos = g_nds.GPU.GPU3D.GetRenderXPos();
+        if (xpos == 0) return raw;
+        if (xpos & 0x100u) {
+            int i = 0;
+            int shift = 512 - xpos;
+            if (shift > static_cast<int>(width))
+                shift = static_cast<int>(width);
+            for (; i < shift; ++i) g_compute_scrolled_line[i] = 0;
+            for (int j = 0; i < static_cast<int>(width); ++i, ++j)
+                g_compute_scrolled_line[i] = raw[j];
+        } else {
+            int i = 0;
+            int j = xpos;
+            for (; j < static_cast<int>(width); ++i, ++j)
+                g_compute_scrolled_line[i] = raw[j];
+            for (; i < static_cast<int>(width); ++i)
+                g_compute_scrolled_line[i] = 0;
+        }
+        return g_compute_scrolled_line;
+    }
 #endif
     return g_nds.GPU.GPU3D.GetLine(line);
 }
 
 const uint32_t* nds_gpu3d_wide_attr_line(int line) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_nds.GPU.GPU3D.IsRendererAccelerated())
-        return nullptr;
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) {
+        const uint32_t width = g_nds.GPU.GPU3D.GetRenderWidth();
+        if (!g_compute_frame_ready || g_nds.GPU.GPU3D.AbortFrame)
+            return g_compute_zero_line;
+        const uint32_t* raw = &g_compute_attr_frame[width * line];
+        const uint16_t xpos = g_nds.GPU.GPU3D.GetRenderXPos();
+        if (xpos == 0) return raw;
+        if (xpos & 0x100u) {
+            int i = 0;
+            int shift = 512 - xpos;
+            if (shift > static_cast<int>(width))
+                shift = static_cast<int>(width);
+            for (; i < shift; ++i) g_compute_scrolled_attr_line[i] = 0;
+            for (int j = 0; i < static_cast<int>(width); ++i, ++j)
+                g_compute_scrolled_attr_line[i] = raw[j];
+        } else {
+            int i = 0;
+            int j = xpos;
+            for (; j < static_cast<int>(width); ++i, ++j)
+                g_compute_scrolled_attr_line[i] = raw[j];
+            for (; i < static_cast<int>(width); ++i)
+                g_compute_scrolled_attr_line[i] = 0;
+        }
+        return g_compute_scrolled_attr_line;
+    }
 #endif
     return g_nds.GPU.GPU3D.GetAttrLine(line);
 }
@@ -587,49 +767,18 @@ void nds_gpu3d_start_frame() {
         g_nds.GPU.GPU3D.AbortFrame = false;
     }
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
-        g_compute_rendered_frame) {
-        const auto sync_start = profiling() ? ProfileClock::now()
-                                            : ProfileClock::time_point{};
-        auto& renderer = g_nds.GPU.GPU3D.GetCurrentRenderer();
-        // Order the compute shader's image stores before glGetTexImage copies
-        // the low-resolution texture into the pixel-pack buffer.
-        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-        renderer.PrepareCaptureFrame();
-        // Map the bound PBO into runner-owned storage. Upstream GetLine(0)
-        // hides glUnmapBuffer's success result, so reproduce its fast path
-        // here while explicitly checking map and unmap validity.
-        void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-        bool readback_valid = mapped != nullptr;
-        if (mapped) {
-            std::memcpy(g_compute_frame, mapped, sizeof(g_compute_frame));
-            if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE)
-                readback_valid = false;
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) {
+        // Reference mode reproduces the original immediate submit+map here.
+        // Forced overlap queues at VCount215 and pays only any unfinished
+        // portion of the copy at the next frame boundary.
+        if (g_compute_readback_pending) compute_finish_readback();
+        if (g_compute_rendered_frame) {
+            if (nds_gpu2d_requires_3d_readback())
+                compute_submit_readback();
+            else
+                g_compute_rendered_frame = false;
         }
-        g_compute_rendered_frame = false;
-        // Do not clear GL errors before this sequence: the drain must also
-        // catch errors raised by the preceding VCount215 compute render.
-        const bool gl_failed =
-            compute_gl_stage_failed("frame render/readback");
-        if (!readback_valid || gl_failed) {
-            if (profiling()) {
-                profile_add(g_gpu3d_profile.compute_sync_ns, sync_start);
-                ++g_gpu3d_profile.compute_sync_calls;
-            }
-            g_compute_frame_ready = false;
-            if (!g_compute_runtime_failed) {
-                std::fprintf(stderr,
-                             "[gpu3d] compute frame render/readback failed\n");
-                g_compute_runtime_failed = true;
-            }
-            scheduler_terminal_halt_all("compute frame render/readback failure");
-            return;
-        }
-        g_compute_frame_ready = true;
-        if (profiling()) {
-            profile_add(g_gpu3d_profile.compute_sync_ns, sync_start);
-            ++g_gpu3d_profile.compute_sync_calls;
-        }
+        if (g_compute_readback_pending) compute_finish_readback();
     }
 #endif
 }

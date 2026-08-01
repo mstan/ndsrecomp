@@ -51,18 +51,21 @@ G1/G2/G3 validation.
 
 ### 3. Adaptive widescreen on GPU-composited 3D
 
-The current experimental melonDS ComputeRenderer uses OpenGL 4.3, but adaptive
-widescreen deliberately requires the faithful soft renderer. Promotion needs
-a wide GPU render target and direct composition into the presentation path,
-without synchronously reading the full frame back to the CPU.
+The experimental melonDS ComputeRenderer now supports a 448x192 adaptive
+target and an opt-in direct OpenGL top-window presenter. In supported SM64DS
+gameplay it keeps 3D GPU-resident and uploads only packed OBJ/HUD metadata;
+unsupported scenes and display capture retain the faithful CPU fallback.
+Clean unprofiled evidence shows a 23.66% reduction in settled-gameplay
+emulation time and clears the 12.8 ms phase target, but regresses the whole
+shortened route by 1.23%, so software remains the default.
 
-Required work includes:
+Promotion work still includes:
 
-- preserve native 2D/HUD corner anchoring over the wide 3D surface;
-- support display capture and CPU consumers without stale frames;
+- forced DISPCAPCNT, screen-routing, RenderXPos, and transition tests;
 - characterize soft/compute image differences and failure fallback;
 - validate NVIDIA, AMD, and Intel behavior;
-- measure the exact detached/adaptive mode, not native stacked output.
+- unprofiled multi-pair ABBA in the exact detached/adaptive mode;
+- clear the 5% full-route complexity gate before making OpenGL the default.
 
 ### 4. Slow-frame and host-scheduling tails
 
@@ -80,4 +83,3 @@ Actor culling and the minimap are fixed, but the courtyard sky can still show
 stretching or black voids at 21:9. Prior generic polygon widening was rejected.
 Revisit with title/decomp-aware skybox geometry or draw identification rather
 than another global renderer heuristic.
-

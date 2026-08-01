@@ -1642,7 +1642,7 @@ void main()
     imageStore(FinalFB, ivec2(gl_GlobalInvocationID.xy), result);
 
     // It's a division by constant, so using the builtin division is fine
-    const int scale = ScreenWidth/256;
+    const int scale = RenderScale;
     ivec2 lowresCoordinate = ivec2(gl_GlobalInvocationID.xy) / scale;
     ivec2 lowresCoordinateRest = ivec2(gl_GlobalInvocationID.xy) % scale;
     if (lowresCoordinateRest == ivec2(0, 0))
@@ -1652,6 +1652,13 @@ void main()
         color8.y = bitfieldExtract(color.x, 8, 8);
         color8.z = bitfieldExtract(color.x, 16, 8);
         color8.w = bitfieldExtract(color.x, 24, 8);
+        // Preserve the six-bit polygon ID for runner-side adaptive sky
+        // repair without another readback surface. Each RGB channel is
+        // six-bit, leaving exactly two unused high bits per byte.
+        uint polygonId = bitfieldExtract(attr.x, 24, 6);
+        color8.x |= (polygonId & 0x03U) << 6;
+        color8.y |= ((polygonId >> 2) & 0x03U) << 6;
+        color8.z |= ((polygonId >> 4) & 0x03U) << 6;
         imageStore(LowResFB, lowresCoordinate, color8);
     }
 }

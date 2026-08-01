@@ -481,12 +481,6 @@ int main(int argc, char** argv) {
             nds_adaptive_screens_name(frontend_options.adaptive_supported));
         return 2;
     }
-    if (interactive && frontend_options.adaptive_screens != NDS_ADAPTIVE_NONE &&
-        compute_requested) {
-        std::fprintf(stderr,
-            "adaptive widescreen currently requires the soft 3D renderer\n");
-        return 2;
-    }
     bool adaptive_sky_repair = true;
     if (const char* value = std::getenv("NDS_ADAPTIVE_SKY_REPAIR")) {
         if (value[0] == '0' && value[1] == '\0')

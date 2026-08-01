@@ -21,6 +21,9 @@ void nds_gpu3d_use_soft_renderer(bool threaded);
 bool nds_gpu3d_use_compute_renderer();
 bool nds_gpu3d_compute_renderer_built();
 bool nds_gpu3d_compute_runtime_failed();
+// Host presentation handle for the accelerated renderer's integer
+// RGB6/alpha5 surface. Valid only while its OpenGL context is current.
+uint32_t nds_gpu3d_compute_output_texture();
 
 struct NdsGpu3dProfile {
     uint64_t vcount215_ns;
@@ -33,6 +36,10 @@ struct NdsGpu3dProfile {
     // This is where ComputeRenderer's GPU wait/readback is paid.
     uint64_t compute_sync_ns;
     uint64_t compute_sync_calls;
+    uint64_t compute_submit_ns;
+    uint64_t compute_submit_calls;
+    uint64_t compute_map_ns;
+    uint64_t compute_map_calls;
 };
 void nds_gpu3d_profile(NdsGpu3dProfile* out);
 

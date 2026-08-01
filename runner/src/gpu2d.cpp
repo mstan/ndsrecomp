@@ -64,6 +64,10 @@ std::array<AdaptiveFrame, 2> g_wide_3d_frame{};
 std::array<AdaptiveFrame, 2> g_wide_3d_attr_frame{};
 std::array<uint16_t, 2> g_wide_3d_width{};
 bool g_adaptive_skybox_fill = false;
+AdaptiveFrame g_direct_object_frame{};
+bool g_direct_present_enabled = false;
+bool g_direct_frame_active = false;
+uint32_t g_direct_force_cpu_frames = 0;
 int g_front = 0;
 uint64_t g_render_ns = 0;
 uint64_t g_obj_ns = 0;
@@ -71,10 +75,32 @@ uint64_t g_engine_ns[2] = {};
 uint64_t g_text_lines[2][5] = {};
 uint64_t g_no_effect_lines[2] = {};
 uint64_t g_render_scanlines = 0;
+uint64_t g_direct_frames = 0;
+uint64_t g_direct_overlay_ns = 0;
+
+bool enabled(int engine);
 
 bool profiling() {
     static const bool enabled = std::getenv("NDS_PROFILE_GPU") != nullptr;
     return enabled;
+}
+
+bool direct_scene_supported() {
+    if (!g_direct_present_enabled) return false;
+    // The direct presenter currently owns the physical top window only.
+    if ((nds_powercontrol9() & 0x8000u) == 0u) return false;
+    if (!enabled(0)) return false;
+    Unit& u = g_unit[0];
+    if ((u.capture & 0x80000000u) != 0u || u.capture_latch) return false;
+    const uint8_t* const palette = nds_vram_renderer_palette(0);
+    const uint8_t* const oam = nds_vram_renderer_oam(0);
+    const NdsVramRendererView* const vram = nds_vram_renderer_view(0);
+    const uint32_t mode = (u.dispcnt >> 16) & 3u;
+    const bool bg0_3d = (u.dispcnt & 0x8u) != 0 &&
+                        (u.dispcnt & 0x100u) != 0;
+    return palette && oam && vram && !(u.dispcnt & 0x80u) &&
+           mode == 1u && bg0_3d && (u.dispcnt & 0x0E00u) == 0u &&
+           nds_gpu3d_output_width() > 256u;
 }
 
 uint16_t view16(const uint8_t* view, uint32_t offset) {
@@ -1378,18 +1404,23 @@ void reg_write8(Unit& u, int engine, uint32_t off, uint8_t v) {
 void nds_gpu2d_reset(){
     g_unit={};
     g_front = 0;
+    g_direct_frame_active = false;
+    g_direct_force_cpu_frames = 0;
     g_render_ns = 0;
     g_obj_ns = 0;
     g_engine_ns[0] = g_engine_ns[1] = 0;
     std::memset(g_text_lines, 0, sizeof(g_text_lines));
     g_no_effect_lines[0] = g_no_effect_lines[1] = 0;
     g_render_scanlines = 0;
+    g_direct_frames = 0;
+    g_direct_overlay_ns = 0;
     for (auto& buffers : g_fb)
         for (auto& frame : buffers)
             frame.fill(0xFFFFFFFFu);
     for (auto& frame : g_wide_3d_frame) frame.fill(0u);
     for (auto& frame : g_wide_3d_attr_frame) frame.fill(0u);
     g_wide_3d_width.fill(0u);
+    g_direct_object_frame.fill(0u);
 }
 void nds_gpu2d_stop(){
     for (auto& buffers : g_fb)
@@ -1406,12 +1437,12 @@ void nds_gpu2d_write(uint32_t addr,uint32_t value,uint32_t width){
 void nds_gpu2d_render_scanline(int line) {
     if (line < 0 || line >= 192) return;
     if (!profiling()) {
-        render_engine_line(0, line);
+        if (!g_direct_frame_active) render_engine_line(0, line);
         render_engine_line(1, line);
         return;
     }
     const auto start = std::chrono::steady_clock::now();
-    render_engine_line(0, line);
+    if (!g_direct_frame_active) render_engine_line(0, line);
     const auto middle = std::chrono::steady_clock::now();
     render_engine_line(1, line);
     const auto finish = std::chrono::steady_clock::now();
@@ -1429,6 +1460,10 @@ void nds_gpu2d_render_frame(){
         nds_gpu2d_render_scanline(line);
 }
 void nds_gpu2d_start_frame(){
+    const bool force_cpu = g_direct_force_cpu_frames != 0u;
+    if (force_cpu) --g_direct_force_cpu_frames;
+    g_direct_frame_active = !force_cpu && direct_scene_supported();
+    if (g_direct_frame_active) ++g_direct_frames;
     for (auto& u : g_unit) {
         for (int affine = 0; affine < 2; ++affine) {
             u.refx_internal[affine] = u.refx[affine];
@@ -1454,6 +1489,83 @@ const uint32_t* nds_gpu2d_framebuffer(int screen){
 }
 void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
     g_adaptive_skybox_fill = enabled;
+}
+
+void nds_gpu2d_set_direct_present(bool enabled) {
+    g_direct_present_enabled = enabled;
+    if (!enabled) g_direct_frame_active = false;
+}
+
+bool nds_gpu2d_direct_frame_active() {
+    return g_direct_frame_active;
+}
+
+bool nds_gpu2d_requires_3d_readback() {
+    return !g_direct_frame_active;
+}
+
+void nds_gpu2d_force_cpu_frames(uint32_t frames) {
+    g_direct_force_cpu_frames =
+        std::max(g_direct_force_cpu_frames, frames);
+}
+
+bool nds_gpu2d_direct_frame(NdsGpu2dDirectFrame* out) {
+    if (!out || !g_direct_frame_active || !direct_scene_supported())
+        return false;
+    Unit& u = g_unit[0];
+    const uint8_t* const palette = nds_vram_renderer_palette(0);
+    const uint8_t* const oam = nds_vram_renderer_oam(0);
+    const NdsVramRendererView* const vram = nds_vram_renderer_view(0);
+    const int output_width = nds_gpu3d_output_width();
+    if (!palette || !oam || !vram || output_width <= 256 ||
+        output_width > kMaxAdaptiveWidth)
+        return false;
+
+    const auto start = profiling() ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+    std::array<Pixel, kMaxAdaptiveWidth> obj{};
+    for (int y = 0; y < 192; ++y) {
+        render_obj_line(0, y, obj.data(), output_width,
+                        oam, palette, *vram);
+        uint32_t* const dst =
+            g_direct_object_frame.data() +
+            static_cast<size_t>(y) * output_width;
+        for (int x = 0; x < output_width; ++x) {
+            const Pixel& pixel = obj[x];
+            if (!pixel.valid) {
+                dst[x] = 0u;
+                continue;
+            }
+            const uint32_t r = pixel.color & 0x3Fu;
+            const uint32_t g = (pixel.color >> 8) & 0x3Fu;
+            const uint32_t b =
+                ((pixel.color >> 16) & 0x3Fu) |
+                (static_cast<uint32_t>(pixel.priority & 3u) << 6);
+            const uint32_t alpha_code =
+                pixel.alpha == 0u ? 17u :
+                pixel.alpha == 0xFFu ? 0xFFu :
+                std::min<uint32_t>(16u, pixel.alpha);
+            dst[x] = r | (g << 8) | (b << 16) |
+                     (alpha_code << 24);
+        }
+    }
+
+    out->object_pixels = g_direct_object_frame.data();
+    out->width = static_cast<uint16_t>(output_width);
+    out->backdrop_color = rgb6(view16(palette, 0));
+    out->bldcnt = u.bldcnt;
+    out->master_bright = u.master_bright;
+    out->eva = u.eva;
+    out->evb = u.evb;
+    out->evy = u.evy;
+    out->priority_3d = static_cast<uint8_t>(u.bgcnt[0] & 3u);
+    out->render_xpos = nds_gpu3d_render_xpos();
+    if (profiling()) {
+        g_direct_overlay_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start).count());
+    }
+    return true;
 }
 
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
@@ -1627,4 +1739,6 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     out->no_effect_lines[0] = g_no_effect_lines[0];
     out->no_effect_lines[1] = g_no_effect_lines[1];
     out->scanlines = g_render_scanlines;
+    out->direct_frames = g_direct_frames;
+    out->direct_overlay_ns = g_direct_overlay_ns;
 }

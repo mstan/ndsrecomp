@@ -280,6 +280,7 @@ uint64_t framebuffer_rgb_fnv(int screen) {
 
 struct FrontendPresentation {
     bool separate = false;
+    bool gl_top = false;
     SDL_Window* windows[2]{};
     SDL_Renderer* renderers[2]{};
     SDL_Texture* textures[2]{};
@@ -325,6 +326,16 @@ bool create_presentation(const NdsFrontendOptions& options,
                          FrontendPresentation& presentation) {
     presentation.separate =
         options.screen_layout == NdsScreenLayout::Separate;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    const char* renderer_selection = std::getenv("NDS_3D_RENDERER");
+    const char* direct_selection =
+        std::getenv("NDS_COMPUTE_DIRECT_PRESENT");
+    presentation.gl_top = presentation.separate &&
+        (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u &&
+        renderer_selection &&
+        std::strcmp(renderer_selection, "compute") == 0 &&
+        direct_selection && std::strcmp(direct_selection, "1") == 0;
+#endif
     const int aa_scale = options.antialiasing >= 8 ? 4 :
                          options.antialiasing >= 4 ? 3 :
                          options.antialiasing >= 2 ? 2 : 1;
@@ -344,6 +355,10 @@ bool create_presentation(const NdsFrontendOptions& options,
     const int first_height = presentation.separate
         ? kScreenHeight * kWindowScale
         : kScreenHeight * 2 * kWindowScale;
+    const uint32_t top_window_flags =
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+        (presentation.gl_top
+             ? static_cast<uint32_t>(SDL_WINDOW_OPENGL) : 0u);
     presentation.windows[0] = SDL_CreateWindow(
         presentation.separate ? "ndsrecomp - Top Screen"
                               : "ndsrecomp firmware preview",
@@ -351,16 +366,18 @@ bool create_presentation(const NdsFrontendOptions& options,
         (presentation.separate ? presentation.screen_widths[0]
                                : presentation.canvas_width) * kWindowScale,
         first_height,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        top_window_flags);
     if (!presentation.windows[0]) {
         std::fprintf(stderr, "[sdl] window failed: %s\n", SDL_GetError());
         return false;
     }
-    presentation.renderers[0] = create_renderer(presentation.windows[0]);
-    if (!presentation.renderers[0]) {
-        std::fprintf(stderr, "[sdl] renderer failed: %s\n", SDL_GetError());
-        destroy_presentation(presentation);
-        return false;
+    if (!presentation.gl_top) {
+        presentation.renderers[0] = create_renderer(presentation.windows[0]);
+        if (!presentation.renderers[0]) {
+            std::fprintf(stderr, "[sdl] renderer failed: %s\n", SDL_GetError());
+            destroy_presentation(presentation);
+            return false;
+        }
     }
 
     if (presentation.separate) {
@@ -394,6 +411,11 @@ bool create_presentation(const NdsFrontendOptions& options,
     }
 
     for (int screen = 0; screen < 2; ++screen) {
+        if (screen == 0 && presentation.gl_top) {
+            presentation.window_ids[screen] =
+                SDL_GetWindowID(presentation.windows[screen]);
+            continue;
+        }
         const int logical_height =
             !presentation.separate && screen == 0
                 ? kScreenHeight * 2 : kScreenHeight;
@@ -456,6 +478,7 @@ struct PresentationTicks {
     uint64_t upload = 0;
     uint64_t draw = 0;
     uint64_t swap = 0;
+    bool ok = true;
 };
 
 PresentationTicks present_screens(FrontendPresentation& presentation,
@@ -464,6 +487,39 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
                                   const uint32_t* bottom_pixels,
                                   int bottom_width) {
     PresentationTicks ticks{};
+    if (presentation.gl_top) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        NdsGpu2dDirectFrame direct_frame{};
+        const bool direct = nds_gpu2d_direct_frame(&direct_frame);
+        NdsComputePresentTicks gl_ticks{};
+        if (!nds_compute_host_present_top(
+                top_pixels, static_cast<uint16_t>(top_width),
+                direct ? &direct_frame : nullptr, &gl_ticks)) {
+            std::fprintf(stderr, "[gpu3d] direct top presentation failed\n");
+            ticks.ok = false;
+            return ticks;
+        }
+        ticks.upload += gl_ticks.upload;
+        ticks.draw += gl_ticks.draw;
+        ticks.swap += gl_ticks.swap;
+        uint64_t start = SDL_GetPerformanceCounter();
+        SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
+                          bottom_width * sizeof(uint32_t));
+        ticks.upload += SDL_GetPerformanceCounter() - start;
+        const SDL_Rect screen_rect{
+            0, 0, presentation.screen_widths[1], kScreenHeight};
+        SDL_Renderer* renderer = presentation.renderers[1];
+        start = SDL_GetPerformanceCounter();
+        SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
+        SDL_RenderClear(renderer);
+        render_screen(presentation, 1, screen_rect);
+        ticks.draw += SDL_GetPerformanceCounter() - start;
+        start = SDL_GetPerformanceCounter();
+        SDL_RenderPresent(renderer);
+        ticks.swap += SDL_GetPerformanceCounter() - start;
+#endif
+        return ticks;
+    }
     uint64_t start = SDL_GetPerformanceCounter();
     SDL_UpdateTexture(presentation.textures[0], nullptr, top_pixels,
                       top_width * sizeof(uint32_t));
@@ -561,11 +617,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     // Activate only after every fallible visible-frontend allocation. From
     // here onward teardown always destroys the compute renderer while this
     // context is current.
-    if (!nds_compute_host_start()) {
+    if (!nds_compute_host_start(
+            presentation.gl_top ? presentation.windows[0] : nullptr)) {
         destroy_presentation(presentation);
         SDL_Quit();
         return 1;
     }
+    nds_gpu2d_set_direct_present(
+        nds_compute_host_has_visible_context());
 #else
     if (const char* selection = std::getenv("NDS_3D_RENDERER")) {
         if (std::strcmp(selection, "compute") == 0)
@@ -875,9 +934,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         uint16_t top_width = 256;
         uint16_t bottom_width = 256;
         const uint64_t adaptive_start = SDL_GetPerformanceCounter();
-        if (options.adaptive_screens & NDS_ADAPTIVE_TOP)
+        if ((options.adaptive_screens & NDS_ADAPTIVE_TOP) &&
+            !nds_gpu2d_direct_frame_active())
             top_pixels =
                 nds_gpu2d_adaptive_framebuffer(0, &top_width);
+        else if (nds_gpu2d_direct_frame_active())
+            top_width = nds_gpu3d_output_width();
         if (options.adaptive_screens & NDS_ADAPTIVE_BOTTOM)
             bottom_pixels =
                 nds_gpu2d_adaptive_framebuffer(1, &bottom_width);
@@ -887,6 +949,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         const PresentationTicks presentation_ticks = present_screens(
             presentation, top_pixels, top_width,
             bottom_pixels, bottom_width);
+        if (!presentation_ticks.ok) {
+            compute_failed = true;
+            running = false;
+            break;
+        }
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
         phase_swap_ticks += presentation_ticks.swap;
@@ -979,6 +1046,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         audio_queue.underruns.load(std::memory_order_relaxed);
     if (audio) SDL_CloseAudioDevice(audio);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+    nds_gpu2d_set_direct_present(false);
     nds_compute_host_stop();
 #endif
     if (controller) SDL_GameControllerClose(controller);
@@ -1065,6 +1133,10 @@ void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
 void nds_frontend_black_band_scan(bool enabled, bool reset) {
     if (reset) g_black_band = {};
     g_black_band.enabled = enabled ? 1 : 0;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    nds_gpu2d_set_direct_present(
+        !enabled && nds_compute_host_has_visible_context());
+#endif
 }
 
 void nds_frontend_black_band_capture(NdsFrontendBlackBandCapture* out) {

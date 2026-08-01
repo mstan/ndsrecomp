@@ -277,7 +277,8 @@ bool CompileComputeProgram(GLuint& result, const std::string& source, const std:
         {
         }
     }*/
-    Log(LogLevel::Error, "Shader %s from cache was rejected\n", name.c_str());
+    // Program-binary caching is disabled in this imported renderer. Do not
+    // report every normal source compilation as a cache error.
 
     GLuint shader;
     bool linkingSucess = false;

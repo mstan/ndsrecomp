@@ -40,12 +40,14 @@ void nds_profile_report(std::FILE* out) {
     if (gpu_profile.scanlines) {
         std::fprintf(out,
             "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "
-            "across %llu scanlines\n",
+            "across %llu scanlines; direct %llu frames / %.3f seconds\n",
             static_cast<double>(gpu_profile.render_ns) / 1.0e9,
             static_cast<double>(gpu_profile.engine_ns[0]) / 1.0e9,
             static_cast<double>(gpu_profile.engine_ns[1]) / 1.0e9,
             static_cast<double>(gpu_profile.obj_ns) / 1.0e9,
-            static_cast<unsigned long long>(gpu_profile.scanlines));
+            static_cast<unsigned long long>(gpu_profile.scanlines),
+            static_cast<unsigned long long>(gpu_profile.direct_frames),
+            static_cast<double>(gpu_profile.direct_overlay_ns) / 1.0e9);
         std::fprintf(out,
             "  GPU2D lines: A text[0..4]=%llu/%llu/%llu/%llu/%llu "
             "no-effect=%llu; B=%llu/%llu/%llu/%llu/%llu no-effect=%llu\n",
@@ -69,7 +71,7 @@ void nds_profile_report(std::FILE* out) {
         std::fprintf(out,
             "  GPU3D profile: submit/render %.3f s (%llu calls), "
             "GetLine %.3f s (%llu calls), sync144 %.3f s (%llu calls), "
-            "compute readback %.3f s (%llu calls)\n",
+            "compute readback %.3f s (%llu calls; submit %.3f, map %.3f)\n",
             static_cast<double>(gpu3d_profile.vcount215_ns) / 1.0e9,
             (unsigned long long)gpu3d_profile.vcount215_calls,
             static_cast<double>(gpu3d_profile.getline_ns) / 1.0e9,
@@ -77,7 +79,9 @@ void nds_profile_report(std::FILE* out) {
             static_cast<double>(gpu3d_profile.vcount144_ns) / 1.0e9,
             (unsigned long long)gpu3d_profile.vcount144_calls,
             static_cast<double>(gpu3d_profile.compute_sync_ns) / 1.0e9,
-            (unsigned long long)gpu3d_profile.compute_sync_calls);
+            (unsigned long long)gpu3d_profile.compute_sync_calls,
+            static_cast<double>(gpu3d_profile.compute_submit_ns) / 1.0e9,
+            static_cast<double>(gpu3d_profile.compute_map_ns) / 1.0e9);
     }
     NdsSchedulerProfile sched{};
     scheduler_profile(&sched);
