@@ -353,6 +353,24 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   **3.01% worse**). The comparisons and cache-entry copy cost more than the
   avoided generation reads; do not pursue snapshot handoff as another
   per-dispatch fast path.
+- 2026-08-01 **fixed-target validated fallthrough links**: REJECTED and
+  reverted. The candidate emitted 56,244 ARM9 RAM/gameplay link sites with a
+  per-site exact-byte/generation cache and retained normal ordered dispatch
+  whenever the linked bank's target validation was not live. G3 remained
+  exact through 700M on both screens. The executable grew
+  300,346,754 -> 312,843,850 bytes (**+12.50 MB / +4.16%**).
+
+  Quiet detached-screen/adaptive-top B/A/B whole-route FPS was
+  **54.367 / 54.244 / 53.893** (candidate mean **0.21% lower**).
+  Settled-Yoshi emulation was **16.135 / 16.472 / 16.342 ms/frame**
+  (candidate mean **1.42% lower**) and FPS was
+  **54.763 / 53.958 / 53.969** (candidate mean **+0.76%**). This was not a
+  coverage failure: the final candidate leg recorded **44,085,767 linked
+  hits and 7 misses** in settled Yoshi. A fixed target removes hash/key/bank
+  selection but still reads the executable-page generation at each boundary,
+  so its result agrees with the prior 1-2% cache-hit-inline experiments.
+  Further work must eliminate validation boundaries (selection-safe
+  page/superblock coalescing), not add another per-boundary cache.
 
 ## Reproduction crib
 
