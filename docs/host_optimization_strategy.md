@@ -307,6 +307,40 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   was **0.13% slower** than baseline, with other gameplay phases also flat.
   Large dynamic call count did not translate into removable frame time; do
   not broaden the trampoline to ARM7 without new profile evidence.
+- 2026-08-01 **post-trampoline target-mode RIP profile**: detached screens +
+  adaptive top, settled Yoshi, 1 ms sampling. The main thread contributed
+  18,601 runner samples. `lookup_static_cached` remains first at
+  **2,805 (15.08%)**, followed by `runtime_dispatch` **1,236 (6.64%)**,
+  adaptive framebuffer composition **975 (5.24%)**, `runtime_should_yield`
+  **713 (3.83%)**, executable-page generation lookup **660 (3.55%)**,
+  `runtime_code_cycles` **642 (3.45%)**, `runtime_tick` **615 (3.31%)**,
+  and `runtime_mem_cycles` **535 (2.88%)**. The separate soft-render worker
+  contributed 8,161 samples, dominated by polygon scanlines (4,771).
+  Instrumented phase timing was 17.107 ms emulation + 1.631 ms presentation;
+  use the RIP shares for ranking, not that instrumented absolute.
+- 2026-08-01 **inlined dispatch-cache hit path**: REJECTED and reverted.
+  The common key/generation check was forced inline into the dispatch loop
+  while ordered search/refill stayed out-of-line and unchanged. G3 remained
+  exact. Quiet target B/A/B whole-route FPS was
+  **54.462 / 54.048 / 54.840** (candidate mean **+1.12%**); settled-Yoshi
+  emulation was **16.148 / 16.506 / 16.193 ms/frame** (candidate mean
+  **2.03% lower**). Only the transient new-game load crossed 5%. The sampled
+  lookup symbol is mostly necessary live-generation validation, not removable
+  call overhead; the result fails the retention gate.
+- 2026-08-01 **File A settled-gameplay coverage closure**: RETAINED for
+  correctness, performance-neutral. The new profile exposed 69,323 ARM9
+  Tier-3 instructions / 8,968 entries in settled Yoshi. Discovery found 424
+  unique PCs; 406 were in the gameplay generation, 124 were new configured
+  boundaries, and the 32 hottest sites matched the existing captured image
+  byte-for-byte over their sampled 64-byte windows. Regenerating the same
+  content-validated bank reduced the identical phase to
+  **Tier-3 `(0,0)` instructions and entries** without relaxing validation.
+  Target B/A/B whole-route FPS was **54.151 / 54.096 / 54.104**, and
+  settled-Yoshi emulation was **16.470 / 16.505 / 16.413 ms/frame**: flat.
+  G1 passes 8/8 exact with firmware Tier-3 zero; G2 passes 2,400 frames with
+  zero underruns/errors/input and exact FNV pair
+  `e333837761ca0d1c,d61d2eb50e96b61d`; G3 is exact through 700M on both
+  screens.
 
 ## Reproduction crib
 
