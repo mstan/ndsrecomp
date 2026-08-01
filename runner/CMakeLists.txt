@@ -28,6 +28,9 @@ option(NDS_PROFILE_HLE_HEAT
 option(NDS_PROFILE_MEM_TIMING
     "Build candidate-only runtime memory-timing census instrumentation"
     OFF)
+set(NDS_PGO_MODE "OFF" CACHE STRING
+    "Runner-only GCC PGO mode: OFF, GENERATE, or USE")
+set_property(CACHE NDS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 
@@ -152,6 +155,24 @@ add_executable(nds_runner
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)
 ndsrecomp_limit_link(nds_runner)
+if(NOT NDS_PGO_MODE STREQUAL "OFF")
+    if(MSVC)
+        message(FATAL_ERROR "NDS_PGO_MODE currently supports GCC/MinGW only")
+    elseif(NDS_PGO_MODE STREQUAL "GENERATE")
+        # Instrument only runner-owned host code. Generated ARM banks and
+        # portable support libraries remain byte-for-byte baseline objects.
+        target_compile_options(nds_runner PRIVATE
+            -fprofile-generate -fprofile-update=atomic)
+        target_link_options(nds_runner PRIVATE -fprofile-generate)
+    elseif(NDS_PGO_MODE STREQUAL "USE")
+        target_compile_options(nds_runner PRIVATE
+            -fprofile-use -fprofile-correction)
+        target_link_options(nds_runner PRIVATE -fprofile-use)
+    else()
+        message(FATAL_ERROR
+            "NDS_PGO_MODE must be OFF, GENERATE, or USE")
+    endif()
+endif()
 if(NDS_PROFILE_MEM_TIMING)
     # Keep the production memory-timing helper object unchanged. Only the
     # helper implementation and passive query command see the census define.

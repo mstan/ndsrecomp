@@ -15,18 +15,36 @@ aspiration.
 
 ### 1. Scoped runner-only PGO
 
-Keep generated ARM banks unchanged and train only the runner/runtime,
-frontend, GPU2D, and renderer bridge translation units on the complete
-detached/adaptive route.
+The build now exposes `NDS_PGO_MODE=OFF|GENERATE|USE` for GCC/MinGW.
+Instrumentation and profile use apply only to the `nds_runner` target:
+generated ARM banks and the portable support libraries remain baseline
+objects. Generate mode uses GCC's native object-adjacent profile paths and
+atomic counter updates instead of the absolute Windows profile directory that
+previously failed.
 
-The first GCC/MinGW instrumentation build and training traversal completed,
-but an absolute Windows `-fprofile-generate` directory produced no `.gcda`
-files. Before retrying:
+Completed:
 
-- use a compiler-native relative profile directory inside the build tree;
-- verify one short process writes profile data before running the full route;
-- build the profile-use candidate in the same build tree;
-- compare it against the exact gated baseline binary with interleaved A/B.
+- a Release `GENERATE` build with the SM64DS banks and compute renderer;
+- a clean deterministic 1M-cycle proof exit;
+- creation of 30 object-adjacent `.gcda` files totaling 197,768 bytes,
+  including runtime, scheduler, frontend, GPU2D, GPU3D, and renderer bridge
+  translation units.
+
+Still required:
+
+- train the complete firmware/new-file route and saved-File-A gameplay route
+  on a quiet host, with both processes exiting normally so counters merge;
+- rebuild the same tree with `NDS_PGO_MODE=USE` and audit missing-profile
+  warnings;
+- compare the profile-use executable against the exact baseline with quiet,
+  interleaved A/B in detached/adaptive-top mode;
+- reject it if it misses the 5% complexity gate; otherwise run G1/G2/G3 and
+  the normal unit/build matrix before retention.
+
+The first attempted full training leg was deliberately excluded: unrelated
+PSX and GCN recompilations reduced its initial interval to 12.05 FPS, after
+which the debug connection closed. It produced no candidate and no usable
+performance claim.
 
 This is the lowest semantic-risk remaining experiment, but a trained local
 binary is not automatically a portable release solution.
