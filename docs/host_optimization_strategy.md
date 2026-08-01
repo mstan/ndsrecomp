@@ -474,6 +474,24 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   `20260801-arm7-superblocks-{B1,A1}`. The large residual ARM7 fall-through
   count comes from nonadjacent finder/entry-point structure, not the contiguous
   edge class handled by D1; changing that structure needs a different design.
+- 2026-08-01 **combined-prologue revisit after D1**: REJECTED as a build
+  experiment; no new runtime claim. The archived exact seam was reimplemented
+  against the superblock emitter with its same-binary forced-OFF legacy path:
+  ARM9 ARM and ARM7 could fuse yield polling, retirement bookkeeping, and
+  code-fetch timing, while ARM9 Thumb and special/NV paths stayed generic.
+  Structural emission tests and the decoder test passed.
+
+  The first runner build applied the experimental definition to every generated
+  firmware/title bank and failed to link within ten minutes, with four O3
+  firmware-shard compilers still active. A second version correctly restricted
+  the definition to SM64DS sources, but the first attempt had invalidated the
+  monolithic runner's firmware objects; rebuilding that set again failed to
+  produce a binary within another ten-minute ceiling. Both builds were stopped
+  by verified process tree, all source and generated-bank changes were reverted,
+  and the exact retained D1 binary was restored. The prior 2026-07-18
+  **4.4–4.6%** measurement remains the only performance evidence. Revisit only
+  with an isolated title-bank build or a substantially smaller representation,
+  not by invalidating the full firmware-bank matrix.
 
 ## Reproduction crib
 
