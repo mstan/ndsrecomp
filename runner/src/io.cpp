@@ -10,11 +10,13 @@
 #include <ctime>
 #include <vector>
 
+#include "battery_save.h"
 #include "state.h"
 #include "scheduler.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "spu.h"
+#include "title_patches.h"
 #include "vram.h"
 
 // Runner-only rare-condition hint owned by runtime_arm.cpp. Generated banks
@@ -104,6 +106,8 @@ uint8_t  g_sram_cmd = 0;
 uint8_t  g_sram_status = 0;
 uint32_t g_sram_addr = 0;
 std::vector<uint8_t> g_cart_sram;
+std::string g_cart_save_path;
+bool g_cart_save_dirty = false;
 
 uint32_t load_le32(const uint8_t* p) {
     return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
@@ -1647,10 +1651,21 @@ uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
             if (pos <= addrsize) {
                 g_sram_addr = (g_sram_addr << 8) | val;
             } else {
-                if (g_sram_status & 0x02u) g_cart_sram[g_sram_addr & mask] = val;
+                if (g_sram_status & 0x02u) {
+                    uint8_t& destination =
+                        g_cart_sram[g_sram_addr & mask];
+                    if (destination != val) {
+                        destination = val;
+                        g_cart_save_dirty = true;
+                    }
+                }
                 ++g_sram_addr;
             }
-            if (last) g_sram_status &= ~0x02u;
+            if (last) {
+                g_sram_status &= ~0x02u;
+                if (g_cart_save_dirty && !g_cart_save_path.empty())
+                    nds_io_flush_cartridge_save();
+            }
             return 0;
         case 0x03:  // read
             if (pos <= addrsize) {
@@ -1872,9 +1887,67 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 
     // Backup chip: 8 KiB regular EEPROM, blank = 0xFF (melonDS CartRetail
     // with ROMList SaveMemType 2 — SM64DS's entry and also melonDS's
-    // unknown-ROM default). No host persistence yet; matches ndsref, which
-    // also runs without a save file.
-    g_cart_sram.assign(8192, 0xFF);
+    // unknown-ROM default). Interactive play loads an exact-size battery
+    // file; parity/automation runs explicitly keep the path disabled.
+    if (g_cart_sram.size() != 8192u) {
+        g_cart_sram.assign(8192u, 0xFFu);
+        g_cart_save_dirty = false;
+        if (!g_cart_save_path.empty()) {
+            std::string error;
+            switch (nds_battery_save_load_exact(
+                    g_cart_save_path, g_cart_sram.data(),
+                    g_cart_sram.size(), &error)) {
+                case NdsBatterySaveLoadResult::Loaded:
+                    std::fprintf(stderr,
+                                 "[save] loaded %zu bytes from %s\n",
+                                 g_cart_sram.size(),
+                                 g_cart_save_path.c_str());
+                    break;
+                case NdsBatterySaveLoadResult::Missing:
+                    std::fprintf(stderr,
+                                 "[save] new cartridge save: %s\n",
+                                 g_cart_save_path.c_str());
+                    break;
+                case NdsBatterySaveLoadResult::InvalidSize:
+                case NdsBatterySaveLoadResult::Error:
+                    std::fprintf(stderr,
+                                 "[save] ignoring %s: %s\n",
+                                 g_cart_save_path.c_str(), error.c_str());
+                    break;
+            }
+        }
+    }
+    return true;
+}
+
+void nds_io_set_cartridge_save_path(const char* path) {
+    g_cart_save_path = path ? path : "";
+}
+
+bool nds_io_flush_cartridge_save() {
+    if (!g_cart_save_dirty || g_cart_save_path.empty())
+        return true;
+    std::string error;
+    if (!nds_battery_save_write_atomic(
+            g_cart_save_path, g_cart_sram.data(),
+            g_cart_sram.size(), &error)) {
+        std::fprintf(stderr, "[save] flush failed for %s: %s\n",
+                     g_cart_save_path.c_str(), error.c_str());
+        return false;
+    }
+    g_cart_save_dirty = false;
+    std::fprintf(stderr, "[save] wrote %zu bytes to %s\n",
+                 g_cart_sram.size(), g_cart_save_path.c_str());
+    return true;
+}
+
+bool nds_io_cartridge_save_snapshot(const uint8_t** data, uint32_t* size,
+                                    bool* dirty) {
+    if (!data || !size || !dirty || g_cart_sram.empty())
+        return false;
+    *data = g_cart_sram.data();
+    *size = static_cast<uint32_t>(g_cart_sram.size());
+    *dirty = g_cart_save_dirty;
     return true;
 }
 
@@ -2382,6 +2455,8 @@ void nds_tick_display(unsigned long long cyc) {
         if (physical_line == 0u) {
             // melonDS GPU::StartFrame: an aborted 3D frame restarts its
             // renderer before scanline 0 of the new frame.
+            nds_title_patches_start_frame();
+            nds_gpu2d_start_frame();
             nds_gpu3d_start_frame();
             g_vcount = 0;
         } else if (g_next_vcount_valid) {

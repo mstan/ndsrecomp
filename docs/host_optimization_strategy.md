@@ -180,6 +180,13 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   headline FPS claim until that A/B closes. Re-ranked next work:
   **B1 guard-snapshot dedup → A1/A2 helper inlining → validated
   nonrecursive fallthrough/body-coalescing design**, then re-profile.
+- 2026-07-31 **SM64DS adaptive sky polygon widening**: REJECTED and
+  reverted. Treating opaque polygon ID 2 as one screen-filling backdrop,
+  widening its geometry, and scaling texture S by the same 448/256 ratio
+  did not remove either the black voids or visible sky stretching in the
+  castle courtyard. The sky model is not a single safely scalable surface;
+  revisit only with model/draw-aware capture or a title-side skybox patch.
+  This result is visual-correctness evidence, not a performance result.
 
 ## Reproduction crib
 

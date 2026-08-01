@@ -131,6 +131,7 @@ target_include_directories(nds_armv4t PUBLIC
 
 add_executable(nds_runner
     src/runtime_arm.cpp
+    src/battery_save.cpp
     src/bus.cpp
     src/cp15.cpp
     src/io.cpp
@@ -139,6 +140,7 @@ add_executable(nds_runner
     src/vram.cpp
     src/gpu2d.cpp
     src/gpu3d.cpp
+    src/title_patches.cpp
     src/tier3.cpp
     src/profile_report.cpp
     src/scheduler.cpp
@@ -261,9 +263,15 @@ if(WIN32)
     target_link_libraries(nds_runner PRIVATE ws2_32)
 endif()
 
-add_executable(frontend_config_test
-    tests/frontend_config_test.cpp
-    src/frontend_config.cpp)
+  add_executable(frontend_config_test
+      tests/frontend_config_test.cpp
+      src/frontend_config.cpp)
 target_include_directories(frontend_config_test PRIVATE src)
 ndsrecomp_link_tomlpp(frontend_config_test)
-add_test(NAME frontend_config_test COMMAND frontend_config_test)
+  add_test(NAME frontend_config_test COMMAND frontend_config_test)
+
+  add_executable(battery_save_test
+      tests/battery_save_test.cpp
+      src/battery_save.cpp)
+  target_include_directories(battery_save_test PRIVATE src)
+  add_test(NAME battery_save_test COMMAND battery_save_test)

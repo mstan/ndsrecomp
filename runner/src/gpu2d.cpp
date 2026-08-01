@@ -25,6 +25,10 @@ struct Unit {
     uint8_t obj_mosaic_x = 0, obj_mosaic_y = 0;
     uint16_t bldcnt = 0, bldalpha = 0;
     uint8_t eva = 16, evb = 0, evy = 0;
+    // BG2/BG3 affine reference registers and the renderer's live scanline
+    // accumulators. The latter reload at frame start and advance only while
+    // an affine/extended layer is drawn, matching melonDS Unit state.
+    int32_t refx_internal[2]{}, refy_internal[2]{};
     uint32_t capture = 0;
     uint16_t master_bright = 0;
     // DISPCAPCNT enable latches at scanline 0 and captures for the whole
@@ -306,6 +310,47 @@ struct BgLine {
     uint8_t order = 0;
 };
 
+enum class BgKind : uint8_t {
+    None,
+    Text,
+    Affine,
+    Extended,
+};
+
+BgKind bg_kind(const Unit& u, int bg) {
+    if (bg < 0 || bg > 3) return BgKind::None;
+    const uint32_t mode = u.dispcnt & 7u;
+    if (bg < 2)
+        return mode == 6u ? BgKind::None : BgKind::Text;
+    if (bg == 2) {
+        switch (mode) {
+            case 0:
+            case 1:
+            case 3:
+                return BgKind::Text;
+            case 2:
+            case 4:
+                return BgKind::Affine;
+            case 5:
+                return BgKind::Extended;
+            default:
+                return BgKind::None;
+        }
+    }
+    switch (mode) {
+        case 0: return BgKind::Text;
+        case 1:
+        case 2:
+            return BgKind::Affine;
+        case 3:
+        case 4:
+        case 5:
+            return BgKind::Extended;
+        default:
+            return BgKind::None;
+    }
+}
+
 void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
                       const NdsVramRendererView& vram, BgLine& out) {
     Unit& u = g_unit[engine];
@@ -389,6 +434,219 @@ void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
             }
         }
         x += run;
+    }
+}
+
+void begin_affine_line(Unit& u, int bg, int y, int32_t* x, int32_t* yy) {
+    const int affine = bg - 2;
+    *x = u.refx_internal[affine];
+    *yy = u.refy_internal[affine];
+    if ((u.bgcnt[bg] & 0x0040u) && u.bg_mosaic_y) {
+        const int mosaic_y = y % (static_cast<int>(u.bg_mosaic_y) + 1);
+        *x -= mosaic_y * u.pb[affine];
+        *yy -= mosaic_y * u.pd[affine];
+    }
+}
+
+void end_affine_line(Unit& u, int bg) {
+    const int affine = bg - 2;
+    u.refx_internal[affine] += u.pb[affine];
+    u.refy_internal[affine] += u.pd[affine];
+}
+
+void setup_affine_output(const Unit& u, int bg, BgLine& out) {
+    out.prio = static_cast<uint8_t>(u.bgcnt[bg] & 3u);
+    out.target = static_cast<uint8_t>(1u << bg);
+    out.order = static_cast<uint8_t>(bg + 1);
+    out.color.fill(0u);
+}
+
+void decode_affine_line(int engine, int bg, int y, const uint8_t* palette,
+                        const NdsVramRendererView& vram, BgLine& out) {
+    Unit& u = g_unit[engine];
+    const uint16_t cnt = u.bgcnt[bg];
+    setup_affine_output(u, bg, out);
+
+    uint32_t coordmask = 0;
+    uint32_t yshift = 0;
+    switch (cnt & 0xC000u) {
+        case 0x0000u: coordmask = 0x07800u; yshift = 7; break;
+        case 0x4000u: coordmask = 0x0F800u; yshift = 8; break;
+        case 0x8000u: coordmask = 0x1F800u; yshift = 9; break;
+        default:      coordmask = 0x3F800u; yshift = 10; break;
+    }
+    const uint32_t overflowmask =
+        (cnt & 0x2000u) ? 0u : ~(coordmask | 0x7FFu);
+    uint32_t char_base = (cnt & 0x003Cu) << 12;
+    uint32_t map_base = (cnt & 0x1F00u) << 3;
+    if (!engine) {
+        char_base += (u.dispcnt & 0x07000000u) >> 8;
+        map_base += (u.dispcnt & 0x38000000u) >> 11;
+    }
+    yshift -= 3u;
+
+    int32_t line_x = 0;
+    int32_t line_y = 0;
+    begin_affine_line(u, bg, y, &line_x, &line_y);
+    const int affine = bg - 2;
+    const int mosaic_width =
+        (cnt & 0x0040u) ? static_cast<int>(u.bg_mosaic_x) + 1 : 1;
+    for (int x = 0; x < 256; ++x) {
+        const int sample_x = x - (x % mosaic_width);
+        const int32_t final_x = line_x + sample_x * u.pa[affine];
+        const int32_t final_y = line_y + sample_x * u.pc[affine];
+        if ((static_cast<uint32_t>(final_x | final_y) & overflowmask) != 0u)
+            continue;
+        const uint32_t map_addr =
+            map_base +
+            ((((static_cast<uint32_t>(final_y) & coordmask) >> 11u)
+               << yshift) +
+             ((static_cast<uint32_t>(final_x) & coordmask) >> 11u));
+        const uint8_t tile = bg_view8(vram, engine, map_addr);
+        const uint32_t tile_x =
+            (static_cast<uint32_t>(final_x) >> 8u) & 7u;
+        const uint32_t tile_y =
+            (static_cast<uint32_t>(final_y) >> 8u) & 7u;
+        const uint8_t index = bg_view8(
+            vram, engine,
+            char_base + (uint32_t{tile} << 6u) + (tile_y << 3u) + tile_x);
+        if (!index) continue;
+        out.color[x] = static_cast<uint16_t>(
+            view16(palette, uint32_t{index} << 1u) | 0x8000u);
+    }
+    end_affine_line(u, bg);
+}
+
+void decode_extended_line(int engine, int bg, int y,
+                          const uint8_t* palette,
+                          const NdsVramRendererView& vram, BgLine& out) {
+    Unit& u = g_unit[engine];
+    const uint16_t cnt = u.bgcnt[bg];
+    setup_affine_output(u, bg, out);
+
+    int32_t line_x = 0;
+    int32_t line_y = 0;
+    begin_affine_line(u, bg, y, &line_x, &line_y);
+    const int affine = bg - 2;
+    const int mosaic_width =
+        (cnt & 0x0040u) ? static_cast<int>(u.bg_mosaic_x) + 1 : 1;
+
+    if (cnt & 0x0080u) {
+        uint32_t xmask = 0, ymask = 0, yshift = 0;
+        switch (cnt & 0xC000u) {
+            case 0x0000u:
+                xmask = ymask = 0x07FFFu; yshift = 7; break;
+            case 0x4000u:
+                xmask = ymask = 0x0FFFFu; yshift = 8; break;
+            case 0x8000u:
+                xmask = 0x1FFFFu; ymask = 0x0FFFFu; yshift = 9; break;
+            default:
+                xmask = ymask = 0x1FFFFu; yshift = 9; break;
+        }
+        const uint32_t overflow_x = (cnt & 0x2000u) ? 0u : ~xmask;
+        const uint32_t overflow_y = (cnt & 0x2000u) ? 0u : ~ymask;
+        const uint32_t bitmap_base = (cnt & 0x1F00u) << 6u;
+        const bool direct = (cnt & 0x0004u) != 0u;
+        for (int x = 0; x < 256; ++x) {
+            const int sample_x = x - (x % mosaic_width);
+            const int32_t final_x = line_x + sample_x * u.pa[affine];
+            const int32_t final_y = line_y + sample_x * u.pc[affine];
+            if ((static_cast<uint32_t>(final_x) & overflow_x) ||
+                (static_cast<uint32_t>(final_y) & overflow_y))
+                continue;
+            const uint32_t pixel =
+                ((static_cast<uint32_t>(final_y) & ymask) >> 8u) *
+                    (1u << yshift) +
+                ((static_cast<uint32_t>(final_x) & xmask) >> 8u);
+            if (direct) {
+                const uint16_t color = bg_view16(
+                    vram, engine, bitmap_base + (pixel << 1u));
+                if (color & 0x8000u) out.color[x] = color;
+            } else {
+                const uint8_t index =
+                    bg_view8(vram, engine, bitmap_base + pixel);
+                if (index)
+                    out.color[x] = static_cast<uint16_t>(
+                        view16(palette, uint32_t{index} << 1u) | 0x8000u);
+            }
+        }
+        end_affine_line(u, bg);
+        return;
+    }
+
+    uint32_t coordmask = 0;
+    uint32_t yshift = 0;
+    switch (cnt & 0xC000u) {
+        case 0x0000u: coordmask = 0x07800u; yshift = 7; break;
+        case 0x4000u: coordmask = 0x0F800u; yshift = 8; break;
+        case 0x8000u: coordmask = 0x1F800u; yshift = 9; break;
+        default:      coordmask = 0x3F800u; yshift = 10; break;
+    }
+    const uint32_t overflowmask =
+        (cnt & 0x2000u) ? 0u : ~(coordmask | 0x7FFu);
+    uint32_t char_base = (cnt & 0x003Cu) << 12u;
+    uint32_t map_base = (cnt & 0x1F00u) << 3u;
+    if (!engine) {
+        char_base += (u.dispcnt & 0x07000000u) >> 8u;
+        map_base += (u.dispcnt & 0x38000000u) >> 11u;
+    }
+    const bool extpal = (u.dispcnt & 0x40000000u) != 0u;
+    yshift -= 3u;
+    for (int x = 0; x < 256; ++x) {
+        const int sample_x = x - (x % mosaic_width);
+        const int32_t final_x = line_x + sample_x * u.pa[affine];
+        const int32_t final_y = line_y + sample_x * u.pc[affine];
+        if ((static_cast<uint32_t>(final_x | final_y) & overflowmask) != 0u)
+            continue;
+        const uint32_t map_addr =
+            map_base +
+            (((((static_cast<uint32_t>(final_y) & coordmask) >> 11u)
+                << yshift) +
+              ((static_cast<uint32_t>(final_x) & coordmask) >> 11u))
+             << 1u);
+        const uint16_t tile = bg_view16(vram, engine, map_addr);
+        uint32_t tile_x =
+            (static_cast<uint32_t>(final_x) >> 8u) & 7u;
+        uint32_t tile_y =
+            (static_cast<uint32_t>(final_y) >> 8u) & 7u;
+        if (tile & 0x0400u) tile_x = 7u - tile_x;
+        if (tile & 0x0800u) tile_y = 7u - tile_y;
+        const uint8_t index = bg_view8(
+            vram, engine,
+            char_base + ((uint32_t{tile} & 0x03FFu) << 6u) +
+                (tile_y << 3u) + tile_x);
+        if (!index) continue;
+        uint16_t color = 0;
+        if (extpal) {
+            color = static_cast<uint16_t>(nds_vram_read_bg_extpal(
+                engine,
+                (static_cast<uint32_t>(bg) << 13u) +
+                    (static_cast<uint32_t>(tile >> 12u) << 9u) +
+                    (uint32_t{index} << 1u),
+                2));
+        } else {
+            color = view16(palette, uint32_t{index} << 1u);
+        }
+        out.color[x] = static_cast<uint16_t>(color | 0x8000u);
+    }
+    end_affine_line(u, bg);
+}
+
+void decode_bg_line(int engine, int bg, int y, const uint8_t* palette,
+                    const NdsVramRendererView& vram, BgLine& out) {
+    switch (bg_kind(g_unit[engine], bg)) {
+        case BgKind::Text:
+            decode_text_line(engine, bg, y, palette, vram, out);
+            break;
+        case BgKind::Affine:
+            decode_affine_line(engine, bg, y, palette, vram, out);
+            break;
+        case BgKind::Extended:
+            decode_extended_line(engine, bg, y, palette, vram, out);
+            break;
+        default:
+            out.color.fill(0u);
+            break;
     }
 }
 
@@ -613,21 +871,17 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
     }
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
-    static std::array<BgLine, 4> text_lines;
-    size_t text_count = 0;
-    const uint32_t bgmode = u.dispcnt & 7u;
-    int text_bgs[4];
+    static std::array<BgLine, 4> bg_lines;
+    size_t bg_count = 0;
+    int active_bgs[4];
     for (int bg = 0; bg < 4; ++bg) {
         if (!(u.dispcnt & (0x100u << bg))) continue;
         if (bg == 0 && bg0_3d) continue;   // BG0's slot is the 3D layer
-        const bool text = (bg < 2) || (bgmode == 0) ||
-            (bg == 2 && (bgmode == 1 || bgmode == 3)) ||
-            (bg == 3 && bgmode == 0);
-        if (text) text_bgs[text_count++] = bg;
+        if (bg_kind(u, bg) != BgKind::None)
+            active_bgs[bg_count++] = bg;
     }
-    for (size_t i = 0; i < text_count; ++i)
-        decode_text_line(engine, text_bgs[i], y, palette, vram,
-                         text_lines[i]);
+    for (size_t i = 0; i < bg_count; ++i)
+        decode_bg_line(engine, active_bgs[i], y, palette, vram, bg_lines[i]);
     const uint8_t prio3d = static_cast<uint8_t>(u.bgcnt[0] & 3u);
     auto ahead = [](const Pixel& a, const Pixel& b) {
         return a.priority < b.priority ||
@@ -639,10 +893,10 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
             if (ahead(p, top)) { below = top; top = p; }
             else if (ahead(p, below)) { below = p; }
         };
-        for (size_t i = 0; i < text_count; ++i) {
-            const uint16_t c = text_lines[i].color[x];
+        for (size_t i = 0; i < bg_count; ++i) {
+            const uint16_t c = bg_lines[i].color[x];
             if (!(c & 0x8000u)) continue;
-            const BgLine& l = text_lines[i];
+            const BgLine& l = bg_lines[i];
             push(Pixel{rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
                        l.target, 0, l.prio, l.order, true});
         }
@@ -849,27 +1103,24 @@ void render_engine_line(int engine, int y) {
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
     const uint32_t* const lut = rgb32_lut();
-    static std::array<BgLine, 4> text_lines;  // decoded, sorted front-first
-    size_t text_count = 0;
-    const uint32_t bgmode = u.dispcnt & 7u;
-    int text_bgs[4];
+    static std::array<BgLine, 4> bg_lines;  // decoded, sorted front-first
+    size_t bg_count = 0;
+    int active_bgs[4];
     for (int bg = 0; bg < 4; ++bg) {
         if (!(u.dispcnt & (0x100u << bg))) continue;
-        const bool text = (bg < 2) || (bgmode == 0) ||
-            (bg == 2 && (bgmode == 1 || bgmode == 3)) ||
-            (bg == 3 && bgmode == 0);
-        if (text) text_bgs[text_count++] = bg;
+        if (bg_kind(u, bg) != BgKind::None)
+            active_bgs[bg_count++] = bg;
     }
     // Front-first order: lower BGCNT priority wins, ties break to the lower
     // BG index. Four elements maximum: insertion sort on the index list.
     {
         int order[4];
         uint8_t prio[4];
-        for (size_t i = 0; i < text_count; ++i) {
-            order[i] = text_bgs[i];
-            prio[i] = static_cast<uint8_t>(u.bgcnt[text_bgs[i]] & 3u);
+        for (size_t i = 0; i < bg_count; ++i) {
+            order[i] = active_bgs[i];
+            prio[i] = static_cast<uint8_t>(u.bgcnt[active_bgs[i]] & 3u);
         }
-        for (size_t i = 1; i < text_count; ++i) {
+        for (size_t i = 1; i < bg_count; ++i) {
             const int bg = order[i];
             const uint8_t p = prio[i];
             size_t j = i;
@@ -882,15 +1133,14 @@ void render_engine_line(int engine, int y) {
             order[j] = bg;
             prio[j] = p;
         }
-        for (size_t i = 0; i < text_count; ++i)
-            decode_text_line(engine, order[i], y, palette, vram,
-                             text_lines[i]);
+        for (size_t i = 0; i < bg_count; ++i)
+            decode_bg_line(engine, order[i], y, palette, vram, bg_lines[i]);
     }
     const uint32_t mbmode=u.master_bright>>14;
     const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
     // Common firmware top-screen mode: OBJ over a backdrop, with no BG or
     // color effect enabled. There is no second layer to sort or blend.
-    if (text_count == 0 && u.bldcnt == 0 && mbmode == 0) {
+    if (bg_count == 0 && u.bldcnt == 0 && mbmode == 0) {
         if (profiling()) ++g_text_lines[engine][0];
         for (int x = 0; x < 256; ++x)
             dst[x] = obj[x].valid ? to_rgb32(obj[x].color)
@@ -907,7 +1157,7 @@ void render_engine_line(int engine, int y) {
     // the general blender for every pixel.
     if ((u.bldcnt & 0x3FC0u) == 0 && mbmode == 0) {
         if (profiling()) {
-            ++g_text_lines[engine][text_count];
+            ++g_text_lines[engine][bg_count];
             ++g_no_effect_lines[engine];
         }
         for (int x = 0; x < 256; ++x) {
@@ -915,11 +1165,11 @@ void render_engine_line(int engine, int y) {
             // candidate; an OBJ pixel wins any priority tie (order 0).
             uint16_t top15 = backdrop15;
             uint8_t top_prio = 4;
-            for (size_t i = 0; i < text_count; ++i) {
-                const uint16_t c = text_lines[i].color[x];
+            for (size_t i = 0; i < bg_count; ++i) {
+                const uint16_t c = bg_lines[i].color[x];
                 if (c & 0x8000u) {
                     top15 = c;
-                    top_prio = text_lines[i].prio;
+                    top_prio = bg_lines[i].prio;
                     break;
                 }
             }
@@ -931,14 +1181,14 @@ void render_engine_line(int engine, int y) {
         }
         return;
     }
-    if (profiling()) ++g_text_lines[engine][text_count];
+    if (profiling()) ++g_text_lines[engine][bg_count];
     for(int x=0;x<256;++x){
         Pixel top=backdrop, below=backdrop;
         bool have_top = false;
-        for (size_t i = 0; i < text_count; ++i) {
-            const uint16_t c = text_lines[i].color[x];
+        for (size_t i = 0; i < bg_count; ++i) {
+            const uint16_t c = bg_lines[i].color[x];
             if (!(c & 0x8000u)) continue;
-            const BgLine& l = text_lines[i];
+            const BgLine& l = bg_lines[i];
             const Pixel pixel{rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
                               l.target, 0, l.prio, l.order, true};
             if (!have_top) {
@@ -1006,14 +1256,22 @@ void reg_write16(Unit&u,int engine,uint32_t off,uint16_t v){
         else if(sub==2)u.pb[n]=v;
         else if(sub==4)u.pc[n]=v;
         else if(sub==6)u.pd[n]=v;
-        else if(sub==8)u.refx[n]=(u.refx[n]&0xFFFF0000)|v;
+        else if(sub==8){
+            u.refx[n]=(u.refx[n]&0xFFFF0000)|v;
+            u.refx_internal[n]=u.refx[n];
+        }
         else if(sub==0xA){
             if(v&0x800)v|=0xF000;
             u.refx[n]=(u.refx[n]&0xFFFF)|(uint32_t{v}<<16);
-        } else if(sub==0xC)u.refy[n]=(u.refy[n]&0xFFFF0000)|v;
+            u.refx_internal[n]=u.refx[n];
+        } else if(sub==0xC){
+            u.refy[n]=(u.refy[n]&0xFFFF0000)|v;
+            u.refy_internal[n]=u.refy[n];
+        }
         else if(sub==0xE){
             if(v&0x800)v|=0xF000;
             u.refy[n]=(u.refy[n]&0xFFFF)|(uint32_t{v}<<16);
+            u.refy_internal[n]=u.refy[n];
         }
         return;
     }
@@ -1139,6 +1397,14 @@ void nds_gpu2d_render_scanline(int line) {
 void nds_gpu2d_render_frame(){
     for (int line = 0; line < 192; ++line)
         nds_gpu2d_render_scanline(line);
+}
+void nds_gpu2d_start_frame(){
+    for (auto& u : g_unit) {
+        for (int affine = 0; affine < 2; ++affine) {
+            u.refx_internal[affine] = u.refx[affine];
+            u.refy_internal[affine] = u.refy[affine];
+        }
+    }
 }
 void nds_gpu2d_finish_frame(){g_front ^= 1;}
 void nds_gpu2d_vblank(){

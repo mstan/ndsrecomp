@@ -603,6 +603,21 @@ std::string handle(const std::string& line) {
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
+    if (cmd == "cart_save") {
+        const uint8_t* data = nullptr;
+        uint32_t size = 0;
+        bool dirty = false;
+        if (!nds_io_cartridge_save_snapshot(&data, &size, &dirty))
+            return "{\"error\":\"no cartridge save is present\"}";
+        std::string hex;
+        append_hex(hex, data, size);
+        return "{\"size\":" + std::to_string(size) +
+            ",\"dirty\":" + std::to_string(dirty ? 1 : 0) +
+            ",\"hex\":\"" + hex + "\"}";
+    }
+    if (cmd == "cart_save_flush")
+        return std::string("{\"ok\":") +
+            (nds_io_flush_cartridge_save() ? "true}" : "false}");
     if (cmd == "profile") {
         // Raw NDS_PROFILE_GPU / NDS_PROFILE_SCHED accumulators (zero unless
         // the corresponding env var armed sampling at process start).

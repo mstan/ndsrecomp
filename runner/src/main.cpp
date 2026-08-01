@@ -25,6 +25,7 @@
 #include "gpu3d.h"
 #include "profile_report.h"
 #include "sha1.h"
+#include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
 #endif
@@ -221,11 +222,13 @@ int main(int argc, char** argv) {
     std::string cli_supersampling;
     std::string cli_antialiasing;
     std::string cli_startup_mode;
+    std::string cli_save_path;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
     bool config_explicit = false;
     bool discover_static_misses = false;
+    bool save_disabled = false;
     NdsFrontendOptions frontend_options{};
     uint16_t port = 19842;
     int positional = 0;
@@ -246,6 +249,10 @@ int main(int argc, char** argv) {
             port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (a == "--rom" && i + 1 < argc) {
             rom_path = argv[++i];
+        } else if (a == "--save-path" && i + 1 < argc) {
+            cli_save_path = argv[++i];
+        } else if (a == "--no-save") {
+            save_disabled = true;
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
             config_explicit = true;
@@ -263,6 +270,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
+                "[--save-path game.sav|--no-save] "
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
@@ -282,6 +290,12 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
         }
+    }
+
+    if (save_disabled && !cli_save_path.empty()) {
+        std::fprintf(stderr,
+                     "--save-path and --no-save cannot be used together\n");
+        return 2;
     }
 
     if (config_explicit || std::filesystem::exists(config_path)) {
@@ -435,6 +449,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
                      rom.size(), rom_sha1.c_str());
     }
+    std::string save_path;
+    if (!rom.empty() && !save_disabled) {
+        if (!cli_save_path.empty()) {
+            save_path = cli_save_path;
+        } else if (interactive) {
+            std::filesystem::path derived(rom_path);
+            derived.replace_extension(".sav");
+            save_path = derived.string();
+        }
+    }
+    nds_io_set_cartridge_save_path(save_path.c_str());
+    if (!rom.empty() && save_path.empty())
+        std::fprintf(stderr, "[save] battery persistence disabled\n");
 #ifdef NDS_HAVE_SM64DS_BANKS
     // Capabilities are tied to the exact title image whose projection,
     // culling, and HUD policy was audited.
@@ -461,6 +488,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     nds_gpu2d_set_adaptive_skybox_fill(sm64ds_wide_policy);
+    nds_title_patches_set_sm64ds_adaptive(
+        sm64ds_wide_policy &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
@@ -638,7 +668,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
         const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
-        return rc;
+        const bool save_ok = nds_io_flush_cartridge_save();
+        return rc != 0 ? rc : save_ok ? 0 : 1;
     }
 
     if (serve) {
@@ -653,13 +684,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] debug server mode from reset\n");
         debug_set_reset_fn(boot);
         debug_serve(port);
+        const bool save_ok = nds_io_flush_cartridge_save();
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         const bool compute_failed = nds_gpu3d_compute_runtime_failed();
         nds_compute_host_stop();
 #else
         const bool compute_failed = false;
 #endif
-        return compute_failed ? 1 : 0;
+        return (compute_failed || !save_ok) ? 1 : 0;
     }
 
     std::fprintf(stderr, "[run] dual-CPU from reset, ARM9 budget=%llu cycles\n",
@@ -687,5 +719,6 @@ int main(int argc, char** argv) {
 #else
     const bool compute_failed = false;
 #endif
-    return compute_failed ? 1 : 0;
+    const bool save_ok = nds_io_flush_cartridge_save();
+    return (compute_failed || !save_ok) ? 1 : 0;
 }

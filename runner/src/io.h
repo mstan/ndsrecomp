@@ -280,3 +280,9 @@ void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
 // ARM7 BIOS at runtime. Neither input is compiled into native objects.
 bool     nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
                                const uint8_t* arm7_bios, uint32_t bios_size);
+// Interactive play defaults to a battery-save file derived from the ROM.
+// Serve/batch gates leave this path empty unless explicitly requested.
+void     nds_io_set_cartridge_save_path(const char* path);
+bool     nds_io_flush_cartridge_save();
+bool     nds_io_cartridge_save_snapshot(const uint8_t** data, uint32_t* size,
+                                        bool* dirty);
