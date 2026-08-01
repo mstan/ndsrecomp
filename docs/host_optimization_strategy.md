@@ -341,6 +341,18 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   zero underruns/errors/input and exact FNV pair
   `e333837761ca0d1c,d61d2eb50e96b61d`; G3 is exact through 700M on both
   screens.
+- 2026-08-01 **fallthrough guard-to-cache handoff**: REJECTED and reverted.
+  The candidate reused a completed body's exact positive validation snapshot
+  only when the queued fallthrough target's cache entry matched its page
+  addresses, generation pointers, and generation values. G3 remained exact
+  through 700M on both screens. In quiet detached-screen/adaptive-top B/A/B,
+  whole-route FPS was **53.818 / 53.564 / 53.042** (candidate mean
+  **0.25% lower**). Settled-Yoshi FPS was
+  **53.176 / 54.147 / 52.684** (candidate mean **2.25% lower**) and emulation
+  time was **16.763 / 16.346 / 16.912 ms/frame** (candidate mean
+  **3.01% worse**). The comparisons and cache-entry copy cost more than the
+  avoided generation reads; do not pursue snapshot handoff as another
+  per-dispatch fast path.
 
 ## Reproduction crib
 
