@@ -244,6 +244,58 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   Tier-3 zero; G2 2,400 frames, zero underruns/queue errors/input, exact FNV
   pair `e333837761ca0d1c,d61d2eb50e96b61d`; G3 exact at every 100M..700M stop
   on both screens; decode/cycle/manifest tests pass.
+- 2026-08-01 **B4 larger RAM split units**: REJECTED before build. The
+  512-byte cap adds only 178 bodies to the ARM9 runtime bank
+  (19,082 finder functions -> 19,260 emitted) and 147 to the gameplay bank
+  (40,167 -> 40,314). The remaining boundaries come from finder/entry-point
+  structure, so raising the cap cannot materially reduce the measured
+  fallthrough volume. Do not pay a full regeneration/gate cycle until
+  dispatch attribution is split by selected bank.
+- 2026-08-01 **C1 generated game banks at `-O3`**: REJECTED as non-viable in
+  the current shard layout. A clean build completed only 53/76 objects after
+  ten minutes, with three gameplay-shard compiler processes still active; no
+  candidate binary linked, so no performance claim is made. The one-line
+  option change was reverted and the cached `-O2` runner restored in 16
+  seconds at the prior 300,213,538-byte size. Revisit only with smaller
+  compilation units or scoped hot-bank evidence.
+- 2026-08-01 **fallthrough selected-bank attribution**: one diagnostic-only
+  headed scenario tagged the bank selected after live-byte validation; its
+  wall timings were discarded because unrelated builds were active. ARM9
+  title/attract fallthroughs resolved **100% to the runtime-RAM bank**.
+  Settled Yoshi split **50.25% runtime RAM / 49.75% gameplay RAM**, with
+  title ROM and system banks both zero. ARM7 resolved **100% to its
+  runtime-RAM bank** in every phase. About 1.5% ARM9 / 3.1% ARM7 remained
+  untagged because slice-yield exits occur before bank selection. The
+  diagnostic counter/API changes were reverted after capture. Conclusion:
+  D1 must coalesce RAM finder/entry-point bodies or provide a nonrecursive
+  RAM-bank trampoline; ROM tuning and a larger max-size cap cannot address
+  the dominant fallthrough class.
+- 2026-08-01 **ARM9 fallthrough tail-dispatch trampoline**: RETAINED. A
+  generated literal fallthrough now returns its raw target to the active
+  `runtime_dispatch` invocation, which iterates instead of recursively
+  creating another host dispatch frame. Calls, exchanges, dynamic branches,
+  ARM7, miss/Tier-3 paths, per-target yielding/counters/tracing, and ordered
+  live-byte validation are unchanged. Each iteration destroys its
+  `StaticGuardScope` before consuming the queued target, so nested dispatch
+  and guard invalidation retain their prior lifetime semantics.
+
+  Quiet-host headed B/A/B used the shipping target mode (detached screens +
+  adaptive top). Whole-route FPS was candidate **52.685 / 53.415** versus
+  baseline **50.882** (candidate mean **+4.26%**). The sustained gameplay
+  target clears the retention threshold: settled-Yoshi emulation time was
+  **17.168 / 16.698 ms/frame** versus **18.170** (**6.81% mean reduction**)
+  and FPS was **51.942 / 53.233** versus **49.420** (**+6.41% mean**).
+  Castle/water, first-character arrival, and everyone-present emulation time
+  improved **8.26% / 8.85% / 7.67%** by the same two-leg mean; boot/menu was
+  flat. This is meaningful headroom but not ISSUE-2 acceptance: the automated
+  target-mode route still falls below 60 FPS and reports audio underruns.
+
+  Correctness is green: G3 byte-locks both screens at every 100M..700M stop;
+  G1 passes all eight fresh-pair firmware scenarios with exact screens/audio
+  and zero Tier-3; G2 completes 2,400 interactive frames with zero
+  underruns/errors/input and exact FNV pair
+  `e333837761ca0d1c,d61d2eb50e96b61d`. Decode, interpreter-cycle,
+  HLE-manifest, frontend-config, and battery-save tests pass.
 
 ## Reproduction crib
 

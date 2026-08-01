@@ -222,6 +222,29 @@ std::vector<uint64_t> g_discovery_seen;
 uint32_t g_yield_poll_hint = 1u;
 bool g_cpu_fast_poll = true;
 
+// ARM9 content-validated banks have no direct C-to-C calls: every body is
+// entered through runtime_dispatch. Let a generated body return its adjacent
+// fallthrough target to that dispatch invocation instead of recursively
+// nesting another runtime_dispatch frame. Nested BL/computed dispatches
+// install their own state and restore their caller's state on return.
+struct TailDispatchState {
+    TailDispatchState* saved = nullptr;
+    uint32_t target_pc = 0u;
+    int cpu = 0;
+    bool pending = false;
+};
+TailDispatchState* g_tail_dispatch = nullptr;
+
+struct TailDispatchScope {
+    TailDispatchState state;
+    TailDispatchScope() {
+        state.saved = g_tail_dispatch;
+        state.cpu = static_cast<int>(g_nds_active);
+        g_tail_dispatch = &state;
+    }
+    ~TailDispatchScope() { g_tail_dispatch = state.saved; }
+};
+
 void request_yield_poll() { g_yield_poll_hint = 1u; }
 
 bool configured_cpu_fast_poll() {
@@ -971,42 +994,51 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t ci, uint32_t r
 
 // ── Dispatch ────────────────────────────────────────────────────────────
 extern "C" void runtime_dispatch(uint32_t target_pc) {
-    uint32_t pc = target_pc & ~1u;
-    ++g_nds_dispatch_stats[g_nds_active].dispatch_total;
-    // Slice-preemption point. `pc` is a dispatch entry, so this is a safe
-    // place to yield to the scheduler — including for loops whose back-edge
-    // is an INDIRECT transfer (BX / pop pc / computed jump) and therefore
-    // has no backward-branch yield site. runtime_slice_yield() arms the
-    // unwind so pending BL/BLX returns are preserved.
-    if (runtime_slice_yield()) {
-        ++g_nds_dispatch_stats[g_nds_active].dispatch_slice_yield;
+    TailDispatchScope tail;
+    for (;;) {
+        tail.state.pending = false;
+        uint32_t pc = target_pc & ~1u;
+        ++g_nds_dispatch_stats[g_nds_active].dispatch_total;
+        // Slice-preemption point. `pc` is a dispatch entry, so this is a safe
+        // place to yield to the scheduler — including for loops whose back-edge
+        // is an INDIRECT transfer (BX / pop pc / computed jump) and therefore
+        // has no backward-branch yield site. runtime_slice_yield() arms the
+        // unwind so pending BL/BLX returns are preserved.
+        if (runtime_slice_yield()) {
+            ++g_nds_dispatch_stats[g_nds_active].dispatch_slice_yield;
+            g_cpu.R[15] = pc;
+            return;
+        }
+        // CPSR.T owns the instruction-set state. Some interpreted BX/POP paths
+        // preserve the interworking bit in their target value; generated bank
+        // prologues and the architectural register view require aligned R15.
         g_cpu.R[15] = pc;
+        runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
+        bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+        const CpuCtx& c = g_ctx[g_nds_active];
+        StaticGuardScope guard_scope;
+        if (guard_scope.call(lookup_static_cached(c, pc, thumb))) {
+            if (!tail.state.pending) return;
+            target_pc = tail.state.target_pc;
+            continue;
+        }
+        if (g_discover_static_misses && static_bios_pc(pc)) {
+            runtime_discovery_note_static(pc, thumb ? 1u : 0u);
+            tier3_run(pc);
+            return;
+        }
+        // Tier 3: code copied into RAM at runtime (firmware boot, menu, and the
+        // ITCM-resident IRQ handler) has no static bank — run the guest's OWN
+        // bytes through the interpreter (PRINCIPLES.md "the one exception"),
+        // never an HLE model. The bus owns the memory map (covers ITCM mirror).
+        if (bus_range_has_write_provenance(pc, thumb ? 2u : 4u)) {
+            tier3_run(pc);
+            return;
+        }
+        if (bus_addr_is_writable_ram(pc)) tier3_note_clean_ram_reject();
+        runtime_dispatch_miss(target_pc);
         return;
     }
-    // CPSR.T owns the instruction-set state. Some interpreted BX/POP paths
-    // preserve the interworking bit in their target value; generated bank
-    // prologues and the architectural register view require aligned R15.
-    g_cpu.R[15] = pc;
-    runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
-    bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
-    const CpuCtx& c = g_ctx[g_nds_active];
-    StaticGuardScope guard_scope;
-    if (guard_scope.call(lookup_static_cached(c, pc, thumb))) return;
-    if (g_discover_static_misses && static_bios_pc(pc)) {
-        runtime_discovery_note_static(pc, thumb ? 1u : 0u);
-        tier3_run(pc);
-        return;
-    }
-    // Tier 3: code copied into RAM at runtime (firmware boot, menu, and the
-    // ITCM-resident IRQ handler) has no static bank — run the guest's OWN
-    // bytes through the interpreter (PRINCIPLES.md "the one exception"),
-    // never an HLE model. The bus owns the memory map (covers ITCM mirror).
-    if (bus_range_has_write_provenance(pc, thumb ? 2u : 4u)) {
-        tier3_run(pc);
-        return;
-    }
-    if (bus_addr_is_writable_ram(pc)) tier3_note_clean_ram_reject();
-    runtime_dispatch_miss(target_pc);
 }
 
 extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
@@ -1048,6 +1080,12 @@ extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
 }
 extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_fallthrough;
+    if (g_nds_active == NDS_ARM9 && g_tail_dispatch &&
+        g_tail_dispatch->cpu == static_cast<int>(g_nds_active)) {
+        g_tail_dispatch->target_pc = target_pc;
+        g_tail_dispatch->pending = true;
+        return;
+    }
     runtime_dispatch(target_pc);
 }
 
