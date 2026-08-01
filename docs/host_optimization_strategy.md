@@ -139,12 +139,15 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
 
 ### D. Structural (bigger projects, later)
 
-- **D1. Superblock emission**: extend straight-line emission across
-  fall-through chains / hot traces within one validated region to
-  amortize entry/exit overhead further. B0 promoted this: generated body
-  fallthrough accounts for ~79–87% of ARM9 dispatch entries in the
-  measured phases. Any implementation must avoid unbounded host recursion,
-  retain slice preemption, and preserve ordered-bank validation/guarding.
+- **D1. Superblock emission — COMPLETE for validated ARM9 RAM banks**:
+  adjacent, same-mode function bodies are coalesced only within one 4 KiB
+  validation region and only when no earlier registered bank can own the
+  next entry. Every dispatch row still enters through ordered live-byte
+  validation, but all member rows select the shared leader and union
+  descriptor; internal fall-throughs become local gotos. Every instruction
+  retains its normal PC update/yield poll and every interior PC remains a
+  resume-switch target. This removes the dominant artificial boundary
+  without host recursion or a per-boundary cache.
 - **D2. GPU2D per-scanline cost** (5.6–9.8%) and ARM7 share (~26% of
   scheduler samples): separate workstreams once the two machinery
   clusters are paid down.
@@ -401,6 +404,47 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   was ample; the distributed call-site and code-footprint cost outweighed the
   eliminated lookup/generation work. Do not pursue generated per-site page
   linking again without a substantially smaller representation.
+- 2026-08-01 **selection-safe same-page ARM9 RAM superblocks**: RETAINED.
+  Before generation, the runtime-RAM bank had **15,719 / 17,988 (87.39%)**
+  eligible adjacent edges and the gameplay-RAM bank had
+  **19,621 / 38,256 (51.29%)**. The landed conservative pass merged 15,669
+  and 19,615 edges respectively. It requires live-byte validation, rejects
+  HLE banks, requires unique direct-mapped entries, never crosses a mode or
+  4 KiB page boundary, and rejects a target present in any preceding dispatch
+  table. All rows in a block still participate in ordinary ordered dispatch
+  and share one exact union validation descriptor; only a validated block's
+  internal artificial fall-throughs become local gotos. The executable
+  shrank 300,344,569 -> 287,654,876 bytes
+  (**-12,689,693 bytes / -4.22%**).
+  Consequently, dispatch/trace counters no longer observe those removed
+  boundaries. Union validation is also deliberately stricter than validating
+  one member alone: modification of any member makes the whole block fall back
+  through ordinary dispatch. The retained scenario remained Tier-3-free.
+
+  At the 700M G3 endpoint, ARM9 dispatch entries fell from 400,476,423 in the
+  prior page-lease instrumentation run to **78,634,647**, while generated
+  fall-through entries fell from 324,420,758 to **2,578,982**. Both screens
+  remained byte-exact at every 100M..700M stop.
+
+  Quiet detached-two-window/adaptive-top B/A/B whole-route FPS was
+  **59.476 / 57.930 / 59.458** (candidate mean **+2.65%**, substantially
+  cap-limited). Emulation time improved in every phase by
+  **10.92–16.22%**. Settled Yoshi was
+  **11.442 / 12.993 / 11.377 ms/frame** (**12.19% more headroom**);
+  castle/water was **12.462 / 14.042 / 12.555 ms/frame**
+  (**10.92% more headroom**); and the worst file-select transition was
+  **16.431 / 19.436 / 16.134 ms/frame** (**16.22% more headroom**).
+  Scenario artifacts are
+  `20260801-superblocks-{B1,A1,B2}`.
+
+  G1 is 8/8. G2 completed 2,400 headed frames at 57.858 FPS with zero audio
+  underruns/errors/input and exact FNV pair
+  `e333837761ca0d1c,d61d2eb50e96b61d`. G3 is exact through 700M on both
+  screens. Decode, interpreter-cycle, HLE-manifest, memory-timing,
+  static-fetch, frontend-config, and battery-save tests pass. This is a
+  material headroom win, but it is not ISSUE-2 acceptance yet: the worst
+  transition remains about **16.28 ms emulation/frame**, above the 12.8 ms
+  goal, and initial attract still presents at about 56 FPS.
 
 ## Reproduction crib
 

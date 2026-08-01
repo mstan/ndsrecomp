@@ -78,6 +78,12 @@ struct BankNames {
     std::string fn_prefix;     // <bank>_  — namespaces emitted fn symbols
 };
 
+struct SuperblockPlan {
+    std::vector<std::size_t> leader;
+    std::vector<std::size_t> end;
+    std::size_t merged_edges = 0;
+};
+
 struct ResolvedHleRoutine {
     HleProfileRoutine manifest;
     uint32_t source_address = 0;
@@ -99,6 +105,87 @@ BankNames bank_names(const std::string& bank) {
         static_cast<unsigned char>(c)));
     n.guard += "_H";
     return n;
+}
+
+uint64_t function_key(uint32_t addr, CpuMode mode) {
+    return (static_cast<uint64_t>(addr) << 1u) |
+        (mode == CpuMode::Thumb ? 1u : 0u);
+}
+
+bool read_dispatch_keys(const std::string& path,
+                        std::unordered_set<uint64_t>& keys) {
+    std::ifstream f(path);
+    if (!f) {
+        std::fprintf(stderr, "cannot read preceding dispatch %s\n",
+                     path.c_str());
+        return false;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        unsigned addr = 0u, thumb = 0u;
+        if (std::sscanf(line.c_str(), " {0x%Xu, %uu,", &addr, &thumb) == 2)
+            keys.insert((static_cast<uint64_t>(addr) << 1u) |
+                        uint64_t{thumb != 0u});
+    }
+    return true;
+}
+
+SuperblockPlan build_superblocks(
+        const std::vector<Function>& funcs,
+        const std::unordered_set<uint64_t>& preceding_rows,
+        bool enabled) {
+    SuperblockPlan plan;
+    plan.leader.resize(funcs.size());
+    plan.end.resize(funcs.size());
+    for (std::size_t i = 0; i < funcs.size(); ++i) {
+        plan.leader[i] = i;
+        plan.end[i] = i + 1u;
+    }
+    if (!enabled) return plan;
+
+    std::unordered_map<uint64_t, unsigned> key_counts;
+    for (const Function& fn : funcs)
+        ++key_counts[function_key(fn.addr, fn.mode)];
+
+    for (std::size_t first = 0; first < funcs.size();) {
+        const Function& head = funcs[first];
+        const uint32_t source =
+            head.source_addr ? head.source_addr : head.addr;
+        const uint32_t page = head.addr & ~0xFFFu;
+        if (source != head.addr || head.end_addr <= head.addr ||
+            uint64_t{head.end_addr} > uint64_t{page} + 4096u ||
+            key_counts[function_key(head.addr, head.mode)] != 1u) {
+            ++first;
+            continue;
+        }
+
+        std::size_t last = first + 1u;
+        while (last < funcs.size()) {
+            const Function& prev = funcs[last - 1u];
+            const Function& next = funcs[last];
+            const uint32_t next_source =
+                next.source_addr ? next.source_addr : next.addr;
+            const uint64_t next_key = function_key(next.addr, next.mode);
+            if (prev.end_addr != next.addr ||
+                prev.mode != next.mode ||
+                next_source != next.addr ||
+                (next.addr & ~0xFFFu) != page ||
+                next.end_addr <= next.addr ||
+                uint64_t{next.end_addr} > uint64_t{page} + 4096u ||
+                key_counts[next_key] != 1u ||
+                preceding_rows.count(next_key) != 0u)
+                break;
+            ++last;
+        }
+        if (last > first + 1u) {
+            plan.end[first] = last;
+            plan.merged_edges += last - first - 1u;
+            for (std::size_t index = first + 1u; index < last; ++index)
+                plan.leader[index] = first;
+        }
+        first = last;
+    }
+    return plan;
 }
 
 std::vector<Function> split_functions_for_emission(
@@ -280,11 +367,35 @@ const ResolvedHleRoutine* find_hle_routine(
 // in-function backward branch targets so a `L_<pc>:` label is emitted for
 // them, and (2) classifies `bx`/`mov pc` returns that alias LR so they
 // C-return instead of dispatching. Mirrors the proven gbarecomp emitter.
+void emit_resume_switch(std::FILE* f, const std::vector<Function>& funcs,
+                        std::size_t first, std::size_t last) {
+    const uint32_t entry = funcs[first].addr;
+    std::fprintf(f,
+        "    if (g_cpu.R[15] != 0x%08Xu) {\n"
+        "        switch (g_cpu.R[15]) {\n",
+        entry);
+    for (std::size_t index = first; index < last; ++index) {
+        const Function& fn = funcs[index];
+        const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+        uint32_t resume_pc = fn.addr;
+        if (index == first) resume_pc += step;
+        for (; resume_pc < fn.end_addr; resume_pc += step)
+            std::fprintf(f, "            case 0x%08Xu: goto L_%08X;\n",
+                         resume_pc, resume_pc);
+    }
+    std::fprintf(f,
+        "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
+        "        }\n"
+        "    }\n");
+}
+
 void emit_function_body(std::FILE* f, const Function& fn,
                         const uint8_t* rom, std::size_t rom_size,
                         uint32_t rom_base,
                         const std::unordered_map<uint64_t, std::string>&
-                            func_names_by_key) {
+                            func_names_by_key,
+                        bool emit_entry_switch,
+                        bool local_fallthrough) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
     ctx.names_by_key = &func_names_by_key;
@@ -298,19 +409,21 @@ void emit_function_body(std::FILE* f, const Function& fn,
     // computed branch into the function arrives at an interior PC and jumps
     // directly to that instruction. This keeps instruction-granular CPU
     // interleaving entirely native (no static-ROM interpreter fallback).
-    std::fprintf(f,
-        "    if (g_cpu.R[15] != 0x%08Xu) {\n"
-        "        switch (g_cpu.R[15]) {\n",
-        fn.addr);
-    for (uint32_t resume_pc = fn.addr + step;
-         resume_pc < fn.end_addr; resume_pc += step) {
-        std::fprintf(f, "            case 0x%08Xu: goto L_%08X;\n",
-                     resume_pc, resume_pc);
+    if (emit_entry_switch) {
+        std::fprintf(f,
+            "    if (g_cpu.R[15] != 0x%08Xu) {\n"
+            "        switch (g_cpu.R[15]) {\n",
+            fn.addr);
+        for (uint32_t resume_pc = fn.addr + step;
+             resume_pc < fn.end_addr; resume_pc += step) {
+            std::fprintf(f, "            case 0x%08Xu: goto L_%08X;\n",
+                         resume_pc, resume_pc);
+        }
+        std::fprintf(f,
+            "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
+            "        }\n"
+            "    }\n");
     }
-    std::fprintf(f,
-        "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
-        "        }\n"
-        "    }\n");
 
     auto source_offset_for = [&](uint32_t guest_pc, uint32_t len,
                                  std::size_t* out) -> bool {
@@ -479,12 +592,19 @@ void emit_function_body(std::FILE* f, const Function& fn,
     // Fall-through tail dispatch: if the body ended by hitting end_addr
     // (clipped to the next function) rather than a terminator, hand
     // control to the adjacent function so the runtime doesn't spin.
-    std::fprintf(f,
-        "    /* fall-through to 0x%08X */\n"
-        "    g_cpu.R[15] = 0x%08Xu;\n"
-        "    runtime_dispatch_literal_fallthrough(0x%08Xu);\n"
-        "    return;\n",
-        fn.end_addr, fn.end_addr, fn.end_addr);
+    if (local_fallthrough) {
+        std::fprintf(f,
+            "    /* coalesced fall-through to 0x%08X */\n"
+            "    goto L_%08X;\n",
+            fn.end_addr, fn.end_addr);
+    } else {
+        std::fprintf(f,
+            "    /* fall-through to 0x%08X */\n"
+            "    g_cpu.R[15] = 0x%08Xu;\n"
+            "    runtime_dispatch_literal_fallthrough(0x%08Xu);\n"
+            "    return;\n",
+            fn.end_addr, fn.end_addr, fn.end_addr);
+    }
 }
 
 void write_bank_header(const std::string& dir,
@@ -510,6 +630,7 @@ void write_bank_dispatch(const std::string& dir,
                          const uint8_t* rom, std::size_t rom_size,
                          uint32_t rom_base, const BankNames& names,
                          bool validate_live_bytes,
+                         const SuperblockPlan& superblocks,
                          const std::vector<ResolvedHleRoutine>& hle_routines) {
     std::FILE* f = std::fopen((dir + "/" + names.dispatch).c_str(), "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", names.dispatch.c_str()); return; }
@@ -523,8 +644,17 @@ void write_bank_dispatch(const std::string& dir,
     std::vector<std::string> validation_symbols(funcs.size());
     if (validate_live_bytes) {
         for (std::size_t index = 0; index < funcs.size(); ++index) {
+            const std::size_t leader = superblocks.leader[index];
+            char symbol[128];
+            std::snprintf(symbol, sizeof symbol, "g_validation_%s_%zu",
+                          names.fn_prefix.c_str(), leader);
+            validation_symbols[index] = std::string{"&"} + symbol;
+            if (leader != index) continue;
+
             const Function& fn = funcs[index];
-            const uint32_t size = fn.end_addr - fn.addr;
+            const std::size_t last = superblocks.end[index];
+            const uint32_t end = funcs[last - 1u].end_addr;
+            const uint32_t size = end - fn.addr;
             const uint32_t source = fn.source_addr ? fn.source_addr : fn.addr;
             if (source < rom_base || uint64_t(source - rom_base) + size > rom_size) {
                 std::fprintf(stderr,
@@ -533,10 +663,6 @@ void write_bank_dispatch(const std::string& dir,
                 std::fclose(f);
                 return;
             }
-            char symbol[128];
-            std::snprintf(symbol, sizeof symbol, "g_validation_%s_%zu",
-                          names.fn_prefix.c_str(), index);
-            validation_symbols[index] = std::string{"&"} + symbol;
             std::fprintf(f, "static const uint8_t %s_bytes[] = {", symbol);
             const uint32_t offset = source - rom_base;
             for (uint32_t i = 0; i < size; ++i) {
@@ -604,11 +730,12 @@ void write_bank_dispatch(const std::string& dir,
     std::vector<Row> rows;
     for (std::size_t index = 0; index < funcs.size(); ++index) {
         const auto& fn = funcs[index];
+        const auto& host_fn = funcs[superblocks.leader[index]];
         const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
         for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
             rows.push_back({pc, fn.mode == CpuMode::Thumb ? uint8_t{1}
                                                          : uint8_t{0},
-                            names.fn_prefix + fn.name,
+                            names.fn_prefix + host_fn.name,
                             validate_live_bytes ? validation_symbols[index]
                                                 : "0"});
         }
@@ -638,6 +765,7 @@ void write_bank_body(const std::string& dir,
                      const std::string& output_name,
                      std::size_t first, std::size_t last,
                      bool allow_direct_calls,
+                     const SuperblockPlan& superblocks,
                      const std::vector<ResolvedHleRoutine>& hle_routines) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     // Direct C calls stay within a body shard. Cross-shard transfers use the
@@ -667,7 +795,10 @@ void write_bank_body(const std::string& dir,
                      funcs[index].name.c_str());
     std::fputs("\n", f);
     for (std::size_t index = first; index < last; ++index) {
+        if (superblocks.leader[index] != index) continue;
         const auto& fn = funcs[index];
+        const std::size_t block_end = superblocks.end[index];
+        const bool coalesced = block_end > index + 1u;
         const ResolvedHleRoutine* hle = find_hle_routine(hle_routines, fn);
         if (hle) {
             std::fprintf(f,
@@ -683,15 +814,23 @@ void write_bank_body(const std::string& dir,
                 fn.name.c_str(), names.fn_prefix.c_str(), fn.name.c_str());
         }
         std::fprintf(f,
-            "/* 0x%08X  mode=%s  end=0x%08X  branches=%zu%s */\n"
+            "/* 0x%08X  mode=%s  end=0x%08X  branches=%zu%s%s */\n"
             "%svoid %s(void) {\n",
             fn.addr, fn.mode == CpuMode::Thumb ? "thumb" : "arm",
-            fn.end_addr, fn.direct_branch_targets.size(),
+            funcs[block_end - 1u].end_addr,
+            fn.direct_branch_targets.size(),
             fn.has_indirect_transfer ? "  indirect" : "",
+            coalesced ? "  coalesced" : "",
             hle ? "NDS_HLE_BODY_STORAGE " : "",
             hle ? "NDS_HLE_BODY_NAME" :
                   (names.fn_prefix + fn.name).c_str());
-        emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key);
+        if (coalesced)
+            emit_resume_switch(f, funcs, index, block_end);
+        for (std::size_t member = index; member < block_end; ++member) {
+            emit_function_body(
+                f, funcs[member], rom, rom_size, rom_base, name_by_key,
+                !coalesced, member + 1u < block_end);
+        }
         std::fprintf(f, "}\n\n");
         if (hle) {
             std::fprintf(f,
@@ -716,8 +855,10 @@ void write_bank_body(const std::string& dir,
 
 int main(int argc, char** argv) {
     std::string config_path, bin_path, out_dir, bank, hle_manifest_path;
+    std::vector<std::string> preceding_dispatch_paths;
     bool audit = false;
     bool validate_live_bytes = false;
+    bool coalesce_fallthroughs = false;
     bool dispatch_only = false;
     bool stable_address_shards = false;
     unsigned shards = 1u;
@@ -730,8 +871,12 @@ int main(int argc, char** argv) {
         else if (a == "--out") out_dir = next();
         else if (a == "--bank") bank = next();
         else if (a == "--hle-manifest") hle_manifest_path = next();
+        else if (a == "--preceding-dispatch")
+            preceding_dispatch_paths.push_back(next());
         else if (a == "--audit") audit = true;
         else if (a == "--validate-live-bytes") validate_live_bytes = true;
+        else if (a == "--coalesce-fallthroughs")
+            coalesce_fallthroughs = true;
         else if (a == "--dispatch-only") dispatch_only = true;
         else if (a == "--stable-address-shards") stable_address_shards = true;
         else if (a == "--shards") shards = static_cast<unsigned>(
@@ -753,6 +898,13 @@ int main(int argc, char** argv) {
     if (bin.empty()) { std::fprintf(stderr, "cannot read %s\n", bin_path.c_str()); return 1; }
     if (!verify_identity(cfg, bin.data(), bin.size())) return 1;
     print_config_summary(cfg);
+    if (coalesce_fallthroughs &&
+        (!validate_live_bytes || !hle_manifest_path.empty())) {
+        std::fprintf(stderr,
+            "--coalesce-fallthroughs requires --validate-live-bytes and "
+            "does not support --hle-manifest\n");
+        return 2;
+    }
 
     HleProfileManifest hle_manifest;
     if (!hle_manifest_path.empty()) {
@@ -879,6 +1031,15 @@ int main(int argc, char** argv) {
             }
         }
         BankNames names = bank_names(bank);
+        std::unordered_set<uint64_t> preceding_rows;
+        for (const std::string& path : preceding_dispatch_paths)
+            if (!read_dispatch_keys(path, preceding_rows)) return 1;
+        const SuperblockPlan superblocks = build_superblocks(
+            funcs, preceding_rows, coalesce_fallthroughs);
+        if (coalesce_fallthroughs)
+            std::printf("[emit] coalesced %zu fallthrough edges; "
+                        "preceding rows=%zu\n",
+                        superblocks.merged_edges, preceding_rows.size());
         unsigned emitted_shards = 0u;
         if (!dispatch_only) {
             write_bank_header(out_dir, funcs, names);
@@ -895,6 +1056,7 @@ int main(int argc, char** argv) {
                 write_bank_body(out_dir, funcs, bin.data(), bin.size(),
                                 cfg.program.load_address, names, output_name,
                                 first, last, !validate_live_bytes,
+                                superblocks,
                                 hle_routines);
                 ++emitted_shards;
             };
@@ -948,7 +1110,7 @@ int main(int argc, char** argv) {
         }
         write_bank_dispatch(out_dir, funcs, bin.data(), bin.size(),
                             cfg.program.load_address, names,
-                            validate_live_bytes, hle_routines);
+                            validate_live_bytes, superblocks, hle_routines);
         std::printf("\n[emit] bank '%s': %zu functions (%u body shard%s%s) -> %s/{%s,%s,%s}\n",
                     bank.c_str(), funcs.size(), emitted_shards,
                     emitted_shards == 1u ? "" : "s",
