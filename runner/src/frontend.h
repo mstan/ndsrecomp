@@ -68,6 +68,10 @@ struct NdsFrontendLiveStats {
     uint64_t frames;          // presented frames
     uint64_t emu_ticks;       // cumulative emulation phase (perf ticks)
     uint64_t present_ticks;   // cumulative present phase
+    uint64_t adaptive_ticks;  // adaptive framebuffer composition
+    uint64_t upload_ticks;    // host texture uploads
+    uint64_t draw_ticks;      // renderer clear/copy work
+    uint64_t swap_ticks;      // window presents
     uint64_t drain_ticks;     // cumulative audio-drain phase
     uint64_t now_ticks;       // performance counter at query time
     uint64_t freq;            // performance frequency (ticks/second)

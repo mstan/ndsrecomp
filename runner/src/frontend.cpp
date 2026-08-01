@@ -452,17 +452,27 @@ void render_screen(FrontendPresentation& presentation, int screen,
     SDL_RenderCopy(renderer, source, nullptr, &destination);
 }
 
-void present_screens(FrontendPresentation& presentation,
-                     const uint32_t* top_pixels,
-                     int top_width,
-                     const uint32_t* bottom_pixels,
-                     int bottom_width) {
+struct PresentationTicks {
+    uint64_t upload = 0;
+    uint64_t draw = 0;
+    uint64_t swap = 0;
+};
+
+PresentationTicks present_screens(FrontendPresentation& presentation,
+                                  const uint32_t* top_pixels,
+                                  int top_width,
+                                  const uint32_t* bottom_pixels,
+                                  int bottom_width) {
+    PresentationTicks ticks{};
+    uint64_t start = SDL_GetPerformanceCounter();
     SDL_UpdateTexture(presentation.textures[0], nullptr, top_pixels,
                       top_width * sizeof(uint32_t));
     SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
                       bottom_width * sizeof(uint32_t));
+    ticks.upload += SDL_GetPerformanceCounter() - start;
     if (!presentation.separate) {
         SDL_Renderer* renderer = presentation.renderers[0];
+        start = SDL_GetPerformanceCounter();
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
         const SDL_Rect top_rect{
@@ -475,19 +485,27 @@ void present_screens(FrontendPresentation& presentation,
             kScreenHeight, presentation.screen_widths[1], kScreenHeight};
         render_screen(presentation, 0, top_rect);
         render_screen(presentation, 1, bottom_rect);
+        ticks.draw += SDL_GetPerformanceCounter() - start;
+        start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
-        return;
+        ticks.swap += SDL_GetPerformanceCounter() - start;
+        return ticks;
     }
 
     for (int screen = 0; screen < 2; ++screen) {
         const SDL_Rect screen_rect{
             0, 0, presentation.screen_widths[screen], kScreenHeight};
         SDL_Renderer* renderer = presentation.renderers[screen];
+        start = SDL_GetPerformanceCounter();
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
         render_screen(presentation, screen, screen_rect);
+        ticks.draw += SDL_GetPerformanceCounter() - start;
+        start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
+        ticks.swap += SDL_GetPerformanceCounter() - start;
     }
+    return ticks;
 }
 
 } // namespace
@@ -630,6 +648,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool selftest_event_error = false;
     uint64_t phase_emu_ticks = 0;
     uint64_t phase_present_ticks = 0;
+    uint64_t phase_adaptive_ticks = 0;
+    uint64_t phase_upload_ticks = 0;
+    uint64_t phase_draw_ticks = 0;
+    uint64_t phase_swap_ticks = 0;
     uint64_t phase_drain_ticks = 0;
     g_live_stats = {};
     g_live_stats.active = 1;
@@ -852,15 +874,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         const uint32_t* bottom_pixels = nds_gpu2d_framebuffer(1);
         uint16_t top_width = 256;
         uint16_t bottom_width = 256;
+        const uint64_t adaptive_start = SDL_GetPerformanceCounter();
         if (options.adaptive_screens & NDS_ADAPTIVE_TOP)
             top_pixels =
                 nds_gpu2d_adaptive_framebuffer(0, &top_width);
         if (options.adaptive_screens & NDS_ADAPTIVE_BOTTOM)
             bottom_pixels =
                 nds_gpu2d_adaptive_framebuffer(1, &bottom_width);
+        phase_adaptive_ticks +=
+            SDL_GetPerformanceCounter() - adaptive_start;
         observe_top_black_bands(native_top, shown_frames);
-        present_screens(presentation, top_pixels, top_width,
-                        bottom_pixels, bottom_width);
+        const PresentationTicks presentation_ticks = present_screens(
+            presentation, top_pixels, top_width,
+            bottom_pixels, bottom_width);
+        phase_upload_ticks += presentation_ticks.upload;
+        phase_draw_ticks += presentation_ticks.draw;
+        phase_swap_ticks += presentation_ticks.swap;
         phase_present_ticks += SDL_GetPerformanceCounter() - phase1;
         if (audio && audio_started) {
             const uint32_t queued = audio_queue_count(audio, audio_queue);
@@ -896,6 +925,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.frames = shown_frames;
         g_live_stats.emu_ticks = phase_emu_ticks;
         g_live_stats.present_ticks = phase_present_ticks;
+        g_live_stats.adaptive_ticks = phase_adaptive_ticks;
+        g_live_stats.upload_ticks = phase_upload_ticks;
+        g_live_stats.draw_ticks = phase_draw_ticks;
+        g_live_stats.swap_ticks = phase_swap_ticks;
         g_live_stats.drain_ticks = phase_drain_ticks;
         g_live_stats.underruns =
             audio_queue.underruns.load(std::memory_order_relaxed);
@@ -986,6 +1019,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             static_cast<unsigned long long>(slow_frames_32ms),
             static_cast<unsigned long long>(first_underrun_frame),
             static_cast<unsigned long long>(last_underrun_frame));
+        std::fprintf(stderr,
+            "[sdl] present detail: adaptive=%.3fs upload=%.3fs "
+            "draw=%.3fs swap=%.3fs\n",
+            phase_adaptive_ticks * tick_seconds,
+            phase_upload_ticks * tick_seconds,
+            phase_draw_ticks * tick_seconds,
+            phase_swap_ticks * tick_seconds);
         nds_profile_report(stderr);
     }
     const bool audio_failed = audio_queue_error ||

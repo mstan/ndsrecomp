@@ -200,6 +200,50 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   G2 2,400 headed frames at 57.863 FPS, zero underruns/queue errors/input,
   exact FNV pair `e333837761ca0d1c,d61d2eb50e96b61d`; G3 byte-lock exact at
   every 100M..700M stop on both screens.
+- 2026-07-31 **A1/A2 header-inline tick/yield/unwind fast paths**:
+  REJECTED and reverted. The candidate exported the exact fast-poll state,
+  kept `NDS_CPU_FAST_POLL=0` on the original out-of-line path, and added
+  unlikely hints to the emitted unwind/hook branches. It increased the
+  runner by 1,629,616 bytes (0.54%). A clean stacked/native pair reduced
+  weighted emulation time only 15.119→14.923 ms/frame (**1.30%**, +0.196 ms
+  headroom). In the new separate-window/adaptive-top acceptance mode it
+  reduced emulation time 17.231→16.874 ms (**2.07%**) and end-to-end time
+  22.964→22.192 ms (**3.36%**). Both default and forced-reference G3 passed
+  exactly through 700M, but the speedup missed the 5% ABI/complexity gate.
+  The acceptance-mode run also exposed a larger target: presentation
+  averaged 4.807 ms/frame and reached 9.25 ms in settled gameplay.
+- 2026-08-01 **adaptive sky-repair disable diagnostic**: REJECTED as a
+  performance change. In the separate-window/adaptive-top target mode, the
+  same-binary repair-on/off pair reduced weighted presentation only
+  4.691->4.478 ms/frame and adaptive composition 3.834->3.689 ms/frame.
+  Settled Yoshi improved by about 0.49 ms of adaptive time, but the run had
+  broad emulation variance and the repair toggle remained below the 5%
+  retention gate. Keep the repair enabled; its remaining visual defects are
+  a correctness workstream rather than the dominant presentation cost.
+- 2026-08-01 **frame-coherent adaptive 3D snapshot**: RETAINED. Attribution
+  split weighted presentation into adaptive composition (3.83 ms), texture
+  upload (0.07 ms), draw (0.004 ms), and two-window swap (0.79 ms). Temporary
+  inner timers then showed HUD/OBJ rasterization, sky repair, and final blend
+  accounted for less than 0.8 ms combined; the missing time was rereading the
+  threaded renderer. The lifecycle was also frame-incoherent: native 2D had
+  consumed 3D frame N, while VCount 215 had already started rendering N+1
+  before host presentation reread the shared wide buffer. The fix snapshots
+  each wide color/attribute scanline into the matching 2D back-buffer slot
+  when native 2D consumes it, then adaptive presentation reads that completed
+  slot without waiting on or sampling N+1.
+
+  Quiet headed B->A->B in the acceptance mode
+  (`separate` + adaptive top, sky repair on) measured weighted presentation
+  at **1.449 / 5.144 / 1.642 ms/frame** and emulation+presentation at
+  **19.138 / 22.978 / 20.404 ms/frame**. The candidate median was 19.771 ms,
+  a **13.96% total frame-time reduction**; presentation fell **69.96%**.
+  Settled Yoshi presentation fell 7.973->1.710/1.789 ms and FPS rose
+  42.79->51.37/49.14. A separate post-gate adaptive-surface capture through
+  the castle confirmed coherent widened world output without new corruption;
+  the already-known sky seam/stretch remains. Gates: G1 8/8 exact with
+  Tier-3 zero; G2 2,400 frames, zero underruns/queue errors/input, exact FNV
+  pair `e333837761ca0d1c,d61d2eb50e96b61d`; G3 exact at every 100M..700M stop
+  on both screens; decode/cycle/manifest tests pass.
 
 ## Reproduction crib
 
@@ -214,7 +258,13 @@ py -3 oracle\probe_gx_state.py --nav sm64ds-title --start 100000000 --step 10000
 $env:NDS_FRONTEND_STATS='1'; $env:NDS_FRONTEND_MAX_FRAMES='2400'; $env:NDS_FRONTEND_REQUIRE_AUDIO='1'; nds_runner --interactive  # G2
 ```
 
-Headroom metric: `phase_ms_per_frame.emu` from the scenario harness.
+Headroom metric: `phase_ms_per_frame.emu` from the scenario harness for core
+emulation, plus `phase_ms_per_frame.present` when evaluating enhanced display
+modes.
 16.7 ms = break-even, **12.8 ms = 1.3x (goal), 8.3 ms = 2x (aspiration)**.
 2026-07-31 state: Yoshi 59.8 FPS at ~14.6 ms (locked but thin); worst
 menu phase 43.5 FPS at 22.4 ms.
+2026-08-01 separate-window/adaptive-top state after the coherent snapshot:
+weighted emulation+presentation 19.14/20.40 ms across two candidate runs;
+settled Yoshi 19.11/20.22 ms (49.1-51.4 FPS). Presentation is no longer the
+dominant gap; CPU emulation is again the primary burndown target.

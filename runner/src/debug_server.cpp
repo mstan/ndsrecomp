@@ -559,6 +559,10 @@ std::string handle(const std::string& line) {
                ",\"frames\":" + std::to_string(s.frames) +
                ",\"emu_ticks\":" + std::to_string(s.emu_ticks) +
                ",\"present_ticks\":" + std::to_string(s.present_ticks) +
+               ",\"adaptive_ticks\":" + std::to_string(s.adaptive_ticks) +
+               ",\"upload_ticks\":" + std::to_string(s.upload_ticks) +
+               ",\"draw_ticks\":" + std::to_string(s.draw_ticks) +
+               ",\"swap_ticks\":" + std::to_string(s.swap_ticks) +
                ",\"drain_ticks\":" + std::to_string(s.drain_ticks) +
                ",\"now_ticks\":" + std::to_string(s.now_ticks) +
                ",\"freq\":" + std::to_string(s.freq) +

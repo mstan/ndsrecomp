@@ -487,7 +487,19 @@ int main(int argc, char** argv) {
             "adaptive widescreen currently requires the soft 3D renderer\n");
         return 2;
     }
-    nds_gpu2d_set_adaptive_skybox_fill(sm64ds_wide_policy);
+    bool adaptive_sky_repair = true;
+    if (const char* value = std::getenv("NDS_ADAPTIVE_SKY_REPAIR")) {
+        if (value[0] == '0' && value[1] == '\0')
+            adaptive_sky_repair = false;
+        else if (!(value[0] == '1' && value[1] == '\0')) {
+            std::fprintf(stderr,
+                "invalid NDS_ADAPTIVE_SKY_REPAIR "
+                "(expected 0 or 1)\n");
+            return 2;
+        }
+    }
+    nds_gpu2d_set_adaptive_skybox_fill(
+        sm64ds_wide_policy && adaptive_sky_repair);
     nds_title_patches_set_sm64ds_adaptive(
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);

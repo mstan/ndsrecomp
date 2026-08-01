@@ -56,6 +56,13 @@ using AdaptiveFrame = std::array<uint32_t, kMaxAdaptiveWidth * 192>;
 // for instruction-precise framebuffer queries made while VCount is 192..262.
 std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
 std::array<AdaptiveFrame, 2> g_adaptive_frame{};
+// The threaded renderer begins the next 3D frame at VCount 215, before the
+// frontend presents the just-completed 2D buffer at the following frame
+// boundary. Snapshot the wide lines while 2D consumes them so adaptive
+// presentation stays on the same frame and never waits on the next render.
+std::array<AdaptiveFrame, 2> g_wide_3d_frame{};
+std::array<AdaptiveFrame, 2> g_wide_3d_attr_frame{};
+std::array<uint16_t, 2> g_wide_3d_width{};
 bool g_adaptive_skybox_fill = false;
 int g_front = 0;
 uint64_t g_render_ns = 0;
@@ -1055,6 +1062,26 @@ void render_engine_line(int engine, int y) {
         // capture, master brightness on every mode except screen-off.
         const uint32_t* line3d =
             (engine == 0) ? nds_gpu3d_line(y) : nullptr;
+        if (engine == 0 && bg0_3d) {
+            const uint16_t wide_width = nds_gpu3d_output_width();
+            if (wide_width > 256u &&
+                wide_width <= static_cast<uint16_t>(kMaxAdaptiveWidth)) {
+                const size_t offset =
+                    static_cast<size_t>(y) * wide_width;
+                std::copy_n(nds_gpu3d_wide_line(y), wide_width,
+                            g_wide_3d_frame[g_front ^ 1].data() + offset);
+                if (g_adaptive_skybox_fill) {
+                    const uint32_t* const attr =
+                        nds_gpu3d_wide_attr_line(y);
+                    if (attr)
+                        std::copy_n(
+                            attr, wide_width,
+                            g_wide_3d_attr_frame[g_front ^ 1].data() +
+                                offset);
+                }
+                g_wide_3d_width[g_front ^ 1] = wide_width;
+            }
+        }
         static std::array<uint32_t, 256> comp6;
         const bool need_comp =
             mode == 1u || (cap && !(u.capture & 0x01000000u));
@@ -1360,6 +1387,9 @@ void nds_gpu2d_reset(){
     for (auto& buffers : g_fb)
         for (auto& frame : buffers)
             frame.fill(0xFFFFFFFFu);
+    for (auto& frame : g_wide_3d_frame) frame.fill(0u);
+    for (auto& frame : g_wide_3d_attr_frame) frame.fill(0u);
+    g_wide_3d_width.fill(0u);
 }
 void nds_gpu2d_stop(){
     for (auto& buffers : g_fb)
@@ -1482,12 +1512,21 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
     std::array<int16_t, kMaxAdaptiveWidth> black_run{};
     std::array<uint32_t, kMaxAdaptiveWidth> repaired_3d{};
+    const bool snapshot_matches =
+        g_wide_3d_width[g_front] == output_width;
     for (int y = 0; y < 192; ++y) {
         render_obj_line(0, y, obj.data(), output_width,
                         oam, palette, *vram);
-        const uint32_t* const line3d = nds_gpu3d_wide_line(y);
+        const uint32_t* const line3d = snapshot_matches
+            ? g_wide_3d_frame[g_front].data() +
+                  static_cast<size_t>(y) * output_width
+            : nds_gpu3d_wide_line(y);
         const uint32_t* const attr3d =
-            g_adaptive_skybox_fill ? nds_gpu3d_wide_attr_line(y) : nullptr;
+            !g_adaptive_skybox_fill ? nullptr
+            : snapshot_matches
+                ? g_wide_3d_attr_frame[g_front].data() +
+                      static_cast<size_t>(y) * output_width
+                : nds_gpu3d_wide_attr_line(y);
         const uint32_t* composited_3d = line3d;
         if (attr3d) {
             int last_sky = -1;
