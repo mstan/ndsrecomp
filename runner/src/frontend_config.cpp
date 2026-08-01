@@ -79,6 +79,29 @@ bool nds_parse_antialiasing(const std::string& value, uint8_t* out) {
     return true;
 }
 
+bool nds_parse_cartridge_save_type(const std::string& value,
+                                   NdsCartridgeSaveType* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "none") {
+        *out = NdsCartridgeSaveType::None;
+        return true;
+    }
+    if (normalized == "eeprom-tiny" || normalized == "eeprom_tiny") {
+        *out = NdsCartridgeSaveType::EepromTiny;
+        return true;
+    }
+    if (normalized == "eeprom") {
+        *out = NdsCartridgeSaveType::Eeprom;
+        return true;
+    }
+    if (normalized == "flash") {
+        *out = NdsCartridgeSaveType::Flash;
+        return true;
+    }
+    return false;
+}
+
 bool nds_parse_startup_mode(const std::string& value,
                             NdsStartupMode* out) {
     if (!out) return false;
@@ -136,6 +159,27 @@ bool nds_load_frontend_config(const std::string& path,
         return false;
     }
 
+    if (const toml::table* game = root["game"].as_table()) {
+        if (const auto value = (*game)["sha1"].value<std::string>()) {
+            const bool invalid_length = value->size() != 40u;
+            const bool invalid_character = std::any_of(
+                value->begin(), value->end(), [](unsigned char c) {
+                    return !(c >= static_cast<unsigned char>('0') &&
+                             c <= static_cast<unsigned char>('9')) &&
+                           !(c >= static_cast<unsigned char>('a') &&
+                             c <= static_cast<unsigned char>('f'));
+                });
+            if (invalid_length || invalid_character) {
+                if (error) {
+                    *error =
+                        "game.sha1 must be exactly 40 lowercase hex digits";
+                }
+                return false;
+            }
+            options->expected_rom_sha1 = *value;
+        }
+    }
+
     if (const toml::table* system = root["system"].as_table()) {
         if (const auto value =
                 (*system)["startup_mode"].value<std::string>()) {
@@ -191,6 +235,56 @@ bool nds_load_frontend_config(const std::string& path,
                 }
                 return false;
             }
+        }
+    }
+
+    if (const toml::table* cartridge = root["cartridge"].as_table()) {
+        if (const auto value =
+                (*cartridge)["save_type"].value<std::string>()) {
+            if (!nds_parse_cartridge_save_type(
+                    *value, &options->cartridge_save.type)) {
+                if (error) {
+                    *error =
+                        "cartridge.save_type must be none, eeprom-tiny, "
+                        "eeprom, or flash";
+                }
+                return false;
+            }
+        }
+        if (const auto value = (*cartridge)["save_size"].value<int64_t>()) {
+            if (*value < 0 || *value > (64ll * 1024ll * 1024ll)) {
+                if (error) {
+                    *error =
+                        "cartridge.save_size must be between 0 and 67108864";
+                }
+                return false;
+            }
+            options->cartridge_save.size = static_cast<uint32_t>(*value);
+        }
+        const uint32_t size = options->cartridge_save.size;
+        const bool power_of_two = size != 0u && (size & (size - 1u)) == 0u;
+        if (options->cartridge_save.type == NdsCartridgeSaveType::None) {
+            if (size != 0u) {
+                if (error) {
+                    *error =
+                        "cartridge.save_size must be 0 when save_type is none";
+                }
+                return false;
+            }
+        } else if (!power_of_two) {
+            if (error) {
+                *error =
+                    "cartridge.save_size must be a nonzero power of two";
+            }
+            return false;
+        } else if (options->cartridge_save.type ==
+                       NdsCartridgeSaveType::EepromTiny &&
+                   size != 512u) {
+            if (error) {
+                *error =
+                    "cartridge.save_size must be 512 for eeprom-tiny";
+            }
+            return false;
         }
     }
     return true;

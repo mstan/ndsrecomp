@@ -48,28 +48,46 @@ int main() {
         !require(!nds_parse_startup_mode("fast", &startup)))
         return 4;
 
+    NdsCartridgeSaveType save_type = NdsCartridgeSaveType::Eeprom;
+    if (!require(nds_parse_cartridge_save_type("flash", &save_type)) ||
+        !require(save_type == NdsCartridgeSaveType::Flash) ||
+        !require(nds_parse_cartridge_save_type("eeprom-tiny", &save_type)) ||
+        !require(save_type == NdsCartridgeSaveType::EepromTiny) ||
+        !require(!nds_parse_cartridge_save_type("sram", &save_type)))
+        return 5;
+
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() /
         "ndsrecomp_frontend_config_test.toml";
     {
         std::ofstream file(path);
-        file << "[system]\n"
+        file << "[game]\n"
+                "sha1 = \"90164d1ac127ee5f9815ea4ae7de798c7b5fc629\"\n"
+                "[system]\n"
                 "startup_mode = \"automatic\"\n"
                 "[display]\n"
                 "screen_layout = \"separate\"\n"
                 "adaptive_widescreen = \"bottom\"\n"
                 "supersampling = 3\n"
-                "antialiasing = 4\n";
+                "antialiasing = 4\n"
+                "[cartridge]\n"
+                "save_type = \"flash\"\n"
+                "save_size = 262144\n";
     }
     NdsFrontendOptions options{};
     std::string error;
     if (!require(nds_load_frontend_config(path.string(), &options, &error)) ||
+        !require(options.expected_rom_sha1 ==
+                 "90164d1ac127ee5f9815ea4ae7de798c7b5fc629") ||
         !require(options.screen_layout == NdsScreenLayout::Separate) ||
         !require(options.startup_mode == NdsStartupMode::Automatic) ||
         !require(options.adaptive_screens == NDS_ADAPTIVE_BOTTOM) ||
         !require(options.supersampling == 3) ||
-        !require(options.antialiasing == 4))
-        return 5;
+        !require(options.antialiasing == 4) ||
+        !require(options.cartridge_save.type ==
+                 NdsCartridgeSaveType::Flash) ||
+        !require(options.cartridge_save.size == 262144))
+        return 6;
 
     {
         std::ofstream file(path);
@@ -78,7 +96,26 @@ int main() {
     }
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
-        return 6;
+        return 7;
+
+    {
+        std::ofstream file(path);
+        file << "[cartridge]\n"
+                "save_type = \"flash\"\n"
+                "save_size = 1000\n";
+    }
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 8;
+
+    {
+        std::ofstream file(path);
+        file << "[game]\n"
+                "sha1 = \"90164D1AC127EE5F9815EA4AE7DE798C7B5FC629\"\n";
+    }
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 9;
     std::filesystem::remove(path);
     return 0;
 }

@@ -25,6 +25,7 @@
 #include "gpu3d.h"
 #include "profile_report.h"
 #include "sha1.h"
+#include "title_banks.h"
 #include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
@@ -436,6 +437,9 @@ int main(int argc, char** argv) {
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
+#ifdef NDS_HAVE_SM64DS_BANKS
+    bool sm64ds_title = false;
+#endif
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
@@ -448,6 +452,15 @@ int main(int argc, char** argv) {
         rom_sha1 = gba::sha1(rom.data(), rom.size()).hex();
         std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
                      rom.size(), rom_sha1.c_str());
+        if (!frontend_options.expected_rom_sha1.empty() &&
+            rom_sha1 != frontend_options.expected_rom_sha1) {
+            std::fprintf(stderr,
+                         "refusing to start: game config expects ROM SHA-1 "
+                         "%s, got %s\n",
+                         frontend_options.expected_rom_sha1.c_str(),
+                         rom_sha1.c_str());
+            return 1;
+        }
     }
     std::string save_path;
     if (!rom.empty() && !save_disabled) {
@@ -460,12 +473,36 @@ int main(int argc, char** argv) {
         }
     }
     nds_io_set_cartridge_save_path(save_path.c_str());
+    nds_io_configure_cartridge_save(frontend_options.cartridge_save);
+    if (!rom.empty()) {
+        const char* type = "none";
+        switch (frontend_options.cartridge_save.type) {
+            case NdsCartridgeSaveType::EepromTiny:
+                type = "eeprom-tiny";
+                break;
+            case NdsCartridgeSaveType::Eeprom:
+                type = "eeprom";
+                break;
+            case NdsCartridgeSaveType::Flash:
+                type = "flash";
+                break;
+            case NdsCartridgeSaveType::None:
+                break;
+        }
+        std::fprintf(stderr, "[save] cartridge backup: %s, %u bytes\n",
+                     type, frontend_options.cartridge_save.size);
+    }
     if (!rom.empty() && save_path.empty())
         std::fprintf(stderr, "[save] battery persistence disabled\n");
 #ifdef NDS_HAVE_SM64DS_BANKS
-    // Capabilities are tied to the exact title image whose projection,
-    // culling, and HUD policy was audited.
-    if (rom_sha1 == "1367529f2cb23e76ef295cb1727333ae8f0a6cd7") {
+    // Static title banks and host-side enhancements are valid only for the
+    // exact image they were generated and audited against. In particular,
+    // many DS titles share the standard ARM7 load address; registering one
+    // title's unguarded immutable bank for another cartridge corrupts guest
+    // execution before the runtime can fall back to Tier 3.
+    sm64ds_title =
+        rom_sha1 == "1367529f2cb23e76ef295cb1727333ae8f0a6cd7";
+    if (sm64ds_title) {
         frontend_options.adaptive_supported = NDS_ADAPTIVE_TOP;
         frontend_options.adaptive_max_width[0] = 448;  // 21:9 at 192 high
         sm64ds_wide_policy = true;
@@ -611,41 +648,48 @@ int main(int argc, char** argv) {
                               0x00000000u);
 #endif
 #endif
+        if (nds_register_configured_title_banks(rom_sha1.c_str())) {
+            std::fprintf(stderr,
+                         "[dispatch] registered configured title banks for %s\n",
+                         rom_sha1.c_str());
+        }
 #ifdef NDS_HAVE_SM64DS_BANKS
-        nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
-                              g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
+        if (sm64ds_title) {
+            nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
+                                  g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
 #if defined(NDS_PROFILE_HLE_HEAT)
-        nds_register_hle_profile_descriptors(
-            NDS_ARM9, g_hle_profile_sm64ds_arm9,
-            g_hle_profile_sm64ds_arm9_len);
+            nds_register_hle_profile_descriptors(
+                NDS_ARM9, g_hle_profile_sm64ds_arm9,
+                g_hle_profile_sm64ds_arm9_len);
 #endif
-        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
-                              g_dispatch_sm64ds_arm7_len, 0x00000000u);
+            nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
+                                  g_dispatch_sm64ds_arm7_len, 0x00000000u);
 #ifdef NDS_HAVE_SM64DS_RAM_BANKS
-        // Content-validated runtime-RAM bank (relocated sound engine +
-        // services); registered after the ROM-derived closure so the
-        // immutable payload rows win for their own address range.
-        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
-                              g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
+            // Content-validated runtime-RAM bank (relocated sound engine +
+            // services); registered after the ROM-derived closure so the
+            // immutable payload rows win for their own address range.
+            nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
+                                  g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_RAM_BANKS
-        // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
-        // overlays loaded over/past the static image); registered after
-        // the ROM-derived closure so the closure's rows win where the
-        // live bytes still match the static image.
-        nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
-                              g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
+            // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
+            // overlays loaded over/past the static image); registered after
+            // the ROM-derived closure so the closure's rows win where the
+            // live bytes still match the static image.
+            nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
+                                  g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
-        // A later gameplay capture carries different overlay generations at
-        // many of the same virtual addresses. Keep it in a separate
-        // content-validated bank: boot/title bytes above win when present,
-        // then this generation becomes eligible after the guest swaps them.
-        nds_register_dispatch(NDS_ARM9,
-                              g_dispatch_sm64ds_arm9_ram_gameplay,
-                              g_dispatch_sm64ds_arm9_ram_gameplay_len,
-                              0xFFFF0000u);
+            // A later gameplay capture carries different overlay generations
+            // at many of the same virtual addresses. Keep it in a separate
+            // content-validated bank: boot/title bytes above win when present,
+            // then this generation becomes eligible after the guest swaps it.
+            nds_register_dispatch(NDS_ARM9,
+                                  g_dispatch_sm64ds_arm9_ram_gameplay,
+                                  g_dispatch_sm64ds_arm9_ram_gameplay_len,
+                                  0xFFFF0000u);
 #endif
+        }
 #endif
 
         // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.

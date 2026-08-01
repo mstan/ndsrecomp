@@ -30,6 +30,10 @@ option(NDS_PROFILE_MEM_TIMING
     OFF)
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
+set(NDS_TITLE_BANK_DIR "" CACHE PATH
+    "Optional ignored directory containing generated title banks")
+set(NDS_TITLE_ROM_SHA1 "" CACHE STRING
+    "Exact lowercase ROM SHA-1 allowed to register NDS_TITLE_BANK_DIR")
 
 # The recompiled ARM9 BIOS bank (generated; compiled as C). Generated TUs
 # trade warning-cleanliness for uniform emission — silence the expected
@@ -55,6 +59,30 @@ if(NDS_SM64DS_BANK_DIR)
             "NDS_SM64DS_BANK_DIR has no generated sm64ds bank sources")
     endif()
 endif()
+set(TITLE_BANK_BODIES)
+set(TITLE_BANK_DISPATCH)
+set(TITLE_BANK_SOURCES)
+if(NDS_TITLE_BANK_DIR)
+    string(LENGTH "${NDS_TITLE_ROM_SHA1}" NDS_TITLE_ROM_SHA1_LENGTH)
+    if(NOT NDS_TITLE_ROM_SHA1_LENGTH EQUAL 40 OR
+       NDS_TITLE_ROM_SHA1 MATCHES "[^0-9a-f]")
+        message(FATAL_ERROR
+            "NDS_TITLE_ROM_SHA1 must be exactly 40 lowercase hex digits "
+            "when NDS_TITLE_BANK_DIR is set")
+    endif()
+    file(GLOB TITLE_BANK_BODIES CONFIGURE_DEPENDS
+        "${NDS_TITLE_BANK_DIR}/*_[0-9][0-9].c")
+    file(GLOB TITLE_BANK_DISPATCH CONFIGURE_DEPENDS
+        "${NDS_TITLE_BANK_DIR}/*_dispatch.c")
+    list(SORT TITLE_BANK_BODIES)
+    list(SORT TITLE_BANK_DISPATCH)
+    set(TITLE_BANK_SOURCES ${TITLE_BANK_BODIES} ${TITLE_BANK_DISPATCH})
+    if(NOT TITLE_BANK_BODIES OR NOT TITLE_BANK_DISPATCH)
+        message(FATAL_ERROR
+            "NDS_TITLE_BANK_DIR must contain generated bank body and "
+            "dispatch sources")
+    endif()
+endif()
 add_library(nds_banks STATIC
     ${GEN}/arm9_bios.c
     ${GEN}/arm9_bios_dispatch.c
@@ -62,24 +90,31 @@ add_library(nds_banks STATIC
     ${GEN}/arm7_bios_dispatch.c
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
-    ${SM64DS_BANK_SOURCES})
+    ${SM64DS_BANK_SOURCES}
+    ${TITLE_BANK_SOURCES})
 ndsrecomp_limit_generated_compiles(nds_banks)
 ndsrecomp_limit_link(nds_banks)
 target_include_directories(nds_banks PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
-    ${NDS_SM64DS_BANK_DIR})
+    ${NDS_SM64DS_BANK_DIR}
+    ${NDS_TITLE_BANK_DIR})
 set_source_files_properties(
     ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
     ${SM64DS_BANK_SOURCES}
+    ${TITLE_BANK_SOURCES}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable;-Wno-unused-but-set-variable")
 if(SM64DS_BANK_SOURCES AND NOT MSVC)
     # Game banks are on the hot path (the ARM7 runtime-RAM bank carries the
     # sound engine); boot correctness is gate-proven (G1/G2/G3), so compile
     # them optimized. -g0 keeps the large generated TUs cheap to link.
     set_source_files_properties(${SM64DS_BANK_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "-w;-O2;-g0")
+endif()
+if(TITLE_BANK_SOURCES AND NOT MSVC)
+    set_source_files_properties(${TITLE_BANK_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-w;-O2;-g0")
 endif()
 
@@ -108,10 +143,69 @@ foreach(src IN LISTS SM64DS_BANK_SOURCES)
         list(APPEND ARM7_BANK_SOURCES ${src})
     endif()
 endforeach()
+foreach(src IN LISTS TITLE_BANK_SOURCES)
+    if(src MATCHES "([_/]|^)arm9_" OR src MATCHES "_arm9_")
+        list(APPEND ARM9_BANK_SOURCES ${src})
+    elseif(src MATCHES "([_/]|^)arm7_" OR src MATCHES "_arm7_")
+        list(APPEND ARM7_BANK_SOURCES ${src})
+    else()
+        message(FATAL_ERROR
+            "Cannot infer title-bank CPU from source name: ${src}. "
+            "Include _arm9_ or _arm7_ in every bank name.")
+    endif()
+endforeach()
 set_source_files_properties(${ARM9_BANK_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=0")
 set_source_files_properties(${ARM7_BANK_SOURCES}
     PROPERTIES COMPILE_DEFINITIONS "NDS_STATIC_CPU=1")
+
+# Build one registry translation unit from the configured dispatch filenames.
+# This keeps game names and the number of overlay/runtime generations out of
+# shared runner source. Every generated table is registered only after the
+# exact configured ROM hash matches.
+set(TITLE_BANK_REGISTRY
+    "${CMAKE_CURRENT_BINARY_DIR}/title_bank_registry.cpp")
+file(WRITE "${TITLE_BANK_REGISTRY}"
+    "#include \"title_banks.h\"\n"
+    "#include \"state.h\"\n"
+    "#include <cstring>\n\n")
+foreach(src IN LISTS TITLE_BANK_DISPATCH)
+    get_filename_component(dispatch_stem "${src}" NAME_WE)
+    string(REGEX REPLACE "_dispatch$" "" bank "${dispatch_stem}")
+    file(APPEND "${TITLE_BANK_REGISTRY}"
+        "extern \"C\" const DispatchEntry g_dispatch_${bank}[];\n"
+        "extern \"C\" const unsigned g_dispatch_${bank}_len;\n")
+endforeach()
+file(APPEND "${TITLE_BANK_REGISTRY}"
+    "\nbool nds_register_configured_title_banks(const char* rom_sha1) {\n")
+if(TITLE_BANK_DISPATCH)
+    file(APPEND "${TITLE_BANK_REGISTRY}"
+        "    if (!rom_sha1 || std::strcmp(rom_sha1, "
+        "\"${NDS_TITLE_ROM_SHA1}\") != 0) return false;\n")
+    foreach(src IN LISTS TITLE_BANK_DISPATCH)
+        get_filename_component(dispatch_stem "${src}" NAME_WE)
+        string(REGEX REPLACE "_dispatch$" "" bank "${dispatch_stem}")
+        if(bank MATCHES "(^|_)arm9($|_)")
+            set(bank_cpu "NDS_ARM9")
+            set(bank_mask "0xFFFF0000u")
+        elseif(bank MATCHES "(^|_)arm7($|_)")
+            set(bank_cpu "NDS_ARM7")
+            set(bank_mask "0x00000000u")
+        else()
+            message(FATAL_ERROR
+                "Cannot infer title-bank CPU from dispatch name: ${bank}")
+        endif()
+        file(APPEND "${TITLE_BANK_REGISTRY}"
+            "    nds_register_dispatch(${bank_cpu}, g_dispatch_${bank}, "
+            "g_dispatch_${bank}_len, ${bank_mask});\n")
+    endforeach()
+    file(APPEND "${TITLE_BANK_REGISTRY}" "    return true;\n")
+else()
+    file(APPEND "${TITLE_BANK_REGISTRY}"
+        "    (void)rom_sha1;\n"
+        "    return false;\n")
+endif()
+file(APPEND "${TITLE_BANK_REGISTRY}" "}\n")
 
 # SHA-1 helper (reused from the recompiler support lib).
 add_library(nds_support STATIC
@@ -148,6 +242,7 @@ add_executable(nds_runner
     src/frontend_config.cpp
     src/frontend.cpp
     src/main.cpp
+    "${TITLE_BANK_REGISTRY}"
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
     vendor/melonds/Savestate.cpp)

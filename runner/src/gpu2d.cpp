@@ -54,7 +54,13 @@ using AdaptiveFrame = std::array<uint32_t, kMaxAdaptiveWidth * 192>;
 // melonDS draws into the back buffer during the active frame and publishes it
 // only in GPU::FinishFrame, after VBlank. Keeping the same lifecycle matters
 // for instruction-precise framebuffer queries made while VCount is 192..262.
-std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][engine], 0xFFRRGGBB
+// Physical top/bottom buffers, matching melonDS GPU::AssignFramebuffers.
+// POWCNT1 bit 15 routes engine A to the top when set and to the bottom when
+// clear. Apply that routing while each scanline is rendered: consulting the
+// live register only when a debug/frontend client later reads the completed
+// frame can retroactively swap a frame if the guest changes POWCNT1 during
+// VBlank.
+std::array<std::array<Frame, 2>, 2> g_fb{}; // [buffer][screen], 0xFFRRGGBB
 std::array<AdaptiveFrame, 2> g_adaptive_frame{};
 // The threaded renderer begins the next 3D frame at VCount 215, before the
 // frontend presents the just-completed 2D buffer at the following frame
@@ -1026,7 +1032,9 @@ void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
 
 void render_engine_line(int engine, int y) {
     Unit& u=g_unit[engine];
-    Frame& fb = g_fb[g_front ^ 1][engine];
+    const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
+    const int screen = engine_a_on_top ? engine : (engine ^ 1);
+    Frame& fb = g_fb[g_front ^ 1][screen];
     uint32_t* const dst = fb.data() + y * 256;
     const uint8_t* const palette = nds_vram_renderer_palette(engine);
     const uint8_t* const oam = nds_vram_renderer_oam(engine);
@@ -1448,9 +1456,7 @@ void nds_gpu2d_vblank(){
     }
 }
 const uint32_t* nds_gpu2d_framebuffer(int screen){
-    const bool normal=(nds_powercontrol9()&0x8000u)!=0;
-    const int engine=normal?screen:(screen^1);
-    return g_fb[g_front][engine&1].data();
+    return g_fb[g_front][screen & 1].data();
 }
 void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
     g_adaptive_skybox_fill = enabled;
@@ -1458,8 +1464,8 @@ void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
 
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
-    const bool normal = (nds_powercontrol9() & 0x8000u) != 0;
-    const int engine = normal ? screen : (screen ^ 1);
+    const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
+    const int engine = engine_a_on_top ? screen : (screen ^ 1);
     const int output_width = nds_gpu3d_output_width();
     if (output_width <= 256) {
         if (width) *width = 256;

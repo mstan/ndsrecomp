@@ -384,9 +384,8 @@ bool nds_gpu3d_run_trace_get(uint64_t count, NdsGxRunTraceEntry* out) {
 void nds_gpu3d_reset() {
     g_nds.ARM9Timestamp = 0;
     g_nds.GPU.GPU3D.Reset();
-    // nds_io_reset resets POWCNT1 to its LLE cold-boot value 0x0001: both 3D
-    // engines start disabled until the guest powers them via 0x04000304.
-    g_nds.GPU.GPU3D.SetEnabled(false, false);
+    // Match the retail/melonDS POWCNT1 reset value 0x820F.
+    g_nds.GPU.GPU3D.SetEnabled(true, true);
     std::memset(g_nds.GPU.VRAMFlat_Texture, 0, sizeof g_nds.GPU.VRAMFlat_Texture);
     std::memset(g_nds.GPU.VRAMFlat_TexPal, 0, sizeof g_nds.GPU.VRAMFlat_TexPal);
     g_texture_flat_gen = 0;

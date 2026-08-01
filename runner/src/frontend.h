@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "cartridge_config.h"
+
 // Run the native, human-facing firmware preview. The emulation remains on the
 // same scheduler/device path used by the deterministic debug verifier; SDL is
 // only the host presentation and input/audio transport.
@@ -28,6 +30,9 @@ enum NdsAdaptiveScreen : uint8_t {
 };
 
 struct NdsFrontendOptions {
+    // Optional exact cartridge identity from [game]. When present, every
+    // title-owned setting in this config is rejected for any other ROM.
+    std::string expected_rom_sha1;
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
     uint8_t adaptive_screens = NDS_ADAPTIVE_NONE;
@@ -39,6 +44,7 @@ struct NdsFrontendOptions {
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction
     uint8_t antialiasing = 0;   // 0/2/4/8 sample-quality preset
+    NdsCartridgeSaveConfig cartridge_save{};
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.
@@ -53,6 +59,8 @@ bool nds_parse_startup_mode(const std::string& value,
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
+bool nds_parse_cartridge_save_type(const std::string& value,
+                                   NdsCartridgeSaveType* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_adaptive_screens_name(uint8_t value);

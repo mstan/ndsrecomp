@@ -91,9 +91,9 @@ uint32_t g_card_data_mode = 0;
 
 // ── AUXSPI cartridge backup device (0x040001A0 CNT / 0x040001A2 DATA) ────
 // Mirrors melonDS NDSCartSlot::WriteSPICnt/WriteSPIData/ReadSPIData and
-// CartRetail's regular-EEPROM chip. SM64DS (ASMP) is melonDS ROMList
-// SaveMemType 2 = 8 KiB EEPROM, which is also melonDS's not-in-list default;
-// the ROMList lookup for other chip types lands with the next game target.
+// CartRetail's EEPROM/flash chips. Chip type and capacity are title-owned
+// game configuration; projects without that table retain the old 8 KiB
+// EEPROM default.
 // A byte transfer holds AUXSPICNT bit7 busy for 8*(8<<speed) system cycles,
 // cleared by a scheduled system event; the guest save code spin-waits on
 // that bit, so instant completion shifts the whole ARM7 timeline.
@@ -106,6 +106,7 @@ uint8_t  g_sram_cmd = 0;
 uint8_t  g_sram_status = 0;
 uint32_t g_sram_addr = 0;
 std::vector<uint8_t> g_cart_sram;
+NdsCartridgeSaveConfig g_cart_save_config;
 std::string g_cart_save_path;
 bool g_cart_save_dirty = false;
 
@@ -1627,18 +1628,8 @@ void io_mem_write(uint32_t addr, uint32_t value, uint32_t width) {
 
 int active() { return (g_nds_active == NDS_ARM9) ? 0 : 1; }
 
-// ── AUXSPI backup-chip protocol (melonDS CartRetail::SPIWrite + the
-// regular-EEPROM handler; addrsize 2 below 64 KiB) ──────────────────────
-uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
-    if (g_cart_sram.empty()) return 0;
-    if (pos == 0) {
-        switch (val) {
-            case 0x04: g_sram_status &= ~0x02u; return 0;    // WRDI
-            case 0x06: g_sram_status |= 0x02u; return 0;     // WREN
-            default: g_sram_cmd = val; g_sram_addr = 0; break;
-        }
-        return 0xFF;
-    }
+// ── AUXSPI backup-chip protocol (melonDS CartRetail::SPIWrite) ─────────
+uint8_t cart_eeprom_spi_write(uint8_t val, uint32_t pos) {
     const uint32_t mask = static_cast<uint32_t>(g_cart_sram.size()) - 1u;
     const uint32_t addrsize = g_cart_sram.size() > 65536u ? 3u : 2u;
     switch (g_sram_cmd) {
@@ -1661,11 +1652,6 @@ uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
                 }
                 ++g_sram_addr;
             }
-            if (last) {
-                g_sram_status &= ~0x02u;
-                if (g_cart_save_dirty && !g_cart_save_path.empty())
-                    nds_io_flush_cartridge_save();
-            }
             return 0;
         case 0x03:  // read
             if (pos <= addrsize) {
@@ -1681,6 +1667,137 @@ uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
         default:
             return 0xFF;
     }
+}
+
+uint8_t cart_eeprom_tiny_spi_write(uint8_t val, uint32_t pos) {
+    const uint32_t high =
+        (g_sram_cmd == 0x0Au || g_sram_cmd == 0x0Bu) ? 0x100u : 0u;
+    switch (g_sram_cmd) {
+        case 0x01:
+            if (pos == 1) {
+                g_sram_status =
+                    (g_sram_status & 0x01u) | (val & 0x0Cu);
+            }
+            return 0;
+        case 0x05:
+            return g_sram_status | 0xF0u;
+        case 0x02:
+        case 0x0A:
+            if (pos < 2) {
+                g_sram_addr = val;
+            } else {
+                if (g_sram_status & 0x02u) {
+                    uint8_t& destination =
+                        g_cart_sram[(g_sram_addr + high) & 0x1FFu];
+                    if (destination != val) {
+                        destination = val;
+                        g_cart_save_dirty = true;
+                    }
+                }
+                ++g_sram_addr;
+            }
+            return 0;
+        case 0x03:
+        case 0x0B:
+            if (pos < 2) {
+                g_sram_addr = val;
+                return 0;
+            }
+            return g_cart_sram[(g_sram_addr++ + high) & 0x1FFu];
+        case 0x9F:
+            return 0xFF;
+        default:
+            return 0xFF;
+    }
+}
+
+uint8_t cart_flash_spi_write(uint8_t val, uint32_t pos) {
+    const uint32_t mask = static_cast<uint32_t>(g_cart_sram.size()) - 1u;
+    switch (g_sram_cmd) {
+        case 0x05:
+            return g_sram_status;
+        case 0x02:
+        case 0x0A:
+            if (pos <= 3) {
+                g_sram_addr = (g_sram_addr << 8) | val;
+            } else {
+                if (g_sram_status & 0x02u) {
+                    uint8_t& destination = g_cart_sram[g_sram_addr & mask];
+                    // Match melonDS's currently modelled distinction between
+                    // page-program (0x02) and page-write (0x0A).
+                    const uint8_t programmed =
+                        g_sram_cmd == 0x02 ? 0u : val;
+                    if (destination != programmed) {
+                        destination = programmed;
+                        g_cart_save_dirty = true;
+                    }
+                }
+                ++g_sram_addr;
+            }
+            return 0;
+        case 0x03:
+        case 0x0B:
+            if (pos <= 3) {
+                g_sram_addr = (g_sram_addr << 8) | val;
+                return 0;
+            }
+            if (g_sram_cmd == 0x0B && pos == 4) return 0;
+            return g_cart_sram[g_sram_addr++ & mask];
+        case 0x9F:
+            return 0xFF;
+        case 0xD8:
+        case 0xDB: {
+            if (pos <= 3) g_sram_addr = (g_sram_addr << 8) | val;
+            if (pos == 3 && (g_sram_status & 0x02u)) {
+                const uint32_t length =
+                    g_sram_cmd == 0xD8 ? 0x10000u : 0x100u;
+                for (uint32_t i = 0; i < length; ++i) {
+                    uint8_t& destination =
+                        g_cart_sram[(g_sram_addr + i) & mask];
+                    if (destination != 0u) {
+                        destination = 0u;
+                        g_cart_save_dirty = true;
+                    }
+                }
+            }
+            return 0;
+        }
+        default:
+            return 0xFF;
+    }
+}
+
+uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
+    if (g_cart_sram.empty()) return 0;
+    if (pos == 0) {
+        switch (val) {
+            case 0x04: g_sram_status &= ~0x02u; return 0;    // WRDI
+            case 0x06: g_sram_status |= 0x02u; return 0;     // WREN
+            default: g_sram_cmd = val; g_sram_addr = 0; break;
+        }
+        return 0xFF;
+    }
+    uint8_t result = 0xFF;
+    switch (g_cart_save_config.type) {
+        case NdsCartridgeSaveType::EepromTiny:
+            result = cart_eeprom_tiny_spi_write(val, pos);
+            break;
+        case NdsCartridgeSaveType::Eeprom:
+            result = cart_eeprom_spi_write(val, pos);
+            break;
+        case NdsCartridgeSaveType::Flash:
+            result = cart_flash_spi_write(val, pos);
+            break;
+        case NdsCartridgeSaveType::None:
+            result = 0;
+            break;
+    }
+    if (last) {
+        g_sram_status &= ~0x02u;
+        if (g_cart_save_dirty && !g_cart_save_path.empty())
+            nds_io_flush_cartridge_save();
+    }
+    return result;
 }
 
 void auxspi_write_cnt(uint16_t val) {
@@ -1840,7 +1957,12 @@ void nds_io_reset() {
         g_fifo_cnt[i] = 0; g_fifo_head[i] = 0; g_fifocnt[i] = 0; g_fifo_lastrx[i] = 0;
     }
     for (auto& b : g_io_mem) b = 0;
-    g_io_mem[0x304] = 0x01; // ARM9 POWCNT1 reset value
+    // melonDS NDS::Reset / retail cold-boot value: both 2D engines and both
+    // 3D halves enabled, main engine routed to the physical top screen.
+    // The old 0x0001 value silently reversed title screens whenever the
+    // firmware/game left bit 15 at reset state.
+    g_io_mem[0x304] = 0x0F;
+    g_io_mem[0x305] = 0x82;
     g_exmemcnt[0] = g_exmemcnt[1] = 0x4000u;
     g_powercontrol7 = 0x0001u;
     g_keyinput = 0x007F03FFu;
@@ -1885,12 +2007,10 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
     const uint32_t megabytes = std::max(1u, rom_size >> 20u);
     g_card_chip_id = 0x000000C2u | ((megabytes - 1u) << 8u);
 
-    // Backup chip: 8 KiB regular EEPROM, blank = 0xFF (melonDS CartRetail
-    // with ROMList SaveMemType 2 — SM64DS's entry and also melonDS's
-    // unknown-ROM default). Interactive play loads an exact-size battery
-    // file; parity/automation runs explicitly keep the path disabled.
-    if (g_cart_sram.size() != 8192u) {
-        g_cart_sram.assign(8192u, 0xFFu);
+    // Blank backup memory is 0xFF. Interactive play loads an exact-size
+    // battery file; parity/automation runs explicitly keep persistence off.
+    if (g_cart_sram.size() != g_cart_save_config.size) {
+        g_cart_sram.assign(g_cart_save_config.size, 0xFFu);
         g_cart_save_dirty = false;
         if (!g_cart_save_path.empty()) {
             std::string error;
@@ -1918,6 +2038,11 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
         }
     }
     return true;
+}
+
+void nds_io_configure_cartridge_save(
+        const NdsCartridgeSaveConfig& config) {
+    g_cart_save_config = config;
 }
 
 void nds_io_set_cartridge_save_path(const char* path) {
