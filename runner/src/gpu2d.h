@@ -47,6 +47,26 @@ bool nds_gpu2d_direct_frame(NdsGpu2dDirectFrame* out);
 bool nds_gpu2d_requires_3d_readback();
 void nds_gpu2d_force_cpu_frames(uint32_t frames);
 
+enum NdsGpu2dDirectClass : uint8_t {
+    NDS_GPU2D_DIRECT_SUPPORTED = 0,
+    NDS_GPU2D_DIRECT_DISABLED,
+    NDS_GPU2D_DIRECT_FORCE_CPU,
+    NDS_GPU2D_DIRECT_SCREEN_ROUTE,
+    NDS_GPU2D_DIRECT_ENGINE_OFF,
+    NDS_GPU2D_DIRECT_CAPTURE,
+    NDS_GPU2D_DIRECT_RENDERER_VIEW,
+    NDS_GPU2D_DIRECT_FORCE_BLANK,
+    NDS_GPU2D_DIRECT_DISPLAY_MODE,
+    NDS_GPU2D_DIRECT_NO_BG0_3D,
+    NDS_GPU2D_DIRECT_EXTRA_BG,
+    NDS_GPU2D_DIRECT_WIDTH,
+    NDS_GPU2D_DIRECT_CLASS_COUNT,
+};
+const char* nds_gpu2d_direct_class_name(uint32_t index);
+constexpr uint32_t NDS_GPU2D_DIRECT_BG_MASK_COUNT = 8;
+constexpr uint32_t NDS_GPU2D_DIRECT_BG_MODE_COUNT = 8;
+constexpr uint32_t NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT = 4;
+
 struct NdsGpu2dProfile {
     uint64_t render_ns;
     uint64_t obj_ns;
@@ -56,5 +76,16 @@ struct NdsGpu2dProfile {
     uint64_t scanlines;
     uint64_t direct_frames;
     uint64_t direct_overlay_ns;
+    uint64_t direct_class_frames[NDS_GPU2D_DIRECT_CLASS_COUNT];
+    uint64_t direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT];
+    uint64_t direct_class_transitions;
+    uint64_t direct_extra_bg_mask_frames[NDS_GPU2D_DIRECT_BG_MASK_COUNT];
+    uint64_t direct_extra_bg_mask_engine_a_ns[
+        NDS_GPU2D_DIRECT_BG_MASK_COUNT];
+    uint64_t direct_extra_bg_mode_frames[NDS_GPU2D_DIRECT_BG_MODE_COUNT];
+    uint64_t direct_extra_effect_frames[
+        NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
+    uint64_t direct_extra_master_bright_frames[
+        NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);

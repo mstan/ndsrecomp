@@ -63,6 +63,27 @@ void nds_profile_report(std::FILE* out) {
             (unsigned long long)gpu_profile.text_lines[1][3],
             (unsigned long long)gpu_profile.text_lines[1][4],
             (unsigned long long)gpu_profile.no_effect_lines[1]);
+        uint64_t classified_frames = 0;
+        for (uint32_t index = 0;
+             index < NDS_GPU2D_DIRECT_CLASS_COUNT; ++index)
+            classified_frames += gpu_profile.direct_class_frames[index];
+        if (classified_frames) {
+            std::fprintf(out,
+                "  GPU2D direct classes: %llu transitions",
+                (unsigned long long)gpu_profile.direct_class_transitions);
+            for (uint32_t index = 0;
+                 index < NDS_GPU2D_DIRECT_CLASS_COUNT; ++index) {
+                if (!gpu_profile.direct_class_frames[index]) continue;
+                std::fprintf(out, "; %s=%llu/%.3f s A",
+                    nds_gpu2d_direct_class_name(index),
+                    (unsigned long long)
+                        gpu_profile.direct_class_frames[index],
+                    static_cast<double>(
+                        gpu_profile.direct_class_engine_a_ns[index]) /
+                        1.0e9);
+            }
+            std::fputc('\n', out);
+        }
     }
     NdsGpu3dProfile gpu3d_profile{};
     nds_gpu3d_profile(&gpu3d_profile);

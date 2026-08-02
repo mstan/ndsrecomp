@@ -14,8 +14,27 @@ void nds_gpu3d_reset();
 // timing and state remain on the scheduler thread.
 void nds_gpu3d_set_threaded(bool threaded);
 void nds_gpu3d_use_soft_renderer(bool threaded);
+// Restore the faithful renderer with the last host-threading preference set
+// by nds_gpu3d_set_threaded/use_soft_renderer. Auto-selection uses this after
+// an OpenGL startup failure.
+void nds_gpu3d_restore_soft_renderer();
 
-// Optional performance-HLE renderer. The OpenGL context and function loader
+enum class NdsGpu3dRendererPolicy : uint8_t {
+    Auto,
+    Soft,
+    Compute,
+    Invalid,
+};
+
+// NDS_3D_RENDERER is intentionally an override: an absent/empty value means
+// Auto, which prefers OpenGL ComputeRenderer when it was built and otherwise
+// retains threaded software. Explicit Compute is fail-loud.
+NdsGpu3dRendererPolicy nds_gpu3d_renderer_policy();
+const char* nds_gpu3d_renderer_policy_name(NdsGpu3dRendererPolicy policy);
+bool nds_gpu3d_renderer_prefers_compute();
+bool nds_gpu3d_renderer_requires_compute();
+
+// Performance-HLE renderer. The OpenGL context and function loader
 // must be current before activation. Failure leaves the faithful soft
 // renderer selected. use_soft_renderer() explicitly restores the fallback.
 bool nds_gpu3d_use_compute_renderer();

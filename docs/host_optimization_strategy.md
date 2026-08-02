@@ -622,11 +622,78 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   every 100M..700M stop. Decode, interpreter-cycle, HLE-manifest,
   frontend-config, battery-save, and compute-disabled build checks pass.
 
-  This is a promising experimental seam, not a default promotion: the full
-  route does not yet clear the 5% complexity gate, and forced capture, parity,
-  and multi-vendor coverage remain pending. The evidence supports continuing
+  This evidence did not clear the ordinary 5% full-route retention gate.
+  Product direction subsequently accepted that near-term regression and
+  promoted OpenGL as the preferred default; forced capture, parity, and
+  multi-vendor coverage remain pending. The evidence supports continuing
   GPU-resident composition; it does not support claiming that OpenGL alone
   fixes firmware/title CPU cost.
+- 2026-08-01 **OpenGL 4.3 default promotion -- USER-DIRECTED**:
+  `NDS_ENABLE_COMPUTE_RENDERER` now defaults ON and an absent renderer override
+  means `NDS_3D_RENDERER=auto`. Auto prefers ComputeRenderer, enables late
+  readback overlap, and uses direct adaptive-top presentation when eligible.
+  A startup failure rebuilds any direct presentation on the faithful software
+  path. `NDS_3D_RENDERER=soft` preserves a same-binary force-floor;
+  `NDS_3D_RENDERER=compute` remains fail-loud. The SM64DS launcher exposes
+  Automatic (OpenGL preferred), Software, and OpenGL 4.3 choices, and the
+  scenario harness now measures Automatic by default.
+
+  This is explicitly a backend-policy decision, not a new performance result.
+  The retained A/B remains **-1.23% whole shortened route** and **-23.66%
+  settled-gameplay emulation cost** (16.32 -> 12.46 ms/frame). Promotion
+  accepts that tradeoff to make GPU-resident composition the development
+  baseline. Fresh default-on, explicit-soft, forced-GL-startup-failure,
+  compute-disabled-auto, and compute-disabled-explicit-compute probes pass with
+  the expected selection/fallback/failure behavior. Both compute-enabled and
+  disabled builds compile; frontend/battery tests pass; default-auto G1 passes
+  all eight fresh-pair firmware scenarios with Tier-3 zero; default-auto G2
+  passes 2,400 headed frames at 57.776 FPS with zero underruns/errors/input and
+  the locked FNV pair `(e333837761ca0d1c,d61d2eb50e96b61d)`; explicit-soft G3
+  byte-locks both screens at every 100M..700M checkpoint. G3 remains a forced
+  software-floor gate because compute's approved pixel differences are not
+  byte-identical to the oracle.
+- 2026-08-01 **direct-presentation eligibility census -- IN PROGRESS**:
+  diagnostic-only per-frame classification now attributes the first
+  mutually-exclusive direct-presentation rejection reason, class transitions,
+  and engine-A CPU rendering time to that reason. A zero-compiler saved-route
+  run on diagnostic binary
+  `3790a6401d49302f944c74ff759659d0686f3397586a266e1fd71db4b31d7511`
+  measured 369/423 direct frames in settled Yoshi; the remaining 54 were
+  `no_bg0_3d` transition frames. Initial attract, Adventure/file select, and
+  saved-file load all hit the current physical-top `screen_route` gate.
+  Those intervals spent 0.83--1.03 ms/frame rendering engine A on the CPU and
+  another 0.38--0.44 ms/frame in compute submit/map readback. This is
+  composition evidence only: profiling was enabled and no timing A/B claim is
+  made.
+
+  The first classifier checked screen routing before the underlying engine
+  state. Reordering it without changing the eligibility boolean produced a
+  second zero-compiler census: all 722 initial frames and all 361
+  Adventure/file-select frames were actually `extra_bg`; saved-file load was
+  104/116 `extra_bg`, 11 route-only, and one no-3D transition. Therefore
+  moving the GL context between detached windows by itself is rejected before
+  implementation.
+
+  A third state-only census (its timing discarded because unrelated compilers
+  started mid-run) narrowed the extra composition exactly. Engine A stayed in
+  DS BG mode 0 with blend/effect mode 2 and no master brightness. Initial
+  attract used BG1+BG3 for 722/722 frames. Adventure/file select used BG1 for
+  288/361 frames and BG1+BG3 for 73/361; saved-file load used BG1 for all 104
+  extra-BG frames. Thus this is not a full affine/capture compositor: the
+  bounded candidate is a compatible dual-window GL presenter plus exact
+  mode-0 text BG1/BG3 planes, preserving centered native output while screen
+  routing is swapped. Its removable CPU-render + readback ceiling is only
+  about 1.2--1.5 ms/frame before paying BG raster/upload cost, so remeasure
+  after the PGO decision and reject it unless the whole-route gain clears 5%.
+  An unbuilt presentation-time BG decode prototype was removed after
+  adversarial review: it sampled palette/VRAM/OAM and effect registers after
+  all scanlines, could re-reject a frame after CPU engine-A rendering had
+  already been skipped, and did not map a native 256-pixel surface to the
+  centered slice of the 448-pixel compute target. Any future candidate must
+  capture the necessary layer/effect state at scanline time (or retain a
+  complete CPU fallback), preserve OBJ/3D alpha and layer tie semantics, and
+  validate a compatible GL context on both windows. No performance claim was
+  made and no dual-window fast path was retained.
 - 2026-08-01 **scoped runner-only PGO candidate — A/B PENDING**:
   `NDS_PGO_MODE=GENERATE|USE` instruments only runner-owned host translation
   units; generated ARM banks and portable support libraries remain baseline
@@ -641,10 +708,17 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   `c1a68f7dda5ce944b6ad7aa3cfdad011166079ec63fe5dec09683c2260c9fdd0`.
 
   One zero-compiler candidate leg measured 57.83 FPS overall and settled
-  gameplay at 57.95 FPS / 15.21 ms emulation per frame. This is not an A/B
-  claim: every exact-source baseline attempt to date overlapped unrelated
-  CMake/Ninja activity and is excluded. Obtain at least two clean interleaved
-  samples per side before deciding retention or running correctness gates.
+  gameplay at 57.95 FPS / 15.21 ms emulation per frame. A later zero-compiler
+  exact-source baseline leg measured 50.76 FPS / 18.11 ms in the same phase.
+  Across all four saved-route phases, the non-adjacent comparison points
+  toward a 15.9--17.7% emulation-time reduction. This is still not an A/B
+  claim: the clean legs were separated by a period of substantial host
+  variance, while each attempted immediately counterbalanced candidate leg
+  overlapped unrelated CMake/Ninja activity and was excluded. Obtain at least
+  two clean interleaved samples per side before deciding retention or running
+  correctness gates. Keep the acceptance run paced at 60 FPS; emulation and
+  presentation milliseconds already measure headroom beyond the cap without
+  changing audio/threading behavior.
 
 ## Reproduction crib
 

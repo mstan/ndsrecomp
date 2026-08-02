@@ -39,9 +39,12 @@ The common vocabulary is:
 
 The intended controls are `NDS_HLE=off|on|verify` as a master policy,
 `NDS_HLE_MATH=off|on|force|verify` for title CPU routines, and
-`NDS_3D_RENDERER=auto|soft|compute|verify` for rendering. Startup output must
-print the effective policy. Existing parity-safe host optimizations remain
-separate because they do not replace guest semantics.
+`NDS_3D_RENDERER=auto|soft|compute` for rendering. `auto` is the renderer
+default: it prefers the OpenGL 4.3 compute backend when built and available,
+then falls back to the faithful software backend on startup failure. Explicit
+`compute` is fail-loud; explicit `soft` is the accuracy-floor override.
+Startup output must print the effective policy. Existing parity-safe host
+optimizations remain separate because they do not replace guest semantics.
 
 ## CPU/title routine seam
 

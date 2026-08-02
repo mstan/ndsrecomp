@@ -393,19 +393,37 @@ int main(int argc, char** argv) {
 
     g_discover_static_misses = discover_static_misses;
 
-    bool compute_requested = false;
-    if (const char* renderer = std::getenv("NDS_3D_RENDERER")) {
-        if (std::strcmp(renderer, "soft") != 0 &&
-            std::strcmp(renderer, "compute") != 0) {
-            std::fprintf(stderr,
-                         "invalid NDS_3D_RENDERER (expected soft or compute)\n");
-            return 2;
-        }
-        compute_requested = std::strcmp(renderer, "compute") == 0;
-        if (compute_requested && !nds_gpu3d_compute_renderer_built()) {
-            std::fprintf(stderr,
-                "NDS_3D_RENDERER=compute requested but this runner was "
-                "built without NDS_ENABLE_COMPUTE_RENDERER\n");
+    const NdsGpu3dRendererPolicy renderer_policy =
+        nds_gpu3d_renderer_policy();
+    if (renderer_policy == NdsGpu3dRendererPolicy::Invalid) {
+        std::fprintf(stderr,
+                     "invalid NDS_3D_RENDERER "
+                     "(expected auto, soft, or compute)\n");
+        return 2;
+    }
+    if (renderer_policy == NdsGpu3dRendererPolicy::Compute &&
+        !nds_gpu3d_compute_renderer_built()) {
+        std::fprintf(stderr,
+            "NDS_3D_RENDERER=compute requested but this runner was "
+            "built without NDS_ENABLE_COMPUTE_RENDERER\n");
+        return 2;
+    }
+    const bool compute_preferred =
+        renderer_policy != NdsGpu3dRendererPolicy::Soft &&
+        nds_gpu3d_compute_renderer_built();
+    std::fprintf(stderr, "[gpu3d] renderer policy: %s (preferred: %s)\n",
+                 nds_gpu3d_renderer_policy_name(renderer_policy),
+                 compute_preferred ? "OpenGL 4.3 compute"
+                                   : "threaded software");
+    for (const char* name : {
+             "NDS_COMPUTE_READBACK_OVERLAP",
+             "NDS_COMPUTE_DIRECT_PRESENT",
+         }) {
+        if (const char* value = std::getenv(name);
+            value && *value &&
+            std::strcmp(value, "0") != 0 &&
+            std::strcmp(value, "1") != 0) {
+            std::fprintf(stderr, "invalid %s (expected 0 or 1)\n", name);
             return 2;
         }
     }

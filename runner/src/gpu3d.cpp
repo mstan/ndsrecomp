@@ -33,6 +33,7 @@ namespace {
 melonDS::NDS g_nds;
 
 int g_log_budget = 64;
+bool g_soft_threaded = false;
 
 // Last VRAM texture generation reflected into each flat view (0 = never
 // refreshed; the live counter starts at 1).
@@ -83,12 +84,12 @@ bool compute_gl_stage_failed(const char* stage) {
 bool compute_readback_overlap() {
     static const bool enabled = [] {
         const char* value = std::getenv("NDS_COMPUTE_READBACK_OVERLAP");
-        if (!value || !*value || std::strcmp(value, "0") == 0) return false;
-        if (std::strcmp(value, "1") == 0) return true;
+        if (!value || !*value || std::strcmp(value, "1") == 0) return true;
+        if (std::strcmp(value, "0") == 0) return false;
         std::fprintf(stderr,
             "[gpu3d] invalid NDS_COMPUTE_READBACK_OVERLAP "
-            "(expected 0/1); using 0\n");
-        return false;
+            "(expected 0/1); using default 1\n");
+        return true;
     }();
     return enabled;
 }
@@ -319,12 +320,14 @@ void Semaphore_Post(Semaphore* sema, int count) {
 // ── Runner-facing bridge API ────────────────────────────────────────────
 
 void nds_gpu3d_set_threaded(bool threaded) {
+    g_soft_threaded = threaded;
     auto* renderer = dynamic_cast<melonDS::SoftRenderer*>(
         &g_nds.GPU.GPU3D.GetCurrentRenderer());
     if (renderer) renderer->SetThreaded(threaded, g_nds.GPU);
 }
 
 void nds_gpu3d_use_soft_renderer(bool threaded) {
+    g_soft_threaded = threaded;
     auto* renderer = dynamic_cast<melonDS::SoftRenderer*>(
         &g_nds.GPU.GPU3D.GetCurrentRenderer());
     if (!renderer) {
@@ -338,6 +341,43 @@ void nds_gpu3d_use_soft_renderer(bool threaded) {
 #endif
     }
     renderer->SetThreaded(threaded, g_nds.GPU);
+}
+
+void nds_gpu3d_restore_soft_renderer() {
+    nds_gpu3d_use_soft_renderer(g_soft_threaded);
+}
+
+NdsGpu3dRendererPolicy nds_gpu3d_renderer_policy() {
+    const char* const value = std::getenv("NDS_3D_RENDERER");
+    if (!value || !*value || std::strcmp(value, "auto") == 0)
+        return NdsGpu3dRendererPolicy::Auto;
+    if (std::strcmp(value, "soft") == 0)
+        return NdsGpu3dRendererPolicy::Soft;
+    if (std::strcmp(value, "compute") == 0)
+        return NdsGpu3dRendererPolicy::Compute;
+    return NdsGpu3dRendererPolicy::Invalid;
+}
+
+const char* nds_gpu3d_renderer_policy_name(
+        NdsGpu3dRendererPolicy policy) {
+    switch (policy) {
+        case NdsGpu3dRendererPolicy::Auto: return "auto";
+        case NdsGpu3dRendererPolicy::Soft: return "soft";
+        case NdsGpu3dRendererPolicy::Compute: return "compute";
+        default: return "invalid";
+    }
+}
+
+bool nds_gpu3d_renderer_prefers_compute() {
+    const NdsGpu3dRendererPolicy policy = nds_gpu3d_renderer_policy();
+    return policy != NdsGpu3dRendererPolicy::Soft &&
+           policy != NdsGpu3dRendererPolicy::Invalid &&
+           nds_gpu3d_compute_renderer_built();
+}
+
+bool nds_gpu3d_renderer_requires_compute() {
+    return nds_gpu3d_renderer_policy() ==
+           NdsGpu3dRendererPolicy::Compute;
 }
 
 bool nds_gpu3d_compute_renderer_built() {

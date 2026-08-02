@@ -256,16 +256,26 @@ void release_host_objects()
 
 bool nds_compute_host_start(SDL_Window* presentation_window)
 {
-    const char* selection = std::getenv("NDS_3D_RENDERER");
-    if (!selection || std::strcmp(selection, "compute") != 0) return true;
+    const NdsGpu3dRendererPolicy policy = nds_gpu3d_renderer_policy();
+    if (policy == NdsGpu3dRendererPolicy::Soft) return true;
     if (g_active) return true;
+    const bool required = policy == NdsGpu3dRendererPolicy::Compute;
+    auto fail_or_fallback = [&](const char* reason) {
+        nds_gpu3d_restore_soft_renderer();
+        release_host_objects();
+        if (required) return false;
+        std::fprintf(stderr,
+            "[gpu3d] OpenGL auto-selection failed (%s); "
+            "using threaded software\n", reason);
+        return true;
+    };
 
     SDL_SetMainReady();
     g_owns_video = (SDL_WasInit(SDL_INIT_VIDEO) == 0);
     if (g_owns_video && SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "[gpu3d] SDL video init failed: %s\n",
                      SDL_GetError());
-        return false;
+        return fail_or_fallback("SDL video initialization");
     }
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -285,8 +295,7 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
             std::fprintf(stderr, "[gpu3d] compute GL window failed: %s\n",
                          SDL_GetError());
             SDL_GL_ResetAttributes();
-            release_host_objects();
-            return false;
+            return fail_or_fallback("OpenGL window creation");
         }
     }
     g_context = SDL_GL_CreateContext(g_window);
@@ -294,33 +303,28 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
     if (!g_context || SDL_GL_MakeCurrent(g_window, g_context) != 0) {
         std::fprintf(stderr, "[gpu3d] compute GL 4.3 context failed: %s\n",
                      SDL_GetError());
-        release_host_objects();
-        return false;
+        return fail_or_fallback("OpenGL 4.3 context creation");
     }
     if (!gladLoadGLLoader(
             reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)) ||
         !GLAD_GL_VERSION_4_3) {
         std::fprintf(stderr, "[gpu3d] OpenGL 4.3 unavailable\n");
-        release_host_objects();
-        return false;
+        return fail_or_fallback("OpenGL 4.3 unavailable");
     }
     std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
                  reinterpret_cast<const char*>(glGetString(GL_VERSION)),
                  reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
     if (!nds_gpu3d_use_compute_renderer()) {
         std::fprintf(stderr, "[gpu3d] compute renderer init failed\n");
-        release_host_objects();
-        return false;
+        return fail_or_fallback("compute renderer initialization");
     }
     if (g_visible && !start_presenter()) {
         std::fprintf(stderr, "[gpu3d] direct presenter init failed\n");
-        nds_gpu3d_use_soft_renderer(false);
-        release_host_objects();
-        return false;
+        return fail_or_fallback("direct presenter initialization");
     }
     if (g_visible) SDL_GL_SetSwapInterval(0);
     g_active = true;
-    std::fprintf(stderr, "[gpu3d] renderer: compute (experimental)\n");
+    std::fprintf(stderr, "[gpu3d] renderer: OpenGL 4.3 compute\n");
     return true;
 }
 
@@ -415,7 +419,7 @@ void nds_compute_host_stop()
         return;
     }
     SDL_GL_MakeCurrent(g_window, g_context);
-    nds_gpu3d_use_soft_renderer(false);
+    nds_gpu3d_restore_soft_renderer();
     release_host_objects();
 }
 

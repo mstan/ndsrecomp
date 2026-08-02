@@ -20,8 +20,8 @@ option(NDS_BOOTSTRAP_FIRMWARE
     "Build with BIOS banks only so guest-produced firmware RAM can be captured"
     OFF)
 option(NDS_ENABLE_COMPUTE_RENDERER
-    "Build the optional melonDS OpenGL 4.3 compute renderer"
-    OFF)
+    "Build the preferred melonDS OpenGL 4.3 compute renderer"
+    ON)
 option(NDS_PROFILE_HLE_HEAT
     "Build candidate-only sampled leaf heat instrumentation"
     OFF)

@@ -49,12 +49,15 @@ Still required:
 - reject it if it misses the 5% complexity gate; otherwise run G1/G2/G3 and
   the normal unit/build matrix before retention.
 
-A single zero-compiler PGO leg is encouraging but not a conclusion:
-57.83 FPS overall, 57.95 FPS and 15.21 ms emulation/frame in settled
-gameplay. Every exact-source baseline attempt so far was invalidated by
-unrelated compiler activity. Contaminated training and A/B timings remain
-excluded; training execution counts are retained only from normally exited
-deterministic routes.
+One zero-compiler PGO leg and one later zero-compiler exact-source baseline
+leg are encouraging but not a conclusion. The PGO leg measured 57.83 FPS
+overall and 57.95 FPS / 15.21 ms emulation per frame in settled gameplay;
+the non-adjacent baseline measured 50.76 FPS / 18.11 ms in that phase.
+Their 15.9--17.7% per-phase emulation-time gap is only directional because
+the host varied between them. Every attempted immediate counter-leg was
+invalidated by unrelated compiler activity. Contaminated training and A/B
+timings remain excluded; training execution counts are retained only from
+normally exited deterministic routes.
 
 This is the lowest semantic-risk remaining experiment, but a trained local
 binary is not automatically a portable release solution.
@@ -80,20 +83,41 @@ G1/G2/G3 validation.
 ### 3. Adaptive widescreen on GPU-composited 3D
 
 The experimental melonDS ComputeRenderer now supports a 448x192 adaptive
-target and an opt-in direct OpenGL top-window presenter. In supported SM64DS
+target and a direct OpenGL top-window presenter. In supported SM64DS
 gameplay it keeps 3D GPU-resident and uploads only packed OBJ/HUD metadata;
 unsupported scenes and display capture retain the faithful CPU fallback.
 Clean unprofiled evidence shows a 23.66% reduction in settled-gameplay
 emulation time and clears the 12.8 ms phase target, but regresses the whole
-shortened route by 1.23%, so software remains the default.
+shortened route by 1.23%. OpenGL 4.3 was nevertheless promoted as the
+automatic default by explicit product direction on 2026-08-01; this accepts
+near-term regressions while the GPU-resident path is completed. Automatic
+startup failure falls back to software, and the launcher exposes explicit
+Software and OpenGL 4.3 choices.
 
-Promotion work still includes:
+Promotion validation is green: automatic OpenGL passes G1 8/8 and the
+2,400-frame G2 soak with zero underruns/errors/input and the locked framebuffer
+FNV pair. The explicit software floor passes G3 byte-lock at every
+100M..700M checkpoint. Compute's known per-pixel differences mean G3 is
+deliberately an accuracy-floor gate, not a compute/oracle equality claim.
+
+Remaining renderer work includes:
 
 - forced DISPCAPCNT, screen-routing, RenderXPos, and transition tests;
 - characterize soft/compute image differences and failure fallback;
 - validate NVIDIA, AMD, and Intel behavior;
 - unprofiled multi-pair ABBA in the exact detached/adaptive mode;
-- clear the 5% full-route complexity gate before making OpenGL the default.
+- remove unsupported-scene GPU-to-CPU-to-GPU round trips and recover early-route
+  regressions;
+- add robust context-loss handling and multi-vendor fallback coverage.
+
+A diagnostic eligibility census also found a possible 1.2--1.5 ms/frame
+ceiling in early swapped-screen scenes, but the first dual-window prototype
+was removed before build: it sampled BG/OBJ/effect state at presentation
+rather than at each scanline and could lose its CPU fallback after the frame
+had already been skipped. A future attempt must capture exact scanline-time
+layer state (or retain a complete CPU fallback), preserve OBJ/3D blend and
+priority rules, map native output to the centered compute slice, and validate
+one compatible GL context on both detached windows.
 
 ### 4. Slow-frame and host-scheduling tails
 

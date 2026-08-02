@@ -124,6 +124,30 @@ std::string counts_json() {
     return buf;
 }
 
+std::string direct_class_json(const uint64_t* values) {
+    std::string result = "{";
+    for (uint32_t index = 0; index < NDS_GPU2D_DIRECT_CLASS_COUNT; ++index) {
+        if (index != 0u) result += ",";
+        result += "\"";
+        result += nds_gpu2d_direct_class_name(index);
+        result += "\":";
+        result += std::to_string(values[index]);
+    }
+    result += "}";
+    return result;
+}
+
+std::string indexed_profile_json(const uint64_t* values, uint32_t count) {
+    std::string result = "{";
+    for (uint32_t index = 0; index < count; ++index) {
+        if (index != 0u) result += ",";
+        result += "\"" + std::to_string(index) + "\":" +
+                  std::to_string(values[index]);
+    }
+    result += "}";
+    return result;
+}
+
 std::string io_state_json() {
     char buf[768];
     std::snprintf(buf, sizeof(buf),
@@ -643,6 +667,25 @@ std::string handle(const std::string& line) {
         nds_gpu3d_profile(&gpu3d);
         NdsSchedulerProfile sched{};
         scheduler_profile(&sched);
+        const std::string direct_class_frames =
+            direct_class_json(gpu.direct_class_frames);
+        const std::string direct_class_engine_a_ns =
+            direct_class_json(gpu.direct_class_engine_a_ns);
+        const std::string direct_extra_bg_mask_frames =
+            indexed_profile_json(gpu.direct_extra_bg_mask_frames,
+                                 NDS_GPU2D_DIRECT_BG_MASK_COUNT);
+        const std::string direct_extra_bg_mask_engine_a_ns =
+            indexed_profile_json(gpu.direct_extra_bg_mask_engine_a_ns,
+                                 NDS_GPU2D_DIRECT_BG_MASK_COUNT);
+        const std::string direct_extra_bg_mode_frames =
+            indexed_profile_json(gpu.direct_extra_bg_mode_frames,
+                                 NDS_GPU2D_DIRECT_BG_MODE_COUNT);
+        const std::string direct_extra_effect_frames =
+            indexed_profile_json(gpu.direct_extra_effect_frames,
+                                 NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT);
+        const std::string direct_extra_master_bright_frames =
+            indexed_profile_json(gpu.direct_extra_master_bright_frames,
+                                 NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT);
         return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
                ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
@@ -651,6 +694,21 @@ std::string handle(const std::string& line) {
                std::to_string(gpu.direct_overlay_ns) +
                ",\"direct_frames\":" +
                std::to_string(gpu.direct_frames) +
+               ",\"direct_class_frames\":" + direct_class_frames +
+               ",\"direct_class_engine_a_ns\":" +
+               direct_class_engine_a_ns +
+               ",\"direct_class_transitions\":" +
+               std::to_string(gpu.direct_class_transitions) +
+               ",\"direct_extra_bg_mask_frames\":" +
+               direct_extra_bg_mask_frames +
+               ",\"direct_extra_bg_mask_engine_a_ns\":" +
+               direct_extra_bg_mask_engine_a_ns +
+               ",\"direct_extra_bg_mode_frames\":" +
+               direct_extra_bg_mode_frames +
+               ",\"direct_extra_effect_frames\":" +
+               direct_extra_effect_frames +
+               ",\"direct_extra_master_bright_frames\":" +
+               direct_extra_master_bright_frames +
                ",\"scanlines\":" + std::to_string(gpu.scanlines) +
                "},\"gpu3d\":{\"vcount215_ns\":" +
                std::to_string(gpu3d.vcount215_ns) +

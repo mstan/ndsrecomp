@@ -271,11 +271,12 @@ approximate raster math. Keep faithful LLE selectable, expose explicit
 A/B control, quantify framebuffer/visual differences, and never
 silently remove fidelity for speed.
 
-Current best architecture candidate is upstream melonDS
-`ComputeRenderer` behind the existing `Renderer3D` seam, with untouched
-`SoftRenderer` as faithful fallback. An opt-in experimental integration now
-exists behind build option `NDS_ENABLE_COMPUTE_RENDERER=ON` and runtime force
-`NDS_3D_RENDERER=compute`; soft remains the runtime default. The runner supplies
+Current accelerated backend is upstream melonDS `ComputeRenderer` behind the
+existing `Renderer3D` seam, with untouched `SoftRenderer` as faithful fallback.
+As directed on 2026-08-01, compute support is built by default and runtime
+`NDS_3D_RENDERER=auto` prefers OpenGL 4.3. Automatic selection falls back to
+software if OpenGL cannot start; `soft` remains a forceable accuracy floor and
+explicit `compute` remains fail-loud. The runner supplies
 real 512-byte flat-VRAM dirty granules, an OpenGL 4.3 hidden context, shader/GL
 failure checks, and the accelerated capture/readback hook required by CPU
 GPU2D `GetLine`. The runner owns the CPU readback buffer, checks PBO map and
@@ -284,7 +285,8 @@ turns runtime failures into persistent terminal state plus nonzero process
 status. Imported implementation files remain byte-identical to the pinned
 melonDS source; the compatibility shims are explicitly runner-owned.
 
-Current forced-compute evidence is deliberately insufficient for promotion:
+The pre-promotion forced-compute evidence did not satisfy the ordinary
+performance-retention gate:
 
 - all 33 compute programs compile on an NVIDIA RTX 3080 Ti and a 240-frame
   forced smoke completes cleanly;
@@ -331,18 +333,18 @@ post-hardening 240-frame forced-compute smoke compiles all 33 programs, reports
 the compute backend, raises no GL error, and matches a fresh soft run at that
 checkpoint.
 
-Therefore ComputeRenderer remains a useful tier-2 experiment, opt-in and
-unpromoted. Next run same-binary fresh-process interleaved soft/compute trials
-over one uninterrupted castle interval on a quiet host, with profiling absent
-from timing runs. Then characterize slow-frame tails, audio underruns, resets,
-display capture, representative visual effects, and AMD/Intel behavior. If
-readback erases the renderer gain, the next renderer seam is direct GPU
-composition rather than more CPU-readback tuning. Classic GL remains a
-lower-accuracy compatibility fallback and expects raw VRAM banks the runner
-shim does not expose. Before promotion, also add a non-guest-mutating drain for
-a finite run that stops with one compute frame pending, harden teardown after a
-catastrophic context-loss/reacquire failure, add focused `RenderXPos` boundary
-and `AbortFrame` tests, and measure the remaining GL-error poll cost.
+ComputeRenderer is now the preferred default by explicit product direction,
+despite not clearing the former 5% whole-route retention gate and despite its
+known framebuffer differences. This is a backend-policy promotion, not a claim
+that OpenGL alone has met the performance target. Continue same-binary
+fresh-process interleaved soft/compute trials over uninterrupted gameplay,
+characterize slow-frame tails, audio underruns, resets, display capture,
+representative visual effects, and AMD/Intel behavior. Eliminate remaining
+readbacks through direct GPU composition rather than tuning synchronous
+GPU-to-CPU transfers. Also add a non-guest-mutating drain for a finite run that
+stops with one compute frame pending, harden teardown after catastrophic
+context loss, add focused `RenderXPos` boundary and `AbortFrame` tests, and
+measure the remaining GL-error poll cost.
 
 The CPU-HLE heat probe is implemented as a candidate-only generated wrapper
 keyed by the selected bank's exact validation identity, not a bare-PC runtime

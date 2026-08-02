@@ -323,18 +323,21 @@ SDL_Renderer* create_renderer(SDL_Window* window) {
 }
 
 bool create_presentation(const NdsFrontendOptions& options,
-                         FrontendPresentation& presentation) {
+                         FrontendPresentation& presentation,
+                         bool allow_gl_top = true) {
     presentation.separate =
         options.screen_layout == NdsScreenLayout::Separate;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    const char* renderer_selection = std::getenv("NDS_3D_RENDERER");
     const char* direct_selection =
         std::getenv("NDS_COMPUTE_DIRECT_PRESENT");
+    const bool direct_enabled =
+        !direct_selection || !*direct_selection ||
+        std::strcmp(direct_selection, "1") == 0;
     presentation.gl_top = presentation.separate &&
+        allow_gl_top &&
         (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u &&
-        renderer_selection &&
-        std::strcmp(renderer_selection, "compute") == 0 &&
-        direct_selection && std::strcmp(direct_selection, "1") == 0;
+        nds_gpu3d_renderer_prefers_compute() &&
+        direct_enabled;
 #endif
     const int aa_scale = options.antialiasing >= 8 ? 4 :
                          options.antialiasing >= 4 ? 3 :
@@ -623,13 +626,24 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         SDL_Quit();
         return 1;
     }
+    // Auto is allowed to recover from missing/failed GL 4.3. A direct-top
+    // presentation was created without an SDL renderer, so rebuild the same
+    // windows on the faithful SDL/software path after that fallback.
+    if (presentation.gl_top && !nds_compute_host_active()) {
+        destroy_presentation(presentation);
+        presentation = {};
+        if (!create_presentation(options, presentation, false)) {
+            SDL_Quit();
+            return 1;
+        }
+    }
     nds_gpu2d_set_direct_present(
         nds_compute_host_has_visible_context());
 #else
-    if (const char* selection = std::getenv("NDS_3D_RENDERER")) {
-        if (std::strcmp(selection, "compute") == 0)
-            std::fprintf(stderr,
-                         "[gpu3d] compute renderer not built; using soft\n");
+    if (nds_gpu3d_renderer_policy() == NdsGpu3dRendererPolicy::Auto) {
+        std::fprintf(stderr,
+            "[gpu3d] OpenGL renderer not built; "
+            "automatic fallback to threaded soft\n");
     }
 #endif
 
