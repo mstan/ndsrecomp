@@ -627,6 +627,24 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   and multi-vendor coverage remain pending. The evidence supports continuing
   GPU-resident composition; it does not support claiming that OpenGL alone
   fixes firmware/title CPU cost.
+- 2026-08-01 **scoped runner-only PGO candidate — A/B PENDING**:
+  `NDS_PGO_MODE=GENERATE|USE` instruments only runner-owned host translation
+  units; generated ARM banks and portable support libraries remain baseline
+  objects. The scenario surface gained a normal `frontend_exit` command
+  because Windows process termination bypassed GCC's profile flush. A
+  complete fresh-file route plus automatic-boot saved-file coverage produced
+  30 merged `.gcda` files (314,884 bytes). The profile-use rebuild emitted no
+  missing, corrupt, or coverage-mismatch warnings. Exact-source hashes are
+  baseline
+  `cf3db9e37f26b65d8cf18dfdcd39d84a35c678db167c474fe02326313eca8304`
+  and candidate
+  `c1a68f7dda5ce944b6ad7aa3cfdad011166079ec63fe5dec09683c2260c9fdd0`.
+
+  One zero-compiler candidate leg measured 57.83 FPS overall and settled
+  gameplay at 57.95 FPS / 15.21 ms emulation per frame. This is not an A/B
+  claim: every exact-source baseline attempt to date overlapped unrelated
+  CMake/Ninja activity and is excluded. Obtain at least two clean interleaved
+  samples per side before deciding retention or running correctness gates.
 
 ## Reproduction crib
 

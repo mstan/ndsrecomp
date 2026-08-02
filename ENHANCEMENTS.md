@@ -26,25 +26,35 @@ Completed:
 
 - a Release `GENERATE` build with the SM64DS banks and compute renderer;
 - a clean deterministic 1M-cycle proof exit;
-- creation of 30 object-adjacent `.gcda` files totaling 197,768 bytes,
-  including runtime, scheduler, frontend, GPU2D, GPU3D, and renderer bridge
-  translation units.
+- a play-mode `frontend_exit` command that takes the normal SDL/runner
+  teardown path, allowing GCC to flush profiles instead of losing them to
+  the scenario harness's former `TerminateProcess` fallback;
+- a complete fresh-file firmware/title/cutscene/Yoshi training traversal plus
+  an automatic-boot saved-File-A load traversal;
+- 30 merged object-adjacent `.gcda` files totaling 314,884 bytes, including
+  runtime, scheduler, frontend, GPU2D, GPU3D, and renderer bridge translation
+  units;
+- a `USE` rebuild with no missing, corrupt, or coverage-mismatch warnings.
+  Exact-source executables are baseline
+  `cf3db9e37f26b65d8cf18dfdcd39d84a35c678db167c474fe02326313eca8304`
+  and PGO
+  `c1a68f7dda5ce944b6ad7aa3cfdad011166079ec63fe5dec09683c2260c9fdd0`.
 
 Still required:
 
-- train the complete firmware/new-file route and saved-File-A gameplay route
-  on a quiet host, with both processes exiting normally so counters merge;
-- rebuild the same tree with `NDS_PGO_MODE=USE` and audit missing-profile
-  warnings;
-- compare the profile-use executable against the exact baseline with quiet,
-  interleaved A/B in detached/adaptive-top mode;
+- obtain at least two zero-contention samples per side in an interleaved
+  exact-baseline/PGO A/B in detached/adaptive-top mode;
+- decide from per-phase emulation headroom, regressions, audio underruns, and
+  whole-route FPS rather than capped FPS alone;
 - reject it if it misses the 5% complexity gate; otherwise run G1/G2/G3 and
   the normal unit/build matrix before retention.
 
-The first attempted full training leg was deliberately excluded: unrelated
-PSX and GCN recompilations reduced its initial interval to 12.05 FPS, after
-which the debug connection closed. It produced no candidate and no usable
-performance claim.
+A single zero-compiler PGO leg is encouraging but not a conclusion:
+57.83 FPS overall, 57.95 FPS and 15.21 ms emulation/frame in settled
+gameplay. Every exact-source baseline attempt so far was invalidated by
+unrelated compiler activity. Contaminated training and A/B timings remain
+excluded; training execution counts are retained only from normally exited
+deterministic routes.
 
 This is the lowest semantic-risk remaining experiment, but a trained local
 binary is not automatically a portable release solution.

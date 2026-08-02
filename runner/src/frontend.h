@@ -59,6 +59,11 @@ const char* nds_adaptive_screens_name(uint8_t value);
 
 int nds_run_interactive_frontend(const NdsFrontendOptions& options);
 
+// Request the interactive frontend's normal SDL quit path. Debug-driven
+// scenario harnesses use this instead of TerminateProcess so runtime teardown
+// (including compiler profile-data flushing) completes normally.
+bool nds_frontend_request_exit();
+
 // Live frontend counters for the play-mode debug surface (`frontend_stats`).
 // Cumulative since frontend start; a client samples twice and derives fps /
 // phase shares over its own window. Zeros (active=0) when no frontend runs.

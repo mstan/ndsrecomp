@@ -1121,6 +1121,17 @@ int nds_run_interactive_frontend(const NdsFrontendOptions&) {
 
 #endif
 
+bool nds_frontend_request_exit() {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_live_stats.active) return false;
+    SDL_Event event{};
+    event.type = SDL_QUIT;
+    return SDL_PushEvent(&event) == 1;
+#else
+    return false;
+#endif
+}
+
 void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
     if (!out) return;
     *out = g_live_stats;

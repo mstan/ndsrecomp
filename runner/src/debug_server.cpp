@@ -568,6 +568,11 @@ std::string handle(const std::string& line) {
                ",\"freq\":" + std::to_string(s.freq) +
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
     }
+    if (cmd == "frontend_exit") {
+        const bool requested = nds_frontend_request_exit();
+        return "{\"requested\":" +
+               std::to_string(requested ? 1 : 0) + "}";
+    }
     if (cmd == "black_band_scan") {
         const bool enabled = json_bool(line, "on", true);
         const bool reset = json_bool(line, "reset", false);
