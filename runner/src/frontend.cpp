@@ -18,6 +18,7 @@
 #include "relative_mouse_touch.h"
 #include "scheduler.h"
 #include "spu.h"
+#include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
 #endif
@@ -609,9 +610,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     if (options.relative_mouse_touch) {
         std::fprintf(stderr,
             "[sdl] relative mouse: click top screen to capture; "
-            "Esc or focus loss releases; sensitivity=%u%% invert-y=%s\n",
+            "Esc or focus loss releases; sensitivity=%u%% invert-y=%s "
+            "aim=%s\n",
             static_cast<unsigned>(options.relative_mouse_sensitivity),
-            options.relative_mouse_invert_y ? "on" : "off");
+            options.relative_mouse_invert_y ? "on" : "off",
+            options.relative_mouse_direct_aim ? "direct-unbounded"
+                                              : "virtual-touch");
     }
 
     SDL_GameController* controller = open_first_controller();
@@ -633,6 +637,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool mouse_down = false;
     bool touch_release_pending = false;
     uint32_t touch_frames_held = 0;
+    int64_t relative_delta_x = 0;
+    int64_t relative_delta_y = 0;
+    uint64_t relative_direct_writes = 0;
     NdsRelativeMouseTouch relative_mouse;
     auto release_relative_mouse = [&]() {
         if (relative_mouse.captured()) {
@@ -646,6 +653,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             mouse_pressed = 0;
             publish_keys();
         }
+        relative_delta_x = 0;
+        relative_delta_y = 0;
     };
     auto capture_relative_mouse = [&]() {
         if (!options.relative_mouse_touch || relative_mouse.captured())
@@ -675,6 +684,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::getenv("NDS_FRONTEND_SELFTEST_MENU") != nullptr;
     const bool selftest_relative_mouse =
         std::getenv("NDS_FRONTEND_SELFTEST_RELATIVE_MOUSE") != nullptr;
+    const uint64_t relative_mouse_selftest_start_vblank =
+        environment_u64("NDS_FRONTEND_SELFTEST_RELATIVE_MOUSE_VBLANK");
     bool audio_started = false;
     bool audio_queue_error = false;
     uint32_t audio_pace_floor = kAudioQueueFrames;
@@ -770,7 +781,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         }
         if (selftest_relative_mouse) {
             SDL_Event injected{};
-            if (relative_mouse_selftest_stage == 0 && shown_frames >= 2) {
+            if (relative_mouse_selftest_stage == 0 && shown_frames >= 2 &&
+                (relative_mouse_selftest_start_vblank == 0 ||
+                 nds_event_counts().vblank9 >=
+                     relative_mouse_selftest_start_vblank)) {
+                std::fprintf(stderr,
+                    "[sdl] relative mouse self-test starting at VBlank %llu\n",
+                    static_cast<unsigned long long>(
+                        nds_event_counts().vblank9));
                 relative_mouse_selftest_error |=
                     !options.relative_mouse_touch || !presentation.separate ||
                     options.relative_mouse_fire_mask == 0;
@@ -792,7 +810,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             } else if (relative_mouse_selftest_stage == 2 &&
                        shown_frames >= 4) {
                 relative_mouse_selftest_error |=
-                    relative_mouse.x() == 128 && relative_mouse.y() == 96;
+                    options.relative_mouse_direct_aim
+                        ? relative_direct_writes == 0
+                        : (relative_mouse.x() == 128 &&
+                           relative_mouse.y() == 96);
                 injected.type = SDL_MOUSEBUTTONDOWN;
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
@@ -802,6 +823,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                        shown_frames >= 5) {
                 relative_mouse_selftest_error |=
                     mouse_pressed != options.relative_mouse_fire_mask;
+                std::fprintf(stderr,
+                    "[sdl] relative mouse fire asserted at VBlank %llu\n",
+                    static_cast<unsigned long long>(
+                        nds_event_counts().vblank9));
                 injected.type = SDL_MOUSEBUTTONUP;
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
@@ -950,9 +975,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_MOUSEMOTION &&
                 relative_mouse.captured() &&
                 (event.motion.windowID == presentation.window_ids[0] ||
-                 event.motion.windowID == 0) &&
-                relative_mouse.move(event.motion.xrel, event.motion.yrel)) {
-                nds_set_touch(relative_mouse.x(), relative_mouse.y(), true);
+                 event.motion.windowID == 0)) {
+                if (options.relative_mouse_direct_aim) {
+                    relative_delta_x += event.motion.xrel;
+                    relative_delta_y += event.motion.yrel;
+                } else if (relative_mouse.move(event.motion.xrel,
+                                               event.motion.yrel)) {
+                    nds_set_touch(relative_mouse.x(), relative_mouse.y(), true);
+                }
             }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down &&
@@ -963,6 +993,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 else
                     nds_set_touch(0, 0, false);
             }
+        }
+
+        if (relative_mouse.captured() && options.relative_mouse_direct_aim &&
+            (relative_delta_x != 0 || relative_delta_y != 0)) {
+            // AMHE0 consumes signed per-frame aim deltas. Keep the native
+            // stylus held at center, but feed motion through those title-owned
+            // fields so turning never stops at a virtual touchscreen edge.
+            const NdsRelativeMouseDelta delta =
+                nds_scale_relative_mouse_delta(
+                    relative_delta_x, relative_delta_y,
+                    options.relative_mouse_sensitivity,
+                    options.relative_mouse_invert_y, 150);
+            if (nds_title_patches_apply_mph_mouse_delta(delta.x, delta.y))
+                ++relative_direct_writes;
+            relative_delta_x = 0;
+            relative_delta_y = 0;
         }
 
         const uint64_t phase0 = SDL_GetPerformanceCounter();

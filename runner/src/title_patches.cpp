@@ -19,8 +19,14 @@ constexpr int32_t kNativeAspect = 0x1555;
 constexpr int32_t kWideAspect = 0x2555;  // round(0x1555 * 448 / 256)
 constexpr double kWideScale = 448.0 / 256.0;
 constexpr double kFix12One = 4096.0;
+// AMHE0's native touch-look routine consumes these signed, per-frame fields.
+// Feeding deltas here while holding the stylus at center preserves the game
+// path but removes the finite physical touchscreen edge.
+constexpr uint32_t kMphUs10AimX = 0x020DE526u;
+constexpr uint32_t kMphUs10AimY = 0x020DE52Eu;
 
 bool g_sm64ds_adaptive = false;
+bool g_mph_mouse_aim = false;
 bool g_logged_sm64ds_clipper = false;
 
 bool read_main_ram32(uint32_t addr, int32_t* out) {
@@ -78,6 +84,19 @@ void patch_sm64ds_clipper() {
 
 void nds_title_patches_set_sm64ds_adaptive(bool enabled) {
     g_sm64ds_adaptive = enabled;
+}
+
+void nds_title_patches_set_mph_mouse_aim(bool enabled) {
+    g_mph_mouse_aim = enabled;
+}
+
+bool nds_title_patches_apply_mph_mouse_delta(int32_t dx, int32_t dy) {
+    if (!g_mph_mouse_aim || (dx == 0 && dy == 0)) return false;
+    if (dx != 0)
+        bus_write_u32_slow(kMphUs10AimX, static_cast<uint32_t>(dx));
+    if (dy != 0)
+        bus_write_u32_slow(kMphUs10AimY, static_cast<uint32_t>(dy));
+    return true;
 }
 
 void nds_title_patches_start_frame() {

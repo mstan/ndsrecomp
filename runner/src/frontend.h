@@ -63,6 +63,9 @@ struct NdsFrontendOptions {
     bool relative_mouse_invert_y = false;
     // Active-high frontend pressed-bit mask (same layout as key_bit()).
     uint16_t relative_mouse_fire_mask = 0;
+    // Internal exact-ROM capability selected after cartridge verification.
+    // MPH consumes unbounded host deltas through its native aim fields.
+    bool relative_mouse_direct_aim = false;
     NdsCartridgeSaveConfig cartridge_save{};
 };
 

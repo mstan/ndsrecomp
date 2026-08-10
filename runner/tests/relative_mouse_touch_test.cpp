@@ -35,5 +35,17 @@ int main() {
 
     mouse.release();
     if (!require(!mouse.captured()) || !require(!mouse.move(1, 1))) return 9;
+
+    NdsRelativeMouseDelta delta =
+        nds_scale_relative_mouse_delta(20, -10, 100, false, 150);
+    if (!require(delta.x == 20) || !require(delta.y == -15)) return 10;
+    delta = nds_scale_relative_mouse_delta(3, -3, 50, true, 150);
+    if (!require(delta.x == 1) || !require(delta.y == 2)) return 11;
+    delta = nds_scale_relative_mouse_delta(
+        static_cast<int64_t>(1) << 40, -(static_cast<int64_t>(1) << 40),
+        400, false, 150);
+    if (!require(delta.x == 2147483647) ||
+        !require(delta.y == static_cast<int32_t>(0x80000000u)))
+        return 12;
     return 0;
 }

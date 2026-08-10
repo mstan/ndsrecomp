@@ -2,6 +2,17 @@
 
 #include <cstdint>
 
+struct NdsRelativeMouseDelta {
+    int32_t x = 0;
+    int32_t y = 0;
+};
+
+// Scale a frame's unbounded host delta for a title-owned direct-aim path.
+// The Y scale accounts for games whose authored touch-look axes differ.
+NdsRelativeMouseDelta nds_scale_relative_mouse_delta(
+    int64_t dx, int64_t dy, uint16_t sensitivity_percent, bool invert_y,
+    uint16_t y_scale_percent = 100);
+
 // Pure, SDL-independent relative-mouse to DS-stylus transform. The frontend
 // owns capture/focus policy; this helper owns deterministic fixed-point
 // sensitivity, inversion, and native touchscreen bounds.

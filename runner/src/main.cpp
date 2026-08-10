@@ -492,6 +492,7 @@ int main(int argc, char** argv) {
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
+    bool mph_mouse_aim_policy = false;
 #ifdef NDS_HAVE_SM64DS_BANKS
     bool sm64ds_title = false;
 #endif
@@ -549,6 +550,10 @@ int main(int argc, char** argv) {
     }
     if (!rom.empty() && save_path.empty())
         std::fprintf(stderr, "[save] battery persistence disabled\n");
+    mph_mouse_aim_policy =
+        rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
+        frontend_options.relative_mouse_touch;
+    frontend_options.relative_mouse_direct_aim = mph_mouse_aim_policy;
 #ifdef NDS_HAVE_SM64DS_BANKS
     // Static title banks and host-side enhancements are valid only for the
     // exact image they were generated and audited against. In particular,
@@ -601,6 +606,7 @@ int main(int argc, char** argv) {
     nds_title_patches_set_sm64ds_adaptive(
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
+    nds_title_patches_set_mph_mouse_aim(mph_mouse_aim_policy);
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
