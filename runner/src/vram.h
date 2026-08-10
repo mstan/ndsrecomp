@@ -11,6 +11,17 @@ bool nds_video_address(uint32_t addr);
 uint32_t nds_video_read(int cpu, uint32_t addr, uint32_t width);
 void nds_video_write(int cpu, uint32_t addr, uint32_t value, uint32_t width);
 
+// Guest-written VRAM may be used as executable storage (notably by ARM7).
+// These helpers expose physical-backing provenance without teaching the CPU
+// bus about VRAM bank mappings. A range is accepted only when every byte maps
+// to exactly one physical bank and was written by the guest after reset.
+bool nds_vram_exec_writable(int cpu, uint32_t addr);
+bool nds_vram_range_has_write_provenance(int cpu, uint32_t addr,
+                                         uint32_t size);
+uint32_t nds_vram_exec_page_generation(int cpu, uint32_t addr);
+bool nds_vram_live_bytes_equal(int cpu, uint32_t addr,
+                               const uint8_t* expected, uint32_t size);
+
 bool nds_video_get_region(const char* name, const uint8_t** ptr, uint32_t* len);
 
 // Renderer-facing mapped views. Addresses are offsets within the named engine

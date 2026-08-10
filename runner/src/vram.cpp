@@ -1,5 +1,6 @@
 #include "vram.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -18,8 +19,14 @@ constexpr uint32_t kBankSize[9] = {
     0x04000, 0x04000, 0x08000, 0x04000
 };
 constexpr uint32_t kTotalVram = 0xA4000;
+constexpr uint32_t kExecPageShift = 12u;
+constexpr uint32_t kExecPageSize = 1u << kExecPageShift;
+constexpr uint32_t kExecPageCount =
+    (kTotalVram + kExecPageSize - 1u) / kExecPageSize;
 
 std::array<uint8_t, kTotalVram> g_vram{};
+std::array<uint8_t, kTotalVram> g_vram_written{};
+std::array<uint32_t, kExecPageCount> g_vram_generation{};
 std::array<uint8_t, 0x800> g_palette{};
 std::array<uint8_t, 0x800> g_oam{};
 std::array<uint8_t, 9> g_cnt{};
@@ -86,7 +93,17 @@ uint32_t bank_read(unsigned bank, uint32_t addr, uint32_t width) {
 void bank_write(unsigned bank, uint32_t addr, uint32_t value, uint32_t width) {
     if (bank >= 9) return;
     const uint32_t off = addr & (kBankSize[bank] - 1u);
-    store(&g_vram[kBankOffset[bank] + off], value, width);
+    const uint32_t physical = kBankOffset[bank] + off;
+    store(&g_vram[physical], value, width);
+    const uint32_t end = std::min<uint32_t>(kTotalVram, physical + width);
+    std::fill(g_vram_written.begin() + physical,
+              g_vram_written.begin() + end, uint8_t{1});
+    const uint32_t first_page = physical >> kExecPageShift;
+    const uint32_t last_page = (end - 1u) >> kExecPageShift;
+    for (uint32_t page = first_page; page <= last_page; ++page) {
+        if (++g_vram_generation[page] == 0u)
+            g_vram_generation[page] = 1u;
+    }
 }
 uint32_t mapped_read(uint16_t mask, uint32_t addr, uint32_t width) {
     // The normal DS mapping has one physical bank behind each renderer view.
@@ -282,7 +299,8 @@ uint8_t* nds_vram_bank_data(unsigned bank) {
 void nds_vram_note_capture_write() { ++g_texture_generation; }
 
 void nds_vram_reset() {
-    g_vram.fill(0); g_palette.fill(0); g_oam.fill(0); g_cnt.fill(0);
+    g_vram.fill(0); g_vram_written.fill(0); g_vram_generation.fill(0);
+    g_palette.fill(0); g_oam.fill(0); g_cnt.fill(0);
     g_lcdc = 0; g_abg.fill(0); g_aobj.fill(0); g_bbg.fill(0); g_bobj.fill(0);
     g_abg_ext.fill(0); g_aobj_ext = 0; g_bbg_ext.fill(0); g_bobj_ext = 0;
     g_texture.fill(0); g_texpal.fill(0); g_arm7.fill(0);
@@ -310,6 +328,61 @@ uint8_t nds_vramstat() {
 
 bool nds_video_address(uint32_t addr) {
     return addr >= 0x05000000u && addr < 0x08000000u;
+}
+
+namespace {
+
+bool exec_physical_offset(int cpu, uint32_t addr, uint32_t* physical) {
+    if (!physical || (addr & 0xFF000000u) != 0x06000000u) return false;
+    uint16_t mask = 0u;
+    if (cpu == 7) {
+        mask = g_arm7[(addr >> 17u) & 1u];
+    } else {
+        // ARM9 execution from VRAM is not currently a validated title path.
+        // Fail closed until its many BG/OBJ/LCDC mappings need explicit use.
+        return false;
+    }
+    if (!mask || (mask & (mask - 1u))) return false;
+    const unsigned bank = std::countr_zero(static_cast<unsigned>(mask));
+    *physical = kBankOffset[bank] + (addr & (kBankSize[bank] - 1u));
+    return *physical < kTotalVram;
+}
+
+}  // namespace
+
+bool nds_vram_exec_writable(int cpu, uint32_t addr) {
+    uint32_t physical = 0u;
+    return exec_physical_offset(cpu, addr, &physical);
+}
+
+bool nds_vram_range_has_write_provenance(int cpu, uint32_t addr,
+                                         uint32_t size) {
+    if (size == 0u) return false;
+    for (uint32_t i = 0u; i < size; ++i) {
+        uint32_t physical = 0u;
+        if (!exec_physical_offset(cpu, addr + i, &physical) ||
+            !g_vram_written[physical])
+            return false;
+    }
+    return true;
+}
+
+uint32_t nds_vram_exec_page_generation(int cpu, uint32_t addr) {
+    uint32_t physical = 0u;
+    if (!exec_physical_offset(cpu, addr, &physical)) return 0u;
+    return g_vram_generation[physical >> kExecPageShift];
+}
+
+bool nds_vram_live_bytes_equal(int cpu, uint32_t addr,
+                               const uint8_t* expected, uint32_t size) {
+    if (!expected || size == 0u) return false;
+    for (uint32_t i = 0u; i < size; ++i) {
+        uint32_t physical = 0u;
+        if (!exec_physical_offset(cpu, addr + i, &physical) ||
+            g_vram[physical] != expected[i])
+            return false;
+    }
+    return true;
 }
 uint32_t nds_video_read(int cpu, uint32_t addr, uint32_t width) {
     addr &= ~(width - 1u);

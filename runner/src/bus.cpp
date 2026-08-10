@@ -625,7 +625,8 @@ bool bus_get_region(const char* name, BusRegion* out) {
 bool bus_addr_is_writable_ram(uint32_t addr) {
     uint8_t* ptr = resolve(addr, 1u);
     uint32_t offset = 0;
-    return ptr && generation_for_ptr(ptr, &offset) != nullptr;
+    if (ptr && generation_for_ptr(ptr, &offset) != nullptr) return true;
+    return nds_vram_exec_writable(g_nds_active == NDS_ARM7 ? 7 : 9, addr);
 }
 
 bool bus_addr_has_write_provenance(uint32_t addr) {
@@ -641,6 +642,11 @@ bool bus_range_has_write_provenance(uint32_t addr, uint32_t size) {
             kExecPageSize - (at & (kExecPageSize - 1u));
         const uint32_t chunk = std::min(size - offset, page_left);
         uint8_t* live = resolve(at, chunk);
+        if (!live && nds_vram_range_has_write_provenance(
+                         g_nds_active == NDS_ARM7 ? 7 : 9, at, chunk)) {
+            offset += chunk;
+            continue;
+        }
         uint32_t written_offset = 0u;
         std::vector<uint8_t>* written =
             live ? written_for_ptr(live, &written_offset) : nullptr;
@@ -656,7 +662,9 @@ bool bus_range_has_write_provenance(uint32_t addr, uint32_t size) {
 
 uint32_t bus_exec_page_generation(uint32_t addr) {
     uint8_t* ptr = resolve(addr, 1u);
-    return ptr ? page_generation_for_ptr(ptr) : 0u;
+    if (ptr) return page_generation_for_ptr(ptr);
+    return nds_vram_exec_page_generation(
+        g_nds_active == NDS_ARM7 ? 7 : 9, addr);
 }
 
 bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,
@@ -671,8 +679,14 @@ bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,
         const uint32_t page_left = kExecPageSize - (at & (kExecPageSize - 1u));
         const uint32_t chunk = std::min(size - offset, page_left);
         uint8_t* live = resolve(at, chunk);
-        if (!live || std::memcmp(live, expected + offset, chunk) != 0)
+        if (live) {
+            if (std::memcmp(live, expected + offset, chunk) != 0)
+                return false;
+        } else if (!nds_vram_live_bytes_equal(
+                       g_nds_active == NDS_ARM7 ? 7 : 9, at,
+                       expected + offset, chunk)) {
             return false;
+        }
         offset += chunk;
     }
     return true;
