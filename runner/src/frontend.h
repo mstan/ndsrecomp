@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+#include "cartridge_config.h"
+
 // Run the native, human-facing firmware preview. The emulation remains on the
 // same scheduler/device path used by the deterministic debug verifier; SDL is
 // only the host presentation and input/audio transport.
@@ -28,6 +30,9 @@ enum NdsAdaptiveScreen : uint8_t {
 };
 
 struct NdsFrontendOptions {
+    // Optional exact cartridge identity from [game]. When present, every
+    // title-owned setting in this config is rejected for any other ROM.
+    std::string expected_rom_sha1;
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
     uint8_t adaptive_screens = NDS_ADAPTIVE_NONE;
@@ -35,10 +40,33 @@ struct NdsFrontendOptions {
     // unsupported adaptive output fails closed instead of stretching pixels.
     uint8_t adaptive_supported = NDS_ADAPTIVE_NONE;
     uint16_t adaptive_max_width[2] = {256, 256};
+    // Optional title-owned compositor repair for cylindrical sky geometry.
+    // This is deliberately separate from generic adaptive output: most games
+    // should leave the heuristic off.
+    bool adaptive_skybox_fill = false;
+    // Re-anchor transparent text-tile HUD bands over a wide 3D scene. This
+    // remains title-owned because arbitrary 2D backgrounds are not safe to
+    // split or reposition.
+    bool adaptive_hud_anchor = false;
+    // Width of the authored center HUD band that stays centered. Pixels on
+    // either side are anchored to the corresponding wide edge.
+    uint16_t adaptive_hud_center_width = 64;
     // Host presentation quality. These are deliberately post-composition:
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction
     uint8_t antialiasing = 0;   // 0/2/4/8 sample-quality preset
+    // Optional host FPS-control transport. This stays default-off and is
+    // selected by a title launcher; deterministic/headless routes never
+    // synthesize mouse input.
+    bool relative_mouse_touch = false;
+    uint16_t relative_mouse_sensitivity = 100;  // 10%..400%
+    bool relative_mouse_invert_y = false;
+    // Active-high frontend pressed-bit mask (same layout as key_bit()).
+    uint16_t relative_mouse_fire_mask = 0;
+    // Internal exact-ROM capability selected after cartridge verification.
+    // MPH consumes unbounded host deltas through its native aim fields.
+    bool relative_mouse_direct_aim = false;
+    NdsCartridgeSaveConfig cartridge_save{};
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.
@@ -53,6 +81,11 @@ bool nds_parse_startup_mode(const std::string& value,
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
+bool nds_parse_on_off(const std::string& value, bool* out);
+bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
+bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);
+bool nds_parse_cartridge_save_type(const std::string& value,
+                                   NdsCartridgeSaveType* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_adaptive_screens_name(uint8_t value);

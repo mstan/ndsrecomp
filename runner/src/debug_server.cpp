@@ -643,6 +643,16 @@ std::string handle(const std::string& line) {
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
+    if (cmd == "cart_save_info") {
+        const uint8_t* data = nullptr;
+        uint32_t size = 0;
+        bool dirty = false;
+        if (!nds_io_cartridge_save_snapshot(&data, &size, &dirty))
+            return "{\"error\":\"no cartridge save is present\"}";
+        (void)data;
+        return "{\"size\":" + std::to_string(size) +
+            ",\"dirty\":" + std::to_string(dirty ? 1 : 0) + "}";
+    }
     if (cmd == "cart_save") {
         const uint8_t* data = nullptr;
         uint32_t size = 0;

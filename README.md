@@ -25,9 +25,10 @@ ARM7 and ARM9 BIOSes, pass the Health & Safety screen, reach the main menu, and
 interact with it through mouse-driven touch input.
 
 The first experimental game target is a locally supplied European revision-0
-Super Mario 64 DS dump. The authentic firmware/cartridge path now launches the
-game, accepts its title-screen touch input, and reaches the main title flow.
-This is narrow bring-up evidence, not a compatibility or gameplay claim.
+Super Mario 64 DS dump. A second Metroid Prime Hunters AMHE0 project now
+completes its no-input attract loop through ROM-gated generic title banks,
+configurable cartridge saves, and interpreter fallback. These are narrow
+bring-up results, not compatibility or gameplay claims.
 
 Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
 
@@ -47,7 +48,8 @@ Important limitations:
 
 - SM64DS reaches its title flow, but gameplay is not supported. Lower-screen
   Engine B/3D composition is incomplete and currently renders incorrectly.
-- No other DS game is supported or claimed compatible.
+- Prime Hunters completes its no-input attract loop, but gameplay is not yet
+  supported or claimed compatible.
 - The checked-in tree intentionally omits generated recompiled banks, because
   they contain code derived from user-provided Nintendo dumps.
 - Building the demonstrated targets requires local BIOS, firmware, ROM, and
@@ -143,6 +145,25 @@ cmake --build runner/build
 SDL2 is optional at configure time; without it, the runner is headless and
 interactive presentation is unavailable.
 
+### Game-owned static banks
+
+A game project can supply generated main-code banks without adding title names
+or dispatch symbols to the shared runner. Configure the runner with the
+directory and the exact ROM identity used to generate those banks:
+
+```sh
+cmake -G Ninja -S runner -B runner/build-title \
+  -DNDS_BOOTSTRAP_FIRMWARE=ON \
+  -DNDS_TITLE_BANK_DIR=/path/to/game/generated/recomp \
+  -DNDS_TITLE_ROM_SHA1=40-lowercase-hex-digits
+cmake --build runner/build-title
+```
+
+Dispatch tables are discovered at configure time, classified by `_arm9_` or
+`_arm7_` in the bank name, and registered only when the loaded cartridge has
+the configured SHA-1. Live-byte validation remains the boundary for mutable
+or overlay code.
+
 ### Interactive display configuration
 
 The interactive runner reads an optional `game.toml` in its working directory,
@@ -151,12 +172,24 @@ separate table so recompilation and hardware-parity configuration remain
 independent:
 
 ```toml
+[game]
+sha1 = "40-lowercase-hex-digits"
+
 [display]
 screen_layout = "stacked"          # stacked | separate
 adaptive_widescreen = "none"       # none | top | bottom | both
+adaptive_capability = "top"        # exact-ROM capability; same choices
+adaptive_width = 448               # even width from 256 through 448
+adaptive_skybox_fill = false       # optional title-audited repair
+adaptive_hud_anchor = false        # title-audited text HUD band placement
+adaptive_hud_center_width = 64     # centered source band; multiple of 8
 
 [system]
 startup_mode = "preserve"          # preserve | manual | automatic
+
+[cartridge]
+save_type = "eeprom"                # none | eeprom-tiny | eeprom | flash
+save_size = 8192                    # bytes; nonzero power of two
 ```
 
 `screen_layout = "separate"` creates independently movable top and bottom
@@ -170,7 +203,18 @@ compute backend and its direct GPU-resident adaptive path when eligible, with
 startup fallback to threaded software. `NDS_3D_RENDERER=soft` forces the
 faithful floor; `NDS_3D_RENDERER=compute` forces OpenGL and fails loudly if it
 cannot start. HUD sprites can be anchored to the widened left/right corners
-while center overlays remain centered. The equivalent one-run overrides are
+while center overlays remain centered. `adaptive_capability` requires an exact
+`[game].sha1`, allowing new
+title projects to opt into audited screens without adding their ROM hashes to
+the framework. `adaptive_skybox_fill` remains off unless a title explicitly
+needs and audits the cylindrical-sky repair heuristic. The equivalent one-run
+`adaptive_hud_anchor` permits transparent text-tile HUD planes to be split
+into authored left, center, and right bands over the wide 3D scene; affine,
+bitmap, and windowed layouts still fail closed.
+`adaptive_hud_center_width` keeps wider centered assemblies such as location
+names and energy bars intact while the remaining bands move outward. The
+equivalent one-run
+overrides are
 `NDS_SCREEN_LAYOUT` / `NDS_ADAPTIVE_WIDESCREEN` and the
 `--screen-layout` / `--adaptive-widescreen` CLI flags. Precedence is TOML,
 then environment, then CLI.
@@ -181,6 +225,17 @@ inserted, the real BIOS/firmware/card path then launches it without navigating
 the menu; this is not direct-boot HLE and never modifies `firmware.bin` on
 disk. `manual` forces the DS menu and `preserve` honors the dumped setting.
 The one-run overrides are `NDS_STARTUP_MODE` and `--startup-mode`.
+
+Commercial-title projects should declare cartridge save type and capacity
+from a trusted cartridge database. Projects without a `[cartridge]` table
+retain the historical 8 KiB EEPROM default for compatibility.
+When `[game].sha1` is present, the runner rejects a different cartridge before
+applying any title-owned display, startup, or save-device settings.
+
+Physical framebuffer routing follows POWCNT1 as scanlines are produced. This
+matters for titles such as Prime Hunters that change LCD assignment during
+VBlank: applying the current routing only when a completed frame is presented
+would retroactively swap that frame.
 
 Whole-machine save states are not implemented yet. The vendored 3D device has
 serialization support, but a correct state must atomically include both CPUs,

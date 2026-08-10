@@ -25,6 +25,7 @@
 #include "gpu3d.h"
 #include "profile_report.h"
 #include "sha1.h"
+#include "title_banks.h"
 #include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
@@ -221,6 +222,10 @@ int main(int argc, char** argv) {
     std::string cli_adaptive_screens;
     std::string cli_supersampling;
     std::string cli_antialiasing;
+    std::string cli_relative_mouse_touch;
+    std::string cli_relative_mouse_sensitivity;
+    std::string cli_relative_mouse_invert_y;
+    std::string cli_relative_mouse_fire_key;
     std::string cli_startup_mode;
     std::string cli_save_path;
     uint64_t budget = 4000000ull;
@@ -264,6 +269,14 @@ int main(int argc, char** argv) {
             cli_supersampling = argv[++i];
         } else if (a == "--antialiasing" && i + 1 < argc) {
             cli_antialiasing = argv[++i];
+        } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
+            cli_relative_mouse_touch = argv[++i];
+        } else if (a == "--relative-mouse-sensitivity" && i + 1 < argc) {
+            cli_relative_mouse_sensitivity = argv[++i];
+        } else if (a == "--relative-mouse-invert-y" && i + 1 < argc) {
+            cli_relative_mouse_invert_y = argv[++i];
+        } else if (a == "--relative-mouse-fire-key" && i + 1 < argc) {
+            cli_relative_mouse_fire_key = argv[++i];
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
         } else if (a == "--help" || a == "-h") {
@@ -276,6 +289,10 @@ int main(int argc, char** argv) {
                 "[--adaptive-widescreen none|top|bottom|both] "
                 "[--supersampling 1|2|3|4] "
                 "[--antialiasing 0|2|4|8] "
+                "[--relative-mouse-touch on|off] "
+                "[--relative-mouse-sensitivity 10..400] "
+                "[--relative-mouse-invert-y on|off] "
+                "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
@@ -382,12 +399,51 @@ int main(int argc, char** argv) {
                      "(expected 0, 2, 4, or 8)\n");
         return 2;
     }
+    if (!cli_relative_mouse_touch.empty() &&
+        !nds_parse_on_off(cli_relative_mouse_touch,
+                          &frontend_options.relative_mouse_touch)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-touch (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_relative_mouse_sensitivity,
+            &frontend_options.relative_mouse_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_invert_y.empty() &&
+        !nds_parse_on_off(cli_relative_mouse_invert_y,
+                          &frontend_options.relative_mouse_invert_y)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-invert-y "
+                     "(expected on or off)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_fire_key.empty() &&
+        !nds_parse_mouse_fire_key(
+            cli_relative_mouse_fire_key,
+            &frontend_options.relative_mouse_fire_mask)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-fire-key "
+                     "(expected none, a, b, l, r, x, or y)\n");
+        return 2;
+    }
     if (!cli_startup_mode.empty() &&
         !nds_parse_startup_mode(cli_startup_mode,
                                 &frontend_options.startup_mode)) {
         std::fprintf(stderr,
                      "invalid --startup-mode "
                      "(expected preserve, manual, or automatic)\n");
+        return 2;
+    }
+    if (frontend_options.relative_mouse_touch &&
+        frontend_options.screen_layout != NdsScreenLayout::Separate) {
+        std::fprintf(stderr,
+                     "relative mouse touch requires --screen-layout separate\n");
         return 2;
     }
 
@@ -454,6 +510,10 @@ int main(int argc, char** argv) {
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
+    bool mph_mouse_aim_policy = false;
+#ifdef NDS_HAVE_SM64DS_BANKS
+    bool sm64ds_title = false;
+#endif
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
             & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
@@ -466,6 +526,15 @@ int main(int argc, char** argv) {
         rom_sha1 = gba::sha1(rom.data(), rom.size()).hex();
         std::fprintf(stderr, "[load] cartridge: %zu bytes, SHA-1 %s\n",
                      rom.size(), rom_sha1.c_str());
+        if (!frontend_options.expected_rom_sha1.empty() &&
+            rom_sha1 != frontend_options.expected_rom_sha1) {
+            std::fprintf(stderr,
+                         "refusing to start: game config expects ROM SHA-1 "
+                         "%s, got %s\n",
+                         frontend_options.expected_rom_sha1.c_str(),
+                         rom_sha1.c_str());
+            return 1;
+        }
     }
     std::string save_path;
     if (!rom.empty() && !save_disabled) {
@@ -478,12 +547,40 @@ int main(int argc, char** argv) {
         }
     }
     nds_io_set_cartridge_save_path(save_path.c_str());
+    nds_io_configure_cartridge_save(frontend_options.cartridge_save);
+    if (!rom.empty()) {
+        const char* type = "none";
+        switch (frontend_options.cartridge_save.type) {
+            case NdsCartridgeSaveType::EepromTiny:
+                type = "eeprom-tiny";
+                break;
+            case NdsCartridgeSaveType::Eeprom:
+                type = "eeprom";
+                break;
+            case NdsCartridgeSaveType::Flash:
+                type = "flash";
+                break;
+            case NdsCartridgeSaveType::None:
+                break;
+        }
+        std::fprintf(stderr, "[save] cartridge backup: %s, %u bytes\n",
+                     type, frontend_options.cartridge_save.size);
+    }
     if (!rom.empty() && save_path.empty())
         std::fprintf(stderr, "[save] battery persistence disabled\n");
+    mph_mouse_aim_policy =
+        rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
+        frontend_options.relative_mouse_touch;
+    frontend_options.relative_mouse_direct_aim = mph_mouse_aim_policy;
 #ifdef NDS_HAVE_SM64DS_BANKS
-    // Capabilities are tied to the exact title image whose projection,
-    // culling, and HUD policy was audited.
-    if (rom_sha1 == "1367529f2cb23e76ef295cb1727333ae8f0a6cd7") {
+    // Static title banks and host-side enhancements are valid only for the
+    // exact image they were generated and audited against. In particular,
+    // many DS titles share the standard ARM7 load address; registering one
+    // title's unguarded immutable bank for another cartridge corrupts guest
+    // execution before the runtime can fall back to Tier 3.
+    sm64ds_title =
+        rom_sha1 == "1367529f2cb23e76ef295cb1727333ae8f0a6cd7";
+    if (sm64ds_title) {
         frontend_options.adaptive_supported = NDS_ADAPTIVE_TOP;
         frontend_options.adaptive_max_width[0] = 448;  // 21:9 at 192 high
         sm64ds_wide_policy = true;
@@ -511,10 +608,17 @@ int main(int argc, char** argv) {
         }
     }
     nds_gpu2d_set_adaptive_skybox_fill(
-        sm64ds_wide_policy && adaptive_sky_repair);
+        (frontend_options.adaptive_skybox_fill || sm64ds_wide_policy) &&
+        adaptive_sky_repair &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
+    nds_gpu2d_set_adaptive_hud_anchor(
+        frontend_options.adaptive_hud_anchor &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u,
+        frontend_options.adaptive_hud_center_width);
     nds_title_patches_set_sm64ds_adaptive(
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
+    nds_title_patches_set_mph_mouse_aim(mph_mouse_aim_policy);
     if (!normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
@@ -623,41 +727,48 @@ int main(int argc, char** argv) {
                               0x00000000u);
 #endif
 #endif
+        if (nds_register_configured_title_banks(rom_sha1.c_str())) {
+            std::fprintf(stderr,
+                         "[dispatch] registered configured title banks for %s\n",
+                         rom_sha1.c_str());
+        }
 #ifdef NDS_HAVE_SM64DS_BANKS
-        nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
-                              g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
+        if (sm64ds_title) {
+            nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,
+                                  g_dispatch_sm64ds_arm9_len, 0xFFFF0000u);
 #if defined(NDS_PROFILE_HLE_HEAT)
-        nds_register_hle_profile_descriptors(
-            NDS_ARM9, g_hle_profile_sm64ds_arm9,
-            g_hle_profile_sm64ds_arm9_len);
+            nds_register_hle_profile_descriptors(
+                NDS_ARM9, g_hle_profile_sm64ds_arm9,
+                g_hle_profile_sm64ds_arm9_len);
 #endif
-        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
-                              g_dispatch_sm64ds_arm7_len, 0x00000000u);
+            nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7,
+                                  g_dispatch_sm64ds_arm7_len, 0x00000000u);
 #ifdef NDS_HAVE_SM64DS_RAM_BANKS
-        // Content-validated runtime-RAM bank (relocated sound engine +
-        // services); registered after the ROM-derived closure so the
-        // immutable payload rows win for their own address range.
-        nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
-                              g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
+            // Content-validated runtime-RAM bank (relocated sound engine +
+            // services); registered after the ROM-derived closure so the
+            // immutable payload rows win for their own address range.
+            nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
+                                  g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_RAM_BANKS
-        // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
-        // overlays loaded over/past the static image); registered after
-        // the ROM-derived closure so the closure's rows win where the
-        // live bytes still match the static image.
-        nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
-                              g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
+            // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
+            // overlays loaded over/past the static image); registered after
+            // the ROM-derived closure so the closure's rows win where the
+            // live bytes still match the static image.
+            nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
+                                  g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
-        // A later gameplay capture carries different overlay generations at
-        // many of the same virtual addresses. Keep it in a separate
-        // content-validated bank: boot/title bytes above win when present,
-        // then this generation becomes eligible after the guest swaps them.
-        nds_register_dispatch(NDS_ARM9,
-                              g_dispatch_sm64ds_arm9_ram_gameplay,
-                              g_dispatch_sm64ds_arm9_ram_gameplay_len,
-                              0xFFFF0000u);
+            // A later gameplay capture carries different overlay generations
+            // at many of the same virtual addresses. Keep it in a separate
+            // content-validated bank: boot/title bytes above win when present,
+            // then this generation becomes eligible after the guest swaps it.
+            nds_register_dispatch(NDS_ARM9,
+                                  g_dispatch_sm64ds_arm9_ram_gameplay,
+                                  g_dispatch_sm64ds_arm9_ram_gameplay_len,
+                                  0xFFFF0000u);
 #endif
+        }
 #endif
 
         // Reset both cores: SVC mode, IRQ+FIQ masked, ARM state, reset vector.
