@@ -222,6 +222,10 @@ int main(int argc, char** argv) {
     std::string cli_adaptive_screens;
     std::string cli_supersampling;
     std::string cli_antialiasing;
+    std::string cli_relative_mouse_touch;
+    std::string cli_relative_mouse_sensitivity;
+    std::string cli_relative_mouse_invert_y;
+    std::string cli_relative_mouse_fire_key;
     std::string cli_startup_mode;
     std::string cli_save_path;
     uint64_t budget = 4000000ull;
@@ -265,6 +269,14 @@ int main(int argc, char** argv) {
             cli_supersampling = argv[++i];
         } else if (a == "--antialiasing" && i + 1 < argc) {
             cli_antialiasing = argv[++i];
+        } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
+            cli_relative_mouse_touch = argv[++i];
+        } else if (a == "--relative-mouse-sensitivity" && i + 1 < argc) {
+            cli_relative_mouse_sensitivity = argv[++i];
+        } else if (a == "--relative-mouse-invert-y" && i + 1 < argc) {
+            cli_relative_mouse_invert_y = argv[++i];
+        } else if (a == "--relative-mouse-fire-key" && i + 1 < argc) {
+            cli_relative_mouse_fire_key = argv[++i];
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
         } else if (a == "--help" || a == "-h") {
@@ -277,6 +289,10 @@ int main(int argc, char** argv) {
                 "[--adaptive-widescreen none|top|bottom|both] "
                 "[--supersampling 1|2|3|4] "
                 "[--antialiasing 0|2|4|8] "
+                "[--relative-mouse-touch on|off] "
+                "[--relative-mouse-sensitivity 10..400] "
+                "[--relative-mouse-invert-y on|off] "
+                "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--discover-static-misses] [--rtc-host]\n",
                 argv[0]);
@@ -383,12 +399,51 @@ int main(int argc, char** argv) {
                      "(expected 0, 2, 4, or 8)\n");
         return 2;
     }
+    if (!cli_relative_mouse_touch.empty() &&
+        !nds_parse_on_off(cli_relative_mouse_touch,
+                          &frontend_options.relative_mouse_touch)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-touch (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_relative_mouse_sensitivity,
+            &frontend_options.relative_mouse_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_invert_y.empty() &&
+        !nds_parse_on_off(cli_relative_mouse_invert_y,
+                          &frontend_options.relative_mouse_invert_y)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-invert-y "
+                     "(expected on or off)\n");
+        return 2;
+    }
+    if (!cli_relative_mouse_fire_key.empty() &&
+        !nds_parse_mouse_fire_key(
+            cli_relative_mouse_fire_key,
+            &frontend_options.relative_mouse_fire_mask)) {
+        std::fprintf(stderr,
+                     "invalid --relative-mouse-fire-key "
+                     "(expected none, a, b, l, r, x, or y)\n");
+        return 2;
+    }
     if (!cli_startup_mode.empty() &&
         !nds_parse_startup_mode(cli_startup_mode,
                                 &frontend_options.startup_mode)) {
         std::fprintf(stderr,
                      "invalid --startup-mode "
                      "(expected preserve, manual, or automatic)\n");
+        return 2;
+    }
+    if (frontend_options.relative_mouse_touch &&
+        frontend_options.screen_layout != NdsScreenLayout::Separate) {
+        std::fprintf(stderr,
+                     "relative mouse touch requires --screen-layout separate\n");
         return 2;
     }
 

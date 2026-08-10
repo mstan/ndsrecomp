@@ -55,6 +55,14 @@ struct NdsFrontendOptions {
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction
     uint8_t antialiasing = 0;   // 0/2/4/8 sample-quality preset
+    // Optional host FPS-control transport. This stays default-off and is
+    // selected by a title launcher; deterministic/headless routes never
+    // synthesize mouse input.
+    bool relative_mouse_touch = false;
+    uint16_t relative_mouse_sensitivity = 100;  // 10%..400%
+    bool relative_mouse_invert_y = false;
+    // Active-high frontend pressed-bit mask (same layout as key_bit()).
+    uint16_t relative_mouse_fire_mask = 0;
     NdsCartridgeSaveConfig cartridge_save{};
 };
 
@@ -70,6 +78,9 @@ bool nds_parse_startup_mode(const std::string& value,
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
+bool nds_parse_on_off(const std::string& value, bool* out);
+bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
+bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);
 bool nds_parse_cartridge_save_type(const std::string& value,
                                    NdsCartridgeSaveType* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);

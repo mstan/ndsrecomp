@@ -38,6 +38,22 @@ int main() {
         !require(!nds_parse_antialiasing("3", &quality)))
         return 3;
 
+    bool toggle = false;
+    uint16_t mouse_value = 0;
+    if (!require(nds_parse_on_off("on", &toggle)) || !require(toggle) ||
+        !require(nds_parse_on_off("false", &toggle)) || require(toggle) ||
+        !require(!nds_parse_on_off("maybe", &toggle)) ||
+        !require(nds_parse_mouse_sensitivity("125", &mouse_value)) ||
+        !require(mouse_value == 125) ||
+        !require(!nds_parse_mouse_sensitivity("9", &mouse_value)) ||
+        !require(!nds_parse_mouse_sensitivity("401", &mouse_value)) ||
+        !require(nds_parse_mouse_fire_key("L", &mouse_value)) ||
+        !require(mouse_value == (1u << 9)) ||
+        !require(nds_parse_mouse_fire_key("none", &mouse_value)) ||
+        !require(mouse_value == 0) ||
+        !require(!nds_parse_mouse_fire_key("start", &mouse_value)))
+        return 13;
+
     NdsStartupMode startup = NdsStartupMode::Preserve;
     if (!require(nds_parse_startup_mode("automatic", &startup)) ||
         !require(startup == NdsStartupMode::Automatic) ||

@@ -79,6 +79,48 @@ bool nds_parse_antialiasing(const std::string& value, uint8_t* out) {
     return true;
 }
 
+bool nds_parse_on_off(const std::string& value, bool* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "on" || normalized == "true" || normalized == "1" ||
+        normalized == "yes") {
+        *out = true;
+        return true;
+    }
+    if (normalized == "off" || normalized == "false" || normalized == "0" ||
+        normalized == "no") {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed < 10 || parsed > 400) return false;
+    *out = static_cast<uint16_t>(parsed);
+    return true;
+}
+
+bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "none" || normalized == "off") {
+        *out = 0;
+        return true;
+    }
+    if (normalized == "a") *out = 1u << 0;
+    else if (normalized == "b") *out = 1u << 1;
+    else if (normalized == "r") *out = 1u << 8;
+    else if (normalized == "l") *out = 1u << 9;
+    else if (normalized == "x") *out = 1u << 10;
+    else if (normalized == "y") *out = 1u << 11;
+    else return false;
+    return true;
+}
+
 bool nds_parse_cartridge_save_type(const std::string& value,
                                    NdsCartridgeSaveType* out) {
     if (!out) return false;

@@ -15,6 +15,7 @@
 #include "gpu3d.h"
 #include "io.h"
 #include "profile_report.h"
+#include "relative_mouse_touch.h"
 #include "scheduler.h"
 #include "spu.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -602,8 +603,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::fprintf(stderr, "[sdl] audio unavailable: %s\n", SDL_GetError());
 
     std::fprintf(stderr,
-        "[sdl] controls: gamepad=Player 1 | mouse=touch | arrows=D-pad | Z=A X=B | "
-        "A=Y S=X | Q=L W=R | Enter=Start Backspace=Select | Esc=quit\n");
+        "[sdl] controls: gamepad=Player 1 | bottom mouse=touch | "
+        "arrows=D-pad | Z=A X=B | A=Y S=X | Q=L W=R | "
+        "Enter=Start Backspace=Select | Esc=quit\n");
+    if (options.relative_mouse_touch) {
+        std::fprintf(stderr,
+            "[sdl] relative mouse: click top screen to capture; "
+            "Esc or focus loss releases; sensitivity=%u%% invert-y=%s\n",
+            static_cast<unsigned>(options.relative_mouse_sensitivity),
+            options.relative_mouse_invert_y ? "on" : "off");
+    }
 
     SDL_GameController* controller = open_first_controller();
     SDL_JoystickID controller_id = controller
@@ -611,9 +620,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         : -1;
     uint16_t keyboard_pressed = 0;
     uint16_t controller_pressed = 0;
+    uint16_t mouse_pressed = 0;
     auto publish_keys = [&]() {
         nds_set_key_mask(static_cast<uint16_t>(
-            0x0FFFu & ~(keyboard_pressed | controller_pressed)));
+            0x0FFFu &
+            ~(keyboard_pressed | controller_pressed | mouse_pressed)));
     };
     publish_keys();
     nds_set_touch(0, 0, false);
@@ -622,6 +633,36 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool mouse_down = false;
     bool touch_release_pending = false;
     uint32_t touch_frames_held = 0;
+    NdsRelativeMouseTouch relative_mouse;
+    auto release_relative_mouse = [&]() {
+        if (relative_mouse.captured()) {
+            SDL_SetRelativeMouseMode(SDL_FALSE);
+            SDL_CaptureMouse(SDL_FALSE);
+            relative_mouse.release();
+            nds_set_touch(0, 0, false);
+            std::fprintf(stderr, "[sdl] relative mouse released\n");
+        }
+        if (mouse_pressed != 0) {
+            mouse_pressed = 0;
+            publish_keys();
+        }
+    };
+    auto capture_relative_mouse = [&]() {
+        if (!options.relative_mouse_touch || relative_mouse.captured())
+            return;
+        if (SDL_SetRelativeMouseMode(SDL_TRUE) != 0) {
+            std::fprintf(stderr,
+                         "[sdl] relative mouse capture failed: %s\n",
+                         SDL_GetError());
+            return;
+        }
+        SDL_CaptureMouse(SDL_TRUE);
+        SDL_GetRelativeMouseState(nullptr, nullptr);
+        relative_mouse.capture(options.relative_mouse_sensitivity,
+                               options.relative_mouse_invert_y);
+        nds_set_touch(relative_mouse.x(), relative_mouse.y(), true);
+        std::fprintf(stderr, "[sdl] relative mouse captured\n");
+    };
     uint64_t shown_frames = 0;
     uint64_t fps_frames = 0;
     uint64_t fps_start = SDL_GetPerformanceCounter();
@@ -632,6 +673,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::getenv("NDS_FRONTEND_REQUIRE_AUDIO") != nullptr;
     const bool selftest_menu =
         std::getenv("NDS_FRONTEND_SELFTEST_MENU") != nullptr;
+    const bool selftest_relative_mouse =
+        std::getenv("NDS_FRONTEND_SELFTEST_RELATIVE_MOUSE") != nullptr;
     bool audio_started = false;
     bool audio_queue_error = false;
     uint32_t audio_pace_floor = kAudioQueueFrames;
@@ -646,6 +689,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool selftest_touch_down = false;
     bool selftest_touch_up = false;
     bool selftest_event_error = false;
+    unsigned relative_mouse_selftest_stage = 0;
+    bool relative_mouse_selftest_error = false;
     uint64_t phase_emu_ticks = 0;
     uint64_t phase_present_ticks = 0;
     uint64_t phase_adaptive_ticks = 0;
@@ -723,15 +768,82 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 selftest_touch_up = true;
             }
         }
+        if (selftest_relative_mouse) {
+            SDL_Event injected{};
+            if (relative_mouse_selftest_stage == 0 && shown_frames >= 2) {
+                relative_mouse_selftest_error |=
+                    !options.relative_mouse_touch || !presentation.separate ||
+                    options.relative_mouse_fire_mask == 0;
+                SDL_RaiseWindow(presentation.windows[0]);
+                injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.windowID = presentation.window_ids[0];
+                injected.button.button = SDL_BUTTON_LEFT;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 1;
+            } else if (relative_mouse_selftest_stage == 1 &&
+                       shown_frames >= 3) {
+                relative_mouse_selftest_error |= !relative_mouse.captured();
+                injected.type = SDL_MOUSEMOTION;
+                injected.motion.windowID = presentation.window_ids[0];
+                injected.motion.xrel = 20;
+                injected.motion.yrel = -10;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 2;
+            } else if (relative_mouse_selftest_stage == 2 &&
+                       shown_frames >= 4) {
+                relative_mouse_selftest_error |=
+                    relative_mouse.x() == 128 && relative_mouse.y() == 96;
+                injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.windowID = presentation.window_ids[0];
+                injected.button.button = SDL_BUTTON_LEFT;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 3;
+            } else if (relative_mouse_selftest_stage == 3 &&
+                       shown_frames >= 5) {
+                relative_mouse_selftest_error |=
+                    mouse_pressed != options.relative_mouse_fire_mask;
+                injected.type = SDL_MOUSEBUTTONUP;
+                injected.button.windowID = presentation.window_ids[0];
+                injected.button.button = SDL_BUTTON_LEFT;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 4;
+            } else if (relative_mouse_selftest_stage == 4 &&
+                       shown_frames >= 6) {
+                relative_mouse_selftest_error |= mouse_pressed != 0;
+                injected.type = SDL_WINDOWEVENT;
+                injected.window.windowID = presentation.window_ids[0];
+                injected.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 5;
+            } else if (relative_mouse_selftest_stage == 5 &&
+                       shown_frames >= 7) {
+                relative_mouse_selftest_error |=
+                    relative_mouse.captured() || mouse_pressed != 0;
+                relative_mouse_selftest_stage = 6;
+            }
+        }
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) running = false;
-            if (event.type == SDL_WINDOWEVENT &&
-                event.window.event == SDL_WINDOWEVENT_CLOSE)
+            if (event.type == SDL_QUIT) {
+                release_relative_mouse();
                 running = false;
+            }
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                release_relative_mouse();
+                running = false;
+            }
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_FOCUS_LOST &&
+                event.window.windowID == presentation.window_ids[0]) {
+                release_relative_mouse();
+            }
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                    running = false;
+                    if (relative_mouse.captured())
+                        release_relative_mouse();
+                    else
+                        running = false;
                 } else if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
                     ++host_key_presses;
                     keyboard_pressed |= bit;
@@ -780,6 +892,26 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
+                event.button.windowID == presentation.window_ids[0] &&
+                options.relative_mouse_touch) {
+                if (!relative_mouse.captured()) {
+                    // The acquisition click only captures; the next click is
+                    // the first guest fire press, avoiding an accidental shot.
+                    capture_relative_mouse();
+                } else if (options.relative_mouse_fire_mask != 0) {
+                    mouse_pressed |= options.relative_mouse_fire_mask;
+                    publish_keys();
+                }
+            }
+            if (event.type == SDL_MOUSEBUTTONUP &&
+                event.button.button == SDL_BUTTON_LEFT &&
+                relative_mouse.captured() && mouse_pressed != 0) {
+                mouse_pressed &= static_cast<uint16_t>(
+                    ~options.relative_mouse_fire_mask);
+                publish_keys();
+            }
+            if (event.type == SDL_MOUSEBUTTONDOWN &&
+                event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
                 event.button.x >= bottom_content_left &&
                 event.button.x < bottom_content_left + kScreenWidth &&
@@ -815,6 +947,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 set_touch_from_mouse(event.motion.x, event.motion.y, true,
                                      options.screen_layout,
                                      bottom_logical_width);
+            if (event.type == SDL_MOUSEMOTION &&
+                relative_mouse.captured() &&
+                (event.motion.windowID == presentation.window_ids[0] ||
+                 event.motion.windowID == 0) &&
+                relative_mouse.move(event.motion.xrel, event.motion.yrel)) {
+                nds_set_touch(relative_mouse.x(), relative_mouse.y(), true);
+            }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_LEAVE && mouse_down &&
                 event.window.windowID == presentation.window_ids[1]) {
@@ -959,6 +1098,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         if (selftest_menu && selftest_touch_up &&
             nds_event_counts().vblank9 >= 600)
             running = false;
+        if (selftest_relative_mouse && relative_mouse_selftest_stage == 6)
+            running = false;
 
         if (scheduler_cpu_terminal_halted(0) &&
             scheduler_cpu_terminal_halted(1)) {
@@ -966,6 +1107,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         }
     }
 
+    release_relative_mouse();
     nds_set_touch(0, 0, false);
     nds_set_key_mask(0x0FFFu);
     g_live_stats.active = 0;
@@ -986,7 +1128,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     SDL_Quit();
     std::fprintf(stderr, "[sdl] closed after %llu presented frames\n",
                  static_cast<unsigned long long>(shown_frames));
-    if (print_stats || soak_frames || selftest_menu) {
+    if (print_stats || soak_frames || selftest_menu ||
+        selftest_relative_mouse) {
         std::fprintf(stderr,
             "[sdl] soak: frames=%llu seconds=%.3f fps=%.3f "
             "audio_started=%u queue_errors=%u underruns=%llu "
@@ -1030,17 +1173,23 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     }
     const bool audio_failed = audio_queue_error ||
         (require_audio && (audio_underruns != 0 || !audio || !audio_started));
-    const bool selftest_failed = selftest_menu &&
+    const bool menu_selftest_failed = selftest_menu &&
         (selftest_event_error || !selftest_key_up || !selftest_touch_up ||
          host_key_presses != 1 || host_touch_presses != 1 ||
          last_touch_event_x != bottom_content_left + 127 ||
          last_touch_event_y != (presentation.separate ? 180 : 372) ||
          top_hash != 0xa0f41b93e4eefa55ull ||
          bottom_hash != 0x6c43b370e9cda730ull);
+    const bool relative_mouse_selftest_failed = selftest_relative_mouse &&
+        (relative_mouse_selftest_error || relative_mouse_selftest_stage != 6);
     if (selftest_menu)
         std::fprintf(stderr, "[sdl] menu self-test: %s\n",
-                     selftest_failed ? "FAIL" : "PASS");
-    return (audio_failed || selftest_failed || compute_failed) ? 1 : 0;
+                     menu_selftest_failed ? "FAIL" : "PASS");
+    if (selftest_relative_mouse)
+        std::fprintf(stderr, "[sdl] relative mouse self-test: %s\n",
+                     relative_mouse_selftest_failed ? "FAIL" : "PASS");
+    return (audio_failed || menu_selftest_failed ||
+            relative_mouse_selftest_failed || compute_failed) ? 1 : 0;
 }
 
 #else

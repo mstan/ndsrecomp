@@ -240,6 +240,7 @@ add_executable(nds_runner
     src/scheduler.cpp
     src/debug_server.cpp
     src/frontend_config.cpp
+    src/relative_mouse_touch.cpp
     src/frontend.cpp
     src/main.cpp
     "${TITLE_BANK_REGISTRY}"
@@ -364,6 +365,12 @@ endif()
 target_include_directories(frontend_config_test PRIVATE src)
 ndsrecomp_link_tomlpp(frontend_config_test)
   add_test(NAME frontend_config_test COMMAND frontend_config_test)
+
+  add_executable(relative_mouse_touch_test
+      tests/relative_mouse_touch_test.cpp
+      src/relative_mouse_touch.cpp)
+  target_include_directories(relative_mouse_touch_test PRIVATE src)
+  add_test(NAME relative_mouse_touch_test COMMAND relative_mouse_touch_test)
 
   add_executable(battery_save_test
       tests/battery_save_test.cpp
