@@ -1134,10 +1134,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         uint16_t bottom_width = 256;
         const uint64_t adaptive_start = SDL_GetPerformanceCounter();
         if ((options.adaptive_screens & NDS_ADAPTIVE_TOP) &&
-            !nds_gpu2d_direct_frame_active())
+            !nds_gpu2d_direct_present_frame_active())
             top_pixels =
                 nds_gpu2d_adaptive_framebuffer(0, &top_width);
-        else if (nds_gpu2d_direct_frame_active())
+        else if (nds_gpu2d_direct_present_frame_active())
             top_width = nds_gpu3d_output_width();
         if (options.adaptive_screens & NDS_ADAPTIVE_BOTTOM)
             bottom_pixels =

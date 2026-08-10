@@ -46,6 +46,10 @@ struct NdsGpu2dDirectFrame {
 };
 void nds_gpu2d_set_direct_present(bool enabled);
 bool nds_gpu2d_direct_frame_active();
+// Presentation trails rasterization by one frame boundary. This reports the
+// eligibility latched for the framebuffer currently exposed by
+// nds_gpu2d_framebuffer(), rather than the frame now being rasterized.
+bool nds_gpu2d_direct_present_frame_active();
 bool nds_gpu2d_direct_frame(NdsGpu2dDirectFrame* out);
 bool nds_gpu2d_requires_3d_readback();
 void nds_gpu2d_force_cpu_frames(uint32_t frames);
