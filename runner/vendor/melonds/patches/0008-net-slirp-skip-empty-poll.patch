@@ -1,0 +1,57 @@
+--- a/src/net/Net_Slirp.cpp
++++ b/src/net/Net_Slirp.cpp
+@@ -524,21 +524,43 @@
+         // libslirp-chosen timeout. See runner/src/wifi_net.cpp's worker
+         // loop and runner/vendor/melonds/patches/0002-net-slirp-nonblocking-poll.patch.
+         timeout = 0;
+-        int res = poll(PollList, PollListSize, timeout);
+-        if (res < 0)
++        // ndsrecomp: only issue the syscall when libslirp actually handed
++        // us descriptors. Upstream's own `if (PollListSize > 0)` guard
++        // just above is commented out, and PollListSize is reset to 0
++        // immediately before slirp_pollfds_fill, so with no active guest
++        // socket this reached poll() with nfds == 0 -- and Windows'
++        // WSAPoll(), which this platform's poll() resolves to, is
++        // documented to fail with WSAEINVAL when nfds is zero. That turned
++        // 0007's BACKEND_ERROR channel into pure noise: a measured 8170
++        // WSAEINVAL "failures" during one MKDS WFC login, 8094 of them
++        // coalesced into a single ring event, all benign, and all of them
++        // stopping the instant the guest opened its first socket (the last
++        // one landed at guest cycle 4113489534, the first DNS query at
++        // 4113966067). A genuine poll() failure would have been
++        // indistinguishable from that flood, which defeats the whole point
++        // of the channel. libslirp still needs slirp_pollfds_poll() called
++        // unconditionally so its internal timers keep advancing, so only
++        // the syscall itself is skipped -- res stays 0, meaning "no
++        // error", for the no-descriptor case.
++        int res = 0;
++        if (PollListSize > 0)
+         {
+-            // ndsrecomp: surface the failure via the atomic handoff pair
+-            // declared in Net_Slirp.h -- see that declaration's comment
+-            // for why this can't just call net_ring_push directly from
+-            // here (this runs on the dedicated worker thread;
+-            // net_ring_push may only ever be called from the emulation
+-            // thread).
++            res = poll(PollList, PollListSize, timeout);
++            if (res < 0)
++            {
++                // ndsrecomp: surface the failure via the atomic handoff
++                // pair declared in Net_Slirp.h -- see that declaration's
++                // comment for why this can't just call net_ring_push
++                // directly from here (this runs on the dedicated worker
++                // thread; net_ring_push may only ever be called from the
++                // emulation thread).
+ #ifdef __WIN32__
+-            LastPollErrorCode.store(WSAGetLastError(), std::memory_order_relaxed);
++                LastPollErrorCode.store(WSAGetLastError(), std::memory_order_relaxed);
+ #else
+-            LastPollErrorCode.store(errno, std::memory_order_relaxed);
++                LastPollErrorCode.store(errno, std::memory_order_relaxed);
+ #endif
+-            PollErrorCount.fetch_add(1, std::memory_order_relaxed);
++                PollErrorCount.fetch_add(1, std::memory_order_relaxed);
++            }
+         }
+         slirp_pollfds_poll(Ctx, res<0, SlirpCbGetREvents, this);
+     }

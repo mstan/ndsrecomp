@@ -1,0 +1,22 @@
+--- a/src/net/Net_Slirp.cpp
++++ b/src/net/Net_Slirp.cpp
+@@ -451,6 +451,19 @@
+         u32 timeout = 0;
+         PollListSize = 0;
+         slirp_pollfds_fill(Ctx, &timeout, SlirpCbAddPoll, this);
++        // ndsrecomp: upstream let libslirp's own internal timer deadlines
++        // (via the `timeout` out-parameter above) decide how long poll()
++        // may block. RecvCheck is reached from the guest-cycle-scheduled
++        // path (Wifi::USTimer -> CheckRX -> WifiAP::RecvPacket ->
++        // Net::RecvPacket -> RecvCheck), so a nonzero timeout would let a
++        // host wall-clock wait stall the emulation thread inside what the
++        // deterministic scheduler treats as a pure guest-cycle advance.
++        // Force non-blocking polling; see
++        // runner/vendor/melonds/patches/0002-net-slirp-nonblocking-poll.patch
++        // and THIRD_PARTY_ATTRIBUTION.md. A host-thread-driven poll (per
++        // plan §19) is the fuller fix and is not yet implemented -- see the
++        // seam noted in runner/src/wifi_net.cpp.
++        timeout = 0;
+         int res = poll(PollList, PollListSize, timeout);
+         slirp_pollfds_poll(Ctx, res<0, SlirpCbGetREvents, this);
+     }

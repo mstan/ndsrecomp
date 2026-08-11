@@ -1,0 +1,106 @@
+--- a/src/WifiAP.cpp
++++ b/src/WifiAP.cpp
+@@ -22,6 +22,11 @@
+ #include "Wifi.h"
+ #include "WifiAP.h"
+ #include "Platform.h"
++// ndsrecomp: always-on network observability ring (M0 floor). See
++// runner/vendor/melonds/patches/0004-wifiap-cpp-net-ring-hooks.patch and
++// THIRD_PARTY_ATTRIBUTION.md. Project-written, dependency-free header,
++// resolved via the runner's own -Isrc include path.
++#include "net/net_ring.h"
+
+ #ifndef __WIN32__
+ #include <stddef.h>
+@@ -148,6 +153,15 @@ int WifiAP::HandleManagementFrame(const u8* data, int len)
+
+             ClientStatus = 2;
+             Log(LogLevel::Debug, "wifiAP: client associated\n");
++            // ndsrecomp: association/state-change observability hook (M0
++            // floor). data[10..15] is 802.11 Addr2 (TA/SA) of the frame
++            // just received from the client -- the station's MAC; APMac is
++            // this virtual AP's own identity (patched identity, see
++            // 0001-wifi-ap-identity.patch). aux carries the NEW
++            // ClientStatus (0=disconnected 1=authenticated 2=associated).
++            net_ring_push(NDS_NET_EVENT_WIFI_ASSOCIATION, /*direction*/1,
++                          0, 0, &data[10], (const u8*)APMac,
++                          0, 0, 0, 0, 0, /*aux=*/(u32)ClientStatus);
+
+             PWRITE_16(p, 0x0010);
+             PWRITE_16(p, 0x0000); // duration??
+@@ -198,6 +212,11 @@ int WifiAP::HandleManagementFrame(const u8* data, int len)
+
+             ClientStatus = 1;
+             Log(LogLevel::Debug, "wifiAP: client deassociated\n");
++            // ndsrecomp: association/state-change observability hook (M0
++            // floor). See the assoc-request case above for field meanings.
++            net_ring_push(NDS_NET_EVENT_WIFI_ASSOCIATION, /*direction*/1,
++                          0, 0, &data[10], (const u8*)APMac,
++                          0, 0, 0, 0, 0, /*aux=*/(u32)ClientStatus);
+
+             PWRITE_16(p, 0x00A0);
+             PWRITE_16(p, 0x0000); // duration??
+@@ -220,6 +239,11 @@ int WifiAP::HandleManagementFrame(const u8* data, int len)
+
+             ClientStatus = 1;
+             Log(LogLevel::Debug, "wifiAP: client authenticated\n");
++            // ndsrecomp: association/state-change observability hook (M0
++            // floor). See the assoc-request case above for field meanings.
++            net_ring_push(NDS_NET_EVENT_WIFI_ASSOCIATION, /*direction*/1,
++                          0, 0, &data[10], (const u8*)APMac,
++                          0, 0, 0, 0, 0, /*aux=*/(u32)ClientStatus);
+
+             PWRITE_16(p, 0x00B0);
+             PWRITE_16(p, 0x0000); // duration??
+@@ -244,6 +268,11 @@ int WifiAP::HandleManagementFrame(const u8* data, int len)
+
+             ClientStatus = 0;
+             Log(LogLevel::Debug, "wifiAP: client deauthenticated\n");
++            // ndsrecomp: association/state-change observability hook (M0
++            // floor). See the assoc-request case above for field meanings.
++            net_ring_push(NDS_NET_EVENT_WIFI_ASSOCIATION, /*direction*/1,
++                          0, 0, &data[10], (const u8*)APMac,
++                          0, 0, 0, 0, 0, /*aux=*/(u32)ClientStatus);
+
+             PWRITE_16(p, 0x00C0);
+             PWRITE_16(p, 0x0000); // duration??
+@@ -308,6 +337,21 @@ int WifiAP::SendPacket(const u8* data, int len)
+                 *(u16*)&LANBuffer[12] = *(u16*)&data[30]; // type
+                 memcpy(&LANBuffer[14], &data[32], lan_len - 14);
+
++                // ndsrecomp: 802.11<->Ethernet boundary observability hook
++                // (M0 floor). This is also the exact point that reaches
++                // Net::SendPacket (via Platform::Net_SendPacket, the
++                // runner's bridge in wifi_net.cpp): Net::SendPacket itself
++                // is a pure one-line forward to the active NetDriver with
++                // no logic of its own (net/Net.cpp), so a single hook here
++                // captures both the "802.11<->Ethernet" and "backend"
++                // boundaries the observability plan names separately --
++                // documented rather than duplicated, per "prefer few
++                // surgical hooks."
++                net_ring_push(NDS_NET_EVENT_ETHERNET_TX, /*direction*/0,
++                              0, 0, &LANBuffer[6], &LANBuffer[0],
++                              0, 0, 0, 0, static_cast<uint16_t>(lan_len),
++                              /*aux=*/*(u16*)&LANBuffer[12]);
++
+                 Platform::Net_SendPacket(LANBuffer, lan_len, UserData);
+             }
+         }
+@@ -396,6 +440,17 @@ int WifiAP::RecvPacket(u8* data)
+
+         // packet is good
+
++        // ndsrecomp: 802.11<->Ethernet boundary observability hook (M0
++        // floor). Symmetric to the SendPacket hook above -- this is also
++        // the point that received data from Net::RecvPacket (via
++        // Platform::Net_RecvPacket), so it doubles as the "backend
++        // boundary" per the same reasoning documented at the SendPacket
++        // hook.
++        net_ring_push(NDS_NET_EVENT_ETHERNET_RX, /*direction*/1,
++                      0, 0, &LANBuffer[6], &LANBuffer[0],
++                      0, 0, 0, 0, static_cast<uint16_t>(rxlen),
++                      /*aux=*/*(u16*)&LANBuffer[12]);
++
+         u8* base = data + 12;
+         u8* p = base;
+

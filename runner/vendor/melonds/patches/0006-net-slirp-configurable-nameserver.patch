@@ -1,0 +1,87 @@
+--- a/src/net/Net_Slirp.h
++++ b/src/net/Net_Slirp.h
+@@ -39,7 +39,23 @@
+ class Net_Slirp : public NetDriver
+ {
+ public:
+-    explicit Net_Slirp(const Platform::SendPacketCallback& callback) noexcept;
++    // ndsrecomp: `nameserver_ipv4_host_order` (host byte order) optionally
++    // overrides the DNS server address slirp hands the guest via DHCP
++    // option 6. 0 (the default -- every pre-existing call site) preserves
++    // upstream melonDS's own behavior exactly: the internal fake address
++    // `kDNSIP`, whose DNS queries SendPacket() intercepts and answers
++    // locally via HandleDNSFrame()'s getaddrinfo() synthesis, never
++    // touching a real socket. A nonzero override is used for the
++    // project's configurable WFC DNS provider (runner/src/wifi_net.cpp,
++    // NdsNetworkOptions): once the guest is told to use a REAL external
++    // address instead of the fake `kDNSIP`, SendPacket()'s
++    // `dst == kDNSIP` special case no longer matches, so those DNS
++    // packets fall through to the normal `slirp_input()` NAT path and are
++    // genuinely forwarded over the host's network to that address --
++    // exactly how a physical DS reaches a configured WFC DNS server. See
++    // runner/vendor/melonds/patches/0006-net-slirp-configurable-nameserver.patch.
++    explicit Net_Slirp(const Platform::SendPacketCallback& callback,
++                        u32 nameserver_ipv4_host_order = 0) noexcept;
+     Net_Slirp(const Net_Slirp&) = delete;
+     Net_Slirp& operator=(const Net_Slirp&) = delete;
+     Net_Slirp(Net_Slirp&& other) noexcept;
+--- a/src/net/Net_Slirp.cpp
++++ b/src/net/Net_Slirp.cpp
+@@ -141,11 +141,19 @@
+     .notify = SlirpCbNotify
+ };
+ 
+-Net_Slirp::Net_Slirp(const Platform::SendPacketCallback& callback) noexcept : Callback(callback)
++Net_Slirp::Net_Slirp(const Platform::SendPacketCallback& callback,
++                     u32 nameserver_ipv4_host_order) noexcept : Callback(callback)
+ {
+     SlirpConfig cfg {};
+     memset(&cfg, 0, sizeof(cfg));
+-    cfg.version = 1;
++    // ndsrecomp: version bumped 1 -> 3 so libslirp actually honors
++    // `disable_dns` below (libslirp.h: "Fields introduced in SlirpConfig
++    // version 3 begin" covers disable_dns; a lower version number tells
++    // slirp to ignore fields past that version's boundary regardless of
++    // what's stored in them). Every version-2 field (outbound_addr/
++    // outbound_addr6) stays null/default via the memset above, so this is
++    // a pure additive capability bump, not a behavior change on its own.
++    cfg.version = 3;
+ 
+     cfg.in_enabled = true;
+     *(u32*)&cfg.vnetwork = htonl(kSubnet);
+@@ -153,7 +161,34 @@
+     *(u32*)&cfg.vhost = htonl(kServerIP);
+     cfg.vhostname = "melonServer";
+     *(u32*)&cfg.vdhcp_start = htonl(kClientIP);
+-    *(u32*)&cfg.vnameserver = htonl(kDNSIP);
++    // ndsrecomp: configurable DHCP-advertised nameserver -- see the
++    // constructor declaration comment in Net_Slirp.h and
++    // patches/0006-net-slirp-configurable-nameserver.patch. 0 preserves
++    // upstream's own kDNSIP (local getaddrinfo-backed DNS synthesis).
++    *(u32*)&cfg.vnameserver =
++        htonl(nameserver_ipv4_host_order ? nameserver_ipv4_host_order : kDNSIP);
++    // ndsrecomp: without this, libslirp's OWN built-in DNS proxy (separate
++    // from and in addition to melonDS's HandleDNSFrame() interception
++    // above SendPacket()) silently re-intercepts ANY UDP packet destined
++    // to port 53 -- REGARDLESS of destination address -- and answers it
++    // using the HOST's own configured resolver, discarding the packet's
++    // real destination entirely. Confirmed by direct measurement: with
++    // disable_dns left false, a guest DNS query sent to a configured WFC
++    // provider (nameserver_ipv4_host_order override, a real external
++    // address, NOT kDNSIP) never actually reached that address -- it came
++    // back answered by whatever DNS server this host's own network stack
++    // uses, with a visibly different (larger, multi-record) response than
++    // querying the real provider address directly from this host. That
++    // defeated the entire point of a configurable WFC DNS provider: the
++    // guest was silently resolving through the host's ordinary internet
++    // DNS no matter what nameserver we told it to use via DHCP. Setting
++    // this unconditionally (not just when nameserver_ipv4_host_order != 0)
++    // is safe for the unmodified default path too: when no override is
++    // configured, HandleDNSFrame's own `dst == kDNSIP` check upstream in
++    // SendPacket() already intercepts and answers the packet BEFORE it
++    // would ever reach slirp_input()/this proxy layer, so disable_dns is
++    // simply never consulted in that case.
++    cfg.disable_dns = true;
+ 
+     Ctx = slirp_new(&cfg, &cb, this);
+ }

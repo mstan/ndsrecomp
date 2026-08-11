@@ -1,0 +1,94 @@
+--- a/src/net/Net_Slirp.h
++++ b/src/net/Net_Slirp.h
+@@ -25,6 +25,8 @@
+ #include "NetDriver.h"
+
++#include <atomic>
++
+ #include <libslirp.h>
+
+ #ifdef __WIN32__
+     #include <ws2tcpip.h>
+@@ -79,16 +81,37 @@
+     void PollHostSockets() noexcept;
++
++    // ndsrecomp: PollHostSockets() used to pass poll()'s return value
++    // straight into slirp_pollfds_poll as a bare `res<0` bool and never
++    // otherwise look at it -- a genuine host-socket poll() failure (e.g.
++    // EBADF/EINTR on POSIX, WSAENOTSOCK on Windows) was therefore
++    // completely invisible, both to a human reading logs and to this
++    // project's own always-on network observability ring (net_ring.h).
++    // TakePollErrorCount()/LastPollError() surface it: PollHostSockets()
++    // (the dedicated worker thread, see that method's own comment)
++    // increments the counter and records the OS error code on every
++    // poll() < 0; the emulation thread (Net_RecvPacket,
++    // runner/src/wifi_net.cpp) drains both once per RX tick and pushes
++    // NDS_NET_EVENT_BACKEND_ERROR -- the SAME atomic-counter-handoff
++    // idiom wifi_net.cpp already uses for rx_queue drops
++    // (rx_dropped_since_last_report), and for the identical reason:
++    // net_ring_push is not thread-safe by design and must only ever be
++    // called from the emulation thread, never from this worker thread.
++    uint32_t TakePollErrorCount() noexcept;
++    int LastPollError() const noexcept;
+ private:
+     static constexpr int PollListMax = 64;
+     static const SlirpCb cb;
+     static int SlirpCbGetREvents(int idx, void* opaque) noexcept;
+     static int SlirpCbAddPoll(int fd, int events, void* opaque) noexcept;
+     static ssize_t SlirpCbSendPacket(const void* buf, size_t len, void* opaque) noexcept;
+     void HandleDNSFrame(u8* data, int len) noexcept;
+
+     Platform::SendPacketCallback Callback;
+     pollfd PollList[PollListMax] {};
+     int PollListSize = 0;
+     FIFO<u32, (0x8000 >> 2)> RXBuffer {};
+     u32 IPv4ID = 0;
+     Slirp* Ctx = nullptr;
++    std::atomic<uint32_t> PollErrorCount{0};
++    std::atomic<int> LastPollErrorCode{0};
+ };
+--- a/src/net/Net_Slirp.cpp
++++ b/src/net/Net_Slirp.cpp
+@@ -19,6 +19,7 @@
+ #include <stdio.h>
+ #include <string.h>
++#include <cerrno>
+ #include "Net.h"
+ #include "Net_Slirp.h"
+ #include "FIFO.h"
+ #include "Platform.h"
+@@ -523,9 +523,34 @@
+         // libslirp-chosen timeout. See runner/src/wifi_net.cpp's worker
+         // loop and runner/vendor/melonds/patches/0002-net-slirp-nonblocking-poll.patch.
+         timeout = 0;
+         int res = poll(PollList, PollListSize, timeout);
++        if (res < 0)
++        {
++            // ndsrecomp: surface the failure via the atomic handoff pair
++            // declared in Net_Slirp.h -- see that declaration's comment
++            // for why this can't just call net_ring_push directly from
++            // here (this runs on the dedicated worker thread;
++            // net_ring_push may only ever be called from the emulation
++            // thread).
++#ifdef __WIN32__
++            LastPollErrorCode.store(WSAGetLastError(), std::memory_order_relaxed);
++#else
++            LastPollErrorCode.store(errno, std::memory_order_relaxed);
++#endif
++            PollErrorCount.fetch_add(1, std::memory_order_relaxed);
++        }
+         slirp_pollfds_poll(Ctx, res<0, SlirpCbGetREvents, this);
+     }
+ }
+
++uint32_t Net_Slirp::TakePollErrorCount() noexcept
++{
++    return PollErrorCount.exchange(0, std::memory_order_relaxed);
++}
++
++int Net_Slirp::LastPollError() const noexcept
++{
++    return LastPollErrorCode.load(std::memory_order_relaxed);
++}
++
+ }

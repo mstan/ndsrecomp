@@ -7,9 +7,17 @@ it is not a legal guarantee of non-infringement.
 ## Project-owned code
 
 Except for the items described below, the tracked implementation and
-documentation are copyright © 2026 Matthew Stan and contributors. No
-project-wide license has been declared yet, so no permission is granted beyond
-rights provided by applicable law.
+documentation are copyright © 2026 Matthew Stanley and contributors and are
+licensed under the MIT License; see [`LICENSE`](LICENSE).
+
+The MIT grant covers this project's own source. It does not and cannot relicense
+the third-party code described below, and it does not make every build artifact
+redistributable under MIT terms. In particular, the native runner links vendored
+melonDS sources, so the `nds_runner` **executable** is a combined work whose
+distribution must comply with GPL-3.0-or-later — see
+[melonDS vendored GPU3D (runner)](#melonds-vendored-gpu3d-runner) below. The
+recompiler, the generated banks, and all `ndsref`-independent tooling stay
+outside that boundary and are distributable under MIT alone.
 
 ## gbarecomp
 
@@ -24,11 +32,12 @@ and this repository's commits have the same copyright owner.
   under `recompiler/finder/` and `recompiler/src/`
 
 The port has since gained Nintendo DS-specific ARMv5TE, CP15, dual-CPU timing,
-and dispatch behavior. The ported portions remain available under the upstream
-PolyForm Noncommercial terms; see the
+and dispatch behavior. Upstream `gbarecomp` remains available under the PolyForm
+Noncommercial terms; see the
 [official license text](https://polyformproject.org/licenses/noncommercial/1.0.0/).
-This provenance statement does not create a license grant for the rest of this
-repository.
+Because both repositories share one copyright owner, the ported portions as they
+exist *here* are offered under this repository's MIT grant; the upstream project's
+own terms are unaffected, and this statement does not relicense upstream.
 
 ## melonDS optional oracle
 
@@ -89,6 +98,81 @@ code block shared between the tracked native recompiler/runtime sources and
 the pinned melonDS source tree. That mechanical check cannot prove independent
 authorship; provenance comments and the repository history remain the primary
 record.
+
+## melonDS vendored Wifi device model + net glue (runner)
+
+Since 2026-08 the native runner additionally vendors melonDS's DS Wi-Fi
+device model (`Wifi`/`WifiAP`) and its network backend glue (`Net`,
+`NetDriver`, `PacketDispatcher`, `Net_Slirp`), following the same decision
+already made for the vendored GPU3D engine above: the runner is already a
+GPL-3.0-or-later combined work, so taking a second melonDS subsystem costs
+nothing additional on the licensing axis. See
+[`docs/adr-melonds-wifi-vendoring.md`](docs/adr-melonds-wifi-vendoring.md)
+for the full analysis. As with GPU3D, the guest's own ARM7 Wi-Fi driver
+still writes every register; this is a device model, not HLE, and no
+DWC/GameSpy/SSL/matchmaking service logic is emulated.
+
+- Local scope: `runner/vendor/melonds/{Wifi.cpp,Wifi.h,WifiAP.cpp,WifiAP.h,net/}`
+- Vendored from tag `1.0rc`, commit
+  `e3fa6f4224e0d706df3ee262ae41cfb0deadc593`:
+  - Byte-identical (hash-verified against the pinned `ndsref` checkout at
+    vendoring time): `Wifi.cpp`, `Wifi.h`, `net/Net.cpp`, `net/Net.h`,
+    `net/NetDriver.h`, `net/PacketDispatcher.cpp`, `net/PacketDispatcher.h`,
+    `net/Net_PCap.cpp`, `net/Net_PCap.h`, `net/pcap/*.h` (the freely
+    distributable libpcap public headers, BSD-licensed, vendored wholesale
+    the same way melonDS itself does), and the entire `net/libslirp/` tree
+    (libslirp 4.8.0, BSD-3-Clause — see its own `COPYRIGHT`).
+  - Modified per the tracked patches in `runner/vendor/melonds/patches/`
+    (GPLv3 §5(a) "you changed the files" notices; see that directory's
+    README for all five patches and their rationale): `WifiAP.cpp` (AP
+    identity: SSID `ndsrecomp`, locally-administered BSSID
+    `02:4E:44:53:52:01`, replacing melonDS's default `melonAP`/
+    `00:F0:77:77:77:77`; plus the association/state-change and
+    802.11<->Ethernet-boundary network-observability-ring hooks),
+    `Wifi.cpp` (the egress/ingress network-observability-ring hooks in
+    `TXSendFrame`/`FinishRX`), and `net/Net_Slirp.{h,cpp}` (patch 0002
+    forces `RecvCheck()`'s `poll()` timeout to 0 so it never blocks;
+    patch 0005 goes further and moves all host-socket polling AND all
+    guest->host packet sends off the emulation thread entirely, onto a
+    dedicated worker thread owned by `runner/src/wifi_net.cpp` --
+    `RecvCheck()` becomes a true no-op and its old body moves to a new
+    method, `PollHostSockets()`, called only by that worker thread. See
+    `runner/vendor/melonds/patches/README.md`'s `0005-*` entry and the
+    design comment above `WifiBridgeState` in `runner/src/wifi_net.cpp`).
+  - Reused as-is from the already-vendored GPU3D set: `types.h`,
+    `Savestate.h`/`.cpp`, `FIFO.h`.
+- `net/Net_PCap.cpp`/`.h` compile only when the off-by-default
+  `NDS_ENABLE_PCAP_BACKEND` CMake option is set; they only need the
+  `<pcap/pcap.h>` header at compile time — the actual Npcap/WinPcap DLL is
+  loaded dynamically at runtime, not linked. `net/LocalMP.cpp`, `LAN.cpp`,
+  `Netplay.cpp`, `MPInterface.cpp` (melonDS's local-wireless/netplay code,
+  which pulls in ENet) are deliberately **not** vendored; local wireless/
+  Download Play/NiFi stays out of scope.
+- Project-written shim headers in the same directory (`NDS.h` extended,
+  `Platform.h` extended, new `SPI.h`, new `SPI_Firmware.h`) supply the
+  minimal interface slice the vendored units consume, the same pattern as
+  the GPU3D shims; as derived interfaces they are likewise
+  GPL-3.0-or-later. The bridge `runner/src/wifi_net.cpp` implements them
+  against the runner's own firmware buffer and a single-slot scheduler
+  shim keyed to the live scheduler's guest-cycle rendezvous
+  (`scheduler.cpp`'s `next_scheduled_event_time()`/`scheduler_run_round()`
+  fold `nds_wifi_next_event_time()`/`nds_wifi_run_events()` into the same
+  chain every other device deadline uses).
+- As of 2026-08-10 this bridge is wired to `bus.cpp`/`io.cpp`/
+  `scheduler.cpp` and is the SOLE Wi-Fi device model on the live bus.
+  `runner/src/wifi.cpp` (the prior hand-written model) has been deleted;
+  `runner/src/wifi.h` is kept unchanged as the bus-facing declaration
+  surface (bus.cpp/io.cpp/scheduler.cpp already call those exact names),
+  now implemented in `wifi_net.cpp` instead. The guest's own ARM7 Wi-Fi
+  driver still writes every register and still derives its own MAC
+  address from firmware over SPI (`Wifi::Reset()` never seeds
+  `W_MACAddr0-2` with a real value; melonDS zeroes them on the
+  `W_ModeReset` bit-14 reset path exactly like the retired hand-written
+  model did) — this remains a device-model swap, never HLE, and no MAC is
+  injected from the host/config/firmware image directly.
+- Consequence: no change to the GPU3D section's licensing conclusion above
+  — `nds_runner` was already a GPL-3.0-or-later combined work; this adds a
+  second vendored subsystem inside the same boundary.
 
 ## mGBA
 

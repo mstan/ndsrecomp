@@ -1,0 +1,20 @@
+--- a/src/WifiAP.cpp
++++ b/src/WifiAP.cpp
+@@ -33,8 +33,15 @@
+ using Platform::LogLevel;
+ 
+ 
+-const char* WifiAP::APName = "melonAP";
+-const u8 WifiAP::APMac[6] = {0x00, 0xF0, 0x77, 0x77, 0x77, 0x77};
++// ndsrecomp: AP identity changed from melonDS's default ("melonAP" /
++// 00:F0:77:77:77:77) to project identity. BSSID is locally-administered
++// (bit 1 of the first octet set) so it can never collide with a real
++// vendor-assigned MAC. See
++// runner/vendor/melonds/patches/0001-wifi-ap-identity.patch and
++// THIRD_PARTY_ATTRIBUTION.md. This file is a modified version of the
++// original melonDS source per GPLv3 5(a).
++const char* WifiAP::APName = "ndsrecomp";
++const u8 WifiAP::APMac[6] = {0x02, 0x4E, 0x44, 0x53, 0x52, 0x01};
+ const u8 WifiAP::APChannel = 6;
+ 
+ #define PWRITE_8(p, v)      *p++ = v;

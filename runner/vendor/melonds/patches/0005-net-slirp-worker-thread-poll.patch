@@ -1,0 +1,82 @@
+--- a/src/net/Net_Slirp.h
++++ b/src/net/Net_Slirp.h
+@@ -48,6 +48,19 @@ public:
+
+     int SendPacket(u8* data, int len) noexcept override;
+     void RecvCheck() noexcept override;
++
++    // ndsrecomp: the real host-socket polling logic, split out of
++    // RecvCheck() (see Net_Slirp.cpp) so it can run on a dedicated worker
++    // thread instead of whatever thread calls Net::RecvPacket (always the
++    // emulation thread in this build). Not part of the NetDriver interface
++    // -- callers need a concrete Net_Slirp* to reach it. Contract: must be
++    // invoked from exactly one thread, and never concurrently with
++    // SendPacket() on this same instance (both touch Ctx). See
++    // runner/src/wifi_net.cpp's worker thread, the only caller, which also
++    // serializes SendPacket() through the same thread so this contract
++    // holds trivially. See
++    // runner/vendor/melonds/patches/0005-net-slirp-worker-thread-poll.patch.
++    void PollHostSockets() noexcept;
+ private:
+     static constexpr int PollListMax = 64;
+     static const SlirpCb cb;
+--- a/src/net/Net_Slirp.cpp
++++ b/src/net/Net_Slirp.cpp
+@@ -444,6 +444,31 @@ int Net_Slirp::SlirpCbGetREvents(int idx, void* opaque) noexcept
+
+ void Net_Slirp::RecvCheck() noexcept
+ {
++    // ndsrecomp: intentionally empty. Net::RecvPacket (vendored,
++    // net/Net.cpp:61) calls this virtual unconditionally on whatever
++    // thread calls Net::RecvPacket -- in this build that is always the
++    // emulation thread (Platform::Net_RecvPacket's only caller chain is
++    // Wifi::USTimer -> CheckRX -> WifiAP::RecvPacket -> Net::RecvPacket,
++    // runner/src/wifi_net.cpp). All host-socket polling now happens
++    // exclusively on a dedicated worker thread via PollHostSockets()
++    // below, invoked only from runner/src/wifi_net.cpp's host networking
++    // thread. Making this a true no-op -- rather than the non-blocking
++    // poll it ran after 0002-net-slirp-nonblocking-poll.patch -- removes
++    // every trace of host-socket-syscall latency/jitter from the
++    // emulation thread's path, per project plan §18/§19. See
++    // runner/vendor/melonds/patches/0005-net-slirp-worker-thread-poll.patch
++    // and docs/adr-melonds-wifi-vendoring.md §8 Finding 1.
++}
++
++void Net_Slirp::PollHostSockets() noexcept
++{
++    // ndsrecomp: this is the body RecvCheck() used to run directly on the
++    // emulation thread, unchanged except for the comments. See this
++    // class's declaration for the single-caller-thread contract that
++    // makes the unsynchronized access to Ctx/PollList below safe: only
++    // runner/src/wifi_net.cpp's worker thread ever calls this, and that
++    // same thread is also the only caller of SendPacket(), so the two
++    // never interleave.
+     if (!Ctx) return;
+
+     //if (PollListSize > 0)
+@@ -453,16 +478,15 @@ void Net_Slirp::RecvCheck() noexcept
+         slirp_pollfds_fill(Ctx, &timeout, SlirpCbAddPoll, this);
+         // ndsrecomp: upstream let libslirp's own internal timer deadlines
+         // (via the `timeout` out-parameter above) decide how long poll()
+-        // may block. RecvCheck is reached from the guest-cycle-scheduled
+-        // path (Wifi::USTimer -> CheckRX -> WifiAP::RecvPacket ->
+-        // Net::RecvPacket -> RecvCheck), so a nonzero timeout would let a
+-        // host wall-clock wait stall the emulation thread inside what the
+-        // deterministic scheduler treats as a pure guest-cycle advance.
+-        // Force non-blocking polling; see
+-        // runner/vendor/melonds/patches/0002-net-slirp-nonblocking-poll.patch
+-        // and THIRD_PARTY_ATTRIBUTION.md. A host-thread-driven poll (per
+-        // plan §19) is the fuller fix and is not yet implemented -- see the
+-        // seam noted in runner/src/wifi_net.cpp.
++        // may block. Keep forcing non-blocking regardless of what libslirp
++        // asked for (0002-net-slirp-nonblocking-poll.patch's mandatory
++        // clamp, retained here even though this now runs on a dedicated
++        // worker thread rather than the emulation thread): a bounded,
++        // fast, always-non-blocking poll() keeps this loop's own shutdown
++        // latency small and predictable -- a stop request is never stuck
++        // behind an in-flight blocking poll() with an arbitrary
++        // libslirp-chosen timeout. See runner/src/wifi_net.cpp's worker
++        // loop and runner/vendor/melonds/patches/0002-net-slirp-nonblocking-poll.patch.
+         timeout = 0;
+         int res = poll(PollList, PollListSize, timeout);
+         slirp_pollfds_poll(Ctx, res<0, SlirpCbGetREvents, this);

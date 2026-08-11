@@ -1,0 +1,57 @@
+--- a/src/Wifi.cpp
++++ b/src/Wifi.cpp
+@@ -23,6 +23,12 @@
+ #include "Wifi.h"
+ #include "WifiAP.h"
+ #include "Platform.h"
++// ndsrecomp: always-on network observability ring (M0 floor). See
++// runner/vendor/melonds/patches/0003-wifi-cpp-net-ring-hooks.patch and
++// THIRD_PARTY_ATTRIBUTION.md. This header is project-written, dependency-
++// free (just <cstdint>), and resolves via the runner's own -Isrc include
++// path (runner/CMakeLists.txt), not through any melonDS include.
++#include "net/net_ring.h"
+
+ namespace melonDS
+ {
+@@ -645,6 +651,18 @@ void Wifi::TXSendFrame(const TXSlot* slot, int num)
+     if (CurChannel == 0) return;
+     TXBuffer[9] = CurChannel;
+
++    // ndsrecomp: egress observability hook (M0 floor,
++    // docs/networking-observability-plan.md (e)). Placed right before the
++    // TX-path dispatch so it captures the frame uniformly regardless of
++    // which case below consumes it (regular data, MP CMD/reply/beacon --
++    // all share this one assembly point). TXBuffer[12+4..9]/[12+10..15] are
++    // 802.11 Addr1 (RA/DA)/Addr2 (TA/SA); TXBuffer[0..11] is melonDS's own
++    // internal TX header, not part of the over-the-air frame.
++    net_ring_push(NDS_NET_EVENT_WIFI_TX_FRAME, /*direction=guest->host*/0,
++                  0, 0, &TXBuffer[12 + 10], &TXBuffer[12 + 4],
++                  0, 0, 0, 0, static_cast<uint16_t>(12 + len),
++                  /*aux=*/static_cast<uint32_t>(num));
++
+     switch (num)
+     {
+     case 0:
+@@ -1238,6 +1256,22 @@ void Wifi::StartRX()
+
+ void Wifi::FinishRX()
+ {
++    // ndsrecomp: ingress observability hook (M0 floor,
++    // docs/networking-observability-plan.md (e)). Placed at the very top,
++    // before the destination-MAC/WEP/RXFilter checks below can `return`
++    // early, so this captures every frame the hardware physically
++    // received regardless of whether it is ultimately accepted or
++    // filtered -- StartRX() (the other candidate hook site) only has the
++    // frame length/rate at that point, not the full 802.11 header, so a
++    // single hook here (rather than one at each site) is both more
++    // complete and the "prefer few surgical hooks" choice. RXBuffer[12+4]/
++    // [12+10] are Addr1 (RA/DA)/Addr2 (TA/SA); RXBuffer[0..11] is
++    // melonDS's own internal RX header, not part of the over-the-air
++    // frame.
++    net_ring_push(NDS_NET_EVENT_WIFI_RX_FRAME, /*direction=host->guest*/1,
++                  0, 0, &RXBuffer[12 + 10], &RXBuffer[12 + 4],
++                  0, 0, 0, 0, *(u16*)&RXBuffer[8], /*aux=*/*(u16*)&RXBuffer[12]);
++
+     ComStatus &= ~0x1;
+     RXCounter = 0;
+
