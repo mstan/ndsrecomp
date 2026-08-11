@@ -1,0 +1,974 @@
+// wifi_net.cpp -- see wifi_net.h and wifi.h for the bridge's status/scope.
+//
+// This file is now the SOLE Wi-Fi device-model implementation on the live
+// bus: it implements every declaration in wifi.h (previously implemented
+// by the retired runner/src/wifi.cpp) against the vendored melonDS Wifi
+// class, plus the melonDS::NDS single-slot scheduler shim (declared in
+// runner/vendor/melonds/NDS.h) and the melonDS::Platform::{Mutex_*,MP_*,
+// Net_SendPacket,Net_RecvPacket[,DynamicLibrary_*]} shim functions
+// (declared in runner/vendor/melonds/Platform.h) that the vendored
+// Wifi.cpp/WifiAP.cpp/net/*.cpp translation units call into.
+//
+// melonDS::NDS::SetIRQ/ClearIRQ/CheckDMAs/GXFIFOStall/GXFIFOUnstall and
+// melonDS::Platform::Log/Thread_*/Semaphore_* are already implemented in
+// gpu3d.cpp for the (same, shared) NDS.h/Platform.h -- this file only adds
+// the members those did not already cover. gpu3d.cpp's NDS::SetIRQ also
+// pushes the Wi-Fi IRQ-assertion net-ring event when irq == IRQ_Wifi (see
+// that file); nothing here duplicates it.
+
+#include "wifi_net.h"
+#include "wifi.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#if defined(NDS_ENABLE_PCAP_BACKEND) && defined(_WIN32)
+// WIN32_LEAN_AND_MEAN keeps windows.h from pulling in the old winsock.h --
+// Net_Slirp.h (included below) already pulls in ws2tcpip.h/winsock2.h for
+// __WIN32__, and winsock.h-after-winsock2.h is a hard conflict GCC flags
+// with "#warning Please include winsock2.h before windows.h".
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+#include "io.h"
+#include "state.h"        // g_nds_active, NDS_ARM9/NDS_ARM7, nds_reschedule_slice
+#include "scheduler.h"    // scheduler_system_timestamp, scheduler_cpu_state (Wiimmfi M8)
+#include "net/net_ring.h"
+#include "net/net_classify.h"
+#include "net/net_capture.h"
+#include "net/net_replay.h"
+
+// Explicit relative paths, not bare quote-includes: runner/src/wifi.h
+// (the existing hand-written device model's header, kept as a thin bridge
+// header -- see its own comment) collides case-insensitively with
+// runner/vendor/melonds/Wifi.h on Windows, and quote-include search checks
+// the including file's own directory (runner/src/) before any -I path, so
+// a bare #include "Wifi.h" from a file in runner/src/ silently resolves to
+// the WRONG header (confirmed by hitting exactly this: a "class
+// melonDS::Wifi" forward-declared-but-never-completed error whose note
+// pointed at wifi_net.h's forward decl, because "Wifi.h" had resolved to
+// runner/src/wifi.h, which declares no such class at all).
+#include "../vendor/melonds/NDS.h"
+#include "../vendor/melonds/Wifi.h"
+#include "../vendor/melonds/WifiAP.h"
+#include "../vendor/melonds/net/Net.h"
+#include "../vendor/melonds/net/Net_Slirp.h"
+
+// ── melonDS::NDS single-slot scheduler shim ─────────────────────────────
+// Wifi::Wifi()/~Wifi() (Wifi.cpp:92-104) register/unregister exactly one
+// event func (USTimer) under exactly one id (Event_Wifi); ScheduleTimer/
+// UpdatePowerOn only ever schedule/cancel that same id with FuncID 0. See
+// NDS.h's declaration comment for why a single slot suffices and what is
+// intentionally simplified (no CurCPU/ARM7Timestamp split -- Wifi is
+// ARM7-only hardware, so real melonDS's ARM9 branch of ScheduleEvent's
+// non-periodic case is unreachable for Event_Wifi; CurrentSystemTimestamp
+// always plays the role of real melonDS's ARM7Timestamp here).
+
+namespace melonDS {
+
+void NDS::RegisterEventFuncs(u32 id, void* that,
+                              const std::initializer_list<EventFunc>& funcs) {
+    EventID = id;
+    EventThat = that;
+    EventCallback = funcs.size() ? *funcs.begin() : nullptr;
+    EventParam = 0;
+    EventScheduled = false;
+}
+
+void NDS::UnregisterEventFuncs(u32 id) {
+    if (id != EventID) return;
+    EventThat = nullptr;
+    EventCallback = nullptr;
+    EventScheduled = false;
+    EventID = kNoEvent;
+}
+
+void NDS::ScheduleEvent(u32 id, bool periodic, s32 delay, u32 funcid,
+                         u32 param) {
+    (void)funcid;  // Wifi always passes 0, its only registered func.
+    if (id != EventID) return;
+    if (EventScheduled) {
+        // Real melonDS logs "EVENT ALREADY SCHEDULED" and bails rather than
+        // clobbering a pending deadline; preserve that invariant.
+        Platform::Log(Platform::Debug,
+                       "[wifi_net] event %u already scheduled\n", id);
+        return;
+    }
+    if (periodic) {
+        EventTimestamp += static_cast<u64>(delay);
+    } else {
+        // Matches real melonDS::NDS::ScheduleEvent's non-periodic branch
+        // (NDS.cpp:1159-1177) with CurCPU fixed to the ARM7 case (see the
+        // NDS.h comment on CurrentSystemTimestamp for why that's always
+        // correct for Event_Wifi): the new deadline is "now" (in system
+        // cycles) plus delay (also system cycles, per
+        // Wifi::ScheduleTimer's 33513982 Hz-based formula).
+        EventTimestamp = CurrentSystemTimestamp + static_cast<u64>(delay);
+        // A device write may schedule an earlier system event than the
+        // live dispatch slice's cap already accounts for -- shorten it,
+        // exactly like every other device deadline (io.cpp's
+        // nds_reschedule_slice call sites for DIV/SQRT/card/SPI). Only the
+        // non-periodic ("first") path needs this: a periodic reschedule
+        // happens from inside nds_wifi_run_events, between CPU dispatch
+        // slices, never inside one.
+        nds_reschedule_slice(EventTimestamp);
+    }
+    EventParam = param;
+    EventScheduled = true;
+}
+
+void NDS::CancelEvent(u32 id) {
+    if (id == EventID) EventScheduled = false;
+}
+
+void NDS::RunPendingEvent() {
+    if (!EventScheduled || !EventCallback) return;
+    if (CurrentSystemTimestamp < EventTimestamp) return;
+    EventScheduled = false;
+    EventCallback(EventThat, EventParam);
+}
+
+}  // namespace melonDS
+
+// ── melonDS::Platform::Mutex_* ──────────────────────────────────────────
+// Backs PacketDispatcher's queue lock (PacketDispatcher.h:45). Real
+// primitive (std::mutex), matching the existing Semaphore_*/Thread_* shim
+// convention in gpu3d.cpp -- correct under real contention even though
+// nothing drives concurrent access from this vendoring pass.
+
+namespace melonDS::Platform {
+
+struct Mutex { std::mutex m; };
+
+Mutex* Mutex_Create() { return new Mutex(); }
+void Mutex_Free(Mutex* mutex) { delete mutex; }
+void Mutex_Lock(Mutex* mutex) { mutex->m.lock(); }
+void Mutex_Unlock(Mutex* mutex) { mutex->m.unlock(); }
+
+// ── melonDS::Platform::MP_* (local wireless) ────────────────────────────
+// Verified safe as unconditional no-ops -- docs/adr-melonds-wifi-vendoring.md
+// §5. Local wireless/Download Play/NiFi stays out of scope (plan §17); every
+// infrastructure-mode TX/RX path in Wifi.cpp falls through to WifiAP when
+// these report "no local peer."
+
+void MP_Begin(void*) {}
+void MP_End(void*) {}
+int MP_SendPacket(u8*, int, u64, void*) { return 0; }
+int MP_RecvPacket(u8*, u64*, void*) { return 0; }
+int MP_SendCmd(u8*, int, u64, void*) { return 0; }
+int MP_SendReply(u8*, int, u64, u16, void*) { return 0; }
+int MP_SendAck(u8*, int, u64, void*) { return 0; }
+int MP_RecvHostPacket(u8*, u64*, void*) { return 0; }
+u16 MP_RecvReplies(u8*, u64, u16, void*) { return 0; }
+
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+// Backs Net_PCap's runtime (not link-time) load of wpcap.dll/Packet.dll.
+// Only compiled when the off-by-default NDS_ENABLE_PCAP_BACKEND CMake
+// option is set. LibPCap::New() (Net_PCap.cpp) probes several library
+// names and tolerates load failure (Npcap not installed) by returning
+// std::optional{}, so a null return here is an expected, handled case,
+// not an error path we need to report.
+struct DynamicLibrary { HMODULE handle; };
+
+DynamicLibrary* DynamicLibrary_Load(const char* lib) {
+    HMODULE handle = LoadLibraryA(lib);
+    if (!handle) return nullptr;
+    return new DynamicLibrary{handle};
+}
+
+void DynamicLibrary_Unload(DynamicLibrary* lib) {
+    if (!lib) return;
+    FreeLibrary(lib->handle);
+    delete lib;
+}
+
+void* DynamicLibrary_LoadFunction(DynamicLibrary* lib, const char* name) {
+    if (!lib) return nullptr;
+    return reinterpret_cast<void*>(GetProcAddress(lib->handle, name));
+}
+#endif  // NDS_ENABLE_PCAP_BACKEND
+
+}  // namespace melonDS::Platform
+
+// ── host networking worker thread + bounded cross-thread queues ────────
+//
+// Design (see the task's requirement -- host packet reception must never
+// run on the emulation thread, and only the emulation thread may touch
+// guest-visible state):
+//
+//   * ONE worker thread (melonDS::Platform::Thread_Create, the same real
+//     std::thread-backed shim already used for GPU3D's optional threaded
+//     softrenderer -- see gpu3d.cpp) owns EVERY interaction with the
+//     vendored Net_Slirp driver -- both SendPacket() (guest->host) and
+//     PollHostSockets() (host->guest polling, ex-RecvCheck() body, see
+//     Net_Slirp.cpp/.h) -- from the moment it starts until it is joined
+//     at shutdown. Because it is the driver's ONLY caller, on a single
+//     thread, in a single unsynchronized loop, Ctx/PollList are never
+//     touched from two threads at once and need no mutex of their own.
+//     This also fixes a real latent bug found while wiring this up: the
+//     libslirp send_packet callback used to be a no-op lambda here, so
+//     every host->guest packet libslirp ever produced (DHCP/ARP/TCP/UDP
+//     replies -- DNS synthesis included, since HandleDNSFrame funnels
+//     through the same Callback) was silently discarded before reaching
+//     the guest at all. Real melonDS's own frontend
+//     (src/frontend/qt_sdl/main.cpp) wires this callback straight to
+//     `net.RXEnqueue(data, len)`; this bridge now does the equivalent,
+//     via the RX queue below, quantized to the guest's own RX tick.
+//   * TWO bounded, mutex-guarded single-producer/single-consumer queues
+//     of *complete, independently-owned* packet buffers (std::vector,
+//     moved -- never a shared/aliased pointer) are the only channel
+//     between the worker thread and the emulation thread:
+//       - tx_queue: producer = emulation thread (Net_SendPacket, guest
+//         TX), consumer = worker thread (drains, then calls
+//         Driver->SendPacket() -- this is also where a blocking
+//         getaddrinfo() inside HandleDNSFrame's DNS synthesis now runs,
+//         off the emulation thread, closing a second host-wall-clock
+//         hazard beyond the poll() timeout patch 0002 already fixed).
+//       - rx_queue: producer = worker thread (the driver's SendPacket
+//         callback below, fired from inside PollHostSockets or from a
+//         DNS-synthesis SendPacket call, both worker-thread-only),
+//         consumer = emulation thread (Net_RecvPacket, guest RX tick).
+//     Bounded at kWifiNetQueueCapacity entries each; a full queue drops
+//     the new packet and records it, never blocks and never grows
+//     unbounded under a host flood.
+//   * A drop on the tx_queue is detected on the emulation thread already
+//     (that IS the producer), so it is net_ring_push'd right there. A
+//     drop on the rx_queue is detected on the WORKER thread (the
+//     producer) -- net_ring_push itself is NOT thread-safe (plain global
+//     counters/array, no atomics, by design: every other ring in this
+//     runner assumes a single emulation thread, see net_ring.cpp), so the
+//     worker thread only increments an atomic counter; the emulation
+//     thread's next Net_RecvPacket call drains that counter and is the
+//     one that actually calls net_ring_push, keeping every ring write on
+//     the emulation thread as the rest of the codebase requires.
+//   * Delivery into the guest is entirely tick-quantized: Net_RecvPacket
+//     is reached only from Wifi::USTimer's own periodic CheckRX(0) poll
+//     (a guest-cycle-scheduled event), never from the worker thread or
+//     from any host-wall-clock-timed callback. Packets can sit in
+//     rx_queue for an arbitrary amount of *host* wall-clock time before
+//     the next guest tick drains them -- that time is not guest-visible
+//     (Wifi has no register that exposes "how long a packet waited in a
+//     host-side queue"), so it does not violate "no host wall-clock may
+//     influence any guest-visible transition": the transition itself
+//     (the packet becoming visible to the guest) always lands exactly on
+//     a guest tick, never earlier.
+//   * Synchronization primitive: plain std::mutex (one per queue) rather
+//     than melonDS::Platform::Mutex_* (defined above for PacketDispatcher,
+//     a vendored class that only knows Platform::Mutex's opaque forward
+//     declaration). This bridge is ordinary project C++ on both ends of
+//     every queue operation, so a raw std::mutex + std::lock_guard avoids
+//     an unnecessary heap-allocated indirection through the C-shaped
+//     shim; nothing here is vendored code that only knows the Platform.h
+//     forward declaration.
+//   * Shutdown: WifiBridgeState's own destructor sets the stop flag,
+//     wakes the worker, and Platform::Thread_Wait()s (joins) it -- BEFORE
+//     any member (net/wifi, and therefore the Net_Slirp driver and its
+//     libslirp Ctx) is destroyed, by ordinary C++ object-destruction
+//     order (a class's own destructor body runs before its members are
+//     destroyed). This guarantees no thread ever polls a destroyed slirp
+//     context and the join never races the teardown it is waiting for.
+//     g_bridge is a namespace-scope std::unique_ptr with static storage
+//     duration, so this destructor also runs automatically at normal
+//     process exit even if nds_wifi3d_detach() is never called explicitly
+//     (it currently isn't, from anywhere in this build -- matching real
+//     melonDS's own NDS::Reset() not reconstructing its Wifi/Net members
+//     either).
+
+namespace {
+
+constexpr int kNetInstance = 0;
+
+// Set once by nds_wifi_configure_network() before the first
+// nds_wifi3d_attach() call (see wifi_net.h). Namespace-scope, not a
+// WifiBridgeState member, because it must be readable/writable before
+// WifiBridgeState even exists.
+NdsWifiNetworkConfig g_network_config{};
+
+// Mirrors Net_Slirp.cpp's own `len > 2048` rejection in SendPacket() and
+// SlirpCbSendPacket() -- no packet on either queue can ever exceed this,
+// so the worst-case memory bound below is exact, not a guess.
+constexpr size_t kWifiNetMaxPacketBytes = 2048;
+// Chosen generously relative to any plausible per-guest-tick packet burst
+// (Wifi::CheckRX(0) drains a whole tick's worth in one WifiAP::RecvPacket
+// call) while keeping the worst-case bound (2 queues * capacity *
+// kWifiNetMaxPacketBytes = 1 MiB) small and fixed regardless of host
+// traffic volume -- a host flood drops packets past this point instead of
+// growing memory.
+constexpr size_t kWifiNetQueueCapacity = 256;
+
+// A bounded FIFO of complete, independently-allocated packet buffers.
+// Ownership transfers cleanly across the thread boundary: TryPush moves
+// the caller's buffer in (the caller's copy is left empty), TryPop moves
+// it back out to the caller (the queue's copy is left empty) -- there is
+// never a shared pointer or a live alias on both sides, so there is no
+// use-after-free or torn-frame hazard: each byte range is owned by
+// exactly one side at any given time, transferred, never copied-in-place.
+// Single internal std::mutex; both queues in this file are used as
+// strict single-producer/single-consumer, so contention is a non-issue.
+class BoundedPacketQueue {
+public:
+    explicit BoundedPacketQueue(size_t capacity) : capacity_(capacity) {}
+
+    bool TryPush(std::vector<uint8_t>&& packet) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.size() >= capacity_) return false;
+        queue_.push_back(std::move(packet));
+        return true;
+    }
+
+    bool TryPop(std::vector<uint8_t>* out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) return false;
+        *out = std::move(queue_.front());
+        queue_.pop_front();
+        return true;
+    }
+
+private:
+    std::mutex mutex_;
+    std::deque<std::vector<uint8_t>> queue_;
+    size_t capacity_;
+};
+
+struct WifiBridgeState {
+    melonDS::NDS nds;
+    std::unique_ptr<melonDS::Wifi> wifi;
+    melonDS::Net net;
+    bool net_instance_registered = false;
+
+    // Non-owning: `net` (above) owns the actual melonDS::NetDriver via
+    // unique_ptr. Kept separately because PollHostSockets() is not part
+    // of the NetDriver virtual interface (NetDriver.h is not a file this
+    // pass owns/may extend), so reaching it needs the concrete type.
+    // Valid for exactly as long as `net`'s driver is set, which is from
+    // the end of nds_wifi3d_attach() until this struct's destructor runs
+    // (net's own destruction happens after StopWorker() below, so the
+    // worker thread never dereferences this after it goes stale).
+    melonDS::Net_Slirp* slirp_driver = nullptr;
+
+    // Wiimmfi M8: mirrors slirp_driver above, but for the replay backend
+    // (net/net_replay.h) -- mutually exclusive with slirp_driver (attach()
+    // constructs exactly one of the two, per NdsWifiNetworkConfig::backend).
+    // Non-owning for the same reason: `net` owns the concrete NetDriver via
+    // unique_ptr; this is only kept separately because SetCurrentCycle/
+    // SetCurrentPCs and the mismatch-query accessors are not part of the
+    // NetDriver virtual interface, so reaching them needs the concrete
+    // type. Never a worker-thread concern: unlike slirp_driver, this is
+    // touched ONLY from the emulation thread (replay never starts a worker
+    // thread at all -- see nds_wifi3d_attach()).
+    melonDS::NetReplay* replay_driver = nullptr;
+
+    // Wiimmfi M8: live packet capture, independent of which backend is
+    // active (see NdsWifiNetworkConfig::capture_out_path). No-op (is_open()
+    // == false) unless a capture_out_path was configured and its Open()
+    // call actually succeeded.
+    NdsNetCaptureWriter capture_writer;
+
+    BoundedPacketQueue tx_queue{kWifiNetQueueCapacity};  // guest -> host
+    BoundedPacketQueue rx_queue{kWifiNetQueueCapacity};  // host -> guest
+
+    // Incremented (worker thread) whenever rx_queue.TryPush fails.
+    // net_ring_push is not thread-safe (see the design comment above), so
+    // the actual ring write happens on the emulation thread's next
+    // Net_RecvPacket call, which drains this counter via exchange(0).
+    std::atomic<uint32_t> rx_dropped_since_last_report{0};
+
+    std::atomic<bool> worker_stop{false};
+    std::mutex wake_mutex;
+    std::condition_variable wake_cv;
+    bool wake_pending = false;
+    melonDS::Platform::Thread* worker_thread = nullptr;
+
+    void StopWorker() {
+        if (!worker_thread) return;
+        worker_stop.store(true, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(wake_mutex);
+            wake_pending = true;
+        }
+        wake_cv.notify_all();
+        // Blocks until the worker thread's loop observes worker_stop and
+        // returns -- bounded by the loop's own idle-wait granularity
+        // (a few milliseconds, see WifiWorkerThreadMain), never by a
+        // host-socket wait: PollHostSockets()'s poll() is unconditionally
+        // non-blocking (patch 0002's clamp, retained in PollHostSockets),
+        // so the worker is never stuck inside a long syscall when this
+        // runs.
+        melonDS::Platform::Thread_Wait(worker_thread);
+        melonDS::Platform::Thread_Free(worker_thread);
+        worker_thread = nullptr;
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[wifi_net] host network worker thread stopped\n");
+    }
+
+    // Destructor body runs BEFORE member destruction (net, wifi, nds are
+    // destroyed after this returns) -- see the design comment above for
+    // why that ordering is exactly what makes shutdown safe.
+    ~WifiBridgeState() { StopWorker(); }
+};
+
+std::unique_ptr<WifiBridgeState> g_bridge;
+
+// The worker thread's whole life: drain outbound packets to the driver,
+// poll host sockets (non-blocking), wait briefly, repeat. Every access to
+// state->slirp_driver here is safe by construction: this function is the
+// ONLY caller of SendPacket()/PollHostSockets() on the concrete driver
+// (see the class comments), and it never runs before the driver is
+// constructed (the thread is created after slirp_driver is set, in
+// nds_wifi3d_attach()) nor after it is destroyed (StopWorker() joins this
+// thread before WifiBridgeState's members, including the driver, are torn
+// down).
+void WifiWorkerThreadMain(WifiBridgeState* state) {
+    melonDS::Platform::Log(melonDS::Platform::Info,
+        "[wifi_net] host network worker thread started\n");
+    std::vector<uint8_t> pkt;
+    while (!state->worker_stop.load(std::memory_order_relaxed)) {
+        while (state->tx_queue.TryPop(&pkt)) {
+            if (state->slirp_driver)
+                state->slirp_driver->SendPacket(
+                    pkt.data(), static_cast<int>(pkt.size()));
+        }
+        if (state->slirp_driver)
+            state->slirp_driver->PollHostSockets();
+
+        std::unique_lock<std::mutex> lock(state->wake_mutex);
+        state->wake_cv.wait_for(
+            lock, std::chrono::milliseconds(2),
+            [state] {
+                return state->wake_pending ||
+                       state->worker_stop.load(std::memory_order_relaxed);
+            });
+        state->wake_pending = false;
+    }
+    melonDS::Platform::Log(melonDS::Platform::Info,
+        "[wifi_net] host network worker thread loop exiting\n");
+}
+
+}  // namespace
+
+namespace melonDS::Platform {
+
+int Net_SendPacket(u8* data, int len, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    if (len <= 0) return 0;
+    // network.enabled=false: no backend was attached at all (see
+    // nds_wifi3d_attach()) -- absorb the packet silently rather than
+    // queueing it for a worker thread that will never exist to drain it.
+    // Wiimmfi M8: a replay backend attaches replay_driver instead of
+    // slirp_driver, so "no backend at all" must check both.
+    if (!g_bridge->slirp_driver && !g_bridge->replay_driver) return len;
+    if (static_cast<size_t>(len) > kWifiNetMaxPacketBytes) {
+        // Net_Slirp::SendPacket would reject this anyway; fail fast on
+        // the emulation thread instead of spending queue capacity on a
+        // packet the worker thread would just drop.
+        net_ring_push(NDS_NET_EVENT_BACKEND_DROP, /*direction=*/0, 0, 0,
+                      nullptr, nullptr, 0, 0, 0, 0,
+                      static_cast<uint16_t>(len), /*aux=*/2u);
+        return 0;
+    }
+    // Passive protocol classification (Wiimmfi M3 task 1): read-only decode
+    // of the exact bytes about to be queued -- never alters what gets sent.
+    // See net_classify.h for the full design note. This is the guest->host
+    // (TX/egress) side of the bridge/backend boundary named in the task.
+    net_classify_ethernet_frame(data, static_cast<size_t>(len), /*direction=*/0);
+
+    // Wiimmfi M8: live capture, independent of which backend is active.
+    if (g_bridge->capture_writer.is_open()) {
+        g_bridge->capture_writer.Write(scheduler_system_timestamp(),
+                                        kNdsNetCaptureDirTx, data,
+                                        static_cast<size_t>(len));
+    }
+
+    if (g_bridge->replay_driver) {
+        // Synchronous, in-memory comparison -- no host I/O, no queue, no
+        // worker thread involved, so calling straight through on the
+        // emulation thread is exactly as safe as calling any other pure
+        // function here. See net_replay.h's class comment for the full
+        // calling contract.
+        g_bridge->replay_driver->SetCurrentCycle(scheduler_system_timestamp());
+        g_bridge->replay_driver->SetCurrentPCs(scheduler_cpu_state(0).R[15],
+                                                scheduler_cpu_state(1).R[15]);
+        g_bridge->replay_driver->SendPacket(data, len);
+        return len;
+    }
+
+    std::vector<uint8_t> pkt(data, data + len);
+    if (!g_bridge->tx_queue.TryPush(std::move(pkt))) {
+        // Detected on the emulation thread (this function's caller), so
+        // the ring write is safe here directly -- see the design comment
+        // above.
+        net_ring_push(NDS_NET_EVENT_BACKEND_DROP, /*direction=*/0, 0, 0,
+                      nullptr, nullptr, 0, 0, 0, 0,
+                      static_cast<uint16_t>(len), /*aux=*/0u);
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_bridge->wake_mutex);
+        g_bridge->wake_pending = true;
+    }
+    g_bridge->wake_cv.notify_all();
+    return len;
+}
+
+int Net_RecvPacket(u8* data, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+
+    // Wiimmfi M8: give the replay driver the current guest cycle/PCs
+    // before net.RecvPacket() below reaches its RecvCheck() -- see
+    // net_replay.h's class comment for why this must happen on every call,
+    // not just the first.
+    if (g_bridge->replay_driver) {
+        g_bridge->replay_driver->SetCurrentCycle(scheduler_system_timestamp());
+        g_bridge->replay_driver->SetCurrentPCs(scheduler_cpu_state(0).R[15],
+                                                scheduler_cpu_state(1).R[15]);
+    }
+
+    // The only place host-arrived packets become guest-visible: drain
+    // every packet the worker thread queued since the last guest RX tick
+    // into the vendored per-instance dispatch queue (Net::RXEnqueue --
+    // the same entry point real melonDS's own frontend uses for this
+    // exact callback, src/frontend/qt_sdl/main.cpp). This function is
+    // reached only from Wifi::CheckRX(0)'s guest-cycle-scheduled poll
+    // (via WifiAP::RecvPacket), so this drain is inherently quantized to
+    // that tick, never to host wall-clock. (In replay mode, rx_queue is
+    // never pushed to at all -- see nds_wifi3d_attach() -- so this loop is
+    // a harmless no-op there; the replay driver's own due-frame delivery
+    // happens inside net.RecvPacket() below, via RecvCheck().)
+    std::vector<uint8_t> pkt;
+    while (g_bridge->rx_queue.TryPop(&pkt)) {
+        g_bridge->net.RXEnqueue(pkt.data(), static_cast<int>(pkt.size()));
+    }
+
+    // Surface any worker-thread rx_queue drops here -- net_ring_push must
+    // run on the emulation thread (see the design comment above); this is
+    // that rendezvous point.
+    const uint32_t dropped = g_bridge->rx_dropped_since_last_report.exchange(
+        0, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < dropped; ++i) {
+        net_ring_push(NDS_NET_EVENT_BACKEND_DROP, /*direction=*/1, 0, 0,
+                      nullptr, nullptr, 0, 0, 0, 0, 0, /*aux=*/1u);
+    }
+
+    // ndsrecomp: PollHostSockets() (worker thread, see Net_Slirp.h's
+    // TakePollErrorCount() doc comment) records genuine host-socket
+    // poll() failures via an atomic counter rather than silently
+    // discarding them -- the return value used to feed straight into
+    // slirp_pollfds_poll's boolean `error` flag and nowhere else.
+    // Surface it here, the same rendezvous point already used for
+    // rx_queue drops above, and for the identical reason (net_ring_push
+    // must run on the emulation thread).
+    if (g_bridge->slirp_driver) {
+        const uint32_t poll_errors =
+            g_bridge->slirp_driver->TakePollErrorCount();
+        if (poll_errors) {
+            net_ring_push(NDS_NET_EVENT_BACKEND_ERROR, /*direction=*/1, 0,
+                          static_cast<uint32_t>(
+                              g_bridge->slirp_driver->LastPollError()),
+                          nullptr, nullptr, 0, 0, 0, 0, 0,
+                          /*aux=*/poll_errors);
+        }
+    }
+
+    const int recv_len = g_bridge->net.RecvPacket(data, kNetInstance);
+    // Passive protocol classification (Wiimmfi M3 task 1), symmetric to the
+    // TX hook above: read-only decode of the exact bytes just delivered to
+    // the guest, after RecvPacket has already filled `data` -- this is the
+    // host->guest (RX/ingress) side of the bridge/backend boundary.
+    if (recv_len > 0) {
+        net_classify_ethernet_frame(data, static_cast<size_t>(recv_len),
+                                    /*direction=*/1);
+        // Wiimmfi M8: live capture, independent of which backend is active.
+        if (g_bridge->capture_writer.is_open()) {
+            g_bridge->capture_writer.Write(scheduler_system_timestamp(),
+                                            kNdsNetCaptureDirRx, data,
+                                            static_cast<size_t>(recv_len));
+        }
+    }
+    return recv_len;
+}
+
+}  // namespace melonDS::Platform
+
+// ── process-wide Winsock lifecycle ──────────────────────────────────────
+// See wifi_net.h's declaration comment for the full rationale (fixes
+// main.cpp's boot()-starts-a-Winsock-using-worker-thread-before-anyone-
+// called-WSAStartup bug). WSAStartup is reference-counted by the OS, so
+// this pair coexisting with debug_server.cpp's own pre-existing
+// WSAStartup/WSACleanup calls is intentional and harmless -- each success
+// increments a per-process count that the matching cleanup call
+// decrements; Winsock itself only tears down once the count reaches zero.
+
+bool nds_net_platform_init() {
+#ifdef _WIN32
+    WSADATA wsa;
+    const int rc = WSAStartup(MAKEWORD(2, 2), &wsa);
+    if (rc != 0) {
+        std::fprintf(stderr,
+            "[wifi_net] WSAStartup failed (error %d) -- host networking is "
+            "unavailable this run\n", rc);
+        return false;
+    }
+    std::fprintf(stderr,
+        "[wifi_net] Winsock initialized (WSAStartup 2.2) before boot()\n");
+    return true;
+#else
+    return true;
+#endif
+}
+
+void nds_net_platform_shutdown() {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+// ── device-model attach seam ────────────────────────────────────────────
+
+melonDS::Wifi* nds_wifi3d_attach() {
+    if (g_bridge) return g_bridge->wifi.get();
+
+    g_bridge = std::make_unique<WifiBridgeState>();
+    g_bridge->nds.SPI.SetFirmwareSource(nds_firmware_bytes(),
+                                         nds_firmware_size());
+
+    g_bridge->net.RegisterInstance(kNetInstance);
+    g_bridge->net_instance_registered = true;
+
+    // network.enabled=false (--network off): the guest-visible Wi-Fi
+    // device model above is still fully constructed (the hardware exists
+    // and the guest can still scan/associate with the virtual AP), but no
+    // host networking backend is attached at all -- slirp_driver/
+    // worker_thread stay null, and Net_SendPacket/Net_RecvPacket below
+    // become unconditional no-ops the moment they see that. This is the
+    // "no host networking backend" mode named in the task, distinct from
+    // wfc_enabled=false (which just means "use upstream melonDS's own
+    // local-getaddrinfo DNS synthesis instead of a configured WFC
+    // provider" -- a fully-networked default).
+    if (g_network_config.enabled) {
+        // Wiimmfi M8: live capture, independent of which backend gets
+        // attached below -- open it first so even the very first frame
+        // either backend produces is captured.
+        if (!g_network_config.capture_out_path.empty()) {
+            const bool opened = g_bridge->capture_writer.Open(
+                g_network_config.capture_out_path,
+                g_network_config.capture_sanitize,
+                g_network_config.capture_write_pcap,
+                g_network_config.capture_scenario_tag,
+                g_network_config.rom_sha1);
+            melonDS::Platform::Log(
+                opened ? melonDS::Platform::Info : melonDS::Platform::Error,
+                "[wifi_net] capture-out %s '%s' (sanitize=%d, pcap=%d)\n",
+                opened ? "opened" : "FAILED to open",
+                g_network_config.capture_out_path.c_str(),
+                g_network_config.capture_sanitize ? 1 : 0,
+                g_network_config.capture_write_pcap ? 1 : 0);
+        }
+
+        if (g_network_config.backend == NdsNetBackendKind::Replay) {
+            // Wiimmfi M8: host Internet is disabled entirely for this
+            // backend -- no sockets, no libslirp, no worker thread (see
+            // below). `replay_records` was already loaded and fully
+            // validated by main.cpp's CLI handling (NdsNetCaptureReader::
+            // ReadAll), so this constructor never itself parses a file.
+            auto replay = std::make_unique<melonDS::NetReplay>(
+                std::move(g_network_config.replay_records),
+                [](const melonDS::u8* data, int len) noexcept {
+                    if (!g_bridge || len <= 0) return;
+                    // Synchronous: RecvCheck() (which invokes this
+                    // callback) is itself only ever called from
+                    // Net::RecvPacket on the emulation thread, at a guest
+                    // RX tick -- see Net_RecvPacket above -- so enqueueing
+                    // straight into the Dispatcher here needs no cross-
+                    // thread queue at all (unlike the live slirp path's
+                    // worker-thread callback, which DOES need the
+                    // rx_queue hop below).
+                    g_bridge->net.RXEnqueue(data, len);
+                },
+                g_network_config.replay_sanitized);
+            g_bridge->replay_driver = replay.get();
+            const uint64_t tx_total = g_bridge->replay_driver->TxTotalCount();
+            const uint64_t rx_total = g_bridge->replay_driver->RxTotalCount();
+            g_bridge->net.SetDriver(std::move(replay));
+            melonDS::Platform::Log(melonDS::Platform::Info,
+                "[wifi_net] network backend attached: REPLAY (%llu TX, "
+                "%llu RX recorded frame(s); host networking fully "
+                "disabled)\n",
+                (unsigned long long)tx_total, (unsigned long long)rx_total);
+        } else {
+            // Wiimmfi M4: when a WFC provider is configured, this overrides
+            // the DHCP-advertised DNS server address so the guest's own DNS
+            // queries are genuinely NAT-forwarded to that real address
+            // instead of answered locally -- see the constructor's doc
+            // comment in Net_Slirp.h and
+            // patches/0006-net-slirp-configurable-nameserver.patch. 0 (the
+            // default, wfc_enabled=false) preserves upstream's own behavior
+            // exactly, which is how "ordinary DNS" is proven end-to-end
+            // without this project's provider config at all.
+            const melonDS::u32 nameserver_override =
+                (g_network_config.wfc_enabled && g_network_config.wfc_dns_ipv4)
+                    ? static_cast<melonDS::u32>(g_network_config.wfc_dns_ipv4)
+                    : 0u;
+
+            // The libslirp send_packet callback: fires only from inside
+            // Net_Slirp::PollHostSockets() or Net_Slirp::SendPacket()'s DNS
+            // synthesis (HandleDNSFrame) -- both exclusively worker-thread
+            // calls once the thread below is running (and, transiently during
+            // this very construction, only from this thread, before the
+            // worker starts). Never touches guest state directly: it only
+            // ever hands the packet to the bounded rx_queue, which the
+            // emulation thread later drains in Net_RecvPacket above.
+            auto slirp = std::make_unique<melonDS::Net_Slirp>(
+                [](const melonDS::u8* data, int len) noexcept {
+                    if (!g_bridge || len <= 0) return;
+                    std::vector<uint8_t> pkt(
+                        data, data + static_cast<size_t>(len));
+                    if (!g_bridge->rx_queue.TryPush(std::move(pkt))) {
+                        g_bridge->rx_dropped_since_last_report.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+                },
+                nameserver_override);
+            g_bridge->slirp_driver = slirp.get();
+            g_bridge->net.SetDriver(std::move(slirp));
+
+            melonDS::Platform::Log(melonDS::Platform::Info,
+                "[wifi_net] network backend attached (wfc_enabled=%d, "
+                "nameserver_override=%s)\n",
+                g_network_config.wfc_enabled ? 1 : 0,
+                nameserver_override ? "yes" : "no (upstream default)");
+        }
+    } else {
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[wifi_net] network disabled (--network off): Wi-Fi device is "
+            "live but no host networking backend is attached\n");
+    }
+
+    g_bridge->wifi = std::make_unique<melonDS::Wifi>(g_bridge->nds);
+
+    // Start the host networking worker thread last, once slirp_driver and
+    // wifi are both fully constructed -- std::thread's own construction
+    // establishes a happens-before edge, so the new thread is guaranteed
+    // to observe every write above. Skipped entirely when no backend was
+    // attached above, AND skipped for the replay backend (Wiimmfi M8):
+    // replay never touches a host socket or libslirp, so there is nothing
+    // for a background thread to poll -- see net_replay.h's class comment.
+    if (g_bridge->slirp_driver) {
+        g_bridge->worker_thread = melonDS::Platform::Thread_Create(
+            [state = g_bridge.get()] { WifiWorkerThreadMain(state); });
+    }
+
+    return g_bridge->wifi.get();
+}
+
+bool nds_wifi_replay_status(NdsNetReplayStatus* out) {
+    if (!out || !g_bridge || !g_bridge->replay_driver) return false;
+    melonDS::NetReplay* r = g_bridge->replay_driver;
+    out->active = true;
+    out->mismatch = r->HasMismatch();
+    out->tx_matched = r->TxMatchedCount();
+    out->tx_total = r->TxTotalCount();
+    out->rx_delivered = r->RxDeliveredCount();
+    out->rx_total = r->RxTotalCount();
+    if (out->mismatch) {
+        const melonDS::NdsNetReplayMismatch& m = r->Mismatch();
+        out->mismatch_tx_frame_index = m.tx_frame_index;
+        out->mismatch_guest_cycle = m.guest_cycle;
+        out->mismatch_arm9_pc = m.arm9_pc;
+        out->mismatch_arm7_pc = m.arm7_pc;
+        out->mismatch_reason = m.reason;
+    }
+    return true;
+}
+
+void nds_wifi_configure_network(const NdsWifiNetworkConfig& config) {
+    g_network_config = config;
+}
+
+void nds_wifi3d_detach() {
+    if (!g_bridge) return;
+    if (g_bridge->net_instance_registered)
+        g_bridge->net.UnregisterInstance(kNetInstance);
+    // ~WifiBridgeState() stops and joins the worker thread (StopWorker())
+    // before net/wifi -- and therefore the Net_Slirp driver and its
+    // libslirp Ctx -- are destroyed. See the design comment above.
+    g_bridge.reset();
+}
+
+// ── bus-facing implementation of wifi.h (retired wifi.cpp's role) ──────
+
+namespace {
+
+constexpr uint32_t kWifiBase = 0x04800000u;
+constexpr uint32_t kWifiEnd  = 0x04810000u;
+
+// Wi-Fi is ARM7-only hardware (nds_wifi_address below gates cpu==7), so
+// every path that reaches the vendored Wifi object through a bus access is
+// driven by the live ARM7 timeline. Mirrors the retired wifi.cpp's
+// active_system_timestamp(): g_runtime_cycles is the CURRENTLY LOADED
+// CPU's live, mid-slice cycle counter (scheduler.cpp's run_slice), already
+// in system(1x)/ARM7-clock units when that CPU is ARM7, or in the 2x/ARM9
+// domain (needing >>1) when it is ARM9 -- defensive only, since the
+// cpu==7 gate above every call site here means the ARM9 branch should
+// never actually execute in practice.
+uint64_t wifi_current_system_timestamp() {
+    return g_nds_active == NDS_ARM9 ? (g_runtime_cycles >> 1u) : g_runtime_cycles;
+}
+
+// Register-access ring hooks live here, in the bridge, rather than as a
+// vendored patch to Wifi::Read/Write: nds_wifi_read/write (below) are
+// ALREADY the single funnel every bus-level Wi-Fi access passes through
+// (bus.cpp calls nothing else), so wrapping the call here captures every
+// access uniformly, with the real before/after register value, without
+// touching vendored source at all. Direction convention: 0 = guest->host
+// (the guest is driving/writing the device, analogous to TX/egress), 1 =
+// host->guest (the guest is observing/reading the device, analogous to
+// RX/ingress) -- see the comment on NdsNetTraceEntry::direction.
+uint16_t wifi_reg_read16(melonDS::Wifi* wifi, uint32_t addr) {
+    g_bridge->nds.CurrentSystemTimestamp = wifi_current_system_timestamp();
+    const uint16_t value = wifi->Read(addr);
+    net_ring_push(NDS_NET_EVENT_WIFI_REG_READ, /*direction=*/1,
+                  static_cast<uint16_t>(addr & 0xFFFFu), value,
+                  nullptr, nullptr, 0, 0, 0, 0, 0, 0);
+    return value;
+}
+
+void wifi_reg_write16(melonDS::Wifi* wifi, uint32_t addr, uint16_t value) {
+    g_bridge->nds.CurrentSystemTimestamp = wifi_current_system_timestamp();
+    net_ring_push(NDS_NET_EVENT_WIFI_REG_WRITE, /*direction=*/0,
+                  static_cast<uint16_t>(addr & 0xFFFFu), value,
+                  nullptr, nullptr, 0, 0, 0, 0, 0, 0);
+    wifi->Write(addr, value);
+}
+
+}  // namespace
+
+bool nds_wifi_address(int cpu, uint32_t addr) {
+    return cpu == 7 && addr >= kWifiBase && addr < kWifiEnd;
+}
+
+void nds_wifi_reset() {
+    melonDS::Wifi* wifi = nds_wifi3d_attach();
+    if (wifi) wifi->Reset();
+}
+
+void nds_wifi_load_firmware(const uint8_t* data, uint32_t size) {
+    // Boot order (main.cpp:681-682): nds_io_reset() -- which calls
+    // nds_wifi_reset() above -- runs BEFORE nds_io_load_firmware()
+    // populates the firmware buffer. Real melonDS's Wifi::Reset() reads RF
+    // chip type and the per-channel RF calibration table straight out of
+    // an ALREADY-loaded firmware image (NDS.SPI.GetFirmware(),
+    // Wifi.cpp:147-186); our first Reset() above therefore ran against an
+    // empty view (SPI.h's defensive all-zero/DS-default fallback, not a
+    // crash, but not the real calibration data either). Rebind the SPI
+    // firmware view to the fresh buffer here and re-Reset() so the
+    // guest-visible state once firmware/BIOS code starts executing
+    // reflects the real firmware image. This is safe: nothing has touched
+    // a Wi-Fi register yet at this point in boot (the BIOS/firmware
+    // haven't started running), so a second full Reset() is not
+    // observable as a guest-visible glitch -- it is strictly more correct
+    // than the single early Reset() alone.
+    melonDS::Wifi* wifi = nds_wifi3d_attach();
+    if (!g_bridge) return;
+    g_bridge->nds.SPI.SetFirmwareSource(data, size);
+    if (wifi) wifi->Reset();
+}
+
+void nds_wifi_set_power_control(bool enabled, uint64_t timestamp) {
+    melonDS::Wifi* wifi = nds_wifi3d_attach();
+    if (!wifi || !g_bridge) return;
+    g_bridge->nds.CurrentSystemTimestamp = timestamp;
+    // Wifi::SetPowerCnt(u32 val) reads the raw POWCNT2 bit (val & (1<<1));
+    // io.cpp's caller has already reduced the register to that one bit
+    // (nds_wifi_set_power_control's `enabled` parameter), so synthesize a
+    // value carrying just that bit rather than changing this function's
+    // long-lived signature.
+    wifi->SetPowerCnt(enabled ? 0x0002u : 0u);
+}
+
+uint64_t nds_wifi_next_event_time() {
+    if (!g_bridge) return UINT64_MAX;
+    return g_bridge->nds.HasPendingEvent() ? g_bridge->nds.PendingEventTime()
+                                            : UINT64_MAX;
+}
+
+void nds_wifi_run_events(uint64_t timestamp) {
+    if (!g_bridge || !g_bridge->wifi) return;
+    g_bridge->nds.CurrentSystemTimestamp = timestamp;
+    // Drains every event due at or before this guest-cycle rendezvous,
+    // exactly mirroring the retired wifi.cpp's
+    // `while (g_power_on && g_timer_deadline <= timestamp)` loop: Wifi's
+    // own USTimer reschedules itself periodically (Wifi.cpp:1934,
+    // ScheduleTimer(false)) every call, and UpdatePowerOn's CancelEvent
+    // naturally empties HasPendingEvent() when the device powers off, so
+    // no separate "is it powered on" gate is needed here -- the schedule
+    // state already encodes it.
+    while (g_bridge->nds.HasPendingEvent() &&
+           g_bridge->nds.PendingEventTime() <= timestamp) {
+        g_bridge->nds.RunPendingEvent();
+    }
+}
+
+uint16_t nds_wifi_debug_if() {
+    // W_IF (0x010) has no read-side special case in Wifi::Read -- it falls
+    // straight through to the generic `return IOPORT(addr&0xFFF);` at the
+    // end, so calling Read() directly here is side-effect-free. This is a
+    // diagnostic accessor for the IRQ trace ring (io.cpp's
+    // nds_note_irq_accept), not a bus transaction, so it intentionally
+    // bypasses nds_wifi_read's ARM7/POWCNT2 gating and does not push a
+    // net_ring event -- logging it there would conflate driver-visible
+    // register traffic with an internal trace-annotation read.
+    if (!g_bridge || !g_bridge->wifi) return 0u;
+    return g_bridge->wifi->Read(melonDS::Wifi::W_IF);
+}
+
+uint16_t nds_wifi_debug_ie() {
+    if (!g_bridge || !g_bridge->wifi) return 0u;
+    return g_bridge->wifi->Read(melonDS::Wifi::W_IE);
+}
+
+uint32_t nds_wifi_read(uint32_t addr, uint32_t width, bool powered) {
+    // Bus-level semantics preserved exactly as documented in wifi.h and
+    // implemented by the retired wifi.cpp: the ARM7-only aperture and the
+    // POWCNT2 gate are enforced HERE, not inside the vendored
+    // Wifi::Read/Write -- melonDS's own NDS.cpp enforces them at its
+    // ARM7Read8/16/32 call sites (case 0x04800000), not inside the Wifi
+    // class itself, so the bridge must keep doing exactly that.
+    if (!powered || addr < kWifiBase || addr >= kWifiEnd) return 0u;
+    melonDS::Wifi* wifi = nds_wifi3d_attach();
+    if (!wifi) return 0u;
+    if (width == 1u) {
+        // The device is 16-bit; a byte read selects a byte out of the
+        // aligned halfword the device actually returns.
+        const uint16_t value = wifi_reg_read16(wifi, addr & ~1u);
+        return (value >> ((addr & 1u) * 8u)) & 0xFFu;
+    }
+    if (width == 2u) return wifi_reg_read16(wifi, addr);
+    if (width == 4u)
+        // 32-bit accesses split into two halfwords, low word first.
+        return static_cast<uint32_t>(wifi_reg_read16(wifi, addr)) |
+               (static_cast<uint32_t>(wifi_reg_read16(wifi, addr + 2u)) << 16u);
+    return 0u;
+}
+
+void nds_wifi_write(uint32_t addr, uint32_t value, uint32_t width, bool powered) {
+    if (!powered || addr < kWifiBase || addr >= kWifiEnd) return;
+    melonDS::Wifi* wifi = nds_wifi3d_attach();
+    if (!wifi) return;
+    if (width == 2u) {
+        wifi_reg_write16(wifi, addr, static_cast<uint16_t>(value));
+    } else if (width == 4u) {
+        wifi_reg_write16(wifi, addr, static_cast<uint16_t>(value));
+        wifi_reg_write16(wifi, addr + 2u, static_cast<uint16_t>(value >> 16u));
+    }
+    // ARM7 byte writes do not route to Wifi::Write in melonDS/NDS.cpp.
+}

@@ -21,6 +21,7 @@
 #include "scheduler.h"
 #include "state.h"
 #include "vram.h"
+#include "net/net_ring.h"
 
 #include "NDS.h"
 #include "GPU3D_Soft.h"
@@ -188,7 +189,25 @@ void profile_add(uint64_t& dst, ProfileClock::time_point start) {
 
 namespace melonDS {
 
-void NDS::SetIRQ(u32 cpu, u32 irq) { nds_raise_irq(static_cast<int>(cpu), 1u << irq); }
+// NDS::SetIRQ is shared by every melonDS::NDS instance in this build (the
+// GPU3D bridge's own g_nds above, and the Wi-Fi bridge's g_bridge->nds in
+// wifi_net.cpp) since the method body touches no instance state. That
+// makes this the single, uniform call site every Wi-Fi IRQ assertion
+// passes through regardless of which NDS object raised it (Wifi::SetIRQ ->
+// NDS.SetIRQ(1, IRQ_Wifi), Wifi.cpp:384-390) -- recording it here, rather
+// than as a patch inside vendored Wifi.cpp, needs no vendored-file change
+// at all. IRQ_Wifi (melonDS's real IRQ bit 24, NDS.h) is ARM7-only by
+// construction (Wifi never raises any other IRQ number), so cpu is always
+// 1 here for this event; recorded as `aux` for completeness rather than
+// assumed by a reader.
+void NDS::SetIRQ(u32 cpu, u32 irq) {
+    if (irq == IRQ_Wifi) {
+        net_ring_push(NDS_NET_EVENT_WIFI_IRQ, /*direction=host->guest*/1,
+                       0, 0, nullptr, nullptr, 0, 0, 0, 0, 0,
+                       /*aux=*/cpu);
+    }
+    nds_raise_irq(static_cast<int>(cpu), 1u << irq);
+}
 
 void NDS::ClearIRQ(u32 cpu, u32 irq) { nds_clear_irq(static_cast<int>(cpu), 1u << irq); }
 

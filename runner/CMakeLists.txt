@@ -22,6 +22,9 @@ option(NDS_BOOTSTRAP_FIRMWARE
 option(NDS_ENABLE_COMPUTE_RENDERER
     "Build the preferred melonDS OpenGL 4.3 compute renderer"
     ON)
+option(NDS_ENABLE_PCAP_BACKEND
+    "Build the vendored melonDS Net_PCap backend (dynamically loads Npcap/WinPcap at runtime; off by default per docs/adr-melonds-wifi-vendoring.md §2)"
+    OFF)
 option(NDS_PROFILE_HLE_HEAT
     "Build candidate-only sampled leaf heat instrumentation"
     OFF)
@@ -216,6 +219,29 @@ add_library(nds_support STATIC
 target_include_directories(nds_support PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
 
+# Vendored libslirp 4.8.0 (BSD-3-Clause), built via melonDS's own hand-written
+# CMakeLists.txt (not upstream's meson.build, which wants real GLib2 -- see
+# docs/adr-melonds-wifi-vendoring.md §9). That CMakeLists ships its own glib
+# shim (glib/glib.c, not real GLib) and already wires ws2_32/iphlpapi on
+# WIN32 internally, so no extra link setup is needed beyond depending on the
+# `slirp` target it defines. cmake_minimum_required(VERSION 3.16) there is
+# satisfied by this project's own C:\msys64\mingw64\bin\cmake.exe (4.2.2,
+# verified by direct invocation, not assumed); __WIN32__ (which
+# Net_Slirp.h/.cpp guard socket includes on) is defined by this mingw-w64
+# installation's own g++ (verified via `g++ -dM -E -`, not assumed).
+add_subdirectory(vendor/melonds/net/libslirp EXCLUDE_FROM_ALL)
+if(NOT MSVC)
+    # libslirp's own CMakeLists.txt does not set its own warning posture, so
+    # it inherits this project's top-level -Wall -Wextra (add_compile_options
+    # is directory-scoped and propagates into add_subdirectory'd targets).
+    # Same "don't edit vendored code to satisfy our own warning flags"
+    # rationale as the GPU3D/Wifi/net -w suppressions below, applied to a
+    # separate CMake target instead of a source-file property since libslirp
+    # builds as its own target (`slirp`), not as sources listed directly in
+    # nds_runner.
+    target_compile_options(slirp PRIVATE -w)
+endif()
+
 # The runner: runtime ABI + DS bus + CP15 + driver.
 # The portable ARMv4T/v5TE core (decoders + IR + the Tier-3 interpreter).
 add_library(nds_armv4t STATIC
@@ -232,7 +258,14 @@ add_executable(nds_runner
     src/bus.cpp
     src/cp15.cpp
     src/io.cpp
-    src/wifi.cpp
+    src/wifi_net.cpp
+    src/net/net_ring.cpp
+    src/net/net_classify.cpp
+    src/net/net_capture.cpp
+    src/net/net_pcap.cpp
+    src/net/net_sanitize.cpp
+    src/net/net_replay.cpp
+    src/net/wfc_provider.cpp
     src/spu.cpp
     src/vram.cpp
     src/gpu2d.cpp
@@ -249,7 +282,19 @@ add_executable(nds_runner
     "${TITLE_BANK_REGISTRY}"
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
-    vendor/melonds/Savestate.cpp)
+    vendor/melonds/Savestate.cpp
+    # Vendored melonDS Wifi device model + net glue (GPL-3.0-or-later),
+    # tag 1.0rc commit e3fa6f4224e0d706df3ee262ae41cfb0deadc593, patched per
+    # vendor/melonds/patches/ (WifiAP.cpp AP identity + net-ring hooks;
+    # Wifi.cpp net-ring hooks; Net_Slirp.cpp non-blocking poll). Wired to
+    # bus.cpp/scheduler.cpp via src/wifi_net.cpp, which is now the sole
+    # Wi-Fi device model -- the hand-written src/wifi.cpp was retired.
+    # Net_PCap.cpp is added below, gated behind NDS_ENABLE_PCAP_BACKEND.
+    vendor/melonds/Wifi.cpp
+    vendor/melonds/WifiAP.cpp
+    vendor/melonds/net/Net.cpp
+    vendor/melonds/net/PacketDispatcher.cpp
+    vendor/melonds/net/Net_Slirp.cpp)
 ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
@@ -299,10 +344,21 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
         NDS_HAVE_COMPUTE_RENDERER=1
         MELONDS_GL_HEADER="glad/glad.h")
 endif()
+if(NDS_ENABLE_PCAP_BACKEND)
+    # Net_PCap.cpp only needs <pcap/pcap.h> (the freely-distributable libpcap
+    # public headers, BSD-licensed, vendored wholesale at vendor/melonds/net/
+    # pcap/ -- same tree melonDS itself vendors) at compile time; the actual
+    # wpcap.dll/Packet.dll is loaded at runtime via Platform::DynamicLibrary_*
+    # (src/wifi_net.cpp), so there is no link-time Npcap/WinPcap SDK
+    # dependency. Off by default: docs/adr-melonds-wifi-vendoring.md §2.
+    target_sources(nds_runner PRIVATE vendor/melonds/net/Net_PCap.cpp)
+    target_compile_definitions(nds_runner PRIVATE NDS_ENABLE_PCAP_BACKEND=1)
+endif()
 target_include_directories(nds_runner PRIVATE
     $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
+    $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
     src
-    vendor/melonds                                     # vendored melonDS GPU3D + shims (GPL-3.0-or-later)
+    vendor/melonds                                     # vendored melonDS GPU3D + Wifi + shims (GPL-3.0-or-later)
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
 ndsrecomp_link_tomlpp(nds_runner)
@@ -314,7 +370,16 @@ if(NOT MSVC)
         vendor/melonds/GPU3D.cpp
         vendor/melonds/GPU3D_Soft.cpp
         vendor/melonds/Savestate.cpp
+        vendor/melonds/Wifi.cpp
+        vendor/melonds/WifiAP.cpp
+        vendor/melonds/net/Net.cpp
+        vendor/melonds/net/PacketDispatcher.cpp
+        vendor/melonds/net/Net_Slirp.cpp
         PROPERTIES COMPILE_OPTIONS "-w")
+    if(NDS_ENABLE_PCAP_BACKEND)
+        set_source_files_properties(vendor/melonds/net/Net_PCap.cpp
+            PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
     if(NDS_ENABLE_COMPUTE_RENDERER)
         set_source_files_properties(
             vendor/melonds/GPU3D_Compute.cpp
@@ -337,7 +402,7 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
             "-w;-include;${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute/PlatformCompute.h")
     endif()
 endif()
-target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t)
+target_link_libraries(nds_runner PRIVATE nds_banks nds_support nds_armv4t slirp)
 if(NDS_BOOTSTRAP_FIRMWARE)
     target_compile_definitions(nds_runner PRIVATE NDS_BOOTSTRAP_FIRMWARE=1)
 elseif(EXISTS "${GEN}/fw_arm9_calibration_save_dispatch.c")
@@ -398,3 +463,15 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/battery_save.cpp)
   target_include_directories(battery_save_test PRIVATE src)
   add_test(NAME battery_save_test COMMAND battery_save_test)
+
+  # Wiimmfi M8: format round-trip, corruption/truncation detection, and
+  # sanitizer determinism -- pure host-side logic with zero melonDS/
+  # emulator dependency, so this links only the three net/* sources it
+  # actually needs (matching frontend_config_test's minimal-link style).
+  add_executable(net_capture_test
+      tests/net_capture_test.cpp
+      src/net/net_capture.cpp
+      src/net/net_pcap.cpp
+      src/net/net_sanitize.cpp)
+  target_include_directories(net_capture_test PRIVATE src)
+  add_test(NAME net_capture_test COMMAND net_capture_test)

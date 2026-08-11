@@ -278,6 +278,13 @@ void     nds_tick_display(unsigned long long system_cycles);
 void     nds_tick_rtc(unsigned long long system_cycles);
 void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
+// Read-only view over the already-loaded firmware image (empty until
+// nds_io_load_firmware runs). Consumed by the vendored melonDS Wifi device
+// model's Firmware/FirmwareHeader shim (runner/vendor/melonds/SPI_Firmware.h)
+// so it can read RF calibration bytes out of the same buffer io.cpp already
+// serves to the guest, without a second copy or a second load path.
+const uint8_t* nds_firmware_bytes();
+uint32_t       nds_firmware_size();
 // Installs user-provided cartridge data and derives KEY1 from the user's
 // ARM7 BIOS at runtime. Neither input is compiled into native objects.
 bool     nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,

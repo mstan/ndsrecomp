@@ -1983,6 +1983,9 @@ void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     nds_wifi_load_firmware(p, n);
 }
 
+const uint8_t* nds_firmware_bytes() { return g_fw.empty() ? nullptr : g_fw.data(); }
+uint32_t       nds_firmware_size()  { return static_cast<uint32_t>(g_fw.size()); }
+
 bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
                            const uint8_t* arm7_bios, uint32_t bios_size) {
     constexpr uint32_t kKeyOffset = 0x30u;
