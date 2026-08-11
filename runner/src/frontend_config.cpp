@@ -144,6 +144,47 @@ bool nds_parse_cartridge_save_type(const std::string& value,
     return false;
 }
 
+bool nds_parse_ipv4(const std::string& value, uint32_t* out) {
+    if (!out || value.empty()) return false;
+    uint32_t octets[4] = {0, 0, 0, 0};
+    size_t pos = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (pos >= value.size() || !std::isdigit(static_cast<unsigned char>(value[pos])))
+            return false;
+        size_t start = pos;
+        while (pos < value.size() && std::isdigit(static_cast<unsigned char>(value[pos])))
+            ++pos;
+        const std::string digits = value.substr(start, pos - start);
+        if (digits.size() > 1 && digits[0] == '0') return false;  // no leading zeros
+        if (digits.size() > 3) return false;
+        const long v = std::strtol(digits.c_str(), nullptr, 10);
+        if (v < 0 || v > 255) return false;
+        octets[i] = static_cast<uint32_t>(v);
+        if (i < 3) {
+            if (pos >= value.size() || value[pos] != '.') return false;
+            ++pos;
+        }
+    }
+    if (pos != value.size()) return false;  // trailing garbage
+    *out = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    return true;
+}
+
+bool nds_parse_network_backend(const std::string& value, std::string* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    // Wiimmfi M8 adds "replay" alongside the pre-existing "slirp"/"pcap"
+    // names. Unlike "pcap" (accepted here but still rejected later, at
+    // main.cpp's bridge-construction validation -- see that file's own
+    // comment), "replay" IS fully wired into nds_wifi3d_attach().
+    if (normalized == "slirp" || normalized == "pcap" ||
+        normalized == "replay") {
+        *out = normalized;
+        return true;
+    }
+    return false;
+}
+
 bool nds_parse_startup_mode(const std::string& value,
                             NdsStartupMode* out) {
     if (!out) return false;
@@ -163,6 +204,15 @@ bool nds_parse_startup_mode(const std::string& value,
         return true;
     }
     return false;
+}
+
+bool nds_parse_instance_index(const std::string& value, uint32_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed < 0 || parsed > 255) return false;
+    *out = static_cast<uint32_t>(parsed);
+    return true;
 }
 
 const char* nds_screen_layout_name(NdsScreenLayout value) {
@@ -230,6 +280,15 @@ bool nds_load_frontend_config(const std::string& path,
                     *error =
                         "system.startup_mode must be preserve, manual, or "
                         "automatic";
+                }
+                return false;
+            }
+        }
+        if (const auto value = (*system)["instance_index"].value<int64_t>()) {
+            if (!nds_parse_instance_index(std::to_string(*value),
+                                          &options->instance_index)) {
+                if (error) {
+                    *error = "system.instance_index must be 0..255";
                 }
                 return false;
             }
@@ -389,6 +448,57 @@ bool nds_load_frontend_config(const std::string& path,
                     "cartridge.save_size must be 512 for eeprom-tiny";
             }
             return false;
+        }
+    }
+
+    if (const toml::table* network = root["network"].as_table()) {
+        if (const auto value = (*network)["enabled"].value<bool>()) {
+            options->network.enabled = *value;
+        }
+        if (const auto value = (*network)["backend"].value<std::string>()) {
+            if (!nds_parse_network_backend(*value, &options->network.backend)) {
+                if (error) *error = "network.backend must be slirp, replay, or pcap";
+                return false;
+            }
+        }
+        // Wiimmfi M8: capture/replay knobs, TOML mirror of the
+        // --net-capture-* CLI flags (see frontend.h's NdsNetworkOptions).
+        if (const toml::table* capture = (*network)["capture"].as_table()) {
+            if (const auto value = (*capture)["out"].value<std::string>()) {
+                options->network.capture_out = *value;
+            }
+            if (const auto value = (*capture)["in"].value<std::string>()) {
+                options->network.capture_in = *value;
+            }
+            if (const auto value = (*capture)["raw"].value<bool>()) {
+                options->network.capture_raw = *value;
+            }
+            if (const auto value = (*capture)["no_pcap"].value<bool>()) {
+                options->network.capture_no_pcap = *value;
+            }
+            if (const auto value = (*capture)["scenario"].value<std::string>()) {
+                options->network.capture_scenario = *value;
+            }
+        }
+        if (const toml::table* wfc = (*network)["wfc"].as_table()) {
+            if (const auto value = (*wfc)["enabled"].value<bool>()) {
+                options->network.wfc_enabled = *value;
+            }
+            if (const auto value = (*wfc)["provider"].value<std::string>()) {
+                options->network.wfc_provider.name = *value;
+            }
+            if (const auto value = (*wfc)["dns_server"].value<std::string>()) {
+                uint32_t probe = 0;
+                if (!nds_parse_ipv4(*value, &probe)) {
+                    if (error) {
+                        *error =
+                            "network.wfc.dns_server must be a dotted-quad "
+                            "IPv4 address";
+                    }
+                    return false;
+                }
+                options->network.wfc_provider.dns_server = *value;
+            }
         }
     }
     return true;

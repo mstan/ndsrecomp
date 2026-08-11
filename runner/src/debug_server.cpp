@@ -22,6 +22,8 @@
 #include "hle_profile.h"
 #include "dispatch_stats.h"
 #include "mem_timing_profile.h"
+#include "net/net_ring.h"
+#include "wifi_net.h"
 #include "runtime_arm.h"
 #include "spu.h"
 #include "tier3.h"
@@ -572,6 +574,141 @@ std::string handle(const std::string& line) {
             (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
             (unsigned long long)e.insn9, (unsigned long long)e.insn7, e.value);
         return buf;
+    }
+    // ── Network event ring (Wiimmfi M0) ─────────────────────────────────
+    // Read-only ring queries, same "by ordinal" / "most recent N" idioms as
+    // the rest of this group above. No call site pushes into the ring yet
+    // (Wi-Fi device/AP/bridge/backend are later phases), so a normal run
+    // will see an empty ring here — {"latest":0}, {"found":false} for any
+    // nonzero count, and zero entries from net_ring_dump. That is the
+    // correct, expected shape of an inert-but-present query surface, not an
+    // error. None of these three commands advance execution, so none of
+    // them belong in the play-mode execution guard below.
+    if (cmd == "net_sample") {
+        const uint64_t count = json_u64(line, "count", 0);
+        if (count == 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "{\"latest\":%llu}",
+                (unsigned long long)net_ring_latest());
+            return buf;
+        }
+        NdsNetTraceEntry e{};
+        if (!net_ring_get(count, &e)) return "{\"found\":false}";
+        std::string src_mac_hex, dst_mac_hex;
+        append_hex(src_mac_hex, e.src_mac, sizeof(e.src_mac));
+        append_hex(dst_mac_hex, e.dst_mac, sizeof(e.dst_mac));
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "{\"found\":true,\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,"
+            "\"cyc7\":%llu,\"insn9\":%llu,\"insn7\":%llu,\"arm9_pc\":%u,"
+            "\"arm7_pc\":%u,\"kind\":\"%s\",\"direction\":%u,"
+            "\"wifi_reg\":%u,\"wifi_value\":%u,\"src_mac\":\"%s\","
+            "\"dst_mac\":\"%s\",\"src_ipv4\":%u,\"dst_ipv4\":%u,"
+            "\"src_port\":%u,\"dst_port\":%u,\"payload_len\":%u,\"aux\":%u",
+            (unsigned long long)e.count, (unsigned long long)e.sys,
+            (unsigned long long)e.cyc9, (unsigned long long)e.cyc7,
+            (unsigned long long)e.insn9, (unsigned long long)e.insn7,
+            e.arm9_pc, e.arm7_pc, nds_net_event_kind_name(e.kind),
+            e.direction, e.wifi_reg, e.wifi_value, src_mac_hex.c_str(),
+            dst_mac_hex.c_str(), e.src_ipv4, e.dst_ipv4, e.src_port,
+            e.dst_port, e.payload_len, e.aux);
+        std::string out = buf;
+        if (e.has_hostname) {
+            char hostname[kNetHostnameMaxLen] = {};
+            if (net_ring_get_hostname(e.count, hostname, sizeof(hostname)))
+                out += ",\"hostname\":\"" + std::string(hostname) + "\"";
+        }
+        out += "}";
+        return out;
+    }
+    if (cmd == "net_ring_dump") {
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "max", 128));
+        if (max > 4096) max = 4096;
+        const std::string filter_str = json_str(line, "filter", "all");
+        uint8_t filter = NDS_NET_EVENT_KIND_COUNT;
+        if (!nds_net_event_kind_parse(filter_str.c_str(), &filter))
+            return "{\"error\":\"unknown filter '" + filter_str + "'\"}";
+        std::vector<NdsNetTraceEntry> ev(max ? max : 1);
+        const uint32_t count =
+            max ? net_ring_copy_recent(ev.data(), max, filter) : 0;
+        std::string out = "{\"events\":[";
+        for (uint32_t i = 0; i < count; ++i) {
+            const NdsNetTraceEntry& e = ev[i];
+            std::string src_mac_hex, dst_mac_hex;
+            append_hex(src_mac_hex, e.src_mac, sizeof(e.src_mac));
+            append_hex(dst_mac_hex, e.dst_mac, sizeof(e.dst_mac));
+            char b[512];
+            std::snprintf(b, sizeof(b),
+                "%s{\"count\":%llu,\"sys\":%llu,\"cyc9\":%llu,\"cyc7\":%llu,"
+                "\"insn9\":%llu,\"insn7\":%llu,\"arm9_pc\":%u,\"arm7_pc\":%u,"
+                "\"kind\":\"%s\",\"direction\":%u,\"wifi_reg\":%u,"
+                "\"wifi_value\":%u,\"src_mac\":\"%s\",\"dst_mac\":\"%s\","
+                "\"src_ipv4\":%u,\"dst_ipv4\":%u,\"src_port\":%u,"
+                "\"dst_port\":%u,\"payload_len\":%u,\"aux\":%u",
+                i ? "," : "", (unsigned long long)e.count,
+                (unsigned long long)e.sys, (unsigned long long)e.cyc9,
+                (unsigned long long)e.cyc7, (unsigned long long)e.insn9,
+                (unsigned long long)e.insn7, e.arm9_pc, e.arm7_pc,
+                nds_net_event_kind_name(e.kind), e.direction, e.wifi_reg,
+                e.wifi_value, src_mac_hex.c_str(), dst_mac_hex.c_str(),
+                e.src_ipv4, e.dst_ipv4, e.src_port, e.dst_port,
+                e.payload_len, e.aux);
+            out += b;
+            // Same convention as net_sample: attach the hostname (DNS
+            // events only) as an extra JSON field rather than a raw C
+            // buffer append, so a filtered dns_query/dns_response dump is
+            // actually useful without a second net_sample round trip per
+            // entry.
+            if (e.has_hostname) {
+                char hostname[kNetHostnameMaxLen] = {};
+                if (net_ring_get_hostname(e.count, hostname, sizeof(hostname)))
+                    out += ",\"hostname\":\"" + std::string(hostname) + "\"";
+            }
+            out += "}";
+        }
+        out += "]}";
+        return out;
+    }
+    if (cmd == "net_state") {
+        NdsNetRingState st{};
+        net_ring_debug_state(&st);
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+            "{\"produced\":%llu,\"oldest\":%llu,\"capacity\":%u}",
+            (unsigned long long)st.produced, (unsigned long long)st.oldest,
+            st.capacity);
+        return buf;
+    }
+    if (cmd == "net_replay_status") {
+        // Wiimmfi M8: live query, mid-session -- never wait for the
+        // process to exit to learn a replay's outcome (this project's own
+        // always-on-ring philosophy, DEBUG.md: query the live state, don't
+        // arm-then-capture). Does not advance execution, so it does not
+        // belong in the play-mode execution guard either.
+        NdsNetReplayStatus st{};
+        if (!nds_wifi_replay_status(&st)) return "{\"active\":false}";
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"active\":true,\"mismatch\":%s,\"tx_matched\":%llu,"
+            "\"tx_total\":%llu,\"rx_delivered\":%llu,\"rx_total\":%llu",
+            st.mismatch ? "true" : "false",
+            (unsigned long long)st.tx_matched, (unsigned long long)st.tx_total,
+            (unsigned long long)st.rx_delivered, (unsigned long long)st.rx_total);
+        std::string out = buf;
+        if (st.mismatch) {
+            char mbuf[384];
+            std::snprintf(mbuf, sizeof(mbuf),
+                ",\"mismatch_tx_frame_index\":%llu,\"mismatch_guest_cycle\":%llu,"
+                "\"mismatch_arm9_pc\":%u,\"mismatch_arm7_pc\":%u,"
+                "\"mismatch_reason\":\"%s\"",
+                (unsigned long long)st.mismatch_tx_frame_index,
+                (unsigned long long)st.mismatch_guest_cycle,
+                st.mismatch_arm9_pc, st.mismatch_arm7_pc,
+                st.mismatch_reason.c_str());
+            out += mbuf;
+        }
+        out += "}";
+        return out;
     }
     if (cmd == "io_state") return io_state_json();
     if (cmd == "frontend_stats") {

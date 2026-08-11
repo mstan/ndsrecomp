@@ -6,6 +6,7 @@
 // halt. Reports where each core got — the execution-driven signal for the
 // next pieces (SPI/firmware boot for ARM7, IPC handshake between them).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,10 @@
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "net/net_ring.h"
+#include "net/net_capture.h"
+#include "net/wfc_provider.h"
+#include "wifi_net.h"
 #include "profile_report.h"
 #include "sha1.h"
 #include "title_banks.h"
@@ -205,6 +210,82 @@ bool apply_startup_mode(std::vector<uint8_t>& fw, NdsStartupMode mode) {
     return true;
 }
 
+// Wiimmfi (beads-yjp.1.11): two ndsrecomp instances booted from the SAME
+// firmware dump present the SAME console MAC, so Wiimmfi identity and DS
+// friend codes -- both derived from it -- collide: two such clients look
+// like one console appearing twice and cannot match with each other
+// online. This mirrors melonDS's own proven fix for exactly this problem
+// (multi-instance local testing) byte-for-byte -- see
+// ndsref/third_party/melonDS/src/frontend/qt_sdl/EmuInstance.cpp:1739-1752
+// -- rather than inventing a new perturbation scheme: add the instance
+// index into MAC bytes 3/4/5 (melonDS's own wrap-mod-256 u8 arithmetic,
+// reproduced here with explicit truncating casts), then mask byte 0 so
+// the result can never be a broadcast/multicast address.
+//
+// Instance 0 is a deliberate, total no-op (early return): the owner
+// chose LLE-faithful as the default, so the guest reads its REAL MAC off
+// the real firmware dump over its own ordinary SPI path, unperturbed,
+// exactly like a physical console. Only a nonzero --instance-index
+// perturbs anything.
+//
+// This is an in-memory FIRMWARE patch, applied to this process's private
+// copy of `fw` only -- never a ROM patch (no cartridge byte is ever
+// touched) and never guest interception (no HLE, no faking a register
+// read/IPC value the guest "expects"; the guest still reads the MAC the
+// only way real hardware does, via SPI -- see nds_wifi_load_firmware's
+// SPI.SetFirmwareSource binding). Same category of change as
+// normalize_touch_calibration/apply_startup_mode above, and applied at
+// the same call site, for the same reason: the SHA-1 dump verification
+// above already ran against the pristine on-disk bytes before any of
+// these three patches touch `fw`, so patching here can never desync from
+// that check.
+//
+// The MAC lives inside the firmware HEADER's Wi-Fi calibration block
+// (GBATek "DS Firmware Header" / melonDS's SPI_Firmware.h
+// FirmwareHeader::MacAddr), a completely different region with a
+// DIFFERENT checksum than the per-boot user-settings block the other two
+// patches touch (UserData::Checksum, CRC16 start 0xFFFF over 0x70 bytes).
+// The header's own WifiConfigChecksum (offset 0x2A) instead covers
+// WifiConfigLength bytes (a value stored IN the header, read here rather
+// than hardcoded -- default firmware ships 0x138) starting at 0x2C (the
+// length field itself is inside its own checksummed range), CRC16 start
+// 0x0000 -- confirmed against melonDS's own verification call,
+// SPI.cpp:99: `VerifyCRC16(0x0000, 0x2C, *(u16*)&Buffer[0x2C], 0x2A)`.
+// firmware_crc16() above is byte-for-byte the same polynomial table and
+// bit loop as melonDS's SPI.cpp CRC16(), so it is reused here rather than
+// duplicated a third time.
+bool apply_instance_mac(std::vector<uint8_t>& fw, uint32_t instance_index) {
+    if (instance_index == 0) return true;  // instance 0: untouched, LLE-faithful
+    constexpr size_t kMacOffset = 0x36u;
+    constexpr size_t kWifiConfigChecksumOffset = 0x2Au;
+    constexpr size_t kWifiConfigLenOffset = 0x2Cu;
+    if (fw.size() < kWifiConfigLenOffset + 2u) return false;
+    const uint16_t wifi_config_length = static_cast<uint16_t>(
+        uint16_t{fw[kWifiConfigLenOffset]} |
+        (uint16_t{fw[kWifiConfigLenOffset + 1u]} << 8u));
+    if (kWifiConfigLenOffset + wifi_config_length > fw.size()) return false;
+    if (kMacOffset + 6u > kWifiConfigLenOffset + wifi_config_length)
+        return false;  // MacAddr must fall inside the checksummed region
+
+    uint8_t mac[6];
+    std::memcpy(mac, fw.data() + kMacOffset, 6u);
+    // Exact melonDS perturbation (EmuInstance.cpp:1739-1752): u8 arithmetic
+    // wraps mod 256 on both sides, reproduced here with explicit
+    // truncating casts since these are plain uint8_t, not melonDS's
+    // MacAddress element type with the same underlying width.
+    mac[3] = static_cast<uint8_t>(mac[3] + instance_index);
+    mac[4] = static_cast<uint8_t>(mac[4] + instance_index * 0x44u);
+    mac[5] = static_cast<uint8_t>(mac[5] + instance_index * 0x10u);
+    mac[0] &= 0xFCu;  // never a broadcast/multicast address
+    std::memcpy(fw.data() + kMacOffset, mac, 6u);
+
+    const uint16_t crc = firmware_crc16(
+        fw.data() + kWifiConfigLenOffset, wifi_config_length, 0u);
+    fw[kWifiConfigChecksumOffset] = static_cast<uint8_t>(crc);
+    fw[kWifiConfigChecksumOffset + 1u] = static_cast<uint8_t>(crc >> 8u);
+    return true;
+}
+
 void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
     std::fprintf(stderr, "  %s: PC=%08X CPSR=%08X SP=%08X LR=%08X "
                  "R0=%08X R12=%08X  cycles=%llu\n",
@@ -212,9 +293,68 @@ void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
                  (unsigned long long)cycles);
 }
 
+// Wiimmfi M8: end-of-run summary for a --network-backend replay run. A
+// no-op (prints nothing) when the resolved backend isn't Replay, matching
+// the existing net_ring_dump block's "print only if this feature was
+// active" convention. PASS/FAIL is unambiguous by design: `mismatch=true`
+// means NetReplay::SendPacket found the first byte-for-byte divergence
+// against the recorded expectation (see net_replay.h) -- never a silent
+// "0 records replayed, looks fine."
+void dump_replay_status() {
+    NdsNetReplayStatus st{};
+    if (!nds_wifi_replay_status(&st)) return;
+    std::fprintf(stderr, "\n== network replay result (Wiimmfi M8) ==\n");
+    std::fprintf(stderr,
+        "  TX matched: %llu/%llu   RX delivered: %llu/%llu\n",
+        (unsigned long long)st.tx_matched, (unsigned long long)st.tx_total,
+        (unsigned long long)st.rx_delivered, (unsigned long long)st.rx_total);
+    if (st.mismatch) {
+        std::fprintf(stderr,
+            "  status: FAIL -- first divergence at TX frame #%llu "
+            "(guest_cycle=%llu arm9_pc=0x%08X arm7_pc=0x%08X): %s\n",
+            (unsigned long long)st.mismatch_tx_frame_index,
+            (unsigned long long)st.mismatch_guest_cycle, st.mismatch_arm9_pc,
+            st.mismatch_arm7_pc, st.mismatch_reason.c_str());
+    } else {
+        std::fprintf(stderr, "  status: PASS -- no divergence detected\n");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Wiimmfi: Winsock (Windows only) MUST be initialized before ANY
+    // Winsock API call anywhere in this process -- including WSAPoll
+    // inside Net_Slirp::PollHostSockets(), reached from the host
+    // networking worker thread that boot() (below) starts via
+    // nds_wifi3d_attach(). Previously, WSAStartup was called only inside
+    // debug_server.cpp's debug_serve()/debug_pump_start() -- both invoked
+    // AFTER boot() in every mode that calls them at all -- so there was a
+    // real window (present on the end-user launcher's own --interactive
+    // path) where the worker thread could call into Winsock before
+    // WSAStartup had succeeded anywhere in the process (undefined
+    // behavior per Microsoft's documented WSAStartup contract). Worse, a
+    // plain run (neither --serve nor --interactive, e.g. every batch/
+    // scenario/regression-gate invocation) never called WSAStartup at
+    // all, for the process's entire lifetime. This call, unconditionally
+    // first in main() before any argument parsing or boot() work, fixes
+    // every mode at once. See wifi_net.h/.cpp for the implementation --
+    // it lives there (a translation unit that already transitively pulls
+    // in winsock2.h via Net_Slirp.h -> libslirp.h) rather than pulling
+    // windows.h/winsock2.h into main.cpp directly. debug_server.cpp's own
+    // WSAStartup/WSACleanup pair is UNCHANGED and stays exactly as it
+    // was: WSAStartup is reference-counted by design, so that pre-existing
+    // balanced pair is harmless on top of this one, and keeping it means
+    // debug_serve()/debug_pump_start() remain independently safe to call
+    // (e.g. from a future standalone test) without depending on main()
+    // having run first. A no-op returning true on every non-Windows build.
+    if (!nds_net_platform_init()) {
+        std::fprintf(stderr,
+                     "refusing to start: Winsock initialization failed\n");
+        return 1;
+    }
+    std::atexit(nds_net_platform_shutdown);
+
     std::string dir = "bios";
     std::string rom_path;
     std::string config_path = "game.toml";
@@ -227,13 +367,35 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
     std::string cli_startup_mode;
+    std::string cli_instance_index;
     std::string cli_save_path;
+    std::string cli_net_ring_filter;
+    std::string cli_network_enabled;
+    std::string cli_network_backend;
+    std::string cli_wfc_enabled;
+    std::string cli_wfc_provider;
+    // Wiimmfi M8: capture/replay at the Ethernet backend boundary.
+    std::string cli_net_capture_out;
+    std::string cli_net_capture_in;
+    bool cli_net_capture_raw = false;
+    bool cli_net_capture_no_pcap = false;
+    std::string cli_net_capture_scenario;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
     bool config_explicit = false;
     bool discover_static_misses = false;
     bool save_disabled = false;
+    // One-shot batch-mode diagnostic: dump the (Wiimmfi M0) network event
+    // ring to stderr at the end of a plain (non-serve, non-interactive) run,
+    // same convention as the existing nds_dump_irq()/runtime_trace_dump_recent
+    // tail (main.cpp end-of-run block). No call site pushes into this ring
+    // yet, so a normal run's dump is expected to be empty — this flag and
+    // its two companions below exist to prove the query surface works, not
+    // to surface real traffic yet.
+    bool net_ring_dump = false;
+    uint64_t net_ring_last = 256;
+    uint8_t net_ring_filter_kind = NDS_NET_EVENT_KIND_COUNT;  // "all"
     NdsFrontendOptions frontend_options{};
     uint16_t port = 19842;
     int positional = 0;
@@ -279,6 +441,37 @@ int main(int argc, char** argv) {
             cli_relative_mouse_fire_key = argv[++i];
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
+        } else if (a == "--instance-index" && i + 1 < argc) {
+            cli_instance_index = argv[++i];
+        } else if (a == "--net-ring-dump") {
+            // Plain action flag (Convention 2, main.cpp:242-252 style): no
+            // value, dumps the network ring to stderr at end-of-run. A
+            // "FILE" variant would redirect the same text; not implemented
+            // separately since the text is already stderr-redirectable by
+            // the caller (matches how runtime_trace_dump_recent works).
+            net_ring_dump = true;
+        } else if (a == "--net-ring-last" && i + 1 < argc) {
+            net_ring_last = std::strtoull(argv[++i], nullptr, 0);
+        } else if (a == "--net-ring-filter" && i + 1 < argc) {
+            cli_net_ring_filter = argv[++i];
+        } else if (a == "--network" && i + 1 < argc) {
+            cli_network_enabled = argv[++i];
+        } else if (a == "--network-backend" && i + 1 < argc) {
+            cli_network_backend = argv[++i];
+        } else if (a == "--wfc" && i + 1 < argc) {
+            cli_wfc_enabled = argv[++i];
+        } else if (a == "--wfc-provider" && i + 1 < argc) {
+            cli_wfc_provider = argv[++i];
+        } else if (a == "--net-capture-out" && i + 1 < argc) {
+            cli_net_capture_out = argv[++i];
+        } else if (a == "--net-capture-in" && i + 1 < argc) {
+            cli_net_capture_in = argv[++i];
+        } else if (a == "--net-capture-raw") {
+            cli_net_capture_raw = true;
+        } else if (a == "--net-capture-no-pcap") {
+            cli_net_capture_no_pcap = true;
+        } else if (a == "--net-capture-scenario" && i + 1 < argc) {
+            cli_net_capture_scenario = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -294,7 +487,15 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
                 "[--startup-mode preserve|manual|automatic] "
-                "[--discover-static-misses] [--rtc-host]\n",
+                "[--instance-index 0..255] "
+                "[--discover-static-misses] [--rtc-host] "
+                "[--net-ring-dump] [--net-ring-last N] "
+                "[--net-ring-filter <class>|all] "
+                "[--network on|off] [--network-backend slirp|replay|pcap] "
+                "[--wfc on|off] [--wfc-provider kaeru|wiimmfi|<ipv4>] "
+                "[--net-capture-out FILE] [--net-capture-in FILE] "
+                "[--net-capture-raw] [--net-capture-no-pcap] "
+                "[--net-capture-scenario NAME]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
@@ -440,12 +641,195 @@ int main(int argc, char** argv) {
                      "(expected preserve, manual, or automatic)\n");
         return 2;
     }
+    if (!cli_instance_index.empty() &&
+        !nds_parse_instance_index(cli_instance_index,
+                                  &frontend_options.instance_index)) {
+        std::fprintf(stderr, "invalid --instance-index (expected 0..255)\n");
+        return 2;
+    }
+    if (!cli_net_ring_filter.empty() &&
+        !nds_net_event_kind_parse(cli_net_ring_filter.c_str(),
+                                  &net_ring_filter_kind)) {
+        std::fprintf(stderr,
+                     "invalid --net-ring-filter %s (expected 'all' or one "
+                     "of the NdsNetEventKind names, e.g. wifi_reg_write, "
+                     "dns_query, tcp_packet)\n",
+                     cli_net_ring_filter.c_str());
+        return 2;
+    }
     if (frontend_options.relative_mouse_touch &&
         frontend_options.screen_layout != NdsScreenLayout::Separate) {
         std::fprintf(stderr,
                      "relative mouse touch requires --screen-layout separate\n");
         return 2;
     }
+    if (!cli_network_enabled.empty() &&
+        !nds_parse_on_off(cli_network_enabled, &frontend_options.network.enabled)) {
+        std::fprintf(stderr, "invalid --network (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_network_backend.empty() &&
+        !nds_parse_network_backend(cli_network_backend,
+                                   &frontend_options.network.backend)) {
+        std::fprintf(stderr,
+                     "invalid --network-backend (expected slirp, replay, or "
+                     "pcap)\n");
+        return 2;
+    }
+    if (!cli_wfc_enabled.empty() &&
+        !nds_parse_on_off(cli_wfc_enabled, &frontend_options.network.wfc_enabled)) {
+        std::fprintf(stderr, "invalid --wfc (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_wfc_provider.empty()) {
+        uint32_t probe = 0;
+        if (nds_parse_ipv4(cli_wfc_provider, &probe)) {
+            // Raw dotted-quad: a direct per-endpoint DNS override (e.g. a
+            // local test DWC server), provider name becomes "custom" for
+            // logging/reporting purposes only.
+            frontend_options.network.wfc_provider.name = "custom";
+            frontend_options.network.wfc_provider.dns_server = cli_wfc_provider;
+        } else if (nds_wfc_provider_lookup(cli_wfc_provider.c_str())) {
+            frontend_options.network.wfc_provider.name = cli_wfc_provider;
+            frontend_options.network.wfc_provider.dns_server.clear();
+        } else {
+            std::fprintf(stderr,
+                "invalid --wfc-provider %s (expected a known provider name "
+                "[kaeru, wiimmfi] or a dotted-quad IPv4 address)\n",
+                cli_wfc_provider.c_str());
+            return 2;
+        }
+    }
+    // Wiimmfi M8: transfer the capture/replay CLI flags into
+    // frontend_options (no parsing needed beyond what the arg loop already
+    // did -- these are plain strings/bools, unlike backend/on-off, which
+    // need nds_parse_* below).
+    if (!cli_net_capture_out.empty())
+        frontend_options.network.capture_out = cli_net_capture_out;
+    if (!cli_net_capture_in.empty())
+        frontend_options.network.capture_in = cli_net_capture_in;
+    if (cli_net_capture_raw) frontend_options.network.capture_raw = true;
+    if (cli_net_capture_no_pcap) frontend_options.network.capture_no_pcap = true;
+    if (!cli_net_capture_scenario.empty())
+        frontend_options.network.capture_scenario = cli_net_capture_scenario;
+
+    // Resolve the network config to backend-ready numeric form. Provider
+    // name -> table lookup, optional dns_server string -> IPv4, matching
+    // the pipeline documented in wifi_net.h's NdsWifiNetworkConfig.
+    NdsWifiNetworkConfig resolved_network{};
+    resolved_network.enabled = frontend_options.network.enabled;
+    resolved_network.wfc_enabled = frontend_options.network.wfc_enabled;
+
+    // Wiimmfi M8: "replay" is now fully wired into nds_wifi3d_attach()
+    // alongside the pre-existing "slirp"; "pcap" is accepted by
+    // nds_parse_network_backend (frontend_config.cpp) but is deliberately
+    // left NOT wired into the bridge -- see docs/adr-melonds-wifi-
+    // vendoring.md §2 and docs/m8-capture-replay-design.md's "unresolved"
+    // list. This is the same shape of gate the pre-existing code already
+    // had for "pcap", just extended with a real "replay" branch instead of
+    // rejecting it too.
+    if (frontend_options.network.backend == "slirp") {
+        resolved_network.backend = NdsNetBackendKind::Slirp;
+    } else if (frontend_options.network.backend == "replay") {
+        resolved_network.backend = NdsNetBackendKind::Replay;
+    } else {
+        std::fprintf(stderr,
+            "--network-backend %s is not wired into the bridge yet -- only "
+            "\"slirp\" and \"replay\" are currently constructed by "
+            "nds_wifi3d_attach()\n",
+            frontend_options.network.backend.c_str());
+        return 2;
+    }
+
+    if (resolved_network.backend == NdsNetBackendKind::Replay) {
+        if (frontend_options.network.capture_in.empty()) {
+            std::fprintf(stderr,
+                "--network-backend replay requires --net-capture-in <file>\n");
+            return 2;
+        }
+        // Load AND fully validate the capture file HERE, at CLI-validation
+        // time -- never inside nds_wifi3d_attach(). A corrupt/truncated
+        // capture is therefore a startup-time error with a clear message
+        // (exit code 2, matching every other malformed-CLI-input case in
+        // this file), never a silent "0 records replayed, looks like a
+        // pass" mid-run surprise. See net_capture.h's ReadAll doc comment
+        // for the exact corruption/truncation contract this enforces.
+        NdsNetCaptureReader reader;
+        std::string cap_error;
+        if (!reader.Open(frontend_options.network.capture_in, &cap_error)) {
+            std::fprintf(stderr, "--net-capture-in %s: %s\n",
+                         frontend_options.network.capture_in.c_str(),
+                         cap_error.c_str());
+            return 2;
+        }
+        if (!reader.ReadAll(&resolved_network.replay_records, &cap_error)) {
+            std::fprintf(stderr, "--net-capture-in %s: %s\n",
+                         frontend_options.network.capture_in.c_str(),
+                         cap_error.c_str());
+            return 2;
+        }
+        resolved_network.replay_sanitized = reader.sanitized();
+        std::fprintf(stderr,
+            "[network] replay capture loaded: %s (%zu record(s), "
+            "sanitized=%d)\n",
+            frontend_options.network.capture_in.c_str(),
+            resolved_network.replay_records.size(),
+            reader.sanitized() ? 1 : 0);
+    } else if (!frontend_options.network.capture_in.empty()) {
+        std::fprintf(stderr,
+            "--net-capture-in requires --network-backend replay\n");
+        return 2;
+    }
+
+    if (!frontend_options.network.capture_out.empty()) {
+        resolved_network.capture_out_path = frontend_options.network.capture_out;
+        resolved_network.capture_sanitize = !frontend_options.network.capture_raw;
+        resolved_network.capture_write_pcap = !frontend_options.network.capture_no_pcap;
+        resolved_network.capture_scenario_tag = frontend_options.network.capture_scenario;
+        if (frontend_options.network.capture_raw) {
+            // "Make the safe thing the default" (M8 privacy requirement):
+            // sanitize-on-write is the default at every call site; this is
+            // the ONE explicit opt-out, so make it loud rather than quiet.
+            std::fprintf(stderr,
+                "[network] WARNING: --net-capture-raw requested -- capture "
+                "'%s' will contain UNSANITIZED console-identifying data "
+                "(real MAC/DHCP identifiers). Never commit it; run "
+                "tools/net_capture_tool.py sanitize before publishing.\n",
+                resolved_network.capture_out_path.c_str());
+        }
+    }
+
+    if (resolved_network.wfc_enabled &&
+        resolved_network.backend != NdsNetBackendKind::Replay) {
+        const NdsWfcProvider& wfc = frontend_options.network.wfc_provider;
+        std::string dns_str = wfc.dns_server;
+        if (dns_str.empty()) {
+            const NdsWfcProviderInfo* info = nds_wfc_provider_lookup(wfc.name.c_str());
+            if (!info) {
+                std::fprintf(stderr,
+                    "network.wfc.provider %s is not a known provider name "
+                    "(expected kaeru or wiimmfi) and no dns_server override "
+                    "was given\n", wfc.name.c_str());
+                return 2;
+            }
+            dns_str = info->dns_server;
+        }
+        if (!nds_parse_ipv4(dns_str, &resolved_network.wfc_dns_ipv4)) {
+            std::fprintf(stderr,
+                "resolved WFC DNS address %s is not a valid dotted-quad "
+                "IPv4 address\n", dns_str.c_str());
+            return 2;
+        }
+        std::fprintf(stderr,
+            "[network] WFC DNS provider: %s (%s)\n",
+            wfc.name.c_str(), dns_str.c_str());
+    }
+    if (!resolved_network.enabled) {
+        std::fprintf(stderr,
+            "[network] disabled (--network off): no host networking "
+            "backend will be attached\n");
+    }
+    nds_wifi_configure_network(resolved_network);
 
     g_discover_static_misses = discover_static_misses;
 
@@ -630,6 +1014,22 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "[firmware] startup mode: %s\n",
                  nds_startup_mode_name(frontend_options.startup_mode));
+    if (!apply_instance_mac(fw, frontend_options.instance_index)) {
+        std::fprintf(stderr,
+            "refusing to start: cannot apply per-instance guest MAC "
+            "(malformed firmware Wi-Fi calibration block)\n");
+        return 1;
+    }
+    if (frontend_options.instance_index != 0) {
+        std::fprintf(stderr,
+            "[firmware] instance index %u: perturbed guest MAC (bytes "
+            "3/4/5) for multi-instance Wi-Fi identity\n",
+            frontend_options.instance_index);
+    } else {
+        std::fprintf(stderr,
+            "[firmware] instance index 0: guest MAC left untouched "
+            "(LLE-faithful, reads real firmware dump over SPI)\n");
+    }
 
     // Full power-on init, reusable so the debug server can honour `reset`
     // (the bisector compares fresh-from-reset at each event count).
@@ -652,6 +1052,7 @@ int main(int argc, char** argv) {
         }
         runtime_init(nullptr);
         runtime_trace_reset();
+        net_ring_reset();
 
         nds_register_dispatch(NDS_ARM9, g_dispatch_arm9_bios,
                               g_dispatch_arm9_bios_len, 0xFFFF0000u);
@@ -819,6 +1220,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] debug server mode from reset\n");
         debug_set_reset_fn(boot);
         debug_serve(port);
+        dump_replay_status();
         const bool save_ok = nds_io_flush_cartridge_save();
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         const bool compute_failed = nds_gpu3d_compute_runtime_failed();
@@ -848,6 +1250,12 @@ int main(int argc, char** argv) {
     nds_profile_report(stderr);
     std::fprintf(stderr, "\n== recent execution trace (last-scheduled CPU, tail) ==\n");
     runtime_trace_dump_recent(24);
+    if (net_ring_dump) {
+        std::fprintf(stderr, "\n== network event ring (Wiimmfi M0) ==\n");
+        net_ring_dump_recent(static_cast<uint32_t>(
+            std::min<uint64_t>(net_ring_last, UINT32_MAX)), net_ring_filter_kind);
+    }
+    dump_replay_status();
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     const bool compute_failed = nds_gpu3d_compute_runtime_failed();
     nds_compute_host_stop();
