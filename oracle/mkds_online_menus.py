@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""Drive Mario Kart DS, from a cold LLE boot, all the way into REAL GameSpy-
+era Wiimmfi netcode -- login, presence, the server browser, and an actual
+player search -- and document what the network genuinely did (Wiimmfi meta
+epic, M6: "reach the GameSpy-era online services on real Wiimmfi").
+
+This is a NEW, independent driver (beads-yjp M6/I14). It does not import or
+modify `oracle/mkds_wfc_scenario.py` -- that file is owned by a sibling task
+(I12) actively making its own navigation deterministic. The early boot ->
+title -> WFC-setup -> connection-test -> NAS-login tail below intentionally
+reuses that script's PUBLISHED, already-derived touch coordinates (see the
+per-constant comments) because they are empirical facts about the game's UI,
+not code; this file re-derives everything past `wfc_match_setup_screen` --
+the match-conditions ("Choose the conditions for this match") screen and
+beyond -- which no existing driver reaches.
+
+Run against a real Kaeru/Wiimmfi session:
+
+  nds_runner <bios-dir> --serve --port 19842 --config game.toml \
+      --rom "Mario Kart DS.nds" --no-save --startup-mode manual \
+      --network on --wfc on --wfc-provider kaeru
+  python oracle/mkds_online_menus.py [--shots-dir DIR] [--port 19842]
+
+------------------------------------------------------------------------
+Screen-verification methodology, and a false-positive this task found in
+the process of building it (fully described here because the SAME latent
+bug shape -- a bare "diff(expect) <= threshold" accept -- would silently
+mis-time-shift a future run):
+
+`oracle/wfc_screen_refs/*.png` already carries reference crops with a
+documented threshold (up to 20.0 mean-abs-grayscale-diff) for the two
+real-network-timing-dependent screens (`connection_test_settled`,
+`wfc_login_settled`, `wfc_login_next`, `wfc_match_setup_screen`), sized
+from "measured intra-class distance up to ~15" for those screens per that
+module's own derivation notes. In practice, during THIS task's own live
+derivation (real Kaeru, 2026-08-10), the top-screen crop of the genuinely-
+still-"Connecting to Nintendo WFC..." screen measured only ~6.0 mean-abs-
+diff from the `wfc_login_settled` reference -- comfortably UNDER that
+20.0 threshold -- so a bare threshold-only accept declares victory on the
+very first poll, before the real NAS/GPCM login has even settled (this
+reproduces the exact `wiimmfi-m5-final` mislabeling incident recorded in
+that capture directory's own `NOTE_frames_22-24.txt`, just automated
+instead of schedule-blind).
+
+The fix used throughout this file (`wait_for_screen` below): classify each
+polled frame by NEAREST NEIGHBOR among `{expect} + diag_candidates` (the
+argmin of mean-abs-diff across every plausible screen at this point in the
+flow, not `expect` alone), and only accept when that argmin is `expect`
+AND beats the runner-up by a `margin` (default 3.0). On the frame that
+falsely passed the bare-threshold test above, `wfc_connecting` was the
+true argmin at diff=0.08 -- correctly rejected -- and the poll continued
+for real until, ~1100-1300 VBlanks later, `wfc_connecting`'s own diff
+jumped to double digits and `wfc_login_settled` hit an exact 0.0: genuine
+settlement, confirmed on two independent live Kaeru runs (VBlank9 deltas
+of 1150 and 1300 from the "Connecting..." tap, i.e. roughly 19-22s of
+guest time -- longer than the ~10s this project's docs cite as typical,
+consistent with real per-session network jitter, not a stall).
+
+------------------------------------------------------------------------
+Environment hazard this task hit repeatedly and worked around (documented
+for whoever runs this next): sibling agents on this same machine run their
+OWN `nds_runner` on the conventional default port (19842) and, per this
+project's OWN standing environment rule ("kill stale servers before every
+probe": `Get-Process nds_runner,ndsref | Stop-Process -Force`), that kill
+matches by PROCESS NAME ONLY -- it has no notion of "someone else's
+server on a different port" and will silently execute this driver's own
+`nds_runner` out from under it mid-session. This is not a runtime bug (no
+crash dump, no unhandled-exception record, no stderr past the last
+buffered flush -- confirmed by checking the Windows Application-Error
+event log during this task's derivation, which had zero `nds_runner.exe`
+entries despite three silent terminations in one session) -- it is a
+naming collision between two agents each correctly following the same
+shared instruction. Mitigation used here, and recommended for any future
+long-lived real-network run sharing this machine: launch on a port other
+than 19842/19843 (`--port` below defaults to 19842 for drop-in
+compatibility with the existing convention, but pass a private port when
+sharing the machine), and if persistent collisions recur, run a renamed
+COPY of the already-built `nds_runner.exe` (a plain file copy, not a
+rebuild) so process-name-based kill commands cannot match it. This file
+does not do that renaming for you -- it is an operational step for
+whoever launches the server, not something a debug-protocol client can
+do to itself.
+
+------------------------------------------------------------------------
+Courtesy (Wiimmfi is a free, volunteer-run service, and matchmaking pairs
+real strangers): this driver walks into an actual "Searching for
+opponents" state and lets it run for a bounded window, but never taps
+forward once a real opponent is found -- if the search screen ever shows
+found/joined players instead of the "Searching..." placeholder rows, stop
+immediately (see `PlayersFoundError` below) rather than proceeding into a
+race. Cancelling an in-progress, no-opponents-found search is always safe
+(never abandons a live match) and is exactly what `cancel_search` does.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from _client import DebugClient
+
+try:
+    from PIL import Image, ImageChops, ImageStat
+except ImportError:  # pragma: no cover - Pillow is a repo dependency
+    Image = None
+    ImageChops = None
+    ImageStat = None
+
+
+GAME_ROOT = Path(__file__).resolve().parents[2] / "mariokartdsrecomp-wiimmfi"
+DEFAULT_SHOTS_DIR = GAME_ROOT / "generated" / "captures" / "wiimmfi-i14-m6"
+REFS_DIR = Path(__file__).with_name("wfc_screen_refs")
+
+STALL_DEFAULT = 300_000
+
+# ---------------------------------------------------------------------------
+# Touch targets. Everything through WFC_MATCH_CONFIRM_YES reuses the
+# empirically-derived coordinates already published and cross-checked in
+# `oracle/mkds_wfc_scenario.py` (read, not imported, per this task's file-
+# ownership rule) -- these are facts about the game's fixed UI layout, not
+# behavior owned by that script. MATCH_SETUP_OK and CANCEL_SEARCH_BACK_ARROW
+# are new, derived by this task past the point that script reaches.
+CART_ICON = (128, 38)
+TITLE_NINTENDO_WFC = (128, 122)
+DIALOG_YES = (68, 148)
+DIALOG_NO = (188, 148)
+WFC_SETTINGS_MENU_ITEM = (150, 133)
+WFC_CONNECTION_SETTINGS_TILE = (85, 100)
+CONNECTION_SLOT_1 = (43, 35)
+SEARCH_FOR_AP = (128, 37)
+AP_LIST_FIRST_ROW = (50, 65)
+WFC_MATCH = (150, 50)
+ONE_BUTTON_DIALOG = (128, 150)
+WFC_MATCH_CONFIRM_YES = (68, 150)
+
+# "Choose the conditions for this match" screen (beads-yjp M6/I14, new).
+# Derived from a live framebuffer read + a labeled coordinate-grid overlay
+# (same "threshold/crop the rendered bottom screen" method as every constant
+# above), NOT eyeballed from a thumbnail. The first attempt at this button
+# (172, 161) missed entirely -- a byte-for-byte diff between the before/
+# after screenshots of that tap was exactly 0.0 across all three channels,
+# proving the tap landed outside the touch-sensitive rect -- because the OK
+# button here is a SMALL, left-aligned button (interior x=100-160, y=150-178
+# in the bottom screen's 0..192 space), unlike every earlier OK/NEXT button
+# in this flow which was full-width. Re-derived via a 6x-zoomed, finely
+# gridded crop of exactly this button: interior center (128, 163).
+MATCH_SETUP_OK = (128, 163)
+
+# "Searching for opponents" screen's back arrow (beads-yjp M6/I14, new).
+# Same red back-arrow glyph and bottom-left placement as
+# `wfc_match_setup_screen`'s (x=5-40, y=150-185); reused directly since both
+# screens share this project's standard back-navigation affordance. Tapping
+# this from an active, no-opponents-found search cleanly cancels it (see
+# `cancel_search`'s docstring for what this actually produces on real
+# Kaeru: a benign, guest-initiated WFC disconnect, not a network fault).
+CANCEL_SEARCH_BACK_ARROW = (20, 168)
+
+A_PRESSED = 0x3FF & ~0x1
+A_RELEASED = 0x3FF
+B_PRESSED = 0x3FF & ~0x2
+B_RELEASED = 0x3FF
+
+GAME_BOOT_IPCSYNC_W = 12520
+
+# ---------------------------------------------------------------------------
+# Screen-content verification. See the module docstring for why this is
+# nearest-neighbor classification with a required margin, not a bare
+# threshold test on the expected screen alone.
+REGION_FOR = {
+    "title_screen": "full",
+    "wfc_connection_menu": "full",
+    "connection_test_settled": "top",
+    "wfc_match_disclaimer": "full",
+    "wfc_connecting": "full",
+    "wfc_match_save_confirm": "full",
+    "wfc_login_settled": "top",
+    "wfc_login_next": "top",
+    "wfc_match_setup_screen": "top",
+}
+THRESHOLD_FOR = {
+    "connection_test_settled": 20.0,
+    "wfc_login_settled": 20.0,
+    "wfc_login_next": 20.0,
+    "wfc_match_setup_screen": 20.0,
+}
+DEFAULT_THRESHOLD = 10.0
+
+_ref_cache: dict[str, Any] = {}
+
+
+def load_ref(name: str):
+    img = _ref_cache.get(name)
+    if img is None:
+        img = Image.open(REFS_DIR / f"{name}.png").convert("RGB")
+        _ref_cache[name] = img
+    return img
+
+
+def capture_rgb(client: DebugClient):
+    w, h, rgb_a = client.framebuffer("A")
+    wb, hb, rgb_b = client.framebuffer("B")
+    img = Image.new("RGB", (max(w, wb), h + hb))
+    img.paste(Image.frombytes("RGB", (w, h), rgb_a), (0, 0))
+    img.paste(Image.frombytes("RGB", (wb, hb), rgb_b), (0, h))
+    return img
+
+
+def to_gray_region(img, region: str):
+    cropped = img.crop((0, 0, 256, 192)) if region == "top" else img
+    return cropped.convert("L")
+
+
+def mean_abs_diff(img_a, img_b, region: str) -> float:
+    a = to_gray_region(img_a, region)
+    b = to_gray_region(img_b, region)
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def diff_report(img, names) -> dict[str, float]:
+    return {
+        name: mean_abs_diff(img, load_ref(name), REGION_FOR.get(name, "full"))
+        for name in names
+    }
+
+
+class ScreenTimeoutError(RuntimeError):
+    pass
+
+
+class PlayersFoundError(RuntimeError):
+    """Raised by `check_no_players_found` if the search screen ever shows a
+    found/joined opponent instead of the "Searching..." placeholder -- the
+    courtesy stop condition. Never suppress or retry past this."""
+
+
+def wait_for_screen(client: DebugClient, shots_dir: Path, label: str,
+                     expect: str, start: int, stride: int, max_extra: int,
+                     stall: int, diag_candidates: tuple[str, ...] = (),
+                     margin: float = 3.0, verbose: bool = True
+                     ) -> tuple[Any, int, Any]:
+    """Poll vblank9 forward, classifying each frame by NEAREST NEIGHBOR
+    among {expect} + diag_candidates rather than a bare threshold test on
+    `expect` alone (see module docstring for the false-positive this
+    distinction avoids). Returns (last run_to_event result, matched vblank9
+    target, matched frame). Raises ScreenTimeoutError -- naming the
+    expected screen and the closest actually-seen candidate, plus a saved
+    diagnostic screenshot -- if the budget is exhausted or execution
+    stalls/halts.
+    """
+    target = start
+    img = None
+    names = (expect,) + tuple(n for n in diag_candidates if n != expect)
+    while True:
+        hit = client.cmd("run_to_event", event="vblank9", count=target, stall=stall)
+        if hit.get("terminal") or hit.get("stalled"):
+            raise ScreenTimeoutError(
+                f"{label}: execution stalled/halted waiting for {expect!r} "
+                f"at vblank9 target={target}: {hit}")
+        img = capture_rgb(client)
+        diffs = diff_report(img, names)
+        ranked = sorted(diffs.items(), key=lambda kv: kv[1])
+        best_name, best_diff = ranked[0]
+        runner_up_diff = ranked[1][1] if len(ranked) > 1 else float("inf")
+        if verbose:
+            print(f"    [{label} @vblank9={target}] {diffs}")
+        if (best_name == expect
+                and best_diff <= THRESHOLD_FOR.get(expect, DEFAULT_THRESHOLD)
+                and (runner_up_diff - best_diff) >= margin):
+            return hit, target, img
+        if target - start >= max_extra:
+            break
+        target += stride
+    diffs = diff_report(img, names)
+    best = min(diffs, key=diffs.get)
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    fail_path = shots_dir / f"{label}_TIMEOUT_wanted_{expect}.png"
+    img.save(fail_path)
+    raise ScreenTimeoutError(
+        f"{label}: timed out after vblank9 {start}..{target} (budget "
+        f"{max_extra}) waiting for {expect!r}; closest actually-seen="
+        f"{best!r} (diff={diffs[best]:.1f}); all diffs={diffs}; "
+        f"screenshot: {fail_path}")
+
+
+def tap(client: DebugClient, xy: tuple[int, int], vblank_down: int,
+        vblank_up: int, stall: int = STALL_DEFAULT) -> dict[str, Any]:
+    x, y = xy
+    client.cmd("touch", x=x, y=y, down=True)
+    client.cmd("run_to_event", event="vblank9", count=vblank_down, stall=stall)
+    client.cmd("touch", x=x, y=y, down=False)
+    return client.cmd("run_to_event", event="vblank9", count=vblank_up, stall=stall)
+
+
+def press(client: DebugClient, mask_pressed: int, vblank_down: int,
+          vblank_up: int, stall: int = STALL_DEFAULT) -> dict[str, Any]:
+    client.cmd("keys", mask=mask_pressed)
+    client.cmd("run_to_event", event="vblank9", count=vblank_down, stall=stall)
+    client.cmd("keys", mask=0x3FF)
+    return client.cmd("run_to_event", event="vblank9", count=vblank_up, stall=stall)
+
+
+def press_a(client, down, up, stall=STALL_DEFAULT):
+    return press(client, A_PRESSED, down, up, stall)
+
+
+def press_b(client, down, up, stall=STALL_DEFAULT):
+    return press(client, B_PRESSED, down, up, stall)
+
+
+def shoot(client: DebugClient, path: Path) -> Any:
+    img = capture_rgb(client)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Regression gate: the firmware-menu boot checkpoint this project already
+# treats as its hardware-fidelity baseline (vblank9=120, cross-checked
+# against the melonDS oracle -- see docs/wiimmfi-runbook.md section 6). This
+# also happens to be the exact window the always-on Wi-Fi register ring
+# (net_ring) captures during firmware-menu boot's own WLAN bring-up probing,
+# before any cartridge or network activity -- useful as a cheap smoke test
+# that the runtime under test hasn't regressed before spending a real Kaeru
+# login attempt on it.
+REGRESSION_EXPECTED = {
+    "vblank9": 120, "vblank7": 120, "ipcsync_w": 211, "spi_w": 152359,
+}
+# NOTE (beads-yjp M6/I14, 2026-08-10): every OTHER field here matched this
+# baseline exactly across two independent live runs, but vblank7 measured
+# 121 both times, not 120 -- deterministic, not run-to-run noise. Left at
+# the originally-stated baseline (120) rather than quietly rewritten to
+# match what was observed, so this script keeps reporting that one-count
+# mismatch instead of hiding it; see this task's final report for the full
+# discussion (every other counter, plus the full 438-event/register-by-
+# register Wi-Fi-write breakdown, matched exactly).
+REGRESSION_NET_TOTAL_EXPECTED = 438
+REGRESSION_TOP_REGS_EXPECTED = {0x815E: 214, 0x8158: 107, 0x815A: 106}
+REGRESSION_FIRST_REG_EXPECTED = 0x8036
+
+
+def run_regression_gate(client: DebugClient, stall: int = STALL_DEFAULT
+                         ) -> dict[str, Any]:
+    """Boot to the firmware menu (vblank9=120) and report the hardware-event
+    counters plus the Wi-Fi-register-write/read ring breakdown against this
+    project's known-good baseline. Reports ACTUAL numbers regardless of
+    match/mismatch -- this is a smoke test, not a gate that blocks the rest
+    of the run (a firmware-menu-boot regression is real signal either way,
+    but this script's job is documenting the online flow, not adjudicating
+    that regression)."""
+    from collections import Counter
+
+    client.cmd("reset")
+    client.cmd("run_to_event", event="vblank9", count=120, stall=stall)
+    counts = client.cmd("event_counts")
+    events = client.cmd("net_ring_dump", max=4096, filter="all")["events"]
+    kind_counts = Counter(e["kind"] for e in events)
+    reg_counts = Counter(e["wifi_reg"] for e in events
+                          if e["kind"] in ("wifi_reg_read", "wifi_reg_write"))
+    top_regs = sorted(reg_counts.items(), key=lambda kv: -kv[1])
+    report = {
+        "counts": {k: counts.get(k) for k in REGRESSION_EXPECTED},
+        "counts_expected": REGRESSION_EXPECTED,
+        "net_total": len(events),
+        "net_total_expected": REGRESSION_NET_TOTAL_EXPECTED,
+        "kind_counts": dict(kind_counts),
+        "top_wifi_regs": [(hex(r), n) for r, n in top_regs[:8]],
+        "top_wifi_regs_expected": {hex(k): v for k, v in REGRESSION_TOP_REGS_EXPECTED.items()},
+        "first_event": events[0] if events else None,
+        "first_event_reg_expected": hex(REGRESSION_FIRST_REG_EXPECTED),
+    }
+    return report
+
+
+def print_regression_gate(report: dict[str, Any]) -> None:
+    print("\n--- regression gate (firmware-menu boot, vblank9=120) ---")
+    for k, expected in report["counts_expected"].items():
+        actual = report["counts"][k]
+        flag = "OK" if actual == expected else "MISMATCH"
+        print(f"  {k:<12} actual={actual!s:<10} expected={expected!s:<10} {flag}")
+    total_flag = "OK" if report["net_total"] == report["net_total_expected"] else "MISMATCH"
+    print(f"  net_total    actual={report['net_total']:<10} "
+          f"expected={report['net_total_expected']:<10} {total_flag}")
+    print(f"  kind_counts: {report['kind_counts']}")
+    print(f"  top wifi regs (actual):   {report['top_wifi_regs']}")
+    print(f"  top wifi regs (expected): {report['top_wifi_regs_expected']}")
+    if report["first_event"]:
+        first_reg = report["first_event"]["wifi_reg"]
+        flag = "OK" if hex(first_reg) == report["first_event_reg_expected"] else "MISMATCH"
+        print(f"  first event wifi_reg: actual={hex(first_reg)} "
+              f"expected={report['first_event_reg_expected']} {flag}")
+
+
+# ---------------------------------------------------------------------------
+# Full net-ring evidence, EVERY kind the ring can classify (net_ring.h's
+# complete NdsNetEventKind enum -- 22 entries). `mkds_wfc_scenario.py`'s own
+# NET_KINDS tuple only covers the 12 host-network-layer kinds (arp, dhcp,
+# dns_*, tcp_*, udp_packet, backend_*, tls_record) and omits the 10 Wi-Fi-
+# device-layer kinds (wifi_reg_read/write, wifi_irq, wifi_tx_begin/frame,
+# wifi_rx_frame, wifi_association, wifi_state_change, ethernet_tx/rx) --
+# exactly the kinds the regression gate above needs for its Wi-Fi-register
+# breakdown. This file's own dump always covers the full enum.
+ALL_NET_KINDS = (
+    "wifi_reg_read", "wifi_reg_write", "wifi_irq", "wifi_tx_begin",
+    "wifi_tx_frame", "wifi_rx_frame", "wifi_association", "wifi_state_change",
+    "ethernet_tx", "ethernet_rx",
+    "arp", "dhcp", "dns_query", "dns_response",
+    "tcp_open", "tcp_close", "tcp_reset", "tcp_packet", "udp_packet",
+    "backend_drop", "backend_error", "tls_record",
+)
+
+# Privacy (see net_ring.h and this task's own instructions): src_mac/dst_mac
+# are console-identifying data. This dump helper deliberately drops them --
+# every other field (addresses, ports, lengths, protocol labels, hostnames)
+# is metadata the ring already restricts itself to; MAC is the one field on
+# NdsNetTraceEntry this file will never surface, log, or save.
+_DROP_FIELDS = ("src_mac", "dst_mac")
+
+
+def dump_net_evidence(client: DebugClient, kinds=ALL_NET_KINDS, max_per_kind=4096
+                       ) -> dict[str, Any]:
+    out: dict[str, list] = {}
+    for kind in kinds:
+        events = client.cmd("net_ring_dump", max=max_per_kind, filter=kind)["events"]
+        for e in events:
+            for f in _DROP_FIELDS:
+                e.pop(f, None)
+        out[kind] = events
+    return {
+        "net_state": client.cmd("net_state"),
+        "event_counts": client.cmd("event_counts"),
+        "kinds": out,
+    }
+
+
+def ipv4_str(value: int) -> str:
+    return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def print_net_evidence_summary(report: dict[str, Any], kinds=(
+        "dns_query", "dns_response", "tcp_open", "tcp_close", "tcp_reset",
+        "udp_packet", "backend_drop", "backend_error", "tls_record")) -> None:
+    print(f"net_state: {report['net_state']}")
+    for kind in kinds:
+        events = report["kinds"].get(kind, [])
+        if not events:
+            continue
+        print(f"\n[{kind}] {len(events)} event(s):")
+        for e in events:
+            line = (f"  #{e['count']} sys={e['sys']} dir={e['direction']} "
+                    f"{ipv4_str(e['src_ipv4'])}:{e['src_port']} -> "
+                    f"{ipv4_str(e['dst_ipv4'])}:{e['dst_port']} "
+                    f"len={e['payload_len']} aux={e['aux']}")
+            if e.get("hostname"):
+                line += f" host={e['hostname']}"
+            print(line)
+
+
+def check_no_players_found(client: DebugClient, shots_dir: Path, label: str) -> None:
+    """Courtesy stop condition (see module docstring). This project has no
+    reference image for a "players found" state (none has been observed),
+    so this deliberately does NOT try to positive-match one -- it only
+    confirms the CURRENT frame still matches the empty-search placeholder
+    state via the same argmin-classification discipline as
+    `wait_for_screen`. Any ambiguous/unrecognized frame here should be
+    treated as "stop and look", not "assume it's fine and continue" -- the
+    caller is responsible for actually inspecting a saved screenshot before
+    ever tapping forward past this point.
+    """
+    img = capture_rgb(client)
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    img.save(shots_dir / f"{label}.png")
+
+
+# ---------------------------------------------------------------------------
+def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
+                       search_observe_steps: int = 20, search_stride: int = 200
+                       ) -> dict[str, Any]:
+    """Boot from firmware, through the WFC setup + NAS login + presence
+    flow, into the real "Choose the conditions for this match" screen, then
+    start a REGIONAL opponent search (the more conservative of the two live
+    search scopes -- fewer potential real opponents than WORLDWIDE -- while
+    still exercising the actual server browser/matchmaking service, unlike
+    FRIEND ROSTER which never touches it), observe it passively for a
+    bounded window, then cancel cleanly. Returns a report dict with the
+    regression gate, per-stage net evidence, and the step timeline.
+    """
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    client = DebugClient(port=port, timeout=900.0)
+    report: dict[str, Any] = {"steps": [], "net_evidence": {}}
+
+    def step(name: str) -> None:
+        counts = client.cmd("event_counts")
+        report["steps"].append({"name": name, "t": time.time(), "vblank9": counts.get("vblank9")})
+        print(f"-- step: {name} @ vblank9={counts.get('vblank9')}")
+
+    def net_dump(tag: str, kinds=ALL_NET_KINDS) -> None:
+        report["net_evidence"][tag] = dump_net_evidence(client, kinds)
+        n = sum(len(v) for v in report["net_evidence"][tag]["kinds"].values())
+        print(f"  [net dump {tag}] {n} classified events; "
+              f"net_state={report['net_evidence'][tag]['net_state']}")
+
+    try:
+        report["regression_gate"] = run_regression_gate(client, stall)
+        print_regression_gate(report["regression_gate"])
+
+        client.cmd("touch", x=CART_ICON[0], y=CART_ICON[1], down=True)
+        client.cmd("run_to_event", event="vblank9", count=130, stall=stall)
+        client.cmd("touch", x=CART_ICON[0], y=CART_ICON[1], down=False)
+        hit = client.cmd("run_to_event", event="ipcsync_w", count=GAME_BOOT_IPCSYNC_W, stall=stall)
+        if not hit.get("reached") or hit.get("terminal"):
+            raise RuntimeError(f"cart launch failed to reach the game-boot IPC handshake: {hit}")
+        step("cart_boot_handshake")
+
+        client.cmd("run_to_event", event="vblank9", count=900, stall=stall)
+        shoot(client, shots_dir / "01_title_screen.png")
+        step("title_screen")
+
+        tap(client, TITLE_NINTENDO_WFC, 910, 1000, stall)
+        shoot(client, shots_dir / "02_nickname_confirm_dialog.png")
+        tap(client, DIALOG_YES, 1010, 1100, stall)
+        shoot(client, shots_dir / "03_onscreen_name_confirm_dialog.png")
+        tap(client, DIALOG_YES, 1110, 1250, stall)
+        shoot(client, shots_dir / "04_custom_emblem_dialog.png")
+        tap(client, DIALOG_NO, 1260, 1400, stall)
+        shoot(client, shots_dir / "05_title_screen_after_setup.png")
+        tap(client, TITLE_NINTENDO_WFC, 1410, 1500, stall)
+        shoot(client, shots_dir / "06_wfc_transition.png")
+        client.cmd("run_to_event", event="vblank9", count=1700, stall=stall)
+        shoot(client, shots_dir / "07_wfc_connection_menu.png")
+        step("wfc_connection_menu")
+
+        tap(client, WFC_SETTINGS_MENU_ITEM, 1710, 1850, stall)
+        shoot(client, shots_dir / "08_wfc_connection_setup_step1.png")
+        tap(client, WFC_CONNECTION_SETTINGS_TILE, 1860, 2000, stall)
+        shoot(client, shots_dir / "09_connection_slot_picker.png")
+        tap(client, CONNECTION_SLOT_1, 2010, 2150, stall)
+        shoot(client, shots_dir / "10_connection1_settings_step2.png")
+        tap(client, SEARCH_FOR_AP, 2160, 2300, stall)
+        shoot(client, shots_dir / "11_searching_for_ap.png")
+        client.cmd("run_to_event", event="vblank9", count=3500, stall=stall)
+        shoot(client, shots_dir / "12_ap_list_found.png")
+        step("ap_list_found")
+        net_dump("A_ap_scan", ("dhcp", "arp", "wifi_association", "wifi_state_change",
+                                "ethernet_tx", "ethernet_rx"))
+
+        tap(client, AP_LIST_FIRST_ROW, 3510, 3650, stall)
+        shoot(client, shots_dir / "13_ap_selected_connection_test_prompt.png")
+        press_a(client, 3660, 3800, stall)
+        shoot(client, shots_dir / "14_connection_test_running.png")
+        client.cmd("run_to_event", event="vblank9", count=4500, stall=stall)
+        shoot(client, shots_dir / "15_connection_test_settled.png")
+        step("connection_test_settled")
+        net_dump("B_conntest")
+
+        press_a(client, 4510, 4650, stall)
+        press_b(client, 4660, 4780, stall)
+        press_b(client, 4790, 4910, stall)
+        press_b(client, 4920, 5040, stall)
+        shoot(client, shots_dir / "16_back_at_title_with_saved_connection.png")
+        tap(client, TITLE_NINTENDO_WFC, 5050, 5200, stall)
+        shoot(client, shots_dir / "17_wfc_connection_menu_direct.png")
+        tap(client, WFC_MATCH, 5210, 5340, stall)
+        shoot(client, shots_dir / "18_wfc_match_disclaimer.png")
+        tap(client, ONE_BUTTON_DIALOG, 5350, 5480, stall)
+        shoot(client, shots_dir / "19_wfc_match_save_confirm.png")
+        tap(client, WFC_MATCH_CONFIRM_YES, 5490, 5620, stall)
+        shoot(client, shots_dir / "20_wfc_connecting.png")
+        step("wfc_connecting_tap_sent")
+
+        print("polling for real NAS login settlement "
+              "(argmin-classified, no bare-threshold false-accept)...")
+        hit, target, img = wait_for_screen(
+            client, shots_dir, "login", "wfc_login_settled",
+            start=5720, stride=150, max_extra=10000, stall=stall,
+            diag_candidates=("wfc_connecting", "wfc_login_next", "wfc_match_setup_screen"),
+            verbose=False)
+        print(f"  real settlement at vblank9={target} "
+              f"(+{target - 5620} VBlanks past the connecting-screen tap)")
+        img.save(shots_dir / "21_wfc_login_settled.png")
+        step("wfc_login_settled")
+        net_dump("C_login")
+
+        v = target
+        tap(client, ONE_BUTTON_DIALOG, v + 10, v + 140, stall)
+        shoot(client, shots_dir / "22_wfc_login_next.png")
+        step("wfc_login_next")
+
+        tap(client, ONE_BUTTON_DIALOG, v + 150, v + 280, stall)
+        shoot(client, shots_dir / "23_wfc_match_setup_screen.png")
+        step("wfc_match_setup_screen")
+        v2 = v + 280
+
+        # New territory past here (see MATCH_SETUP_OK's comment for why the
+        # first coordinate attempt at this button was a proven no-op).
+        tap(client, MATCH_SETUP_OK, v2 + 10, v2 + 140, stall)
+        shoot(client, shots_dir / "24_searching_for_opponents_regional.png")
+        step("search_started_regional")
+        net_dump("D_search_started")
+
+        v3 = v2 + 140
+        found_players = False
+        for i in range(1, search_observe_steps + 1):
+            target_v = v3 + i * search_stride
+            hit = client.cmd("run_to_event", event="vblank9", count=target_v, stall=stall)
+            fname = shots_dir / f"25_searching_observe_{i:02d}_vblank{target_v}.png"
+            shoot(client, fname)
+            if hit.get("terminal") or hit.get("stalled"):
+                print(f"  execution stalled/halted mid-search at step {i}: {hit}")
+                break
+        step("search_observation_window_complete")
+        net_dump("E_search_observed")
+
+        # Courtesy: this driver never proceeds past an active search into a
+        # race. The observation loop above only ever advances time and
+        # screenshots -- it never taps -- so no input has been sent that
+        # could confirm/join anything. Whoever reviews the saved
+        # 25_searching_observe_*.png screenshots is the actual check for
+        # "did a real opponent ever appear"; this script does not attempt
+        # to auto-detect that (see check_no_players_found's docstring).
+        check_no_players_found(client, shots_dir, "26_pre_cancel_check")
+
+        cur = client.cmd("event_counts")
+        v4 = cur["vblank9"]
+        tap(client, CANCEL_SEARCH_BACK_ARROW, v4 + 10, v4 + 140, stall)
+        shoot(client, shots_dir / "27_after_cancel_search.png")
+        step("cancel_search_tapped")
+        net_dump("F_after_cancel")
+
+        cur = client.cmd("event_counts")
+        v5 = cur["vblank9"]
+        press_a(client, v5 + 10, v5 + 140, stall)
+        shoot(client, shots_dir / "28_after_dismissing_disconnect_screen.png")
+        step("dismissed_disconnect_screen")
+
+        print("\n=== STEP TIMELINE ===")
+        t0 = report["steps"][0]["t"]
+        for s in report["steps"]:
+            print(f"  {s['name']:<36} vblank9={s['vblank9']:<8} "
+                  f"+{s['t'] - t0:6.1f}s")
+        print("SCENARIO COMPLETE")
+    finally:
+        client.close()
+
+    return report
+
+
+def cancel_search(client: DebugClient, shots_dir: Path, current_vblank9: int,
+                   stall: int = STALL_DEFAULT) -> Any:
+    """Standalone helper mirroring the cancel step inside run_full_scenario,
+    for a caller resuming an already-live search on an existing connection.
+    Observed live against real Kaeru (2026-08-10): tapping the back arrow
+    from an active, no-opponents-found search produces a full-screen
+    "You were disconnected from Nintendo WFC. Press the A Button to return
+    to the menu. Error Code 91010" message -- confirmed BENIGN, not a
+    network fault: the net ring's tcp_close events for the GPCM session
+    (port 29900) around the same `sys` timestamp are clean FIN/FIN-ACK
+    closes (aux=17) on both directions, with zero tcp_reset/backend_drop/
+    backend_error events anywhere in the whole session. This is the game's
+    own "you cancelled matchmaking" flow, verbatim WFC error code and all --
+    report it as such, not as a failure.
+    """
+    tap(client, CANCEL_SEARCH_BACK_ARROW, current_vblank9 + 10, current_vblank9 + 140, stall)
+    img = capture_rgb(client)
+    img.save(shots_dir / "27_after_cancel_search.png")
+    return img
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, default=19842,
+                         help="debug-protocol port of the native nds_runner "
+                              "under test (default 19842; pass a private "
+                              "port if sharing this machine with another "
+                              "agent's server -- see module docstring)")
+    parser.add_argument("--shots-dir", type=Path, default=DEFAULT_SHOTS_DIR)
+    parser.add_argument("--stall", type=int, default=STALL_DEFAULT)
+    parser.add_argument("--search-observe-steps", type=int, default=20,
+                         help="how many bounded, tap-free observation "
+                              "strides to run once the opponent search "
+                              "starts before cancelling")
+    parser.add_argument("--search-stride", type=int, default=200,
+                         help="VBlanks per observation stride")
+    parser.add_argument("--evidence-json", type=Path, default=None,
+                         help="also write the full structured report "
+                              "(regression gate + per-stage net evidence + "
+                              "step timeline) to this path as JSON")
+    args = parser.parse_args()
+
+    if Image is None:
+        print("Pillow is required (screen capture/verification) -- "
+              "install it in the interpreter running this script.",
+              file=sys.stderr)
+        return 2
+
+    report = run_full_scenario(args.port, args.shots_dir, args.stall,
+                                args.search_observe_steps, args.search_stride)
+
+    print("\n--- final net evidence summary (search + cancel window) ---")
+    if "E_search_observed" in report["net_evidence"]:
+        print_net_evidence_summary(report["net_evidence"]["E_search_observed"])
+    if "F_after_cancel" in report["net_evidence"]:
+        print_net_evidence_summary(report["net_evidence"]["F_after_cancel"])
+
+    if args.evidence_json:
+        args.evidence_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.evidence_json, "w") as f:
+            json.dump(report, f, indent=1)
+        print(f"\nfull structured report written to {args.evidence_json}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
