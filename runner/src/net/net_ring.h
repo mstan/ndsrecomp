@@ -163,10 +163,8 @@ struct NdsNetTraceEntry {
     uint16_t payload_len;   // on-wire length; NEVER the captured length —
                              // this ring never stores payload bytes (see
                              // the privacy note at the top of this file)
-    uint8_t  has_hostname;  // 1 if net_ring_get_hostname(count, ...) will
-                             // succeed for this entry; the ring's own
-                             // ordinal is the hostname-pool index, so no
-                             // separate "ref" field is needed
+    uint8_t  has_hostname;  // 1 if this entry owns a hostname side-table ref
+    uint16_t hostname_ref;  // compact index into the hostname side table
     uint32_t aux;           // event-kind-specific (TCP flags, DHCP opcode,
                              // association result code, ...)
 };
@@ -203,11 +201,12 @@ struct NdsNetTraceEntry {
 constexpr uint32_t kNetTraceSize = 262144;
 
 // DNS hostnames are variable-length (up to 253 bytes) and don't belong
-// inline in a fixed-size entry — every other ring keeps entries fixed-size
-// (e.g. NdsCardTraceEntry::command is a *fixed* 8-byte field, not a
-// pointer). The pool is indexed by the exact same modulo as the main ring
-// (net_ring.cpp), so it evicts in lockstep automatically with no separate
-// bookkeeping and no separate allocator.
+// inline in a fixed-size entry. Only DNS_QUERY/DNS_RESPONSE events attach
+// names, so hostname storage is a smaller side ring keyed by
+// NdsNetTraceEntry::hostname_ref instead of a kNetTraceSize-sized pool.
+// A 4096-name retained window is much larger than observed login/match-menu
+// DNS volume while removing the old 66 MiB BSS reservation.
+constexpr uint32_t kNetHostnameSlots = 4096;
 constexpr uint32_t kNetHostnameMaxLen = 254;  // 253 + NUL
 
 // ── Write API ────────────────────────────────────────────────────────────
@@ -256,8 +255,7 @@ bool net_ring_get(uint64_t count, NdsNetTraceEntry* out);
 
 // Copies the hostname associated with an entry obtained via net_ring_get /
 // net_ring_copy_recent, if any. False (buffer left untouched) if the entry
-// never carried a hostname or the hostname slot has been evicted (it evicts
-// in lockstep with the main ring — same ordinal, same modulo).
+// never carried a hostname or the smaller hostname side ring has evicted it.
 bool net_ring_get_hostname(uint64_t count, char* buf, size_t buf_size);
 
 // "Most recent N" copy-out, oldest-first — same result shape as

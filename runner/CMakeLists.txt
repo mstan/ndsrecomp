@@ -464,6 +464,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_include_directories(wfc_provider_test PRIVATE src)
   add_test(NAME wfc_provider_test COMMAND wfc_provider_test)
 
+  add_executable(net_ring_test
+      tests/net_ring_test.cpp
+      src/net/net_ring.cpp)
+  target_include_directories(net_ring_test PRIVATE
+      src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+  add_test(NAME net_ring_test COMMAND net_ring_test)
+
   add_executable(relative_mouse_touch_test
       tests/relative_mouse_touch_test.cpp
       src/relative_mouse_touch.cpp)

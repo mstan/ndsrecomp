@@ -66,12 +66,12 @@ struct NdsWfcProvider {
 // What this default actually buys, measured on an offline MKDS boot
 // (3 stable samples per configuration, pre-feature main 9d33234 as the
 // reference): the worker thread goes away, 11 threads -> 10, matching main
-// exactly. It does NOT reduce memory. Commit is 330.9 MB and working set
-// 224.5 MB whether networking is on or off, against main's 238.5 / 211.2 --
-// that +92.4 MB is the always-on ring's static BSS (net_ring.cpp's
-// g_net_trace and g_net_hostname_pool), which is allocated unconditionally
-// and is therefore untouched by this flag. Fixing that is beads-yjp.1.17,
-// still open; do not read this default as having solved it.
+// exactly. The default itself did NOT reduce memory: commit was 330.9 MB
+// and working set 224.5 MB whether networking was on or off, against main's
+// 238.5 / 211.2. That was the always-on ring's static BSS, which is
+// allocated unconditionally and therefore untouched by this flag. The
+// hostname side-table part of that cost is tracked separately in
+// beads-yjp.1.17.
 //
 // Nothing about the *guest-visible* device model changes either way: the
 // offline event-counter comparison against pre-feature main is

@@ -27,10 +27,17 @@ namespace {
 // clamped to capacity, `seq` is the unbounded absolute ordinal assigned to
 // the most recent push (== the `count` field stored in that entry).
 NdsNetTraceEntry g_net_trace[kNetTraceSize] = {};
-char g_net_hostname_pool[kNetTraceSize][kNetHostnameMaxLen] = {};
+struct NetHostnameSlot {
+    uint64_t owner_count;
+    char hostname[kNetHostnameMaxLen];
+};
+static_assert(kNetHostnameSlots <= 65536u,
+              "NdsNetTraceEntry::hostname_ref is uint16_t");
+NetHostnameSlot g_net_hostname_pool[kNetHostnameSlots] = {};
 uint32_t g_net_trace_w = 0;
 uint32_t g_net_trace_retained = 0;
 uint64_t g_net_trace_seq = 0;
+uint16_t g_net_hostname_w = 0;
 
 const char* const kNetEventKindNames[NDS_NET_EVENT_KIND_COUNT] = {
     "wifi_reg_read",
@@ -121,13 +128,8 @@ uint64_t net_ring_push(NdsNetEventKind kind, uint8_t direction,
     e.dst_port = dst_port;
     e.payload_len = payload_len;
     e.has_hostname = 0;
+    e.hostname_ref = 0;
     e.aux = aux;
-    // Clear any stale hostname left in this slot by a since-evicted entry —
-    // otherwise a client that reads the hostname pool by raw slot index
-    // (rather than through net_ring_get_hostname's count check) could see a
-    // hostname belonging to a different, older ordinal.
-    g_net_hostname_pool[slot][0] = '\0';
-
     g_net_trace_w = (slot + 1u) % kNetTraceSize;
     if (g_net_trace_retained < kNetTraceSize) ++g_net_trace_retained;
     return e.count;
@@ -138,8 +140,14 @@ void net_ring_set_hostname(uint64_t count, const char* hostname) {
     const uint32_t idx = static_cast<uint32_t>((count - 1) % kNetTraceSize);
     NdsNetTraceEntry& e = g_net_trace[idx];
     if (e.count != count) return;  // already evicted; drop silently
-    std::snprintf(g_net_hostname_pool[idx], kNetHostnameMaxLen, "%s", hostname);
+    const uint16_t hostname_ref = g_net_hostname_w;
+    NetHostnameSlot& slot = g_net_hostname_pool[hostname_ref];
+    slot.owner_count = count;
+    std::snprintf(slot.hostname, kNetHostnameMaxLen, "%s", hostname);
+    g_net_hostname_w =
+        static_cast<uint16_t>((g_net_hostname_w + 1u) % kNetHostnameSlots);
     e.has_hostname = 1;
+    e.hostname_ref = hostname_ref;
 }
 
 uint64_t net_ring_latest() { return g_net_trace_seq; }
@@ -159,7 +167,10 @@ bool net_ring_get_hostname(uint64_t count, char* buf, size_t buf_size) {
     const uint32_t idx = static_cast<uint32_t>((count - 1) % kNetTraceSize);
     const NdsNetTraceEntry& e = g_net_trace[idx];
     if (e.count != count || !e.has_hostname) return false;
-    std::snprintf(buf, buf_size, "%s", g_net_hostname_pool[idx]);
+    if (e.hostname_ref >= kNetHostnameSlots) return false;
+    const NetHostnameSlot& slot = g_net_hostname_pool[e.hostname_ref];
+    if (slot.owner_count != count) return false;
+    std::snprintf(buf, buf_size, "%s", slot.hostname);
     return true;
 }
 
@@ -204,6 +215,7 @@ void net_ring_reset() {
     g_net_trace_w = 0;
     g_net_trace_retained = 0;
     g_net_trace_seq = 0;
+    g_net_hostname_w = 0;
     // Entries/hostnames are left as-is (matching every other ring's reset —
     // e.g. card_trace at io.cpp:1905 only rewinds the cursors); a stale slot
     // is unreachable because net_ring_get's stored.count == count check will
