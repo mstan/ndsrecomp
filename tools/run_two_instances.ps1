@@ -722,8 +722,8 @@ function Start-EvidenceCollector {
     Write-Host "    Set-Content -LiteralPath '$raceEntryMarker' -Value race-entered"
     $postRunArgs = @(
         '&',
-        (Format-PowerShellArg $PythonExe),
-        (Format-PowerShellArg 'ndsrecomp\tools\collect_two_instance_evidence.py'),
+        (Format-PowerShellArg $pythonPath),
+        (Format-PowerShellArg $collector),
         '--port-a', "$PortA",
         '--port-b', "$PortB",
         '--max-per-kind', "$EvidenceMaxPerKind",
