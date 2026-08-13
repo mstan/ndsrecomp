@@ -9,8 +9,9 @@
 # Run from the GAME worktree:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\prepare_two_instance_saves.ps1
 #
-# Existing mkds_instance0.sav / mkds_instance1.sav files are left untouched
-# unless -Force is passed.
+# Existing mkds_instance0.sav / mkds_instance1.sav and matching
+# mkds_instance0.firmware.bin / mkds_instance1.firmware.bin files are left
+# untouched unless -Force is passed.
 #
 [CmdletBinding()]
 param(
@@ -18,6 +19,7 @@ param(
     [string] $BuildDir = 'ndsrecomp\runner\build-mkds-pcap',
     [string] $Rom = 'Mario Kart DS.nds',
     [string] $SavePrefix = 'mkds_instance',
+    [string] $FirmwarePrefix = 'mkds_instance',
     [int] $PortA = 19866,
     [int] $PortB = 19867,
     [ValidateSet('slirp', 'pcap')]
@@ -46,16 +48,18 @@ if ($PortA -eq $PortB) { throw "-PortA and -PortB must be different" }
 
 $save0 = Join-Path $GameRoot "${SavePrefix}0.sav"
 $save1 = Join-Path $GameRoot "${SavePrefix}1.sav"
-foreach ($save in @($save0, $save1)) {
-    if ((Test-Path -LiteralPath $save) -and -not $Force) {
-        throw "save already exists: $save; pass -Force to replace the two M7 instance saves"
+$firmware0 = Join-Path $GameRoot "${FirmwarePrefix}0.firmware.bin"
+$firmware1 = Join-Path $GameRoot "${FirmwarePrefix}1.firmware.bin"
+foreach ($path in @($save0, $save1, $firmware0, $firmware1)) {
+    if ((Test-Path -LiteralPath $path) -and -not $Force) {
+        throw "prepared file already exists: $path; pass -Force to replace the two M7 instance saves and firmware images"
     }
 }
 
 if ($Force) {
-    foreach ($save in @($save0, $save1)) {
-        if (Test-Path -LiteralPath $save) {
-            Remove-Item -LiteralPath $save -Force
+    foreach ($path in @($save0, $save1, $firmware0, $firmware1)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force
         }
     }
 }
@@ -74,11 +78,55 @@ function Stop-OwnedRunner {
     }
 }
 
+function Invoke-DebugCommand {
+    param([int] $Port, [hashtable] $Command, [int] $TimeoutMilliseconds = 30000)
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $client.ReceiveTimeout = $TimeoutMilliseconds
+    $client.SendTimeout = $TimeoutMilliseconds
+    try {
+        $client.Connect('127.0.0.1', $Port)
+        $stream = $client.GetStream()
+        $writer = New-Object System.IO.StreamWriter($stream)
+        $writer.NewLine = "`n"
+        $writer.AutoFlush = $true
+        $reader = New-Object System.IO.StreamReader($stream)
+        $writer.WriteLine(($Command | ConvertTo-Json -Compress))
+        $line = $reader.ReadLine()
+        if (-not $line) {
+            throw "debug server closed the connection"
+        }
+        $response = $line | ConvertFrom-Json
+        if ($response.error) {
+            throw "$($Command.cmd): $($response.error)"
+        }
+        return $response
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Convert-HexToBytes {
+    param([string] $Hex)
+
+    if (($Hex.Length % 2) -ne 0) {
+        throw "firmware_dump returned an odd-length hex string"
+    }
+    $bytes = New-Object byte[] ($Hex.Length / 2)
+    for ($i = 0; $i -lt $bytes.Length; ++$i) {
+        $bytes[$i] = [Convert]::ToByte($Hex.Substring($i * 2, 2), 16)
+    }
+    return $bytes
+}
+
 function Invoke-Prep {
     param([string] $Label, [int] $Port, [int] $InstanceIndex)
 
     $saveName = "${SavePrefix}${InstanceIndex}.sav"
+    $firmwareName = "${FirmwarePrefix}${InstanceIndex}.firmware.bin"
     $savePath = Join-Path $GameRoot $saveName
+    $firmwarePath = Join-Path $GameRoot $firmwareName
     $saveParent = Split-Path -Parent $savePath
     if ($saveParent) {
         New-Item -ItemType Directory -Force -Path $saveParent | Out-Null
@@ -117,13 +165,26 @@ function Invoke-Prep {
         if (-not (Test-Path -LiteralPath $savePath)) {
             throw "scenario completed but save was not created: $savePath"
         }
+        $firmwareDump = Invoke-DebugCommand -Port $Port -Command @{ cmd = 'firmware_dump' }
+        if ($firmwareDump.size -ne 262144) {
+            throw "firmware_dump returned $($firmwareDump.size) bytes, expected 262144"
+        }
+        [System.IO.File]::WriteAllBytes(
+            $firmwarePath,
+            [byte[]](Convert-HexToBytes -Hex ([string] $firmwareDump.hex))
+        )
         $saveInfo = Get-Item -LiteralPath $savePath
         if ($saveInfo.Length -le 0) {
             throw "scenario completed but save is empty: $savePath"
         }
+        $firmwareInfo = Get-Item -LiteralPath $firmwarePath
+        if ($firmwareInfo.Length -ne 262144) {
+            throw "unexpected firmware image size for ${firmwarePath}: $($firmwareInfo.Length)"
+        }
 
-        Write-Host ("prepared {0}: {1} ({2} bytes), screenshots {3}" -f `
-            $Label, $saveInfo.FullName, $saveInfo.Length, $shotsDir) -ForegroundColor Cyan
+        Write-Host ("prepared {0}: {1} ({2} bytes), {3} ({4} bytes), screenshots {5}" -f `
+            $Label, $saveInfo.FullName, $saveInfo.Length,
+            $firmwareInfo.FullName, $firmwareInfo.Length, $shotsDir) -ForegroundColor Cyan
     }
     finally {
         Stop-OwnedRunner $runner
@@ -135,13 +196,21 @@ Invoke-Prep -Label 'B' -Port $PortB -InstanceIndex 1
 
 $hash0 = (Get-FileHash -LiteralPath $save0 -Algorithm SHA1).Hash
 $hash1 = (Get-FileHash -LiteralPath $save1 -Algorithm SHA1).Hash
+$firmwareHash0 = (Get-FileHash -LiteralPath $firmware0 -Algorithm SHA1).Hash
+$firmwareHash1 = (Get-FileHash -LiteralPath $firmware1 -Algorithm SHA1).Hash
 if ($hash0 -eq $hash1) {
     throw "prepared instance saves are byte-identical; WFC identities did not diverge"
 }
+if ($firmwareHash0 -eq $firmwareHash1) {
+    throw "prepared firmware images are byte-identical; per-instance identities did not diverge"
+}
 
 Write-Host ''
-Write-Host 'Prepared two persistent saves for tools/run_two_instances.ps1:' -ForegroundColor Cyan
+Write-Host 'Prepared two persistent save/firmware pairs for tools/run_two_instances.ps1:' -ForegroundColor Cyan
 Write-Host "  $save0"
 Write-Host "  $save1"
+Write-Host "  $firmware0"
+Write-Host "  $firmware1"
 Write-Host ("  hashes: {0} / {1}" -f $hash0.Substring(0, 12), $hash1.Substring(0, 12))
+Write-Host ("  firmware hashes: {0} / {1}" -f $firmwareHash0.Substring(0, 12), $firmwareHash1.Substring(0, 12))
 Write-Host "Screenshots: $ShotsRoot"

@@ -278,6 +278,7 @@ void     nds_tick_display(unsigned long long system_cycles);
 void     nds_tick_rtc(unsigned long long system_cycles);
 void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
+bool     nds_io_replace_firmware(const uint8_t* p, uint32_t n);
 // Read-only view over the already-loaded firmware image (empty until
 // nds_io_load_firmware runs). Consumed by the vendored melonDS Wifi device
 // model's Firmware/FirmwareHeader shim (runner/vendor/melonds/SPI_Firmware.h)

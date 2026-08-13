@@ -1983,6 +1983,14 @@ void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     nds_wifi_load_firmware(p, n);
 }
 
+bool nds_io_replace_firmware(const uint8_t* p, uint32_t n) {
+    if (!p || n != 262144u)
+        return false;
+    g_fw.assign(p, p + n);
+    nds_wifi_rebind_firmware(g_fw.data(), static_cast<uint32_t>(g_fw.size()));
+    return true;
+}
+
 const uint8_t* nds_firmware_bytes() { return g_fw.empty() ? nullptr : g_fw.data(); }
 uint32_t       nds_firmware_size()  { return static_cast<uint32_t>(g_fw.size()); }
 

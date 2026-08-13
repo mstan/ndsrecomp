@@ -64,6 +64,28 @@ void append_hex(std::string& s, const uint8_t* data, size_t len) {
     }
 }
 
+int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+bool parse_hex_bytes(const std::string& hex, std::vector<uint8_t>& out) {
+    if ((hex.size() & 1u) != 0u)
+        return false;
+    out.clear();
+    out.reserve(hex.size() / 2u);
+    for (size_t i = 0; i < hex.size(); i += 2u) {
+        const int hi = hex_value(hex[i]);
+        const int lo = hex_value(hex[i + 1u]);
+        if (hi < 0 || lo < 0)
+            return false;
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
 bool json_find(const std::string& s, const std::string& key, size_t& pos) {
     std::string pat = "\"" + key + "\"";
     size_t p = s.find(pat);
@@ -802,6 +824,18 @@ std::string handle(const std::string& line) {
         if (data && size) append_hex(hex, data, size);
         return "{\"size\":" + std::to_string(size) +
                ",\"hex\":\"" + hex + "\"}";
+    }
+    if (cmd == "firmware_replace") {
+        // Local-owner operation for M7 prepared-save launches: boot the
+        // firmware menu from the pristine dump, then install the guest-written
+        // WFC identity bytes before the game reads firmware over SPI.
+        std::vector<uint8_t> data;
+        if (!parse_hex_bytes(json_str(line, "hex"), data))
+            return "{\"error\":\"invalid firmware hex\"}";
+        if (!nds_io_replace_firmware(data.data(),
+                                     static_cast<uint32_t>(data.size())))
+            return "{\"error\":\"firmware image must be exactly 262144 bytes\"}";
+        return "{\"ok\":true,\"size\":" + std::to_string(data.size()) + "}";
     }
     if (cmd == "io_state") return io_state_json();
     if (cmd == "frontend_stats") {

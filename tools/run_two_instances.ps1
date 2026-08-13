@@ -9,13 +9,14 @@
 # The two instances MUST have distinct console MACs, because Nintendo WFC
 # identity and DS friend codes derive from the MAC: two clients presenting the
 # same one appear to the service as a single console in two places and will not
-# match with each other. Instance A therefore keeps the firmware dump's real MAC
-# untouched (LLE-faithful), and instance B runs with --instance-index 1, which
-# perturbs the MAC in the in-memory firmware image and recomputes its checksum,
-# so the guest still reads it over its own SPI path. No HLE, no ROM patch.
+# match with each other. prepare_two_instance_saves.ps1 persists a separate
+# firmware image for each instance after the guest creates its WFC profile; this
+# launcher boots the firmware menu from the pristine dump, then installs that
+# prepared firmware into the in-memory SPI flash before MKDS reads its WFC
+# identity. No HLE, no ROM patch.
 #
-#   A: --instance-index 0 (default) -> 00:09:BF:10:C3:87   (your real dump)
-#   B: --instance-index 1           -> 00:09:BF:11:07:97
+#   A: --instance-index 0 + prepared firmware profile
+#   B: --instance-index 1 + prepared firmware profile
 #
 # Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON:
 #
@@ -51,6 +52,7 @@ param(
     [string] $BuildDir   = 'ndsrecomp\runner\build-mkds-pcap',
     [string] $Rom        = 'Mario Kart DS.nds',
     [string] $SavePrefix = 'mkds_instance',
+    [string] $FirmwarePrefix = 'mkds_instance',
     [int]    $PortA      = 19860,
     [int]    $PortB      = 19861,
     [ValidateSet('slirp', 'pcap')]
@@ -196,6 +198,17 @@ function Invoke-DebugCommand {
     }
 }
 
+function Convert-FileToHex {
+    param([string] $Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $builder = [System.Text.StringBuilder]::new($bytes.Length * 2)
+    foreach ($byte in $bytes) {
+        [void] $builder.Append($byte.ToString('x2'))
+    }
+    return $builder.ToString()
+}
+
 function Get-LogTail {
     param([string] $Path, [int] $Lines = 80)
 
@@ -212,14 +225,24 @@ function Assert-InstanceSaves {
     }
 
     $saveHashes = @()
+    $firmwareHashes = @()
     foreach ($index in 0, 1) {
         $saveName = "${SavePrefix}${index}.sav"
+        $firmwareName = "${FirmwarePrefix}${index}.firmware.bin"
         $savePath = Join-Path $GameRoot $saveName
+        $firmwarePath = Join-Path $GameRoot $firmwareName
         if (-not (Test-Path -LiteralPath $savePath)) {
             throw (
                 "missing prepared save: $savePath; run " +
                 "ndsrecomp\tools\prepare_two_instance_saves.ps1 first, or " +
                 "pass -SkipSavePreflight for a deliberate manual setup run"
+            )
+        }
+        if (-not (Test-Path -LiteralPath $firmwarePath)) {
+            throw (
+                "missing prepared firmware image: $firmwarePath; run " +
+                "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to " +
+                "create matching save/firmware pairs"
             )
         }
         $saveInfo = Get-Item -LiteralPath $savePath
@@ -229,7 +252,16 @@ function Assert-InstanceSaves {
                 "bytes, expected 262144 from prepare_two_instance_saves.ps1"
             )
         }
+        $firmwareInfo = Get-Item -LiteralPath $firmwarePath
+        if ($firmwareInfo.Length -ne 262144) {
+            throw (
+                "unexpected firmware size for ${firmwarePath}: " +
+                "$($firmwareInfo.Length) bytes, expected 262144 from " +
+                "prepare_two_instance_saves.ps1"
+            )
+        }
         $saveHashes += (Get-FileHash -LiteralPath $savePath -Algorithm SHA1).Hash
+        $firmwareHashes += (Get-FileHash -LiteralPath $firmwarePath -Algorithm SHA1).Hash
     }
     if ($saveHashes[0] -eq $saveHashes[1]) {
         throw (
@@ -238,8 +270,15 @@ function Assert-InstanceSaves {
             "separate WFC identities before the Friend Roster attempt"
         )
     }
+    if ($firmwareHashes[0] -eq $firmwareHashes[1]) {
+        throw (
+            "per-instance firmware images are byte-identical; run " +
+            "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to create " +
+            "separate WFC identities before the Friend Roster attempt"
+        )
+    }
 
-    Write-Host ("save preflight OK: {0}0.sav and {0}1.sav" -f $SavePrefix) `
+    Write-Host ("save/firmware preflight OK: {0}0/1.sav and {1}0/1.firmware.bin" -f $SavePrefix, $FirmwarePrefix) `
         -ForegroundColor Green
 }
 
@@ -495,6 +534,51 @@ function Wait-DebugPorts {
     return $false
 }
 
+function Wait-FirmwareMenuReady {
+    param([int] $Port, [switch] $Headless)
+
+    if ($Headless) {
+        $hit = Invoke-DebugCommand -Port $Port -Command @{
+            cmd = 'run_to_event'
+            event = 'vblank9'
+            count = 120
+        } -TimeoutMilliseconds 120000
+        if (-not $hit.reached -or $hit.terminal) {
+            throw "headless instance on port $Port did not reach vblank9=120: $($hit | ConvertTo-Json -Compress)"
+        }
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($EvidenceStartupTimeoutSeconds)
+    do {
+        $counts = Invoke-DebugCommand -Port $Port -Command @{ cmd = 'event_counts' }
+        if ($counts.vblank9 -ge 120) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    throw "interactive instance on port $Port did not reach firmware-menu vblank9>=120"
+}
+
+function Install-PreparedFirmware {
+    param([string] $Label, [int] $Port, [int] $InstanceIndex, [switch] $Headless)
+
+    $firmwareName = "${FirmwarePrefix}${InstanceIndex}.firmware.bin"
+    $firmwarePath = Join-Path $GameRoot $firmwareName
+    Wait-FirmwareMenuReady -Port $Port -Headless:$Headless
+    $hex = Convert-FileToHex -Path $firmwarePath
+    $result = Invoke-DebugCommand -Port $Port -Command @{
+        cmd = 'firmware_replace'
+        hex = $hex
+    } -TimeoutMilliseconds 120000
+    if (-not $result.ok -or $result.size -ne 262144) {
+        throw "firmware_replace failed for ${Label}: $($result | ConvertTo-Json -Compress)"
+    }
+    Write-Host ("installed prepared firmware for {0}: {1}" -f $Label, $firmwareName) `
+        -ForegroundColor Green
+}
+
 function Start-EvidenceCollector {
     param([int] $PortA, [int] $PortB)
 
@@ -552,6 +636,11 @@ function Start-EvidenceCollector {
 
 $a = Start-Instance -Label 'A' -Port $PortA -InstanceIndex 0
 $b = Start-Instance -Label 'B' -Port $PortB -InstanceIndex 1 -Headless:$DriveB
+if (-not (Wait-DebugPorts -PortA $PortA -PortB $PortB)) {
+    throw "debug ports $PortA and $PortB did not both accept connections within $EvidenceStartupTimeoutSeconds seconds"
+}
+Install-PreparedFirmware -Label 'A' -Port $PortA -InstanceIndex 0
+Install-PreparedFirmware -Label 'B' -Port $PortB -InstanceIndex 1 -Headless:$DriveB
 $collector = Start-EvidenceCollector -PortA $PortA -PortB $PortB
 
 Write-Host ''

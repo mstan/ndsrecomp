@@ -1378,6 +1378,11 @@ void nds_wifi_load_firmware(const uint8_t* data, uint32_t size) {
     if (wifi) wifi->Reset();
 }
 
+void nds_wifi_rebind_firmware(const uint8_t* data, uint32_t size) {
+    if (!g_bridge) return;
+    g_bridge->nds.SPI.SetFirmwareSource(data, size);
+}
+
 void nds_wifi_set_power_control(bool enabled, uint64_t timestamp) {
     melonDS::Wifi* wifi = nds_wifi3d_attach();
     if (!wifi || !g_bridge) return;

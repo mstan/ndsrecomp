@@ -27,6 +27,7 @@
 
 void nds_wifi_reset();
 void nds_wifi_load_firmware(const uint8_t* data, uint32_t size);
+void nds_wifi_rebind_firmware(const uint8_t* data, uint32_t size);
 void nds_wifi_set_power_control(bool enabled, uint64_t timestamp);
 uint64_t nds_wifi_next_event_time();
 void nds_wifi_run_events(uint64_t timestamp);
