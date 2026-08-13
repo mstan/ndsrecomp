@@ -35,6 +35,7 @@ param(
     [string] $GameRoot   = 'F:\Projects\ndsrecomp\mariokartdsrecomp',
     [string] $BuildDir   = '..\ndsrecomp\runner\build-mkds-pcap',
     [string] $Rom        = 'Mario Kart DS.nds',
+    [string] $SavePrefix = 'mkds_instance',
     [int]    $PortA      = 19860,
     [int]    $PortB      = 19861,
     [ValidateSet('slirp', 'pcap')]
@@ -47,7 +48,9 @@ param(
     [double] $EvidenceStartupTimeoutSeconds = 30,
     [double] $EvidenceInterval = 5,
     [int] $EvidenceMaxPerKind = 4096,
-    [string] $EvidenceOutDir = ''
+    [string] $EvidenceOutDir = '',
+    [switch] $SkipSavePreflight,
+    [switch] $PreflightOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +64,42 @@ if ($EvidenceStartupTimeoutSeconds -lt 0) { throw "-EvidenceStartupTimeoutSecond
 if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
 if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
     throw "-EvidenceMaxPerKind must be in 1..4096"
+}
+
+function Assert-InstanceSaves {
+    if ($SkipSavePreflight) {
+        Write-Warning "skipping per-instance save preflight"
+        return
+    }
+
+    foreach ($index in 0, 1) {
+        $saveName = "${SavePrefix}${index}.sav"
+        $savePath = Join-Path $GameRoot $saveName
+        if (-not (Test-Path -LiteralPath $savePath)) {
+            throw (
+                "missing prepared save: $savePath; run " +
+                "ndsrecomp\tools\prepare_two_instance_saves.ps1 first, or " +
+                "pass -SkipSavePreflight for a deliberate manual setup run"
+            )
+        }
+        $saveInfo = Get-Item -LiteralPath $savePath
+        if ($saveInfo.Length -ne 262144) {
+            throw (
+                "unexpected save size for ${savePath}: $($saveInfo.Length) " +
+                "bytes, expected 262144 from prepare_two_instance_saves.ps1"
+            )
+        }
+    }
+
+    Write-Host ("save preflight OK: {0}0.sav and {0}1.sav" -f $SavePrefix) `
+        -ForegroundColor Green
+}
+
+Assert-InstanceSaves
+
+if ($PreflightOnly) {
+    Write-Host "preflight complete; no instances launched" -ForegroundColor Cyan
+    exit 0
 }
 
 # Never kill by process name -- other sessions and agents may own runners.
@@ -96,7 +135,7 @@ function Start-Instance {
     # driver documents for scripted runs), but it is WRONG here: registering
     # each instance as the other's friend has to persist across the session,
     # and --no-save would discard it.
-    $save = "mkds_instance$InstanceIndex.sav"
+    $save = "${SavePrefix}${InstanceIndex}.sav"
     $argv = @('ndsrecomp\bios', '--config', 'game.toml', '--rom', "`"$Rom`"",
               '--save-path', $save,
               '--network', 'on', '--network-backend', $NetworkBackend,
