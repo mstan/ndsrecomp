@@ -253,6 +253,54 @@ def correlate_instances(instances: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
+    instances = report.get("instances", [])
+    correlation = report.get("correlation", {})
+    backend_errors = sum(
+        instance.get("kind_counts", {}).get("backend_error", 0)
+        for instance in instances
+    )
+    bucket_totals: Counter[str] = Counter()
+    for instance in instances:
+        bucket_totals.update(instance["udp_summary"]["counts"])
+
+    direct_client_udp = correlation.get("direct_client_udp_count", 0)
+    shared_endpoints = correlation.get("shared_candidate_peer_endpoint_count", 0)
+    inferred_ips = correlation.get("inferred_client_ips", {})
+    missing_ips = [
+        label for label in ("A", "B")
+        if not inferred_ips.get(label)
+    ]
+
+    if backend_errors:
+        status = "backend_errors_observed"
+    elif missing_ips:
+        status = "missing_client_ip"
+    elif bucket_totals["natneg_udp"] == 0:
+        status = "no_natneg_udp"
+    elif bucket_totals["candidate_peer_udp"] == 0:
+        status = "natneg_without_peer_udp"
+    elif direct_client_udp == 0:
+        status = "candidate_peer_udp_without_direct_client_udp"
+    else:
+        status = "direct_client_udp_observed"
+
+    return {
+        "status": status,
+        "backend_error_count": backend_errors,
+        "missing_client_ips": missing_ips,
+        "natneg_udp_count": bucket_totals["natneg_udp"],
+        "wfc_service_udp_count": bucket_totals["wfc_service_udp"],
+        "candidate_peer_udp_count": bucket_totals["candidate_peer_udp"],
+        "direct_client_udp_count": direct_client_udp,
+        "shared_candidate_peer_endpoint_count": shared_endpoints,
+        "notes": [
+            "This is a transport evidence verdict only.",
+            "Race entry and lobby return still require framebuffer or operator confirmation.",
+        ],
+    }
+
+
 def collect_instance(label: str, port: int, out_dir: Path,
                      max_per_kind: int, screenshot_prefix: str = ""
                      ) -> dict[str, Any]:
@@ -340,6 +388,19 @@ def print_correlation(correlation: dict[str, Any]) -> None:
         )
 
 
+def print_verdict(verdict: dict[str, Any]) -> None:
+    if not verdict:
+        return
+    print(
+        "m7 transport verdict: "
+        f"{verdict.get('status')} "
+        f"natneg={verdict.get('natneg_udp_count', 0)} "
+        f"candidate_peer={verdict.get('candidate_peer_udp_count', 0)} "
+        f"direct_client={verdict.get('direct_client_udp_count', 0)} "
+        f"backend_error={verdict.get('backend_error_count', 0)}"
+    )
+
+
 def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
                    created_at: str, screenshot_prefix: str = ""
                    ) -> dict[str, Any]:
@@ -352,6 +413,7 @@ def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
         ],
     }
     report["correlation"] = correlate_instances(report["instances"])
+    report["m7_transport_verdict"] = m7_transport_verdict(report)
     return report
 
 
@@ -364,6 +426,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
         "created_at": report["created_at"],
         "path": str(snapshot_path),
         "correlation": report.get("correlation", {}),
+        "m7_transport_verdict": report.get("m7_transport_verdict", {}),
         "instances": [
             {
                 "label": instance["label"],
@@ -392,6 +455,7 @@ def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
     for instance in report["instances"]:
         print_summary(instance)
     print_correlation(report.get("correlation", {}))
+    print_verdict(report.get("m7_transport_verdict", {}))
     print(f"wrote {report_path}")
     return 0
 
@@ -421,6 +485,7 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         for instance in report["instances"]:
             print_summary(instance)
         print_correlation(report.get("correlation", {}))
+        print_verdict(report.get("m7_transport_verdict", {}))
 
         snapshot_index += 1
         remaining = args.watch_seconds - (time.monotonic() - started)
@@ -433,6 +498,9 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         "watch_seconds": args.watch_seconds,
         "interval": args.interval,
         "ports": {"A": args.port_a, "B": args.port_b},
+        "latest_m7_transport_verdict": (
+            index[-1]["m7_transport_verdict"] if index else {}
+        ),
         "snapshots": index,
     }
     report_path = out_dir / "evidence.json"
