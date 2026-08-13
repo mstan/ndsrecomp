@@ -244,9 +244,9 @@ void* DynamicLibrary_LoadFunction(DynamicLibrary* lib, const char* name) {
 //         callback below, fired from inside PollHostSockets or from a
 //         DNS-synthesis SendPacket call, both worker-thread-only),
 //         consumer = emulation thread (Net_RecvPacket, guest RX tick).
-//     Bounded at kWifiNetQueueCapacity entries each; a full queue drops
-//     the new packet and records it, never blocks and never grows
-//     unbounded under a host flood.
+//     Bounded at kWifiNetTxQueueCapacity/kWifiNetRxQueueCapacity entries;
+//     a full queue drops the new packet and records it, never blocks and
+//     never grows unbounded under a host flood.
 //   * A drop on the tx_queue is detected on the emulation thread already
 //     (that IS the producer), so it is net_ring_push'd right there. A
 //     drop on the rx_queue is detected on the WORKER thread (the
@@ -304,14 +304,14 @@ NdsWifiNetworkConfig g_network_config{};
 // SlirpCbSendPacket() -- no packet on either queue can ever exceed this,
 // so the worst-case memory bound below is exact, not a guess.
 constexpr size_t kWifiNetMaxPacketBytes = 2048;
-// Chosen generously relative to real pcap bursts. Slirp tends to emit a small
-// guest-specific stream, but pcap sees the live LAN and can enqueue many
-// accepted broadcasts or peer frames before the guest's next Wifi::CheckRX(0)
-// tick drains them. Keep the worst-case bound (2 queues * capacity *
-// kWifiNetMaxPacketBytes = 4 MiB) small and fixed regardless of host traffic
-// volume -- a host flood still drops packets past this point instead of
-// growing memory.
-constexpr size_t kWifiNetQueueCapacity = 1024;
+// Slirp tends to emit a small guest-specific stream, but pcap sees the live LAN
+// and can enqueue many accepted broadcasts or peer frames before the guest's
+// next Wifi::CheckRX(0) tick drains them. Keep the worst-case bound
+// ((tx + rx) * kWifiNetMaxPacketBytes = 10 MiB) fixed regardless of host
+// traffic volume -- a host flood still drops packets past this point instead
+// of growing memory.
+constexpr size_t kWifiNetTxQueueCapacity = 1024;
+constexpr size_t kWifiNetRxQueueCapacity = 4096;
 constexpr size_t kWifiNetPcapMaxRxPacketBytes = 1518;
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)
@@ -644,8 +644,8 @@ struct WifiBridgeState {
 
     NdsWifiNetworkState network_state;
 
-    BoundedPacketQueue tx_queue{kWifiNetQueueCapacity};  // guest -> host
-    BoundedPacketQueue rx_queue{kWifiNetQueueCapacity};  // host -> guest
+    BoundedPacketQueue tx_queue{kWifiNetTxQueueCapacity};  // guest -> host
+    BoundedPacketQueue rx_queue{kWifiNetRxQueueCapacity};  // host -> guest
 
     std::mutex guest_mac_mutex;
     std::array<uint8_t, 6> guest_mac{};
