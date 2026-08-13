@@ -50,6 +50,7 @@ param(
     [int] $EvidenceMaxPerKind = 4096,
     [string] $EvidenceOutDir = '',
     [switch] $SkipSavePreflight,
+    [switch] $SkipPortPreflight,
     [switch] $PreflightOnly
 )
 
@@ -64,6 +65,35 @@ if ($EvidenceStartupTimeoutSeconds -lt 0) { throw "-EvidenceStartupTimeoutSecond
 if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
 if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
     throw "-EvidenceMaxPerKind must be in 1..4096"
+}
+
+function Resolve-GamePath {
+    param([string] $Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return $Path
+    }
+    return (Join-Path $GameRoot $Path)
+}
+
+function Test-DebugPort {
+    param([int] $Port)
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $async = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(500, $false)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
 }
 
 function Assert-InstanceSaves {
@@ -95,7 +125,44 @@ function Assert-InstanceSaves {
         -ForegroundColor Green
 }
 
+function Assert-DebugPortsFree {
+    if ($SkipPortPreflight) {
+        Write-Warning "skipping debug-port preflight"
+        return
+    }
+
+    $busy = @()
+    foreach ($port in @($PortA, $PortB)) {
+        if (Test-DebugPort -Port $port) {
+            $busy += $port
+        }
+    }
+    if ($busy.Count -gt 0) {
+        throw (
+            "debug port(s) already accept connections: $($busy -join ', '); " +
+            "choose different -PortA/-PortB values or pass -SkipPortPreflight " +
+            "for an intentional shared-machine run"
+        )
+    }
+
+    Write-Host ("debug-port preflight OK: {0}, {1}" -f $PortA, $PortB) `
+        -ForegroundColor Green
+}
+
+function Assert-EvidenceCollectorPreflight {
+    if ($EvidenceWatchSeconds -le 0) { return }
+
+    $pythonPath = Resolve-GamePath $PythonExe
+    $collector = Join-Path $GameRoot 'ndsrecomp\tools\collect_two_instance_evidence.py'
+    if (-not (Test-Path -LiteralPath $pythonPath)) { throw "python not found: $pythonPath" }
+    if (-not (Test-Path -LiteralPath $collector)) { throw "collector not found: $collector" }
+
+    Write-Host "evidence collector preflight OK" -ForegroundColor Green
+}
+
 Assert-InstanceSaves
+Assert-DebugPortsFree
+Assert-EvidenceCollectorPreflight
 
 if ($PreflightOnly) {
     Write-Host "preflight complete; no instances launched" -ForegroundColor Cyan
@@ -153,26 +220,6 @@ function Start-Instance {
     return $p
 }
 
-function Test-DebugPort {
-    param([int] $Port)
-
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $async = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne(500, $false)) {
-            return $false
-        }
-        $client.EndConnect($async)
-        return $true
-    }
-    catch {
-        return $false
-    }
-    finally {
-        $client.Close()
-    }
-}
-
 function Wait-DebugPorts {
     param([int] $PortA, [int] $PortB)
 
@@ -196,11 +243,7 @@ function Start-EvidenceCollector {
 
     if ($EvidenceWatchSeconds -le 0) { return $null }
 
-    $pythonPath = if ([System.IO.Path]::IsPathRooted($PythonExe)) {
-        $PythonExe
-    } else {
-        Join-Path $GameRoot $PythonExe
-    }
+    $pythonPath = Resolve-GamePath $PythonExe
     $collector = Join-Path $GameRoot 'ndsrecomp\tools\collect_two_instance_evidence.py'
     if (-not (Test-Path -LiteralPath $pythonPath)) { throw "python not found: $pythonPath" }
     if (-not (Test-Path -LiteralPath $collector)) { throw "collector not found: $collector" }
