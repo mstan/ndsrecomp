@@ -133,8 +133,15 @@ function Invoke-Prep {
 Invoke-Prep -Label 'A' -Port $PortA -InstanceIndex 0
 Invoke-Prep -Label 'B' -Port $PortB -InstanceIndex 1
 
+$hash0 = (Get-FileHash -LiteralPath $save0 -Algorithm SHA1).Hash
+$hash1 = (Get-FileHash -LiteralPath $save1 -Algorithm SHA1).Hash
+if ($hash0 -eq $hash1) {
+    throw "prepared instance saves are byte-identical; WFC identities did not diverge"
+}
+
 Write-Host ''
 Write-Host 'Prepared two persistent saves for tools/run_two_instances.ps1:' -ForegroundColor Cyan
 Write-Host "  $save0"
 Write-Host "  $save1"
+Write-Host ("  hashes: {0} / {1}" -f $hash0.Substring(0, 12), $hash1.Substring(0, 12))
 Write-Host "Screenshots: $ShotsRoot"

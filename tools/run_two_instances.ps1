@@ -170,6 +170,7 @@ function Assert-InstanceSaves {
         return
     }
 
+    $saveHashes = @()
     foreach ($index in 0, 1) {
         $saveName = "${SavePrefix}${index}.sav"
         $savePath = Join-Path $GameRoot $saveName
@@ -187,6 +188,14 @@ function Assert-InstanceSaves {
                 "bytes, expected 262144 from prepare_two_instance_saves.ps1"
             )
         }
+        $saveHashes += (Get-FileHash -LiteralPath $savePath -Algorithm SHA1).Hash
+    }
+    if ($saveHashes[0] -eq $saveHashes[1]) {
+        throw (
+            "per-instance saves are byte-identical; run " +
+            "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to create " +
+            "separate WFC identities before the Friend Roster attempt"
+        )
     }
 
     Write-Host ("save preflight OK: {0}0.sav and {0}1.sav" -f $SavePrefix) `
