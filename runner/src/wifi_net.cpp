@@ -307,11 +307,11 @@ constexpr size_t kWifiNetMaxPacketBytes = 2048;
 // Slirp tends to emit a small guest-specific stream, but pcap sees the live LAN
 // and can enqueue many accepted broadcasts or peer frames before the guest's
 // next Wifi::CheckRX(0) tick drains them. Keep the worst-case bound
-// ((tx + rx) * kWifiNetMaxPacketBytes = 10 MiB) fixed regardless of host
+// ((tx + rx) * kWifiNetMaxPacketBytes = 18 MiB) fixed regardless of host
 // traffic volume -- a host flood still drops packets past this point instead
 // of growing memory.
 constexpr size_t kWifiNetTxQueueCapacity = 1024;
-constexpr size_t kWifiNetRxQueueCapacity = 4096;
+constexpr size_t kWifiNetRxQueueCapacity = 8192;
 constexpr size_t kWifiNetPcapMaxRxPacketBytes = 1518;
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)
