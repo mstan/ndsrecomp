@@ -5,6 +5,15 @@
 # source pair through the same prepared Wiimmfi two-login preflight used by the
 # owner launcher before copying anything.
 #
+# Promote the known-good scratch profiles into the default owner-run paths:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\promote_prepared_profiles.ps1 -Force
+#
+# The tool refuses to replace target saves while live nds_runner processes use
+# those save paths. Close old owner windows first, or launch run_two_instances
+# directly with -SavePrefix scratch\m7-fwprobe-instance and
+# -FirmwarePrefix scratch\m7-fwprobe-instance.
+#
 [CmdletBinding()]
 param(
     [string] $GameRoot = 'F:\Projects\ndsrecomp\mariokartdsrecomp',

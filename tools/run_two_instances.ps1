@@ -22,10 +22,20 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\build_mkds_pcap_runner.ps1
 #
-# To initialize the per-instance saves before the owner-driven Friend Roster
-# run, use ndsrecomp\tools\prepare_two_instance_saves.ps1.
+# To initialize the default per-instance profiles before the owner-driven
+# Friend Roster run, prefer the guarded promotion path. It validates the
+# source pair through the prepared Wiimmfi two-login preflight before copying
+# into mkds_instance0/1.sav and mkds_instance0/1.firmware.bin:
 #
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\promote_prepared_profiles.ps1 -Force
+#
+# To regenerate fresh profiles instead, after closing any old owner windows
+# using mkds_instance0/1.sav, use ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force.
+#
+# You can also bypass default promotion and launch directly from the proven
+# scratch profiles:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -SavePrefix scratch\m7-fwprobe-instance -FirmwarePrefix scratch\m7-fwprobe-instance
 #
 # Rolling ring/framebuffer evidence starts automatically while driving the
 # Friend Roster attempt:
@@ -234,15 +244,23 @@ function Assert-InstanceSaves {
         if (-not (Test-Path -LiteralPath $savePath)) {
             throw (
                 "missing prepared save: $savePath; run " +
-                "ndsrecomp\tools\prepare_two_instance_saves.ps1 first, or " +
-                "pass -SkipSavePreflight for a deliberate manual setup run"
+                "ndsrecomp\tools\promote_prepared_profiles.ps1 -Force after " +
+                "closing old owner windows, regenerate with " +
+                "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force, or " +
+                "launch with -SavePrefix scratch\m7-fwprobe-instance " +
+                "-FirmwarePrefix scratch\m7-fwprobe-instance for the " +
+                "known-good scratch profiles"
             )
         }
         if (-not (Test-Path -LiteralPath $firmwarePath)) {
             throw (
                 "missing prepared firmware image: $firmwarePath; run " +
-                "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to " +
-                "create matching save/firmware pairs"
+                "ndsrecomp\tools\promote_prepared_profiles.ps1 -Force after " +
+                "closing old owner windows, regenerate with " +
+                "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force, or " +
+                "launch with -SavePrefix scratch\m7-fwprobe-instance " +
+                "-FirmwarePrefix scratch\m7-fwprobe-instance for the " +
+                "known-good scratch profiles"
             )
         }
         $saveInfo = Get-Item -LiteralPath $savePath
@@ -266,6 +284,7 @@ function Assert-InstanceSaves {
     if ($saveHashes[0] -eq $saveHashes[1]) {
         throw (
             "per-instance saves are byte-identical; run " +
+            "ndsrecomp\tools\promote_prepared_profiles.ps1 -Force or " +
             "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to create " +
             "separate WFC identities before the Friend Roster attempt"
         )
@@ -273,6 +292,7 @@ function Assert-InstanceSaves {
     if ($firmwareHashes[0] -eq $firmwareHashes[1]) {
         throw (
             "per-instance firmware images are byte-identical; run " +
+            "ndsrecomp\tools\promote_prepared_profiles.ps1 -Force or " +
             "ndsrecomp\tools\prepare_two_instance_saves.ps1 -Force to create " +
             "separate WFC identities before the Friend Roster attempt"
         )
