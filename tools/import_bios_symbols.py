@@ -79,6 +79,10 @@ EXTRA_ENTRIES = {
         (0x00001CB6, "lpad_00001CB6",    "thumb", "runtime_confirmed"),
         (0x00001D1A, "irqh_00001D1A",    "thumb", "indirect_handler"),
         (0x0000201A, "irqh_0000201A",    "thumb", "indirect_handler"),
+        # MPH WFC setup writes configuration into firmware, then reboots
+        # through the BIOS path and returns through this computed Thumb
+        # continuation (LR 0x0380F8D7).
+        (0x00002CB2, "lpad_00002CB2",    "thumb", "runtime_confirmed"),
         (0x00002DD4, "irqh_00002DD4",    "arm",   "indirect_handler"),
     ],
     "biosnds9": [

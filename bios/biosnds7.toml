@@ -839,6 +839,12 @@ name = "irqh_0000201A"
 kind = "indirect_handler"
 
 [[entry_point]]
+addr = 0x00002CB2
+mode = "thumb"
+name = "lpad_00002CB2"
+kind = "runtime_confirmed"
+
+[[entry_point]]
 addr = 0x00002DD4
 mode = "arm"
 name = "irqh_00002DD4"

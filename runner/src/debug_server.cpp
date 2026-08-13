@@ -790,6 +790,19 @@ std::string handle(const std::string& line) {
         out += "}";
         return out;
     }
+    if (cmd == "firmware_dump") {
+        // Read-only export of the private in-memory firmware image. This is
+        // used by WFC setup flows that intentionally end by powering the DS
+        // off after saving connection settings. The caller owns where the
+        // bytes are written; do not publish dumps containing real console
+        // identity or service configuration.
+        const uint8_t* data = nds_firmware_bytes();
+        const uint32_t size = nds_firmware_size();
+        std::string hex;
+        if (data && size) append_hex(hex, data, size);
+        return "{\"size\":" + std::to_string(size) +
+               ",\"hex\":\"" + hex + "\"}";
+    }
     if (cmd == "io_state") return io_state_json();
     if (cmd == "frontend_stats") {
         // Cumulative frontend counters; sample twice and diff for fps /

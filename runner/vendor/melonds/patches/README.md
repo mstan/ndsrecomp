@@ -14,10 +14,10 @@ patch here against the committed file, or re-copy from
 ## 0001-wifi-ap-identity.patch
 
 `src/WifiAP.cpp`: changes the hardcoded AP identity from melonDS's default
-(SSID `melonAP`, BSSID `00:F0:77:77:77:77`) to this project's identity
-(SSID `ndsrecomp`, BSSID `02:4E:44:53:52:01`). The new BSSID has the
-locally-administered bit set (bit 1 of the first octet) so it can never
-collide with a real vendor-assigned MAC address.
+(SSID `melonAP`, BSSID `00:F0:77:77:77:77`, channel 6) to this project's
+identity (SSID `ndsrecomp`, BSSID `02:4E:44:53:52:01`, channel 1). The new
+BSSID has the locally-administered bit set (bit 1 of the first octet) so it
+can never collide with a real vendor-assigned MAC address.
 
 ## 0002-net-slirp-nonblocking-poll.patch
 

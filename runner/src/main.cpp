@@ -373,6 +373,7 @@ int main(int argc, char** argv) {
     std::string cli_startup_mode;
     std::string cli_instance_index;
     std::string cli_save_path;
+    std::string cli_firmware_path;
     std::string cli_net_ring_filter;
     std::string cli_network_enabled;
     std::string cli_network_backend;
@@ -425,6 +426,8 @@ int main(int argc, char** argv) {
             cli_save_path = argv[++i];
         } else if (a == "--no-save") {
             save_disabled = true;
+        } else if (a == "--firmware-path" && i + 1 < argc) {
+            cli_firmware_path = argv[++i];
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
             config_explicit = true;
@@ -484,6 +487,7 @@ int main(int argc, char** argv) {
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
                 "[--save-path game.sav|--no-save] "
+                "[--firmware-path firmware.bin] "
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
@@ -914,7 +918,9 @@ int main(int argc, char** argv) {
 
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
-    auto fw = read_file(dir + "/firmware.bin");
+    auto fw = read_file(
+        cli_firmware_path.empty() ? (dir + "/firmware.bin")
+                                  : cli_firmware_path);
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
@@ -923,8 +929,20 @@ int main(int argc, char** argv) {
     bool sm64ds_title = false;
 #endif
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
-            & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios")
-            & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
+            & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios");
+    if (cli_firmware_path.empty()) {
+        ok = ok & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
+    } else if (fw.size() != 262144u) {
+        std::fprintf(stderr,
+            "refusing to start: --firmware-path %s has %zu bytes, expected 262144\n",
+            cli_firmware_path.c_str(), fw.size());
+        return 1;
+    } else {
+        std::fprintf(stderr,
+            "[firmware] using explicit firmware image %s, SHA-1 %s\n",
+            cli_firmware_path.c_str(),
+            gba::sha1(fw.data(), fw.size()).hex().c_str());
+    }
     if (!ok) { std::fprintf(stderr, "refusing to start: dump verification failed\n"); return 1; }
     if (!rom_path.empty()) {
         if (rom.size() < 0x200u) {

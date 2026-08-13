@@ -47,7 +47,7 @@ using Platform::LogLevel;
 // original melonDS source per GPLv3 5(a).
 const char* WifiAP::APName = "ndsrecomp";
 const u8 WifiAP::APMac[6] = {0x02, 0x4E, 0x44, 0x53, 0x52, 0x01};
-const u8 WifiAP::APChannel = 6;
+const u8 WifiAP::APChannel = 1;
 
 #define PWRITE_8(p, v)      *p++ = v;
 #define PWRITE_16(p, v)     *(u16*)p = v; p += 2;
