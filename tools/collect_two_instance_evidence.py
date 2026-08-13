@@ -553,6 +553,89 @@ def print_verdict(verdict: dict[str, Any]) -> None:
     )
 
 
+def counter_delta(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, int]:
+    keys = set(current) | set(previous)
+    return {
+        key: int(current.get(key, 0)) - int(previous.get(key, 0))
+        for key in sorted(keys)
+        if int(current.get(key, 0)) != int(previous.get(key, 0))
+    }
+
+
+def snapshot_delta(current: dict[str, Any],
+                   previous: dict[str, Any] | None) -> dict[str, Any]:
+    if previous is None:
+        return {"baseline": True}
+
+    previous_instances = {
+        instance["label"]: instance
+        for instance in previous.get("instances", [])
+    }
+    instance_deltas = []
+    for instance in current.get("instances", []):
+        label = instance["label"]
+        prev = previous_instances.get(label, {})
+        instance_deltas.append({
+            "label": label,
+            "event_counts": counter_delta(
+                instance.get("event_counts", {}),
+                prev.get("event_counts", {}),
+            ),
+            "kind_counts": counter_delta(
+                instance.get("kind_counts", {}),
+                prev.get("kind_counts", {}),
+            ),
+            "udp_counts": counter_delta(
+                instance.get("udp_counts", {}),
+                prev.get("udp_counts", {}),
+            ),
+        })
+
+    current_status = current.get("m7_transport_verdict", {}).get("status")
+    previous_status = previous.get("m7_transport_verdict", {}).get("status")
+    return {
+        "baseline": False,
+        "status_changed": current_status != previous_status,
+        "previous_status": previous_status,
+        "current_status": current_status,
+        "instances": instance_deltas,
+    }
+
+
+def print_snapshot_delta(delta: dict[str, Any]) -> None:
+    if delta.get("baseline"):
+        print("delta: baseline snapshot")
+        return
+    if delta.get("status_changed"):
+        print(
+            "delta: verdict "
+            f"{delta.get('previous_status')} -> {delta.get('current_status')}"
+        )
+    printed = False
+    for instance in delta.get("instances", []):
+        udp = instance.get("udp_counts", {})
+        kinds = instance.get("kind_counts", {})
+        interesting_udp = {
+            name: udp.get(name, 0)
+            for name in ("wfc_service_udp", "natneg_udp", "candidate_peer_udp")
+            if udp.get(name, 0)
+        }
+        interesting_kinds = {
+            name: kinds.get(name, 0)
+            for name in ("tcp_reset", "backend_drop", "backend_error")
+            if kinds.get(name, 0)
+        }
+        if interesting_udp or interesting_kinds:
+            printed = True
+            print(
+                f"delta {instance['label']}: "
+                f"udp={interesting_udp or {}} "
+                f"kinds={interesting_kinds or {}}"
+            )
+    if not printed and not delta.get("status_changed"):
+        print("delta: no new transport-classified events")
+
+
 def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
                    created_at: str, screenshot_prefix: str = ""
                    ) -> dict[str, Any]:
@@ -570,9 +653,10 @@ def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
 
 
 def compact_snapshot(snapshot_index: int, snapshot_path: Path,
-                     report: dict[str, Any], elapsed_sec: float
+                     report: dict[str, Any], elapsed_sec: float,
+                     previous_snapshot: dict[str, Any] | None = None
                      ) -> dict[str, Any]:
-    return {
+    compact = {
         "snapshot": snapshot_index,
         "elapsed_sec": round(elapsed_sec, 3),
         "created_at": report["created_at"],
@@ -597,6 +681,8 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
             for instance in report["instances"]
         ],
     }
+    compact["delta"] = snapshot_delta(compact, previous_snapshot)
+    return compact
 
 
 def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
@@ -620,6 +706,7 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
     started = time.monotonic()
     index: list[dict[str, Any]] = []
     snapshot_index = 0
+    stop_reason: dict[str, Any] | None = None
     while True:
         now = time.monotonic()
         elapsed = now - started
@@ -633,13 +720,28 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
             created_at, screenshot_prefix=prefix)
         snapshot_path = snapshots_dir / f"snapshot_{snapshot_index:03d}.json"
         snapshot_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        index.append(compact_snapshot(snapshot_index, snapshot_path, report, elapsed))
+        previous = index[-1] if index else None
+        compact = compact_snapshot(
+            snapshot_index, snapshot_path, report, elapsed, previous)
+        index.append(compact)
 
         print(f"\n--- snapshot {snapshot_index} elapsed={elapsed:.1f}s ---")
         for instance in report["instances"]:
             print_summary(instance)
         print_correlation(report.get("correlation", {}))
         print_verdict(report.get("m7_transport_verdict", {}))
+        print_snapshot_delta(compact["delta"])
+
+        verdict_status = report.get("m7_transport_verdict", {}).get("status")
+        if verdict_status in args.stop_on_verdict:
+            stop_reason = {
+                "kind": "verdict",
+                "status": verdict_status,
+                "snapshot": snapshot_index,
+                "elapsed_sec": round(elapsed, 3),
+            }
+            print(f"stop condition matched: verdict={verdict_status}")
+            break
 
         snapshot_index += 1
         remaining = args.watch_seconds - (time.monotonic() - started)
@@ -655,6 +757,7 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         "latest_m7_transport_verdict": (
             index[-1]["m7_transport_verdict"] if index else {}
         ),
+        "stop_reason": stop_reason,
         "snapshots": index,
     }
     report_path = out_dir / "evidence.json"
@@ -673,6 +776,12 @@ def main() -> int:
                         help="collect repeated snapshots for this many seconds")
     parser.add_argument("--interval", type=float, default=5.0,
                         help="seconds between watch-mode snapshots")
+    parser.add_argument("--stop-on-verdict", action="append", default=[],
+                        help=(
+                            "in watch mode, stop after writing the first "
+                            "snapshot whose M7 transport verdict has this "
+                            "status; may be repeated"
+                        ))
     args = parser.parse_args()
     if args.max_per_kind < 1 or args.max_per_kind > 4096:
         parser.error("--max-per-kind must be in 1..4096")

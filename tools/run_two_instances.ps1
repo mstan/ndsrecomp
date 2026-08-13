@@ -31,6 +31,9 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -EvidenceWatchSeconds 900
 #
+# Add -EvidenceStopOnVerdict direct_client_udp_bidirectional_observed when you
+# want the rolling collector to stop as soon as peer UDP is proven.
+#
 # To also prove the two pcap-backed instances can concurrently reach the
 # authenticated match setup menu before opening the interactive windows:
 #
@@ -57,6 +60,7 @@ param(
     [double] $EvidenceInterval = 5,
     [int] $EvidenceMaxPerKind = 4096,
     [string] $EvidenceOutDir = '',
+    [string[]] $EvidenceStopOnVerdict = @(),
     [switch] $SkipSavePreflight,
     [switch] $SkipPortPreflight,
     [switch] $SkipNetworkRuntimePreflight,
@@ -87,6 +91,11 @@ if ($EvidenceStartupTimeoutSeconds -lt 0) { throw "-EvidenceStartupTimeoutSecond
 if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
 if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
     throw "-EvidenceMaxPerKind must be in 1..4096"
+}
+foreach ($status in $EvidenceStopOnVerdict) {
+    if ([string]::IsNullOrWhiteSpace($status)) {
+        throw "-EvidenceStopOnVerdict entries must be non-empty"
+    }
 }
 if ($LoginGateAttempts -lt 1) { throw "-LoginGateAttempts must be positive" }
 if ($LoginGateTimeoutSeconds -le 0) { throw "-LoginGateTimeoutSeconds must be positive" }
@@ -507,6 +516,9 @@ function Start-EvidenceCollector {
               '--interval', "$EvidenceInterval",
               '--max-per-kind', "$EvidenceMaxPerKind",
               '--out-dir', $outDir)
+    foreach ($status in $EvidenceStopOnVerdict) {
+        $argv += @('--stop-on-verdict', $status)
+    }
     $p = Start-Process -FilePath $pythonPath -WorkingDirectory $GameRoot `
             -ArgumentList $argv -PassThru `
             -RedirectStandardOutput $collectorOut `
@@ -541,6 +553,7 @@ if ($collector) {
 } else {
     Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
     Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
+    Write-Host '  Add --stop-on-verdict direct_client_udp_bidirectional_observed to stop once peer UDP is proven.'
     Write-Host 'Or pass -EvidenceWatchSeconds 900 to this launcher.'
 }
 Write-Host 'For a final post-run snapshot, omit --watch-seconds/--interval.'
