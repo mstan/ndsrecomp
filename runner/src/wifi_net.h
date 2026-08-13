@@ -55,6 +55,7 @@ namespace melonDS { class Wifi; }
 enum class NdsNetBackendKind : uint8_t {
     Slirp = 0,
     Replay = 1,
+    Pcap = 2,
 };
 
 struct NdsWifiNetworkConfig {
@@ -95,6 +96,11 @@ struct NdsWifiNetworkConfig {
     bool capture_write_pcap = true;  // Wireshark-openable sibling; default on
     std::string capture_scenario_tag;  // free-form label, e.g. "dhcp"
     std::string rom_sha1;               // capture header provenance field
+
+    // backend == Pcap only: empty means choose the first usable non-loopback
+    // adapter; otherwise match this exact device, friendly, or description
+    // string from LibPCap::GetAdapters().
+    std::string pcap_adapter;
 };
 
 // Wiimmfi M8: query surface for a --network-backend replay run's outcome.
@@ -156,8 +162,8 @@ void nds_net_platform_shutdown();
 void nds_wifi_configure_network(const NdsWifiNetworkConfig& config);
 
 // Constructs (once) the vendored Wifi device model bound to the runner's
-// firmware buffer and a non-blocking-patched Net_Slirp backend, and
-// returns it. Idempotent: safe to call from every nds_wifi_* entry point.
+// firmware buffer and the selected network backend, and returns it.
+// Idempotent: safe to call from every nds_wifi_* entry point.
 melonDS::Wifi* nds_wifi3d_attach();
 
 // Tears the above down (unused by the current boot/reset path -- Wifi and

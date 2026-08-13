@@ -22,11 +22,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cctype>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <array>
 #include <vector>
 
 #if defined(NDS_ENABLE_PCAP_BACKEND) && defined(_WIN32)
@@ -60,7 +64,11 @@
 #include "../vendor/melonds/Wifi.h"
 #include "../vendor/melonds/WifiAP.h"
 #include "../vendor/melonds/net/Net.h"
+#include "../vendor/melonds/net/NetDriver.h"
 #include "../vendor/melonds/net/Net_Slirp.h"
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+#include "../vendor/melonds/net/Net_PCap.h"
+#endif
 
 // ── melonDS::NDS single-slot scheduler shim ─────────────────────────────
 // Wifi::Wifi()/~Wifi() (Wifi.cpp:92-104) register/unregister exactly one
@@ -303,6 +311,200 @@ constexpr size_t kWifiNetMaxPacketBytes = 2048;
 // traffic volume -- a host flood drops packets past this point instead of
 // growing memory.
 constexpr size_t kWifiNetQueueCapacity = 256;
+constexpr size_t kWifiNetPcapMaxRxPacketBytes = 1518;
+
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+uint16_t ReadBe16(const uint8_t* p) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) | p[1]);
+}
+
+void WriteBe16(uint8_t* p, uint16_t value) {
+    p[0] = static_cast<uint8_t>(value >> 8u);
+    p[1] = static_cast<uint8_t>(value);
+}
+
+uint16_t InternetChecksum(const uint8_t* data, size_t len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2)
+        sum += ReadBe16(data + i);
+    if (len & 1u) sum += static_cast<uint16_t>(data[len - 1] << 8u);
+    while (sum >> 16u)
+        sum = (sum & 0xFFFFu) + (sum >> 16u);
+    return static_cast<uint16_t>(~sum);
+}
+
+bool RewriteDhcpDnsOption(std::vector<uint8_t>* packet,
+                          uint32_t dns_ipv4_host_order) {
+    if (!packet || dns_ipv4_host_order == 0u) return false;
+    std::vector<uint8_t>& p = *packet;
+    if (p.size() < 14u + 20u + 8u + 240u) return false;
+    if (ReadBe16(&p[12]) != 0x0800u) return false;  // Ethernet: IPv4
+
+    const size_t ip = 14u;
+    const uint8_t version = static_cast<uint8_t>(p[ip] >> 4u);
+    const size_t ihl = static_cast<size_t>(p[ip] & 0x0Fu) * 4u;
+    if (version != 4u || ihl < 20u || p.size() < ip + ihl + 8u + 240u)
+        return false;
+    if (p[ip + 9u] != 17u) return false;  // UDP
+
+    const size_t udp = ip + ihl;
+    const uint16_t src_port = ReadBe16(&p[udp]);
+    const uint16_t dst_port = ReadBe16(&p[udp + 2u]);
+    if (src_port != 67u || dst_port != 68u) return false;
+    const uint16_t udp_len = ReadBe16(&p[udp + 4u]);
+    if (udp_len < 8u + 240u || p.size() < udp + udp_len) return false;
+
+    const size_t dhcp = udp + 8u;
+    if (p[dhcp + 236u] != 0x63u || p[dhcp + 237u] != 0x82u ||
+        p[dhcp + 238u] != 0x53u || p[dhcp + 239u] != 0x63u) {
+        return false;
+    }
+
+    const size_t options_begin = dhcp + 240u;
+    const size_t options_end = udp + udp_len;
+    for (size_t opt = options_begin; opt < options_end;) {
+        const uint8_t code = p[opt++];
+        if (code == 0u) continue;       // pad
+        if (code == 255u) return false; // end
+        if (opt >= options_end) return false;
+        const uint8_t len = p[opt++];
+        if (opt + len > options_end) return false;
+        if (code == 6u && len >= 4u) {
+            for (size_t i = 0; i + 3u < len; i += 4u) {
+                p[opt + i + 0u] =
+                    static_cast<uint8_t>(dns_ipv4_host_order >> 24u);
+                p[opt + i + 1u] =
+                    static_cast<uint8_t>(dns_ipv4_host_order >> 16u);
+                p[opt + i + 2u] =
+                    static_cast<uint8_t>(dns_ipv4_host_order >> 8u);
+                p[opt + i + 3u] =
+                    static_cast<uint8_t>(dns_ipv4_host_order);
+            }
+
+            WriteBe16(&p[ip + 10u], 0u);
+            WriteBe16(&p[ip + 10u], InternetChecksum(&p[ip], ihl));
+            // IPv4 UDP checksums are optional; clear rather than carrying a
+            // checksum over a payload we intentionally changed.
+            WriteBe16(&p[udp + 6u], 0u);
+            return true;
+        }
+        opt += len;
+    }
+    return false;
+}
+
+bool PcapAdapterHasMac(const melonDS::AdapterData& adapter) {
+    for (uint8_t b : adapter.MAC) {
+        if (b != 0u) return true;
+    }
+    return false;
+}
+
+bool PcapAdapterHasIpv4(const melonDS::AdapterData& adapter) {
+    for (uint8_t b : adapter.IP_v4) {
+        if (b != 0u) return true;
+    }
+    return false;
+}
+
+std::string PcapAdapterIpv4String(const melonDS::AdapterData& adapter) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                  adapter.IP_v4[0], adapter.IP_v4[1],
+                  adapter.IP_v4[2], adapter.IP_v4[3]);
+    return std::string(buf);
+}
+
+bool PcapAdapterNameMatches(const melonDS::AdapterData& adapter,
+                            const std::string& requested) {
+    return requested == adapter.DeviceName ||
+           requested == adapter.FriendlyName ||
+           requested == adapter.Description;
+}
+
+bool ContainsAsciiInsensitive(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) return false;
+    for (const char* h = haystack; *h; ++h) {
+        const char* hp = h;
+        const char* np = needle;
+        while (*hp && *np &&
+               std::tolower(static_cast<unsigned char>(*hp)) ==
+                   std::tolower(static_cast<unsigned char>(*np))) {
+            ++hp;
+            ++np;
+        }
+        if (!*np) return true;
+    }
+    return false;
+}
+
+bool IsPcapAdapterProbablyVirtual(const melonDS::AdapterData& adapter) {
+    for (const char* needle : {
+             "bluetooth",
+             "hyper-v",
+             "tap-windows",
+             "twingate",
+             "virtual",
+             "vethernet",
+             "vpn",
+             "wsl",
+         }) {
+        if (ContainsAsciiInsensitive(adapter.FriendlyName, needle) ||
+            ContainsAsciiInsensitive(adapter.Description, needle) ||
+            ContainsAsciiInsensitive(adapter.DeviceName, needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MacEqual(const uint8_t* a, const std::array<uint8_t, 6>& b) {
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+
+bool IsBroadcastMac(const uint8_t* mac) {
+    for (size_t i = 0; i < 6u; ++i) {
+        if (mac[i] != 0xFFu) return false;
+    }
+    return true;
+}
+
+const melonDS::AdapterData* ChoosePcapAdapter(
+    const std::vector<melonDS::AdapterData>& adapters,
+    const std::string& requested) {
+    if (!requested.empty()) {
+        for (const melonDS::AdapterData& adapter : adapters) {
+            if (PcapAdapterNameMatches(adapter, requested)) return &adapter;
+        }
+        return nullptr;
+    }
+
+    for (const melonDS::AdapterData& adapter : adapters) {
+        const bool loopback = (adapter.Flags & PCAP_IF_LOOPBACK) != 0u;
+        const bool up = (adapter.Flags & PCAP_IF_UP) != 0u;
+        const bool running = (adapter.Flags & PCAP_IF_RUNNING) != 0u;
+        if (!loopback && up && running && PcapAdapterHasMac(adapter) &&
+            PcapAdapterHasIpv4(adapter) &&
+            !IsPcapAdapterProbablyVirtual(adapter)) {
+            return &adapter;
+        }
+    }
+    return nullptr;
+}
+
+void LogPcapAdapters(const std::vector<melonDS::AdapterData>& adapters) {
+    for (const melonDS::AdapterData& adapter : adapters) {
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[wifi_net] pcap adapter: device='%s' friendly='%s' "
+            "description='%s' ipv4=%s flags=0x%08x\n",
+            adapter.DeviceName, adapter.FriendlyName, adapter.Description,
+            PcapAdapterIpv4String(adapter).c_str(), adapter.Flags);
+    }
+}
+#endif
 
 // A bounded FIFO of complete, independently-allocated packet buffers.
 // Ownership transfers cleanly across the thread boundary: TryPush moves
@@ -344,6 +546,11 @@ struct WifiBridgeState {
     melonDS::Net net;
     bool net_instance_registered = false;
 
+    // Non-owning: live socket/adapter backends are owned by `net` and called
+    // only from the worker thread. Slirp also keeps the concrete pointer below
+    // so its extra poll-error counters remain observable.
+    melonDS::NetDriver* live_driver = nullptr;
+
     // Non-owning: `net` (above) owns the actual melonDS::NetDriver via
     // unique_ptr. Kept separately because PollHostSockets() is not part
     // of the NetDriver virtual interface (NetDriver.h is not a file this
@@ -374,6 +581,10 @@ struct WifiBridgeState {
 
     BoundedPacketQueue tx_queue{kWifiNetQueueCapacity};  // guest -> host
     BoundedPacketQueue rx_queue{kWifiNetQueueCapacity};  // host -> guest
+
+    std::mutex guest_mac_mutex;
+    std::array<uint8_t, 6> guest_mac{};
+    bool guest_mac_known = false;
 
     // Incremented (worker thread) whenever rx_queue.TryPush fails.
     // net_ring_push is not thread-safe (see the design comment above), so
@@ -417,6 +628,41 @@ struct WifiBridgeState {
 
 std::unique_ptr<WifiBridgeState> g_bridge;
 
+void LearnGuestMacFromTx(WifiBridgeState* state, const uint8_t* data,
+                         int len) {
+    if (!state || !data || len < 12) return;
+    std::lock_guard<std::mutex> lock(state->guest_mac_mutex);
+    for (size_t i = 0; i < state->guest_mac.size(); ++i)
+        state->guest_mac[i] = data[6u + i];
+    state->guest_mac_known = true;
+}
+
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
+                             int len) {
+    if (!state || !data || len < 14) return false;
+    if (static_cast<size_t>(len) > kWifiNetPcapMaxRxPacketBytes) {
+        state->rx_dropped_since_last_report.fetch_add(
+            1, std::memory_order_relaxed);
+        return false;
+    }
+
+    std::array<uint8_t, 6> guest_mac{};
+    bool guest_mac_known = false;
+    {
+        std::lock_guard<std::mutex> lock(state->guest_mac_mutex);
+        guest_mac = state->guest_mac;
+        guest_mac_known = state->guest_mac_known;
+    }
+
+    const uint8_t* dst = data;
+    const uint8_t* src = data + 6u;
+    if (guest_mac_known && MacEqual(src, guest_mac)) return false;
+    if (IsBroadcastMac(dst) || (dst[0] & 1u) != 0u) return true;
+    return guest_mac_known && MacEqual(dst, guest_mac);
+}
+#endif
+
 // The worker thread's whole life: drain outbound packets to the driver,
 // poll host sockets (non-blocking), wait briefly, repeat. Every access to
 // state->slirp_driver here is safe by construction: this function is the
@@ -432,12 +678,14 @@ void WifiWorkerThreadMain(WifiBridgeState* state) {
     std::vector<uint8_t> pkt;
     while (!state->worker_stop.load(std::memory_order_relaxed)) {
         while (state->tx_queue.TryPop(&pkt)) {
-            if (state->slirp_driver)
-                state->slirp_driver->SendPacket(
+            if (state->live_driver)
+                state->live_driver->SendPacket(
                     pkt.data(), static_cast<int>(pkt.size()));
         }
         if (state->slirp_driver)
             state->slirp_driver->PollHostSockets();
+        else if (state->live_driver)
+            state->live_driver->RecvCheck();
 
         std::unique_lock<std::mutex> lock(state->wake_mutex);
         state->wake_cv.wait_for(
@@ -463,9 +711,9 @@ int Net_SendPacket(u8* data, int len, void* userdata) {
     // network.enabled=false: no backend was attached at all (see
     // nds_wifi3d_attach()) -- absorb the packet silently rather than
     // queueing it for a worker thread that will never exist to drain it.
-    // Wiimmfi M8: a replay backend attaches replay_driver instead of
-    // slirp_driver, so "no backend at all" must check both.
-    if (!g_bridge->slirp_driver && !g_bridge->replay_driver) return len;
+    // Wiimmfi M8: a replay backend attaches replay_driver instead of a live
+    // backend, so "no backend at all" must check both.
+    if (!g_bridge->live_driver && !g_bridge->replay_driver) return len;
     if (static_cast<size_t>(len) > kWifiNetMaxPacketBytes) {
         // Net_Slirp::SendPacket would reject this anyway; fail fast on
         // the emulation thread instead of spending queue capacity on a
@@ -475,6 +723,7 @@ int Net_SendPacket(u8* data, int len, void* userdata) {
                       static_cast<uint16_t>(len), /*aux=*/2u);
         return 0;
     }
+    LearnGuestMacFromTx(g_bridge.get(), data, len);
     // Passive protocol classification (Wiimmfi M3 task 1): read-only decode
     // of the exact bytes about to be queued -- never alters what gets sent.
     // See net_classify.h for the full design note. This is the guest->host
@@ -704,6 +953,74 @@ melonDS::Wifi* nds_wifi3d_attach() {
                 "%llu RX recorded frame(s); host networking fully "
                 "disabled)\n",
                 (unsigned long long)tx_total, (unsigned long long)rx_total);
+        } else if (g_network_config.backend == NdsNetBackendKind::Pcap) {
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+            auto pcap_lib = melonDS::LibPCap::New();
+            if (!pcap_lib) {
+                std::fprintf(stderr,
+                    "[wifi_net] --network-backend pcap requested, but no "
+                    "Npcap/WinPcap runtime library could be loaded\n");
+                std::exit(2);
+            }
+
+            std::vector<melonDS::AdapterData> adapters =
+                pcap_lib->GetAdapters();
+            const melonDS::AdapterData* selected =
+                ChoosePcapAdapter(adapters, g_network_config.pcap_adapter);
+            if (!selected) {
+                std::fprintf(stderr,
+                    "[wifi_net] --network-backend pcap could not select an "
+                    "adapter%s%s%s\n",
+                    g_network_config.pcap_adapter.empty() ? "" :
+                        " matching '",
+                    g_network_config.pcap_adapter.empty() ? "" :
+                        g_network_config.pcap_adapter.c_str(),
+                    g_network_config.pcap_adapter.empty() ? "" : "'");
+                LogPcapAdapters(adapters);
+                std::exit(2);
+            }
+
+            auto pcap = pcap_lib->Open(*selected,
+                [](const melonDS::u8* data, int len) noexcept {
+                    if (!g_bridge || len <= 0) return;
+                    if (!ShouldAcceptPcapRxFrame(g_bridge.get(), data, len))
+                        return;
+                    std::vector<uint8_t> pkt(
+                        data, data + static_cast<size_t>(len));
+                    if (g_network_config.wfc_enabled &&
+                        g_network_config.wfc_dns_ipv4 != 0u) {
+                        RewriteDhcpDnsOption(&pkt,
+                                             g_network_config.wfc_dns_ipv4);
+                    }
+                    if (!g_bridge->rx_queue.TryPush(std::move(pkt))) {
+                        g_bridge->rx_dropped_since_last_report.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+                });
+            if (!pcap) {
+                std::fprintf(stderr,
+                    "[wifi_net] --network-backend pcap failed to open "
+                    "adapter '%s'\n", selected->DeviceName);
+                std::exit(2);
+            }
+
+            g_bridge->live_driver = pcap.get();
+            g_bridge->net.SetDriver(std::move(pcap));
+            melonDS::Platform::Log(melonDS::Platform::Info,
+                "[wifi_net] network backend attached: PCAP device='%s' "
+                "friendly='%s' ipv4=%s%s\n",
+                selected->DeviceName, selected->FriendlyName,
+                PcapAdapterIpv4String(*selected).c_str(),
+                (g_network_config.wfc_enabled &&
+                 g_network_config.wfc_dns_ipv4 != 0u)
+                    ? " dhcp_dns_override=yes"
+                    : " dhcp_dns_override=no");
+#else
+            std::fprintf(stderr,
+                "[wifi_net] internal error: pcap backend selected in a build "
+                "without NDS_ENABLE_PCAP_BACKEND\n");
+            std::exit(2);
+#endif
         } else {
             // Wiimmfi M4: when a WFC provider is configured, this overrides
             // the DHCP-advertised DNS server address so the guest's own DNS
@@ -739,6 +1056,7 @@ melonDS::Wifi* nds_wifi3d_attach() {
                 },
                 nameserver_override);
             g_bridge->slirp_driver = slirp.get();
+            g_bridge->live_driver = slirp.get();
             g_bridge->net.SetDriver(std::move(slirp));
 
             melonDS::Platform::Log(melonDS::Platform::Info,
@@ -755,14 +1073,14 @@ melonDS::Wifi* nds_wifi3d_attach() {
 
     g_bridge->wifi = std::make_unique<melonDS::Wifi>(g_bridge->nds);
 
-    // Start the host networking worker thread last, once slirp_driver and
+    // Start the host networking worker thread last, once live_driver and
     // wifi are both fully constructed -- std::thread's own construction
     // establishes a happens-before edge, so the new thread is guaranteed
     // to observe every write above. Skipped entirely when no backend was
     // attached above, AND skipped for the replay backend (Wiimmfi M8):
-    // replay never touches a host socket or libslirp, so there is nothing
+    // replay never touches a host socket or adapter, so there is nothing
     // for a background thread to poll -- see net_replay.h's class comment.
-    if (g_bridge->slirp_driver) {
+    if (g_bridge->live_driver) {
         g_bridge->worker_thread = melonDS::Platform::Thread_Create(
             [state = g_bridge.get()] { WifiWorkerThreadMain(state); });
     }

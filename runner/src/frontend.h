@@ -81,6 +81,7 @@ struct NdsNetworkOptions {
     std::string backend = "slirp";  // "slirp" (default), "replay" (Wiimmfi
                                      // M8), or, if built with
                                      // NDS_ENABLE_PCAP_BACKEND, "pcap"
+    std::string pcap_adapter;       // backend == "pcap": empty = auto-select
     bool wfc_enabled = false;
     NdsWfcProvider wfc_provider{};
 

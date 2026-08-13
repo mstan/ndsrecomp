@@ -118,6 +118,20 @@ int main() {
 
     {
         std::ofstream file(path);
+        file << "[network]\n"
+                "enabled = true\n"
+                "backend = \"pcap\"\n"
+                "pcap_adapter = \"Ethernet\"\n";
+    }
+    options = {};
+    if (!require(nds_load_frontend_config(path.string(), &options, &error)) ||
+        !require(options.network.enabled) ||
+        !require(options.network.backend == "pcap") ||
+        !require(options.network.pcap_adapter == "Ethernet"))
+        return 14;
+
+    {
+        std::ofstream file(path);
         file << "[display]\n"
                 "screen_layout = \"invalid\"\n";
     }

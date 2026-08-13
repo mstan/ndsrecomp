@@ -173,10 +173,9 @@ bool nds_parse_ipv4(const std::string& value, uint32_t* out) {
 bool nds_parse_network_backend(const std::string& value, std::string* out) {
     if (!out) return false;
     const std::string normalized = lower_ascii(value);
-    // Wiimmfi M8 adds "replay" alongside the pre-existing "slirp"/"pcap"
-    // names. Unlike "pcap" (accepted here but still rejected later, at
-    // main.cpp's bridge-construction validation -- see that file's own
-    // comment), "replay" IS fully wired into nds_wifi3d_attach().
+    // Wiimmfi M8 added "replay"; M7 wires "pcap" when the runner is built
+    // with NDS_ENABLE_PCAP_BACKEND. Builds without that flag reject pcap at
+    // main.cpp's bridge-construction validation.
     if (normalized == "slirp" || normalized == "pcap" ||
         normalized == "replay") {
         *out = normalized;
@@ -460,6 +459,9 @@ bool nds_load_frontend_config(const std::string& path,
                 if (error) *error = "network.backend must be slirp, replay, or pcap";
                 return false;
             }
+        }
+        if (const auto value = (*network)["pcap_adapter"].value<std::string>()) {
+            options->network.pcap_adapter = *value;
         }
         // Wiimmfi M8: capture/replay knobs, TOML mirror of the
         // --net-capture-* CLI flags (see frontend.h's NdsNetworkOptions).

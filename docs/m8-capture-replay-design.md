@@ -365,8 +365,8 @@ directory identically.
    resolved and handed off. Low-value field (provenance only, not
    correctness-affecting); left blank rather than restructuring boot
    order under time pressure.
-5. **`pcap` remains unwired** into `nds_wifi3d_attach()` — pre-existing
-   state, explicitly left as-is per the task's own guidance.
+5. **`pcap` is separate M7 live-backend work.** Capture/replay does not
+   depend on the live pcap backend.
 6. **A capture that legitimately starts with an RX frame before any TX**
    (not possible for this project's own DHCP-first flows, but not
    structurally forbidden by the format) would have no MAC-shaped field

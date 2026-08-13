@@ -372,6 +372,7 @@ int main(int argc, char** argv) {
     std::string cli_net_ring_filter;
     std::string cli_network_enabled;
     std::string cli_network_backend;
+    std::string cli_pcap_adapter;
     std::string cli_wfc_enabled;
     std::string cli_wfc_provider;
     // Wiimmfi M8: capture/replay at the Ethernet backend boundary.
@@ -458,6 +459,8 @@ int main(int argc, char** argv) {
             cli_network_enabled = argv[++i];
         } else if (a == "--network-backend" && i + 1 < argc) {
             cli_network_backend = argv[++i];
+        } else if (a == "--pcap-adapter" && i + 1 < argc) {
+            cli_pcap_adapter = argv[++i];
         } else if (a == "--wfc" && i + 1 < argc) {
             cli_wfc_enabled = argv[++i];
         } else if (a == "--wfc-provider" && i + 1 < argc) {
@@ -492,6 +495,7 @@ int main(int argc, char** argv) {
                 "[--net-ring-dump] [--net-ring-last N] "
                 "[--net-ring-filter <class>|all] "
                 "[--network on|off] [--network-backend slirp|replay|pcap] "
+                "[--pcap-adapter NAME] "
                 "[--wfc on|off] [--wfc-provider kaeru|wiimmfi|<ipv4>] "
                 "[--net-capture-out FILE] [--net-capture-in FILE] "
                 "[--net-capture-raw] [--net-capture-no-pcap] "
@@ -676,6 +680,8 @@ int main(int argc, char** argv) {
                      "pcap)\n");
         return 2;
     }
+    if (!cli_pcap_adapter.empty())
+        frontend_options.network.pcap_adapter = cli_pcap_adapter;
     if (!cli_wfc_enabled.empty() &&
         !nds_parse_on_off(cli_wfc_enabled, &frontend_options.network.wfc_enabled)) {
         std::fprintf(stderr, "invalid --wfc (expected on or off)\n");
@@ -719,24 +725,27 @@ int main(int argc, char** argv) {
     NdsWifiNetworkConfig resolved_network{};
     resolved_network.enabled = frontend_options.network.enabled;
     resolved_network.wfc_enabled = frontend_options.network.wfc_enabled;
+    resolved_network.pcap_adapter = frontend_options.network.pcap_adapter;
 
-    // Wiimmfi M8: "replay" is now fully wired into nds_wifi3d_attach()
-    // alongside the pre-existing "slirp"; "pcap" is accepted by
-    // nds_parse_network_backend (frontend_config.cpp) but is deliberately
-    // left NOT wired into the bridge -- see docs/adr-melonds-wifi-
-    // vendoring.md §2 and docs/m8-capture-replay-design.md's "unresolved"
-    // list. This is the same shape of gate the pre-existing code already
-    // had for "pcap", just extended with a real "replay" branch instead of
-    // rejecting it too.
+    // Resolve the user-facing backend name to the bridge enum. Replay is
+    // always available; pcap is available only in builds that opt into the
+    // dynamically-loaded Npcap/WinPcap backend.
     if (frontend_options.network.backend == "slirp") {
         resolved_network.backend = NdsNetBackendKind::Slirp;
     } else if (frontend_options.network.backend == "replay") {
         resolved_network.backend = NdsNetBackendKind::Replay;
+    } else if (frontend_options.network.backend == "pcap") {
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+        resolved_network.backend = NdsNetBackendKind::Pcap;
+#else
+        std::fprintf(stderr,
+            "--network-backend pcap requested, but this runner was built "
+            "without NDS_ENABLE_PCAP_BACKEND\n");
+        return 2;
+#endif
     } else {
         std::fprintf(stderr,
-            "--network-backend %s is not wired into the bridge yet -- only "
-            "\"slirp\" and \"replay\" are currently constructed by "
-            "nds_wifi3d_attach()\n",
+            "--network-backend %s is not recognized\n",
             frontend_options.network.backend.c_str());
         return 2;
     }
