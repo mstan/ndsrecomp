@@ -254,6 +254,13 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def candidate_peer_udp_events(instance: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        event for event in instance["kinds"].get("udp_packet", [])
+        if udp_bucket(event) == "candidate_peer_udp"
+    ]
+
+
 def infer_client_ip(instance: dict[str, Any]) -> str | None:
     votes: Counter[str] = Counter()
     for kind in ("dns_query", "tcp_open", "tcp_packet", "udp_packet"):
@@ -282,29 +289,28 @@ def summarize_local_candidate_udp(instance: dict[str, Any],
     if not local_ip:
         return []
     out = []
-    for event in instance["udp_summary"]["candidate_peer_udp"]:
+    endpoint_counts: Counter[tuple[str, int, str]] = Counter()
+    payload_lens: dict[tuple[str, int, str], int] = {}
+    for event in candidate_peer_udp_events(instance):
         src_ip = event.get("src_ip")
         dst_ip = event.get("dst_ip")
         if src_ip == local_ip:
-            out.append({
-                "direction": "out",
-                "local_ip": src_ip,
-                "local_port": event.get("src_port"),
-                "remote_ip": dst_ip,
-                "remote_port": event.get("dst_port"),
-                "count": event.get("count"),
-                "payload_len": event.get("payload_len"),
-            })
+            key = ("out", dst_ip, event.get("dst_port", 0))
+            endpoint_counts[key] += 1
+            payload_lens[key] = event.get("payload_len")
         elif dst_ip == local_ip:
-            out.append({
-                "direction": "in",
-                "local_ip": dst_ip,
-                "local_port": event.get("dst_port"),
-                "remote_ip": src_ip,
-                "remote_port": event.get("src_port"),
-                "count": event.get("count"),
-                "payload_len": event.get("payload_len"),
-            })
+            key = ("in", src_ip, event.get("src_port", 0))
+            endpoint_counts[key] += 1
+            payload_lens[key] = event.get("payload_len")
+    for (direction, remote_ip, remote_port), count in endpoint_counts.most_common():
+        out.append({
+            "direction": direction,
+            "local_ip": local_ip,
+            "remote_ip": remote_ip,
+            "remote_port": remote_port,
+            "count": count,
+            "last_payload_len": payload_lens[(direction, remote_ip, remote_port)],
+        })
     return out
 
 
@@ -317,14 +323,15 @@ def correlate_instances(instances: list[dict[str, Any]]) -> dict[str, Any]:
     peer_ips = {ip for ip in (ip_a, ip_b) if ip}
 
     direct = []
+    direction_counts: Counter[tuple[str, str]] = Counter()
     for label, instance in (("A", a), ("B", b)):
-        for event in instance["udp_summary"]["candidate_peer_udp"]:
+        for event in candidate_peer_udp_events(instance):
             src_ip = event.get("src_ip")
             dst_ip = event.get("dst_ip")
             if src_ip in peer_ips and dst_ip in peer_ips and src_ip != dst_ip:
+                direction_counts[(src_ip, dst_ip)] += 1
                 direct.append({
                     "observed_by": label,
-                    "count": event.get("count"),
                     "direction": event.get("direction"),
                     "src_ip": src_ip,
                     "src_port": event.get("src_port"),
@@ -355,6 +362,19 @@ def correlate_instances(instances: list[dict[str, Any]]) -> dict[str, Any]:
         "inferred_client_ips": {"A": ip_a, "B": ip_b},
         "direct_client_udp": direct[:128],
         "direct_client_udp_count": len(direct),
+        "direct_client_udp_direction_counts": [
+            {
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "count": count,
+            }
+            for (src_ip, dst_ip), count in sorted(direction_counts.items())
+        ],
+        "direct_client_udp_bidirectional": (
+            bool(ip_a and ip_b) and
+            direction_counts[(ip_a, ip_b)] > 0 and
+            direction_counts[(ip_b, ip_a)] > 0
+        ),
         "shared_candidate_peer_endpoints": shared[:64],
         "shared_candidate_peer_endpoint_count": len(shared),
         "local_candidate_udp": {
@@ -376,6 +396,8 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         bucket_totals.update(instance["udp_summary"]["counts"])
 
     direct_client_udp = correlation.get("direct_client_udp_count", 0)
+    direct_client_udp_bidirectional = correlation.get(
+        "direct_client_udp_bidirectional", False)
     shared_endpoints = correlation.get("shared_candidate_peer_endpoint_count", 0)
     inferred_ips = correlation.get("inferred_client_ips", {})
     missing_ips = [
@@ -393,8 +415,10 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         status = "natneg_without_peer_udp"
     elif direct_client_udp == 0:
         status = "candidate_peer_udp_without_direct_client_udp"
+    elif not direct_client_udp_bidirectional:
+        status = "direct_client_udp_one_way"
     else:
-        status = "direct_client_udp_observed"
+        status = "direct_client_udp_bidirectional_observed"
 
     return {
         "status": status,
@@ -404,6 +428,7 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         "wfc_service_udp_count": bucket_totals["wfc_service_udp"],
         "candidate_peer_udp_count": bucket_totals["candidate_peer_udp"],
         "direct_client_udp_count": direct_client_udp,
+        "direct_client_udp_bidirectional": direct_client_udp_bidirectional,
         "shared_candidate_peer_endpoint_count": shared_endpoints,
         "notes": [
             "This is a transport evidence verdict only.",
@@ -501,6 +526,8 @@ def print_correlation(correlation: dict[str, Any]) -> None:
         "correlation: "
         f"A_ip={ips.get('A')} B_ip={ips.get('B')} "
         f"direct_client_udp={correlation.get('direct_client_udp_count', 0)} "
+        "bidirectional="
+        f"{correlation.get('direct_client_udp_bidirectional', False)} "
         "shared_candidate_peer_endpoints="
         f"{correlation.get('shared_candidate_peer_endpoint_count', 0)}"
     )
@@ -521,6 +548,7 @@ def print_verdict(verdict: dict[str, Any]) -> None:
         f"natneg={verdict.get('natneg_udp_count', 0)} "
         f"candidate_peer={verdict.get('candidate_peer_udp_count', 0)} "
         f"direct_client={verdict.get('direct_client_udp_count', 0)} "
+        f"bidirectional={verdict.get('direct_client_udp_bidirectional', False)} "
         f"backend_error={verdict.get('backend_error_count', 0)}"
     )
 
