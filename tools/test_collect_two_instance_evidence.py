@@ -127,6 +127,50 @@ class M7TransportVerdictTest(unittest.TestCase):
             "transport_observed_waiting_for_race_entry",
         )
 
+    def test_latest_verdicts_support_single_snapshot_reports(self):
+        report = report_for([], [])
+        report["m7_transport_verdict"] = {"status": "missing_client_ip"}
+        report["operator_confirmation"] = {
+            "race_entry_operator_confirmed": False,
+        }
+        report["m7_acceptance_verdict"] = {
+            "status": "transport_and_race_entry_not_yet_observed",
+        }
+
+        transport, confirmation, acceptance = evidence.latest_verdicts(report)
+
+        self.assertEqual(transport["status"], "missing_client_ip")
+        self.assertFalse(confirmation["race_entry_operator_confirmed"])
+        self.assertEqual(
+            acceptance["status"],
+            "transport_and_race_entry_not_yet_observed",
+        )
+
+    def test_latest_verdicts_support_watch_summary_reports(self):
+        report = {
+            "latest_m7_transport_verdict": {
+                "status": "direct_client_udp_bidirectional_observed",
+            },
+            "latest_operator_confirmation": {
+                "race_entry_operator_confirmed": True,
+            },
+            "latest_m7_acceptance_verdict": {
+                "status": "race_entry_confirmed_with_bidirectional_peer_udp",
+            },
+        }
+
+        transport, confirmation, acceptance = evidence.latest_verdicts(report)
+
+        self.assertEqual(
+            transport["status"],
+            "direct_client_udp_bidirectional_observed",
+        )
+        self.assertTrue(confirmation["race_entry_operator_confirmed"])
+        self.assertEqual(
+            acceptance["status"],
+            "race_entry_confirmed_with_bidirectional_peer_udp",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -686,6 +686,7 @@ function Start-EvidenceCollector {
         Join-Path $outDir 'race_entered.marker'
     }
     $postRunOutDir = Join-Path $outDir 'final-post-run'
+    $savedEvidencePath = Join-Path $outDir 'evidence.json'
 
     $collectorOut = Join-Path $outDir 'collector.out.log'
     $collectorErr = Join-Path $outDir 'collector.err.log'
@@ -736,7 +737,21 @@ function Start-EvidenceCollector {
     foreach ($status in $EvidenceRequireAcceptance) {
         $postRunArgs += @('--require-acceptance', (Format-PowerShellArg $status))
     }
+    $savedSummaryArgs = @(
+        '&',
+        (Format-PowerShellArg $pythonPath),
+        (Format-PowerShellArg $collector),
+        '--from-file',
+        (Format-PowerShellArg $savedEvidencePath)
+    )
+    foreach ($status in $EvidenceRequireVerdict) {
+        $savedSummaryArgs += @('--require-verdict', (Format-PowerShellArg $status))
+    }
+    foreach ($status in $EvidenceRequireAcceptance) {
+        $savedSummaryArgs += @('--require-acceptance', (Format-PowerShellArg $status))
+    }
     $postRunCommand = $postRunArgs -join ' '
+    $savedSummaryCommand = $savedSummaryArgs -join ' '
     $markerCommand = "Set-Content -LiteralPath '$raceEntryMarker' -Value race-entered"
     $checklist = Join-Path $outDir 'M7_OPERATOR_CHECKLIST.txt'
     @"
@@ -765,6 +780,8 @@ Operator steps:
      $markerCommand
   7. If the rolling collector has not already stopped, run the final snapshot:
      $postRunCommand
+  8. To summarize the saved rolling evidence after the collector exits, run:
+     $savedSummaryCommand
 
 Acceptance requires both:
   direct_client_udp_bidirectional_observed
@@ -777,6 +794,8 @@ Collector logs:
 "@ | Set-Content -LiteralPath $checklist -Encoding ASCII
     Write-Host "  final post-run validation snapshot:"
     Write-Host ("    {0}" -f $postRunCommand)
+    Write-Host "  saved evidence summary after collector exits:"
+    Write-Host ("    {0}" -f $savedSummaryCommand)
     Write-Host "  operator checklist: $checklist"
     return $p
 }

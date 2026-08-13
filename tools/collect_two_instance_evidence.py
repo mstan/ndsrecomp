@@ -999,14 +999,70 @@ def print_acceptance(verdict: dict[str, Any]) -> None:
     )
 
 
+def latest_verdicts(report: dict[str, Any]) -> tuple[dict[str, Any],
+                                                     dict[str, Any],
+                                                     dict[str, Any]]:
+    if "latest_m7_transport_verdict" in report:
+        return (
+            report.get("latest_m7_transport_verdict", {}),
+            report.get("latest_operator_confirmation", {}),
+            report.get("latest_m7_acceptance_verdict", {}),
+        )
+    return (
+        report.get("m7_transport_verdict", {}),
+        report.get("operator_confirmation", {}),
+        report.get("m7_acceptance_verdict", {}),
+    )
+
+
+def latest_instances(report: dict[str, Any]) -> list[dict[str, Any]]:
+    snapshots = report.get("snapshots")
+    if isinstance(snapshots, list) and snapshots:
+        return snapshots[-1].get("instances", [])
+    return report.get("instances", [])
+
+
+def print_saved_summary(report: dict[str, Any], path: Path) -> None:
+    transport, confirmation, acceptance = latest_verdicts(report)
+    print(f"saved evidence: {path}")
+    if "snapshots" in report:
+        snapshots = report.get("snapshots", [])
+        print(f"  snapshots={len(snapshots)} stop_reason={report.get('stop_reason')}")
+    print_verdict(transport)
+    print(
+        "operator confirmation: "
+        f"race_entry={confirmation.get('race_entry_operator_confirmed')} "
+        f"marker={confirmation.get('race_entry_marker')} "
+        f"marker_exists={confirmation.get('race_entry_marker_exists')}"
+    )
+    print_acceptance(acceptance)
+    menu_progress = report.get("menu_progress")
+    if menu_progress:
+        print_menu_progress(menu_progress)
+    for instance in latest_instances(report):
+        label = instance.get("label")
+        screen = instance.get("screen", {})
+        udp_counts = instance.get("udp_counts")
+        if udp_counts is None:
+            udp_counts = instance.get("udp_summary", {}).get("counts", {})
+        print(
+            f"latest {label}: "
+            f"screen={screen.get('nearest')} "
+            f"screen_confident={screen.get('confident')} "
+            f"udp={udp_counts}"
+        )
+
+
+def summarize_saved_file(args: argparse.Namespace) -> int:
+    path = args.from_file
+    report = json.loads(path.read_text(encoding="utf-8"))
+    print_saved_summary(report, path)
+    return check_required_statuses(args, report)
+
+
 def check_required_statuses(args: argparse.Namespace,
                             report: dict[str, Any]) -> int:
-    if "latest_m7_transport_verdict" in report:
-        latest_transport = report.get("latest_m7_transport_verdict", {})
-        latest_acceptance = report.get("latest_m7_acceptance_verdict", {})
-    else:
-        latest_transport = report.get("m7_transport_verdict", {})
-        latest_acceptance = report.get("m7_acceptance_verdict", {})
+    latest_transport, _, latest_acceptance = latest_verdicts(report)
     if args.require_verdict:
         latest_status = latest_transport.get("status")
         if latest_status not in args.require_verdict:
@@ -1032,6 +1088,11 @@ def check_required_statuses(args: argparse.Namespace,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--from-file", type=Path, default=None,
+                        help=(
+                            "summarize and validate a saved evidence.json "
+                            "instead of collecting from live debug ports"
+                        ))
     parser.add_argument("--port-a", type=int, default=19860)
     parser.add_argument("--port-b", type=int, default=19861)
     parser.add_argument("--out-dir", type=Path, default=None)
@@ -1088,6 +1149,10 @@ def main() -> int:
         parser.error("--stop-on-acceptance entries must be non-empty")
     if any(not status.strip() for status in args.require_acceptance):
         parser.error("--require-acceptance entries must be non-empty")
+    if args.from_file is not None:
+        if not args.from_file.is_file():
+            parser.error(f"--from-file not found: {args.from_file}")
+        return summarize_saved_file(args)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = args.out_dir or (
