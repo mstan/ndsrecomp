@@ -736,8 +736,48 @@ function Start-EvidenceCollector {
     foreach ($status in $EvidenceRequireAcceptance) {
         $postRunArgs += @('--require-acceptance', (Format-PowerShellArg $status))
     }
+    $postRunCommand = $postRunArgs -join ' '
+    $markerCommand = "Set-Content -LiteralPath '$raceEntryMarker' -Value race-entered"
+    $checklist = Join-Path $outDir 'M7_OPERATOR_CHECKLIST.txt'
+    @"
+ndsrecomp M7 Friend Roster acceptance checklist
+
+Run directory:
+  $outDir
+
+Instances:
+  A debug port: $PortA
+  B debug port: $PortB
+  A save: ${SavePrefix}0.sav
+  B save: ${SavePrefix}1.sav
+  A firmware: ${FirmwarePrefix}0.firmware.bin
+  B firmware: ${FirmwarePrefix}1.firmware.bin
+
+Use Friend Roster, not public matchmaking.
+
+Operator steps:
+  1. In instance A, open the MKDS Friend Roster and read A's friend code.
+  2. In instance B, open the MKDS Friend Roster and read B's friend code.
+  3. Register A's friend code in B.
+  4. Register B's friend code in A.
+  5. Start a Friend Roster match between A and B.
+  6. When both clients visibly enter the online race, create the marker:
+     $markerCommand
+  7. If the rolling collector has not already stopped, run the final snapshot:
+     $postRunCommand
+
+Acceptance requires both:
+  direct_client_udp_bidirectional_observed
+  race_entry_confirmed_with_bidirectional_peer_udp
+
+Collector logs:
+  stdout: $collectorOut
+  stderr: $collectorErr
+  race-entry marker: $raceEntryMarker
+"@ | Set-Content -LiteralPath $checklist -Encoding ASCII
     Write-Host "  final post-run validation snapshot:"
-    Write-Host ("    {0}" -f ($postRunArgs -join ' '))
+    Write-Host ("    {0}" -f $postRunCommand)
+    Write-Host "  operator checklist: $checklist"
     return $p
 }
 
