@@ -394,8 +394,12 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         for instance in instances
     )
     bucket_totals: Counter[str] = Counter()
+    truncation_risks: dict[str, list[str]] = {}
     for instance in instances:
         bucket_totals.update(instance["udp_summary"]["counts"])
+        risks = instance.get("truncation_risk", [])
+        if risks:
+            truncation_risks[instance.get("label", "?")] = list(risks)
 
     direct_client_udp = correlation.get("direct_client_udp_count", 0)
     direct_client_udp_bidirectional = correlation.get(
@@ -432,8 +436,14 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         "direct_client_udp_count": direct_client_udp,
         "direct_client_udp_bidirectional": direct_client_udp_bidirectional,
         "shared_candidate_peer_endpoint_count": shared_endpoints,
+        "truncation_risk": truncation_risks,
         "notes": [
             "This is a transport evidence verdict only.",
+            (
+                "truncation_risk means at least one filtered ring query "
+                "returned the requested maximum and may not include every "
+                "retained event of that kind."
+            ),
             "Race entry and lobby return still require framebuffer or operator confirmation.",
         ],
     }
@@ -457,6 +467,7 @@ def unavailable_instance_report(label: str, port: int, error: Exception
         "net_state": {},
         "kinds": {kind: [] for kind in EVIDENCE_KINDS},
         "kind_counts": {kind: 0 for kind in EVIDENCE_KINDS},
+        "truncation_risk": [],
         "udp_summary": empty_udp_summary(),
         "framebuffer_saved": False,
         "framebuffer_path": None,
@@ -496,6 +507,10 @@ def collect_instance(label: str, port: int, out_dir: Path,
         report["kind_counts"] = {
             kind: len(events) for kind, events in report["kinds"].items()
         }
+        report["truncation_risk"] = [
+            kind for kind, count in report["kind_counts"].items()
+            if count >= max_per_kind
+        ]
         report["udp_summary"] = summarize_udp(report["kinds"]["udp_packet"])
         return report
     except Exception as exc:
@@ -549,6 +564,12 @@ def print_summary(report: dict[str, Any]) -> None:
     backend_errors = report["kind_counts"].get("backend_error", 0)
     if backend_errors:
         print(f"  backend_error={backend_errors}")
+    if report.get("truncation_risk"):
+        print(
+            "  truncation_risk="
+            f"{','.join(report['truncation_risk'])} "
+            "(filtered dump returned --max-per-kind)"
+        )
     screen = report.get("screen", {})
     if screen.get("available"):
         print(
@@ -780,6 +801,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
                 "event_counts": instance["event_counts"],
                 "net_state": instance["net_state"],
                 "kind_counts": instance["kind_counts"],
+                "truncation_risk": instance.get("truncation_risk", []),
                 "udp_counts": instance["udp_summary"]["counts"],
                 "candidate_peer_udp": instance["udp_summary"]["candidate_peer_udp"],
                 "wfc_service_udp": instance["udp_summary"]["wfc_service_udp"],
