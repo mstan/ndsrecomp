@@ -687,6 +687,14 @@ function Start-EvidenceCollector {
     }
     $postRunOutDir = Join-Path $outDir 'final-post-run'
     $savedEvidencePath = Join-Path $outDir 'evidence.json'
+    $save0Path = Join-Path $GameRoot "${SavePrefix}0.sav"
+    $save1Path = Join-Path $GameRoot "${SavePrefix}1.sav"
+    $firmware0Path = Join-Path $GameRoot "${FirmwarePrefix}0.firmware.bin"
+    $firmware1Path = Join-Path $GameRoot "${FirmwarePrefix}1.firmware.bin"
+    $save0Hash = (Get-FileHash -LiteralPath $save0Path -Algorithm SHA1).Hash
+    $save1Hash = (Get-FileHash -LiteralPath $save1Path -Algorithm SHA1).Hash
+    $firmware0Hash = (Get-FileHash -LiteralPath $firmware0Path -Algorithm SHA1).Hash
+    $firmware1Hash = (Get-FileHash -LiteralPath $firmware1Path -Algorithm SHA1).Hash
 
     $collectorOut = Join-Path $outDir 'collector.out.log'
     $collectorErr = Join-Path $outDir 'collector.err.log'
@@ -764,9 +772,17 @@ Instances:
   A debug port: $PortA
   B debug port: $PortB
   A save: ${SavePrefix}0.sav
+    SHA1: $save0Hash
   B save: ${SavePrefix}1.sav
+    SHA1: $save1Hash
   A firmware: ${FirmwarePrefix}0.firmware.bin
+    SHA1: $firmware0Hash
   B firmware: ${FirmwarePrefix}1.firmware.bin
+    SHA1: $firmware1Hash
+
+These hashes are duplicate-profile guards only. They are not MKDS friend codes.
+Read and exchange the actual 12-digit friend codes through the in-game Friend
+Roster UI.
 
 Use Friend Roster, not public matchmaking.
 
