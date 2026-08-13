@@ -49,6 +49,7 @@ LAN_NOISE_PORTS = {
     10101, 32412, 32414,
 }
 WFC_SERVICE_UDP_PORTS = {27900}
+NATNEG_UDP_PORTS = {27901}
 
 
 def ipv4(value: int) -> str:
@@ -97,6 +98,8 @@ def udp_bucket(event: dict[str, Any]) -> str:
     dst_port = event.get("dst_port", 0)
     if src_port in WFC_SERVICE_UDP_PORTS or dst_port in WFC_SERVICE_UDP_PORTS:
         return "wfc_service_udp"
+    if src_port in NATNEG_UDP_PORTS or dst_port in NATNEG_UDP_PORTS:
+        return "natneg_udp"
     if (
         src_port in LAN_NOISE_PORTS or dst_port in LAN_NOISE_PORTS or
         is_multicast_or_broadcast(src_ip) or is_multicast_or_broadcast(dst_ip)
@@ -108,6 +111,7 @@ def udp_bucket(event: dict[str, Any]) -> str:
 def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {
         "wfc_service_udp": [],
+        "natneg_udp": [],
         "candidate_peer_udp": [],
         "lan_noise_udp": [],
     }
@@ -134,6 +138,7 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
         "counts": {name: len(values) for name, values in buckets.items()},
         "candidate_peer_udp": buckets["candidate_peer_udp"][:128],
         "wfc_service_udp": buckets["wfc_service_udp"][:128],
+        "natneg_udp": buckets["natneg_udp"][:128],
         "top_udp_endpoints": top_endpoints,
     }
 
@@ -305,6 +310,7 @@ def print_summary(report: dict[str, Any]) -> None:
     print(
         "  udp: "
         f"wfc_service={udp['wfc_service_udp']} "
+        f"natneg={udp['natneg_udp']} "
         f"candidate_peer={udp['candidate_peer_udp']} "
         f"lan_noise={udp['lan_noise_udp']}"
     )
@@ -368,6 +374,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
                 "udp_counts": instance["udp_summary"]["counts"],
                 "candidate_peer_udp": instance["udp_summary"]["candidate_peer_udp"],
                 "wfc_service_udp": instance["udp_summary"]["wfc_service_udp"],
+                "natneg_udp": instance["udp_summary"]["natneg_udp"],
                 "framebuffer_path": instance.get("framebuffer_path"),
             }
             for instance in report["instances"]
