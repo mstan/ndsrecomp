@@ -84,6 +84,52 @@ std::string json_str(const std::string& s, const std::string& key,
     return out;
 }
 
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char ch : s) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[7];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out.push_back(ch);
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+const char* net_backend_name(NdsNetBackendKind backend) {
+    switch (backend) {
+    case NdsNetBackendKind::Slirp: return "slirp";
+    case NdsNetBackendKind::Replay: return "replay";
+    case NdsNetBackendKind::Pcap: return "pcap";
+    }
+    return "unknown";
+}
+
+std::string ipv4_host_order_string(uint32_t value) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                  static_cast<unsigned>((value >> 24u) & 0xFFu),
+                  static_cast<unsigned>((value >> 16u) & 0xFFu),
+                  static_cast<unsigned>((value >> 8u) & 0xFFu),
+                  static_cast<unsigned>(value & 0xFFu));
+    return std::string(buf);
+}
+
 uint64_t json_u64(const std::string& s, const std::string& key,
                   uint64_t def = 0) {
     size_t p;
@@ -672,12 +718,46 @@ std::string handle(const std::string& line) {
     if (cmd == "net_state") {
         NdsNetRingState st{};
         net_ring_debug_state(&st);
-        char buf[192];
+        NdsWifiNetworkState net{};
+        const bool has_net = nds_wifi_network_state(&net);
+        const std::string wfc_dns_ip =
+            has_net ? ipv4_host_order_string(net.wfc_dns_ipv4) : "0.0.0.0";
+        char buf[512];
         std::snprintf(buf, sizeof(buf),
-            "{\"produced\":%llu,\"oldest\":%llu,\"capacity\":%u}",
+            "{\"produced\":%llu,\"oldest\":%llu,\"capacity\":%u,"
+            "\"wifi_attached\":%s,\"network_enabled\":%s,"
+            "\"backend\":\"%s\",\"live_backend_active\":%s,"
+            "\"replay_backend_active\":%s,\"worker_active\":%s,"
+            "\"wfc_enabled\":%s,\"wfc_dns_ipv4\":%u,"
+            "\"wfc_dns_ip\":\"%s\","
+            "\"pcap_adapter_selected\":%s",
             (unsigned long long)st.produced, (unsigned long long)st.oldest,
-            st.capacity);
-        return buf;
+            st.capacity,
+            has_net && net.attached ? "true" : "false",
+            has_net && net.network_enabled ? "true" : "false",
+            has_net ? net_backend_name(net.backend) : "none",
+            has_net && net.live_backend_active ? "true" : "false",
+            has_net && net.replay_backend_active ? "true" : "false",
+            has_net && net.worker_active ? "true" : "false",
+            has_net && net.wfc_enabled ? "true" : "false",
+            has_net ? net.wfc_dns_ipv4 : 0u,
+            wfc_dns_ip.c_str(),
+            has_net && net.pcap_adapter_selected ? "true" : "false");
+        std::string out = buf;
+        if (has_net) {
+            out += ",\"pcap_adapter_requested\":\"" +
+                   json_escape(net.pcap_adapter_requested) + "\"";
+            out += ",\"pcap_device_name\":\"" +
+                   json_escape(net.pcap_device_name) + "\"";
+            out += ",\"pcap_friendly_name\":\"" +
+                   json_escape(net.pcap_friendly_name) + "\"";
+            out += ",\"pcap_description\":\"" +
+                   json_escape(net.pcap_description) + "\"";
+            out += ",\"pcap_ipv4\":\"" +
+                   json_escape(net.pcap_ipv4) + "\"";
+        }
+        out += "}";
+        return out;
     }
     if (cmd == "net_replay_status") {
         // Wiimmfi M8: live query, mid-session -- never wait for the

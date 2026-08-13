@@ -124,11 +124,32 @@ struct NdsNetReplayStatus {
     std::string mismatch_reason;
 };
 
+struct NdsWifiNetworkState {
+    bool attached = false;
+    bool network_enabled = false;
+    bool live_backend_active = false;
+    bool replay_backend_active = false;
+    bool worker_active = false;
+    NdsNetBackendKind backend = NdsNetBackendKind::Slirp;
+    bool wfc_enabled = false;
+    uint32_t wfc_dns_ipv4 = 0;
+    std::string pcap_adapter_requested;
+    bool pcap_adapter_selected = false;
+    std::string pcap_device_name;
+    std::string pcap_friendly_name;
+    std::string pcap_description;
+    std::string pcap_ipv4;
+};
+
 // Returns false (no fields populated) if no bridge has been attached yet,
 // or the attached backend isn't Replay. Read-only; never advances
 // execution -- safe to call at any point, including mid-run over the debug
 // server, matching every other query-surface function in this codebase.
 bool nds_wifi_replay_status(NdsNetReplayStatus* out);
+
+// Returns the attached Wi-Fi backend/runtime state. Read-only and safe to
+// query through the debug server while the guest is running.
+bool nds_wifi_network_state(NdsWifiNetworkState* out);
 
 // ── Process-wide Winsock lifecycle (Windows only) ───────────────────────
 // MUST be called exactly once, successfully, before ANY Winsock API call

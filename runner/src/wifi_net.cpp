@@ -641,6 +641,8 @@ struct WifiBridgeState {
     // call actually succeeded.
     NdsNetCaptureWriter capture_writer;
 
+    NdsWifiNetworkState network_state;
+
     BoundedPacketQueue tx_queue{kWifiNetQueueCapacity};  // guest -> host
     BoundedPacketQueue rx_queue{kWifiNetQueueCapacity};  // host -> guest
 
@@ -992,6 +994,13 @@ melonDS::Wifi* nds_wifi3d_attach() {
     if (g_bridge) return g_bridge->wifi.get();
 
     g_bridge = std::make_unique<WifiBridgeState>();
+    g_bridge->network_state.attached = true;
+    g_bridge->network_state.network_enabled = g_network_config.enabled;
+    g_bridge->network_state.backend = g_network_config.backend;
+    g_bridge->network_state.wfc_enabled = g_network_config.wfc_enabled;
+    g_bridge->network_state.wfc_dns_ipv4 = g_network_config.wfc_dns_ipv4;
+    g_bridge->network_state.pcap_adapter_requested =
+        g_network_config.pcap_adapter;
     g_bridge->nds.SPI.SetFirmwareSource(nds_firmware_bytes(),
                                          nds_firmware_size());
 
@@ -1111,6 +1120,15 @@ melonDS::Wifi* nds_wifi3d_attach() {
 
             g_bridge->live_driver = pcap.get();
             g_bridge->net.SetDriver(std::move(pcap));
+            g_bridge->network_state.live_backend_active = true;
+            g_bridge->network_state.pcap_adapter_selected = true;
+            g_bridge->network_state.pcap_device_name = selected->DeviceName;
+            g_bridge->network_state.pcap_friendly_name =
+                selected->FriendlyName;
+            g_bridge->network_state.pcap_description =
+                selected->Description;
+            g_bridge->network_state.pcap_ipv4 =
+                PcapAdapterIpv4String(*selected);
             melonDS::Platform::Log(melonDS::Platform::Info,
                 "[wifi_net] network backend attached: PCAP device='%s' "
                 "friendly='%s' ipv4=%s%s\n",
@@ -1163,6 +1181,7 @@ melonDS::Wifi* nds_wifi3d_attach() {
             g_bridge->slirp_driver = slirp.get();
             g_bridge->live_driver = slirp.get();
             g_bridge->net.SetDriver(std::move(slirp));
+            g_bridge->network_state.live_backend_active = true;
 
             melonDS::Platform::Log(melonDS::Platform::Info,
                 "[wifi_net] network backend attached (wfc_enabled=%d, "
@@ -1188,9 +1207,20 @@ melonDS::Wifi* nds_wifi3d_attach() {
     if (g_bridge->live_driver) {
         g_bridge->worker_thread = melonDS::Platform::Thread_Create(
             [state = g_bridge.get()] { WifiWorkerThreadMain(state); });
+        g_bridge->network_state.worker_active =
+            g_bridge->worker_thread != nullptr;
     }
 
     return g_bridge->wifi.get();
+}
+
+bool nds_wifi_network_state(NdsWifiNetworkState* out) {
+    if (!out || !g_bridge) return false;
+    *out = g_bridge->network_state;
+    out->live_backend_active = g_bridge->live_driver != nullptr;
+    out->replay_backend_active = g_bridge->replay_driver != nullptr;
+    out->worker_active = g_bridge->worker_thread != nullptr;
+    return true;
 }
 
 bool nds_wifi_replay_status(NdsNetReplayStatus* out) {
