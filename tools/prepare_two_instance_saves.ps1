@@ -40,6 +40,9 @@ if (-not (Test-Path -LiteralPath $RunnerExe)) { throw "runner not found: $Runner
 if (-not (Test-Path -LiteralPath $PythonExe)) { throw "python not found: $PythonExe" }
 if (-not (Test-Path -LiteralPath $Scenario)) { throw "scenario not found: $Scenario" }
 if (-not (Test-Path -LiteralPath $RomPath)) { throw "ROM not found: $RomPath" }
+if ($PortA -lt 1 -or $PortA -gt 65535) { throw "-PortA must be in 1..65535" }
+if ($PortB -lt 1 -or $PortB -gt 65535) { throw "-PortB must be in 1..65535" }
+if ($PortA -eq $PortB) { throw "-PortA and -PortB must be different" }
 
 $save0 = Join-Path $GameRoot "${SavePrefix}0.sav"
 $save1 = Join-Path $GameRoot "${SavePrefix}1.sav"

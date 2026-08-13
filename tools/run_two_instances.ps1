@@ -60,6 +60,9 @@ Set-Location $GameRoot
 $exe = Join-Path $GameRoot (Join-Path $BuildDir 'nds_runner.exe')
 if (-not (Test-Path $exe)) { throw "runner not found: $exe" }
 if (-not (Test-Path (Join-Path $GameRoot $Rom))) { throw "ROM not found: $Rom" }
+if ($PortA -lt 1 -or $PortA -gt 65535) { throw "-PortA must be in 1..65535" }
+if ($PortB -lt 1 -or $PortB -gt 65535) { throw "-PortB must be in 1..65535" }
+if ($PortA -eq $PortB) { throw "-PortA and -PortB must be different" }
 if ($EvidenceWatchSeconds -lt 0) { throw "-EvidenceWatchSeconds must be non-negative" }
 if ($EvidenceStartupTimeoutSeconds -lt 0) { throw "-EvidenceStartupTimeoutSeconds must be non-negative" }
 if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
