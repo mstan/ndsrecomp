@@ -20,6 +20,7 @@ param(
     [string] $WfcProvider = 'wiimmfi',
     [string] $PythonExe = '.venv\Scripts\python.exe',
     [double] $StartupTimeoutSeconds = 30,
+    [int] $Attempts = 2,
     [string] $OutDir = ''
 )
 
@@ -44,6 +45,7 @@ if (-not (Test-Path -LiteralPath $Scenario)) { throw "scenario not found: $Scena
 if (-not (Test-Path -LiteralPath $RomPath)) { throw "ROM not found: $RomPath" }
 if ($Port -lt 1 -or $Port -gt 65535) { throw "-Port must be in 1..65535" }
 if ($StartupTimeoutSeconds -lt 0) { throw "-StartupTimeoutSeconds must be non-negative" }
+if ($Attempts -lt 1) { throw "-Attempts must be positive" }
 
 function Test-DebugPort {
     param([int] $TestPort)
@@ -143,18 +145,42 @@ function Assert-WiimmfiMenuEvidence {
         throw "D_match_setup_screen evidence contains backend_error event(s): $($backendErrors.Count)"
     }
 
+    $dnsHosts = @(
+        $matchEvidence.kinds.dns_query |
+        ForEach-Object { $_.hostname } |
+        Where-Object { $_ }
+    )
+    foreach ($requiredHost in @(
+        'nas.nintendowifi.net',
+        'gpcm.gs.nintendowifi.net',
+        'mariokartds.master.gs.nintendowifi.net'
+    )) {
+        if ($dnsHosts -notcontains $requiredHost) {
+            throw "D_match_setup_screen DNS evidence is missing ${requiredHost}: $Path"
+        }
+    }
+
+    $wfcServiceUdp = @(
+        $matchEvidence.kinds.udp_packet |
+        Where-Object { $_.src_port -eq 27900 -or $_.dst_port -eq 27900 }
+    )
+    if ($wfcServiceUdp.Count -lt 1) {
+        throw "D_match_setup_screen evidence has no UDP packet involving port 27900"
+    }
+
     $setupStep = $report.steps |
         Where-Object { $_.name -eq 'wfc_match_setup_screen' } |
         Select-Object -Last 1
     $summary = (
         "evidence OK: wfc_match_setup_screen vblank9={0}, dns={1}/{2}, " +
-        "tcp_open={3}, udp={4}, tls={5}"
+        "tcp_open={3}, udp={4}, wfc_udp={5}, tls={6}"
     ) -f (
         $setupStep.vblank9,
         @($matchEvidence.kinds.dns_query).Count,
         @($matchEvidence.kinds.dns_response).Count,
         @($matchEvidence.kinds.tcp_open).Count,
         @($matchEvidence.kinds.udp_packet).Count,
+        $wfcServiceUdp.Count,
         @($matchEvidence.kinds.tls_record).Count
     )
     Write-Host $summary -ForegroundColor Green
@@ -176,11 +202,6 @@ $GateOutDir = if ($OutDir) {
 }
 New-Item -ItemType Directory -Force -Path $GateOutDir | Out-Null
 
-$ShotsDir = Join-Path $GateOutDir 'shots'
-$EvidenceJson = Join-Path $GateOutDir 'evidence.json'
-$RunnerOut = Join-Path $GateOutDir 'runner.out.log'
-$RunnerErr = Join-Path $GateOutDir 'runner.err.log'
-
 $argv = @('ndsrecomp\bios', '--serve', '--port', "$Port",
           '--config', 'game.toml', '--rom', "`"$Rom`"",
           '--no-save', '--startup-mode', 'manual',
@@ -188,40 +209,76 @@ $argv = @('ndsrecomp\bios', '--serve', '--port', "$Port",
           '--wfc', 'on', '--wfc-provider', $WfcProvider)
 if ($PcapAdapter) { $argv += @('--pcap-adapter', $PcapAdapter) }
 
-Write-Host "launching Wiimmfi menu gate runner on port $Port" -ForegroundColor Cyan
-$runner = Start-Process -FilePath $RunnerExe -WorkingDirectory $GameRoot `
-    -ArgumentList $argv -PassThru `
-    -RedirectStandardOutput $RunnerOut `
-    -RedirectStandardError $RunnerErr `
-    -WindowStyle Hidden
+$completed = $false
+$lastError = $null
 
-try {
-    if (-not (Wait-DebugPort -WaitPort $Port -TimeoutSeconds $StartupTimeoutSeconds)) {
-        $exitText = if ($runner.HasExited) { " exited with code $($runner.ExitCode)" } else { '' }
-        throw (
-            "runner did not open debug port $Port$exitText" +
-            [Environment]::NewLine + (Get-LogTail -Path $RunnerErr)
-        )
+for ($attempt = 1; $attempt -le $Attempts; ++$attempt) {
+    $AttemptOutDir = if ($Attempts -eq 1) {
+        $GateOutDir
+    } else {
+        Join-Path $GateOutDir ("attempt_{0:D3}" -f $attempt)
     }
+    New-Item -ItemType Directory -Force -Path $AttemptOutDir | Out-Null
 
-    & $PythonPath $Scenario `
-        --port $Port `
-        --shots-dir $ShotsDir `
-        --evidence-json $EvidenceJson `
-        --stop-at-match-setup
-    if ($LASTEXITCODE -ne 0) {
-        throw "mkds_online_menus.py failed with exit code $LASTEXITCODE"
+    $ShotsDir = Join-Path $AttemptOutDir 'shots'
+    $EvidenceJson = Join-Path $AttemptOutDir 'evidence.json'
+    $RunnerOut = Join-Path $AttemptOutDir 'runner.out.log'
+    $RunnerErr = Join-Path $AttemptOutDir 'runner.err.log'
+
+    Write-Host (
+        "launching Wiimmfi menu gate runner on port {0} attempt {1}/{2}" -f `
+        $Port, $attempt, $Attempts
+    ) -ForegroundColor Cyan
+    $runner = $null
+    try {
+        $runner = Start-Process -FilePath $RunnerExe -WorkingDirectory $GameRoot `
+            -ArgumentList $argv -PassThru `
+            -RedirectStandardOutput $RunnerOut `
+            -RedirectStandardError $RunnerErr `
+            -WindowStyle Hidden
+
+        if (-not (Wait-DebugPort -WaitPort $Port -TimeoutSeconds $StartupTimeoutSeconds)) {
+            $exitText = if ($runner.HasExited) { " exited with code $($runner.ExitCode)" } else { '' }
+            throw (
+                "runner did not open debug port $Port$exitText" +
+                [Environment]::NewLine + (Get-LogTail -Path $RunnerErr)
+            )
+        }
+
+        & $PythonPath $Scenario `
+            --port $Port `
+            --shots-dir $ShotsDir `
+            --evidence-json $EvidenceJson `
+            --stop-at-match-setup
+        if ($LASTEXITCODE -ne 0) {
+            throw "mkds_online_menus.py failed with exit code $LASTEXITCODE"
+        }
+
+        Assert-WiimmfiMenuEvidence -Path $EvidenceJson
+
+        Write-Host "Wiimmfi menu gate complete" -ForegroundColor Green
+        Write-Host "  evidence: $EvidenceJson"
+        Write-Host "  screenshots: $ShotsDir"
+        $completed = $true
+        break
     }
-
-    Assert-WiimmfiMenuEvidence -Path $EvidenceJson
-
-    Write-Host "Wiimmfi menu gate complete" -ForegroundColor Green
-    Write-Host "  evidence: $EvidenceJson"
-    Write-Host "  screenshots: $ShotsDir"
+    catch {
+        $lastError = $_
+        Write-Warning ("Wiimmfi menu gate attempt {0}/{1} failed: {2}" -f `
+            $attempt, $Attempts, $_.Exception.Message)
+        if ($attempt -lt $Attempts) {
+            Write-Host "retrying with a fresh runner..." -ForegroundColor Yellow
+        }
+    }
+    finally {
+        if ($runner -and -not $runner.HasExited) {
+            Stop-Process -Id $runner.Id -Force
+            Wait-Process -Id $runner.Id -Timeout 10 -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 500
+    }
 }
-finally {
-    if ($runner -and -not $runner.HasExited) {
-        Stop-Process -Id $runner.Id -Force
-        Wait-Process -Id $runner.Id -Timeout 10 -ErrorAction SilentlyContinue
-    }
+
+if (-not $completed) {
+    throw "Wiimmfi menu gate failed after $Attempts attempt(s): $($lastError.Exception.Message)"
 }
