@@ -18,6 +18,7 @@ param(
     [string] $NetworkBackend = 'pcap',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
+    [int] $InstanceIndex = 0,
     [string] $PythonExe = '.venv\Scripts\python.exe',
     [double] $StartupTimeoutSeconds = 30,
     [int] $Attempts = 2,
@@ -44,6 +45,7 @@ if (-not (Test-Path -LiteralPath $PythonPath)) { throw "python not found: $Pytho
 if (-not (Test-Path -LiteralPath $Scenario)) { throw "scenario not found: $Scenario" }
 if (-not (Test-Path -LiteralPath $RomPath)) { throw "ROM not found: $RomPath" }
 if ($Port -lt 1 -or $Port -gt 65535) { throw "-Port must be in 1..65535" }
+if ($InstanceIndex -lt 0 -or $InstanceIndex -gt 255) { throw "-InstanceIndex must be in 0..255" }
 if ($StartupTimeoutSeconds -lt 0) { throw "-StartupTimeoutSeconds must be non-negative" }
 if ($Attempts -lt 1) { throw "-Attempts must be positive" }
 
@@ -227,7 +229,8 @@ $argv = @('ndsrecomp\bios', '--serve', '--port', "$Port",
           '--config', 'game.toml', '--rom', "`"$Rom`"",
           '--no-save', '--startup-mode', 'manual',
           '--network', 'on', '--network-backend', $NetworkBackend,
-          '--wfc', 'on', '--wfc-provider', $WfcProvider)
+          '--wfc', 'on', '--wfc-provider', $WfcProvider,
+          '--instance-index', "$InstanceIndex")
 if ($PcapAdapter) { $argv += @('--pcap-adapter', $PcapAdapter) }
 
 $completed = $false
