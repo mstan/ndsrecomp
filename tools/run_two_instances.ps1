@@ -35,10 +35,12 @@
 # bidirectional peer UDP is proven. Pass -EvidenceWatchSeconds 0 only for a
 # deliberate no-evidence launch.
 #
-# To also prove the two pcap-backed instances can concurrently reach the
-# authenticated match setup menu before opening the interactive windows:
+# Before opening interactive windows, the launcher also proves the two
+# pcap-backed instances can concurrently reach the authenticated match setup
+# menu. Pass -SkipLoginGatePreflight only for a deliberate fast launch with
+# weaker acceptance evidence.
 #
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -RunLoginGatePreflight
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
 # (pwsh / PowerShell 7 is NOT installed on this machine -- use powershell.exe.)
 #
@@ -68,6 +70,7 @@ param(
     [switch] $SkipPortPreflight,
     [switch] $SkipNetworkRuntimePreflight,
     [switch] $RunLoginGatePreflight,
+    [switch] $SkipLoginGatePreflight,
     [string] $LoginGateOutDir = '',
     [int] $LoginGateAttempts = 2,
     [double] $LoginGateTimeoutSeconds = 900,
@@ -361,7 +364,8 @@ function Assert-NetworkRuntimePreflight {
 }
 
 function Assert-TwoLoginGatePreflight {
-    if (-not $RunLoginGatePreflight) {
+    if ($SkipLoginGatePreflight) {
+        Write-Warning "skipping two-login gate preflight"
         return
     }
 
