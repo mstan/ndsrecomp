@@ -37,10 +37,10 @@
 # observed. Pass -EvidenceWatchSeconds 0 only for a deliberate no-evidence
 # launch.
 #
-# Before opening interactive windows, the launcher also proves the two
-# pcap-backed instances can concurrently reach the authenticated match setup
-# menu. Pass -SkipLoginGatePreflight only for a deliberate fast launch with
-# weaker acceptance evidence.
+# Before opening interactive windows, the launcher also proves the same
+# prepared save/firmware profiles can concurrently reach the authenticated
+# match setup menu. Pass -SkipLoginGatePreflight only for a deliberate fast
+# launch with weaker acceptance evidence.
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
@@ -446,10 +446,16 @@ function Assert-TwoLoginGatePreflight {
     $argv = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $loginGate,
         '-GameRoot', $GameRoot,
+        '-BuildDir', $BuildDir,
+        '-Rom', $Rom,
+        '-SavePrefix', $SavePrefix,
+        '-FirmwarePrefix', $FirmwarePrefix,
         '-PortA', "$PortA",
         '-PortB', "$PortB",
         '-NetworkBackend', $NetworkBackend,
         '-WfcProvider', $WfcProvider,
+        '-PythonExe', $PythonExe,
+        '-PreparedProfile',
         '-Attempts', "$LoginGateAttempts",
         '-TimeoutSeconds', "$LoginGateTimeoutSeconds",
         '-OutDir', $outDir
@@ -458,7 +464,7 @@ function Assert-TwoLoginGatePreflight {
         $argv += @('-PcapAdapter', $PcapAdapter)
     }
 
-    Write-Host "two-login preflight: proving concurrent authenticated menus" `
+    Write-Host "two-login preflight: proving prepared authenticated menus" `
         -ForegroundColor Cyan
     & powershell.exe @argv
     if ($LASTEXITCODE -ne 0) {

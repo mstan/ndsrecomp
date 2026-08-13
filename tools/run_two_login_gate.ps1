@@ -1,10 +1,12 @@
 # run_two_login_gate.ps1 -- concurrent non-matchmaking Wiimmfi proof.
 #
 # Launches two hidden MKDS runners with distinct instance indexes and drives
-# both through tools/run_wiimmfi_menu_gate.ps1 concurrently. Each child stops at
-# the authenticated match setup menu, before Friend Roster or public
-# matchmaking. This is a topology/login gate for M7, not the owner-driven race
-# acceptance run.
+# both through tools/run_wiimmfi_menu_gate.ps1 concurrently. With
+# -PreparedProfile it drives tools/run_prepared_wiimmfi_menu_gate.ps1 instead,
+# using the existing per-instance cartridge saves and firmware images. Each
+# child stops at the authenticated match setup menu, before Friend Roster or
+# public matchmaking. This is a topology/login gate for M7, not the
+# owner-driven race acceptance run.
 #
 # Run from the Mario Kart DS game worktree after building the pcap runner:
 #
@@ -13,12 +15,18 @@
 [CmdletBinding()]
 param(
     [string] $GameRoot = 'F:\Projects\ndsrecomp\mariokartdsrecomp',
+    [string] $BuildDir = 'ndsrecomp\runner\build-mkds-pcap',
+    [string] $Rom = 'Mario Kart DS.nds',
+    [string] $SavePrefix = 'mkds_instance',
+    [string] $FirmwarePrefix = 'mkds_instance',
     [int] $PortA = 19901,
     [int] $PortB = 19902,
     [ValidateSet('slirp', 'pcap')]
     [string] $NetworkBackend = 'pcap',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
+    [string] $PythonExe = '.venv\Scripts\python.exe',
+    [switch] $PreparedProfile,
     [int] $Attempts = 2,
     [double] $TimeoutSeconds = 900,
     [string] $OutDir = ''
@@ -35,7 +43,11 @@ if ($Attempts -lt 1) { throw "-Attempts must be positive" }
 if ($TimeoutSeconds -le 0) { throw "-TimeoutSeconds must be positive" }
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$GateScript = Join-Path $ScriptRoot 'run_wiimmfi_menu_gate.ps1'
+$GateScript = if ($PreparedProfile) {
+    Join-Path $ScriptRoot 'run_prepared_wiimmfi_menu_gate.ps1'
+} else {
+    Join-Path $ScriptRoot 'run_wiimmfi_menu_gate.ps1'
+}
 if (-not (Test-Path -LiteralPath $GateScript)) { throw "gate script not found: $GateScript" }
 
 function Test-DebugPort {
@@ -67,6 +79,15 @@ function Get-LogTail {
     return ((Get-Content -LiteralPath $Path -Tail $Lines) -join [Environment]::NewLine)
 }
 
+function Quote-ChildArgument {
+    param([string] $Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return ('"' + ($Value -replace '"', '\"') + '"')
+}
+
 function Test-GateEvidence {
     param([string] $InstanceOutDir, [datetime] $Since)
 
@@ -92,6 +113,13 @@ function Test-GateEvidence {
             Ok = $false
             Path = $evidence.FullName
             Message = "evidence did not stop at match setup"
+        }
+    }
+    if ($PreparedProfile -and -not $report.prepared_profile) {
+        return [pscustomobject]@{
+            Ok = $false
+            Path = $evidence.FullName
+            Message = "evidence does not record prepared_profile=true"
         }
     }
     if (-not $report.net_evidence.D_match_setup_screen) {
@@ -210,17 +238,27 @@ function Start-Gate {
     $stdout = Join-Path $instanceOut 'gate.out.log'
     $stderr = Join-Path $instanceOut 'gate.err.log'
     $args = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $GateScript,
-        '-GameRoot', $GameRoot,
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Quote-ChildArgument $GateScript),
+        '-GameRoot', (Quote-ChildArgument $GameRoot),
+        '-BuildDir', (Quote-ChildArgument $BuildDir),
+        '-Rom', (Quote-ChildArgument $Rom),
         '-Port', "$Port",
         '-NetworkBackend', $NetworkBackend,
         '-WfcProvider', $WfcProvider,
         '-InstanceIndex', "$InstanceIndex",
+        '-PythonExe', (Quote-ChildArgument $PythonExe),
         '-Attempts', "$Attempts",
-        '-OutDir', $instanceOut
+        '-OutDir', (Quote-ChildArgument $instanceOut)
     )
+    if ($PreparedProfile) {
+        $args += @(
+            '-SavePrefix', (Quote-ChildArgument $SavePrefix),
+            '-FirmwarePrefix', (Quote-ChildArgument $FirmwarePrefix)
+        )
+    }
     if ($PcapAdapter) {
-        $args += @('-PcapAdapter', $PcapAdapter)
+        $args += @('-PcapAdapter', (Quote-ChildArgument $PcapAdapter))
     }
 
     $startedAt = Get-Date
@@ -303,6 +341,7 @@ $summaryPath = Join-Path $GateOutDir 'summary.json'
 $summary = [pscustomobject]@{
     created_at = $stamp
     game_root = $GameRoot
+    prepared_profile = [bool]$PreparedProfile
     network_backend = $NetworkBackend
     wfc_provider = $WfcProvider
     pcap_adapter = $PcapAdapter
