@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Collect post-run evidence from two live MKDS ndsrecomp instances.
 
-Use this after the owner-driven Friend Roster attempt. It does not advance the
-guest, press buttons, or arm tracing; it only queries the always-on rings and
-captures the current framebuffers from the two debug ports.
+Use this during or after the owner-driven Friend Roster attempt. It does not
+advance the guest, press buttons, or arm tracing; it only queries the always-on
+rings and captures the current framebuffers from the two debug ports.
 
 Default ports match tools/run_two_instances.ps1.
 """
@@ -139,7 +139,8 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def collect_instance(label: str, port: int, out_dir: Path,
-                     max_per_kind: int) -> dict[str, Any]:
+                     max_per_kind: int, screenshot_prefix: str = ""
+                     ) -> dict[str, Any]:
     client = DebugClient(port=port, timeout=30.0)
     try:
         report: dict[str, Any] = {
@@ -150,7 +151,7 @@ def collect_instance(label: str, port: int, out_dir: Path,
             "net_state": client.cmd("net_state"),
             "kinds": {},
         }
-        screenshot = out_dir / f"{label}_framebuffer.png"
+        screenshot = out_dir / f"{screenshot_prefix}{label}_framebuffer.png"
         report["framebuffer_saved"] = capture_framebuffer(client, screenshot)
         report["framebuffer_path"] = str(screenshot) if report["framebuffer_saved"] else None
 
@@ -204,13 +205,118 @@ def print_summary(report: dict[str, Any]) -> None:
         print(f"  framebuffer={report['framebuffer_path']}")
 
 
+def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
+                   created_at: str, screenshot_prefix: str = ""
+                   ) -> dict[str, Any]:
+    return {
+        "created_at": created_at,
+        "ports": {"A": port_a, "B": port_b},
+        "instances": [
+            collect_instance("A", port_a, out_dir, max_per_kind, screenshot_prefix),
+            collect_instance("B", port_b, out_dir, max_per_kind, screenshot_prefix),
+        ],
+    }
+
+
+def compact_snapshot(snapshot_index: int, snapshot_path: Path,
+                     report: dict[str, Any], elapsed_sec: float
+                     ) -> dict[str, Any]:
+    return {
+        "snapshot": snapshot_index,
+        "elapsed_sec": round(elapsed_sec, 3),
+        "created_at": report["created_at"],
+        "path": str(snapshot_path),
+        "instances": [
+            {
+                "label": instance["label"],
+                "port": instance["port"],
+                "event_counts": instance["event_counts"],
+                "net_state": instance["net_state"],
+                "kind_counts": instance["kind_counts"],
+                "udp_counts": instance["udp_summary"]["counts"],
+                "candidate_peer_udp": instance["udp_summary"]["candidate_peer_udp"],
+                "wfc_service_udp": instance["udp_summary"]["wfc_service_udp"],
+                "framebuffer_path": instance.get("framebuffer_path"),
+            }
+            for instance in report["instances"]
+        ],
+    }
+
+
+def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
+                          stamp: str) -> int:
+    report = collect_report(
+        args.port_a, args.port_b, out_dir, args.max_per_kind, stamp)
+    report_path = out_dir / "evidence.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    for instance in report["instances"]:
+        print_summary(instance)
+    print(f"wrote {report_path}")
+    return 0
+
+
+def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
+    snapshots_dir = out_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    index: list[dict[str, Any]] = []
+    snapshot_index = 0
+    while True:
+        now = time.monotonic()
+        elapsed = now - started
+        if snapshot_index > 0 and elapsed > args.watch_seconds:
+            break
+
+        created_at = time.strftime("%Y%m%d-%H%M%S")
+        prefix = f"snapshot_{snapshot_index:03d}_"
+        report = collect_report(
+            args.port_a, args.port_b, snapshots_dir, args.max_per_kind,
+            created_at, screenshot_prefix=prefix)
+        snapshot_path = snapshots_dir / f"snapshot_{snapshot_index:03d}.json"
+        snapshot_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        index.append(compact_snapshot(snapshot_index, snapshot_path, report, elapsed))
+
+        print(f"\n--- snapshot {snapshot_index} elapsed={elapsed:.1f}s ---")
+        for instance in report["instances"]:
+            print_summary(instance)
+
+        snapshot_index += 1
+        remaining = args.watch_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            break
+        time.sleep(min(args.interval, remaining))
+
+    summary = {
+        "created_at": stamp,
+        "watch_seconds": args.watch_seconds,
+        "interval": args.interval,
+        "ports": {"A": args.port_a, "B": args.port_b},
+        "snapshots": index,
+    }
+    report_path = out_dir / "evidence.json"
+    report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"wrote {report_path}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port-a", type=int, default=19860)
     parser.add_argument("--port-b", type=int, default=19861)
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--max-per-kind", type=int, default=4096)
+    parser.add_argument("--watch-seconds", type=float, default=0.0,
+                        help="collect repeated snapshots for this many seconds")
+    parser.add_argument("--interval", type=float, default=5.0,
+                        help="seconds between watch-mode snapshots")
     args = parser.parse_args()
+    if args.max_per_kind < 1 or args.max_per_kind > 4096:
+        parser.error("--max-per-kind must be in 1..4096")
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    if args.watch_seconds < 0:
+        parser.error("--watch-seconds must be non-negative")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = args.out_dir or (
@@ -219,21 +325,9 @@ def main() -> int:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    report = {
-        "created_at": stamp,
-        "ports": {"A": args.port_a, "B": args.port_b},
-        "instances": [
-            collect_instance("A", args.port_a, out_dir, args.max_per_kind),
-            collect_instance("B", args.port_b, out_dir, args.max_per_kind),
-        ],
-    }
-    report_path = out_dir / "evidence.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-    for instance in report["instances"]:
-        print_summary(instance)
-    print(f"wrote {report_path}")
-    return 0
+    if args.watch_seconds > 0:
+        return watch(args, out_dir, stamp)
+    return write_single_snapshot(args, out_dir, stamp)
 
 
 if __name__ == "__main__":
