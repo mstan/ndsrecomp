@@ -35,7 +35,7 @@
 # You can also bypass default promotion and launch directly from the proven
 # scratch profiles:
 #
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -SavePrefix scratch\m7-fwprobe-instance -FirmwarePrefix scratch\m7-fwprobe-instance
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -UseKnownGoodScratchProfiles
 #
 # Rolling ring/framebuffer evidence starts automatically while driving the
 # Friend Roster attempt:
@@ -63,6 +63,7 @@ param(
     [string] $Rom        = 'Mario Kart DS.nds',
     [string] $SavePrefix = 'mkds_instance',
     [string] $FirmwarePrefix = 'mkds_instance',
+    [switch] $UseKnownGoodScratchProfiles,
     [int]    $PortA      = 19860,
     [int]    $PortB      = 19861,
     [ValidateSet('slirp', 'pcap')]
@@ -96,6 +97,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-Location $GameRoot
+
+if ($UseKnownGoodScratchProfiles) {
+    $SavePrefix = 'scratch\m7-fwprobe-instance'
+    $FirmwarePrefix = 'scratch\m7-fwprobe-instance'
+}
 
 $exe = Join-Path $GameRoot (Join-Path $BuildDir 'nds_runner.exe')
 if (-not (Test-Path $exe)) {
