@@ -455,6 +455,61 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def race_entry_confirmation(race_entry_marker: Path | None,
+                            operator_confirm_race_entry: bool
+                            ) -> dict[str, Any]:
+    marker_exists = False
+    marker_path = None
+    if race_entry_marker is not None:
+        marker_path = str(race_entry_marker)
+        marker_exists = race_entry_marker.exists()
+    confirmed = bool(operator_confirm_race_entry or marker_exists)
+    return {
+        "race_entry_operator_confirmed": confirmed,
+        "operator_confirm_race_entry_flag": bool(operator_confirm_race_entry),
+        "race_entry_marker": marker_path,
+        "race_entry_marker_exists": marker_exists,
+        "notes": [
+            (
+                "Race entry confirmation is an explicit operator marker. "
+                "The collector does not infer gameplay entry from packet "
+                "contents or screen text."
+            ),
+        ],
+    }
+
+
+def m7_acceptance_verdict(report: dict[str, Any]) -> dict[str, Any]:
+    transport_status = report.get("m7_transport_verdict", {}).get("status")
+    confirmation = report.get("operator_confirmation", {})
+    race_confirmed = bool(
+        confirmation.get("race_entry_operator_confirmed", False))
+
+    if (
+        transport_status == "direct_client_udp_bidirectional_observed" and
+        race_confirmed
+    ):
+        status = "race_entry_confirmed_with_bidirectional_peer_udp"
+    elif transport_status == "direct_client_udp_bidirectional_observed":
+        status = "transport_observed_waiting_for_race_entry"
+    elif race_confirmed:
+        status = "race_entry_confirmed_waiting_for_transport"
+    else:
+        status = "transport_and_race_entry_not_yet_observed"
+
+    return {
+        "status": status,
+        "transport_status": transport_status,
+        "race_entry_operator_confirmed": race_confirmed,
+        "notes": [
+            (
+                "M7 acceptance requires both direct peer UDP evidence and "
+                "explicit confirmation that MKDS entered an online race."
+            ),
+        ],
+    }
+
+
 def empty_udp_summary() -> dict[str, Any]:
     return summarize_udp([])
 
@@ -774,7 +829,9 @@ def print_snapshot_delta(delta: dict[str, Any]) -> None:
 
 
 def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
-                   created_at: str, screenshot_prefix: str = ""
+                   created_at: str, screenshot_prefix: str = "",
+                   race_entry_marker: Path | None = None,
+                   operator_confirm_race_entry: bool = False
                    ) -> dict[str, Any]:
     report = {
         "created_at": created_at,
@@ -786,6 +843,9 @@ def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
     }
     report["correlation"] = correlate_instances(report["instances"])
     report["m7_transport_verdict"] = m7_transport_verdict(report)
+    report["operator_confirmation"] = race_entry_confirmation(
+        race_entry_marker, operator_confirm_race_entry)
+    report["m7_acceptance_verdict"] = m7_acceptance_verdict(report)
     return report
 
 
@@ -800,6 +860,8 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
         "path": str(snapshot_path),
         "correlation": report.get("correlation", {}),
         "m7_transport_verdict": report.get("m7_transport_verdict", {}),
+        "operator_confirmation": report.get("operator_confirmation", {}),
+        "m7_acceptance_verdict": report.get("m7_acceptance_verdict", {}),
         "instances": [
             {
                 "label": instance["label"],
@@ -826,7 +888,9 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
 def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
                           stamp: str) -> int:
     report = collect_report(
-        args.port_a, args.port_b, out_dir, args.max_per_kind, stamp)
+        args.port_a, args.port_b, out_dir, args.max_per_kind, stamp,
+        race_entry_marker=args.race_entry_marker,
+        operator_confirm_race_entry=args.operator_confirm_race_entry)
     report_path = out_dir / "evidence.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -834,8 +898,9 @@ def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
         print_summary(instance)
     print_correlation(report.get("correlation", {}))
     print_verdict(report.get("m7_transport_verdict", {}))
+    print_acceptance(report.get("m7_acceptance_verdict", {}))
     print(f"wrote {report_path}")
-    return 0
+    return check_required_statuses(args, report)
 
 
 def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
@@ -855,7 +920,9 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         prefix = f"snapshot_{snapshot_index:03d}_"
         report = collect_report(
             args.port_a, args.port_b, snapshots_dir, args.max_per_kind,
-            created_at, screenshot_prefix=prefix)
+            created_at, screenshot_prefix=prefix,
+            race_entry_marker=args.race_entry_marker,
+            operator_confirm_race_entry=args.operator_confirm_race_entry)
         snapshot_path = snapshots_dir / f"snapshot_{snapshot_index:03d}.json"
         snapshot_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         previous = index[-1] if index else None
@@ -868,6 +935,7 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
             print_summary(instance)
         print_correlation(report.get("correlation", {}))
         print_verdict(report.get("m7_transport_verdict", {}))
+        print_acceptance(report.get("m7_acceptance_verdict", {}))
         print_snapshot_delta(compact["delta"])
 
         verdict_status = report.get("m7_transport_verdict", {}).get("status")
@@ -879,6 +947,16 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
                 "elapsed_sec": round(elapsed, 3),
             }
             print(f"stop condition matched: verdict={verdict_status}")
+            break
+        acceptance_status = report.get("m7_acceptance_verdict", {}).get("status")
+        if acceptance_status in args.stop_on_acceptance:
+            stop_reason = {
+                "kind": "acceptance",
+                "status": acceptance_status,
+                "snapshot": snapshot_index,
+                "elapsed_sec": round(elapsed, 3),
+            }
+            print(f"stop condition matched: acceptance={acceptance_status}")
             break
 
         snapshot_index += 1
@@ -895,6 +973,12 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         "latest_m7_transport_verdict": (
             index[-1]["m7_transport_verdict"] if index else {}
         ),
+        "latest_operator_confirmation": (
+            index[-1]["operator_confirmation"] if index else {}
+        ),
+        "latest_m7_acceptance_verdict": (
+            index[-1]["m7_acceptance_verdict"] if index else {}
+        ),
         "stop_reason": stop_reason,
         "menu_progress": summarize_menu_progress(index),
         "snapshots": index,
@@ -903,13 +987,42 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
     report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print_menu_progress(summary["menu_progress"])
     print(f"wrote {report_path}")
+    return check_required_statuses(args, summary)
+
+
+def print_acceptance(verdict: dict[str, Any]) -> None:
+    print(
+        "m7 acceptance verdict: "
+        f"{verdict.get('status')} "
+        f"transport={verdict.get('transport_status')} "
+        f"race_entry={verdict.get('race_entry_operator_confirmed')}"
+    )
+
+
+def check_required_statuses(args: argparse.Namespace,
+                            report: dict[str, Any]) -> int:
+    if "latest_m7_transport_verdict" in report:
+        latest_transport = report.get("latest_m7_transport_verdict", {})
+        latest_acceptance = report.get("latest_m7_acceptance_verdict", {})
+    else:
+        latest_transport = report.get("m7_transport_verdict", {})
+        latest_acceptance = report.get("m7_acceptance_verdict", {})
     if args.require_verdict:
-        latest_status = summary.get("latest_m7_transport_verdict", {}).get(
-            "status")
+        latest_status = latest_transport.get("status")
         if latest_status not in args.require_verdict:
             required = ", ".join(args.require_verdict)
             print(
                 "required M7 transport verdict not observed: "
+                f"latest={latest_status} required={required}",
+                file=sys.stderr,
+            )
+            return 1
+    if args.require_acceptance:
+        latest_status = latest_acceptance.get("status")
+        if latest_status not in args.require_acceptance:
+            required = ", ".join(args.require_acceptance)
+            print(
+                "required M7 acceptance verdict not observed: "
                 f"latest={latest_status} required={required}",
                 file=sys.stderr,
             )
@@ -939,6 +1052,27 @@ def main() -> int:
                             "summary unless the latest M7 transport verdict "
                             "has this status; may be repeated"
                         ))
+    parser.add_argument("--race-entry-marker", type=Path, default=None,
+                        help=(
+                            "path to a marker file the operator creates after "
+                            "both clients enter an online race"
+                        ))
+    parser.add_argument("--operator-confirm-race-entry", action="store_true",
+                        help=(
+                            "post-run assertion that the operator observed "
+                            "both clients enter an online race"
+                        ))
+    parser.add_argument("--stop-on-acceptance", action="append", default=[],
+                        help=(
+                            "in watch mode, stop after the first snapshot "
+                            "whose M7 acceptance verdict has this status; "
+                            "may be repeated"
+                        ))
+    parser.add_argument("--require-acceptance", action="append", default=[],
+                        help=(
+                            "exit nonzero unless the latest M7 acceptance "
+                            "verdict has this status; may be repeated"
+                        ))
     args = parser.parse_args()
     if args.max_per_kind < 1 or args.max_per_kind > 4096:
         parser.error("--max-per-kind must be in 1..4096")
@@ -950,6 +1084,10 @@ def main() -> int:
         parser.error("--stop-on-verdict entries must be non-empty")
     if any(not status.strip() for status in args.require_verdict):
         parser.error("--require-verdict entries must be non-empty")
+    if any(not status.strip() for status in args.stop_on_acceptance):
+        parser.error("--stop-on-acceptance entries must be non-empty")
+    if any(not status.strip() for status in args.require_acceptance):
+        parser.error("--require-acceptance entries must be non-empty")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = args.out_dir or (

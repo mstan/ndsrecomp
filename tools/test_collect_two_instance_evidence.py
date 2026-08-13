@@ -93,6 +93,40 @@ class M7TransportVerdictTest(unittest.TestCase):
         self.assertEqual(verdict["natneg_udp_count"], 1)
         self.assertEqual(verdict["candidate_peer_udp_count"], 0)
 
+    def test_acceptance_requires_transport_and_race_confirmation(self):
+        report = report_for(
+            [event(0, "192.168.4.32", 42000, "192.168.4.33", 43000)],
+            [event(0, "192.168.4.33", 43000, "192.168.4.32", 42000)],
+        )
+        report["m7_transport_verdict"] = evidence.m7_transport_verdict(report)
+        report["operator_confirmation"] = {
+            "race_entry_operator_confirmed": True,
+        }
+
+        verdict = evidence.m7_acceptance_verdict(report)
+
+        self.assertEqual(
+            verdict["status"],
+            "race_entry_confirmed_with_bidirectional_peer_udp",
+        )
+
+    def test_acceptance_does_not_treat_transport_as_race_entry(self):
+        report = report_for(
+            [event(0, "192.168.4.32", 42000, "192.168.4.33", 43000)],
+            [event(0, "192.168.4.33", 43000, "192.168.4.32", 42000)],
+        )
+        report["m7_transport_verdict"] = evidence.m7_transport_verdict(report)
+        report["operator_confirmation"] = {
+            "race_entry_operator_confirmed": False,
+        }
+
+        verdict = evidence.m7_acceptance_verdict(report)
+
+        self.assertEqual(
+            verdict["status"],
+            "transport_observed_waiting_for_race_entry",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,10 +42,10 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
-# By default the collector watches for 900 seconds, stops early as soon as
-# bidirectional peer UDP is proven, and exits nonzero if that proof is never
-# observed. Pass -EvidenceWatchSeconds 0 only for a deliberate no-evidence
-# launch.
+# By default the collector watches for 900 seconds, stops early only after
+# bidirectional peer UDP is proven AND you mark that both clients entered an
+# online race, and exits nonzero if that acceptance proof is never observed.
+# Pass -EvidenceWatchSeconds 0 only for a deliberate no-evidence launch.
 #
 # Before opening interactive windows, the launcher also proves the same
 # prepared save/firmware profiles can concurrently reach the authenticated
@@ -77,12 +77,17 @@ param(
     [double] $EvidenceInterval = 5,
     [int] $EvidenceMaxPerKind = 4096,
     [string] $EvidenceOutDir = '',
-    [string[]] $EvidenceStopOnVerdict = @(
-        'direct_client_udp_bidirectional_observed'
-    ),
+    [string[]] $EvidenceStopOnVerdict = @(),
     [string[]] $EvidenceRequireVerdict = @(
         'direct_client_udp_bidirectional_observed'
     ),
+    [string[]] $EvidenceStopOnAcceptance = @(
+        'race_entry_confirmed_with_bidirectional_peer_udp'
+    ),
+    [string[]] $EvidenceRequireAcceptance = @(
+        'race_entry_confirmed_with_bidirectional_peer_udp'
+    ),
+    [string] $EvidenceRaceEntryMarker = '',
     [switch] $SkipSavePreflight,
     [switch] $SkipPortPreflight,
     [switch] $SkipNetworkRuntimePreflight,
@@ -128,6 +133,16 @@ foreach ($status in $EvidenceStopOnVerdict) {
 foreach ($status in $EvidenceRequireVerdict) {
     if ([string]::IsNullOrWhiteSpace($status)) {
         throw "-EvidenceRequireVerdict entries must be non-empty"
+    }
+}
+foreach ($status in $EvidenceStopOnAcceptance) {
+    if ([string]::IsNullOrWhiteSpace($status)) {
+        throw "-EvidenceStopOnAcceptance entries must be non-empty"
+    }
+}
+foreach ($status in $EvidenceRequireAcceptance) {
+    if ([string]::IsNullOrWhiteSpace($status)) {
+        throw "-EvidenceRequireAcceptance entries must be non-empty"
     }
 }
 if ($LoginGateAttempts -lt 1) { throw "-LoginGateAttempts must be positive" }
@@ -655,6 +670,16 @@ function Start-EvidenceCollector {
     }
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
+    $raceEntryMarker = if ($EvidenceRaceEntryMarker) {
+        if ([System.IO.Path]::IsPathRooted($EvidenceRaceEntryMarker)) {
+            $EvidenceRaceEntryMarker
+        } else {
+            Join-Path $GameRoot $EvidenceRaceEntryMarker
+        }
+    } else {
+        Join-Path $outDir 'race_entered.marker'
+    }
+
     $collectorOut = Join-Path $outDir 'collector.out.log'
     $collectorErr = Join-Path $outDir 'collector.err.log'
     $argv = @('-B', $collector,
@@ -662,12 +687,19 @@ function Start-EvidenceCollector {
               '--watch-seconds', "$EvidenceWatchSeconds",
               '--interval', "$EvidenceInterval",
               '--max-per-kind', "$EvidenceMaxPerKind",
-              '--out-dir', $outDir)
+              '--out-dir', $outDir,
+              '--race-entry-marker', $raceEntryMarker)
     foreach ($status in $EvidenceStopOnVerdict) {
         $argv += @('--stop-on-verdict', $status)
     }
     foreach ($status in $EvidenceRequireVerdict) {
         $argv += @('--require-verdict', $status)
+    }
+    foreach ($status in $EvidenceStopOnAcceptance) {
+        $argv += @('--stop-on-acceptance', $status)
+    }
+    foreach ($status in $EvidenceRequireAcceptance) {
+        $argv += @('--require-acceptance', $status)
     }
     $p = Start-Process -FilePath $pythonPath -WorkingDirectory $GameRoot `
             -ArgumentList $argv -PassThru `
@@ -678,6 +710,9 @@ function Start-EvidenceCollector {
         -ForegroundColor Green
     Write-Host "  stdout: $collectorOut"
     Write-Host "  stderr: $collectorErr"
+    Write-Host "  race-entry marker: $raceEntryMarker"
+    Write-Host "  after both clients enter the online race, mark acceptance with:"
+    Write-Host "    Set-Content -LiteralPath '$raceEntryMarker' -Value race-entered"
     return $p
 }
 
@@ -705,11 +740,11 @@ Write-Host '  real stranger who would suffer if we desync.'
 Write-Host ''
 if ($collector) {
     Write-Host 'Rolling evidence collection is already running.' -ForegroundColor Cyan
-    Write-Host 'By default it exits nonzero unless bidirectional peer UDP is proven; check collector.err.log after the run.'
+    Write-Host 'By default it exits nonzero unless bidirectional peer UDP and race entry are both proven; check collector.err.log after the run.'
 } else {
     Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
     Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
-    Write-Host '  Add --stop-on-verdict direct_client_udp_bidirectional_observed to stop once peer UDP is proven.'
+    Write-Host '  Add --race-entry-marker <path> and create that marker after both clients enter the race.'
     Write-Host 'The launcher normally starts this automatically; this run used -EvidenceWatchSeconds 0 or could not start the collector.'
 }
 Write-Host 'For a final post-run snapshot, omit --watch-seconds/--interval.'
