@@ -449,8 +449,8 @@ description = "Community AltWFC/WFCZwei relay, per the DS-Homebrew wiki. Not eva
 source = "https://github.com/DS-Homebrew/wiki"
 
 [network.wfc.providers.local-oracle]
-dns_server = "127.0.0.1"
-description = "Local dwc_network_server_emulator instance (AGPL-3.0, protocol oracle only, never linked). Development/regression use only -- see Strand D."
+dns_server = "10.64.0.1"
+description = "Local dwc_network_server_emulator instance through libslirp's guest-visible host alias. The host services still bind to 127.0.0.1; do not hand 127/8 to the guest. Development/regression use only -- see Strand D."
 source = "https://github.com/barronwaffles/dwc_network_server_emulator"
 ```
 

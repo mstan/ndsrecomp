@@ -35,7 +35,10 @@ enum NdsAdaptiveScreen : uint8_t {
 // optional per-endpoint override (dotted-quad IPv4) that always wins over
 // the named provider's built-in default when non-empty -- used for
 // pointing at a local/test DWC server without inventing a second config
-// shape. Default provider is "kaeru" (178.62.43.212), the DNS-only,
+// shape. For Slirp-backed local tests, use provider "local" instead of a
+// raw 127.x.x.x address: 127/8 is the guest's own loopback, while the
+// provider's 10.64.0.1 address is libslirp's guest-visible host alias.
+// Default provider is "kaeru" (178.62.43.212), the DNS-only,
 // no-ROM-patch WFC service verified appropriate for DS; "wiimmfi" is also
 // selectable and aliases that DS-compatible Wiimmfi ecosystem route.
 // "wiimmfi-direct" selects Wiimmfi's raw official DNS endpoint for

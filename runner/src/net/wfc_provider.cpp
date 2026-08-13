@@ -31,6 +31,11 @@ const NdsWfcProviderInfo kNdsWfcProviders[] = {
     // Raw official Wiimmfi DNS endpoint. Kept for diagnostics and future
     // patched-client compatibility; not the stock-DS route.
     {"wiimmfi-direct", "95.217.77.181"},
+    // Guest-visible Slirp host alias. Packets sent here are translated by
+    // libslirp to host loopback, so the local dwc-docker/wfc_dns.py stack can
+    // stay bound to 127.0.0.1 without handing the guest its own loopback.
+    {"local", "10.64.0.1"},
+    {"local-oracle", "10.64.0.1"},
 };
 const size_t kNdsWfcProviderCount =
     sizeof(kNdsWfcProviders) / sizeof(kNdsWfcProviders[0]);

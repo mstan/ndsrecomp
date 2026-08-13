@@ -286,6 +286,10 @@ bool apply_instance_mac(std::vector<uint8_t>& fw, uint32_t instance_index) {
     return true;
 }
 
+bool is_ipv4_loopback(uint32_t ipv4_host_order) {
+    return (ipv4_host_order & 0xFF000000u) == 0x7F000000u;
+}
+
 void dump_cpu(const char* name, const ArmCpuState& c, uint64_t cycles) {
     std::fprintf(stderr, "  %s: PC=%08X CPSR=%08X SP=%08X LR=%08X "
                  "R0=%08X R12=%08X  cycles=%llu\n",
@@ -497,7 +501,7 @@ int main(int argc, char** argv) {
                 "[--network on|off] [--network-backend slirp|replay|pcap] "
                 "[--pcap-adapter NAME] "
                 "[--wfc on|off] "
-                "[--wfc-provider kaeru|wiimmfi|wiimmfi-direct|<ipv4>] "
+                "[--wfc-provider kaeru|wiimmfi|wiimmfi-direct|local|<ipv4>] "
                 "[--net-capture-out FILE] [--net-capture-in FILE] "
                 "[--net-capture-raw] [--net-capture-no-pcap] "
                 "[--net-capture-scenario NAME]\n",
@@ -702,8 +706,8 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr,
                 "invalid --wfc-provider %s (expected a known provider name "
-                "[kaeru, wiimmfi, wiimmfi-direct] or a dotted-quad IPv4 "
-                "address)\n",
+                "[kaeru, wiimmfi, wiimmfi-direct, local, local-oracle] or a "
+                "dotted-quad IPv4 address)\n",
                 cli_wfc_provider.c_str());
             return 2;
         }
@@ -829,6 +833,15 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                 "resolved WFC DNS address %s is not a valid dotted-quad "
                 "IPv4 address\n", dns_str.c_str());
+            return 2;
+        }
+        if (is_ipv4_loopback(resolved_network.wfc_dns_ipv4)) {
+            std::fprintf(stderr,
+                "WFC DNS address %s is guest loopback, not host loopback. "
+                "For the Slirp local server use --wfc-provider local and "
+                "configure the local DNS responder to answer 10.64.0.1; "
+                "for pcap use a host LAN IPv4 address.\n",
+                dns_str.c_str());
             return 2;
         }
         std::fprintf(stderr,

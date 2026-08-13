@@ -19,6 +19,8 @@ int main() {
     if (!require(provider_is("kaeru", "178.62.43.212")) ||
         !require(provider_is("wiimmfi", "178.62.43.212")) ||
         !require(provider_is("wiimmfi-direct", "95.217.77.181")) ||
+        !require(provider_is("local", "10.64.0.1")) ||
+        !require(provider_is("local-oracle", "10.64.0.1")) ||
         !require(provider_is("WIIMMFI", "178.62.43.212")) ||
         !require(nds_wfc_provider_lookup("unknown") == nullptr)) {
         return 1;

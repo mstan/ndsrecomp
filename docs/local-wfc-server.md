@@ -208,18 +208,20 @@ or firewall** — see §4 for how DNS is handled instead.
 The DS resolves `*.nintendowifi.net` via whatever DNS server it's
 configured to use, then connects to whatever IP comes back. To make that
 work locally **without touching this machine's system DNS settings, hosts
-file, or firewall**, this session wrote a small (~150-line), fully
-original, dependency-free Python 3 UDP DNS responder:
-`<scratch>\wfc-server\wfc_dns.py`. It is not part of, and does not derive
+file, or firewall**, use the small, fully original, dependency-free Python
+3 UDP DNS responder at `tools\wfc_dns.py`. It is not derived
 from, `dwc_network_server_emulator` or any other AGPL/GPL project — no
 DNS server ships with that project at all.
 
 Behavior: listens on UDP, and for any A-record query whose name equals or
 ends with a configured suffix (default `nintendowifi.net`), answers with
-a single A record pointing at a configured IP (default `127.0.0.1`, i.e.
-this same machine, where the Docker containers' ports are published).
-Anything else gets `REFUSED` rather than being resolved — it deliberately
-does not act as a general open resolver.
+a single A record pointing at a configured IP. For the runner's Slirp
+backend, answer `10.64.0.1`: that is libslirp's guest-visible host alias,
+and libslirp translates it to this machine's `127.0.0.1`, where the
+Docker containers' ports are published. Do not answer `127.0.0.1` to the
+guest; inside the guest that is the guest's own loopback. Anything else
+gets `REFUSED` rather than being resolved — it deliberately does not act
+as a general open resolver.
 
 ### Start / stop
 
@@ -229,7 +231,7 @@ $py = "C:\Users\Matthew\AppData\Local\Programs\Python\Python312\python.exe"
 # MSYS2 python.exe is earlier on PATH and mangles Windows-style paths. Use the
 # real Windows interpreter's full path explicitly (found via `py -3 -c "import sys; print(sys.executable)"`).
 Start-Process -FilePath $py `
-  -ArgumentList "`"<scratch>\wfc-server\wfc_dns.py`" --bind 127.0.0.1 --port 53 --answer 127.0.0.1" `
+  -ArgumentList "`"F:\Projects\ndsrecomp\ndsrecomp\tools\wfc_dns.py`" --bind 127.0.0.1 --port 53 --answer 10.64.0.1" `
   -RedirectStandardOutput "<scratch>\wfc-server\wfc_dns.log" `
   -RedirectStandardError  "<scratch>\wfc-server\wfc_dns.err.log" `
   -WindowStyle Hidden -PassThru
@@ -243,9 +245,10 @@ verified directly (`UdpClient.Bind` against `127.0.0.1:53` succeeded
 from an unelevated PowerShell session before anything else was started).
 This is **not** a change to the machine's system DNS resolver — it is
 a private resolver instance nothing queries unless explicitly pointed at
-it. Pointing the *guest's* DNS at `127.0.0.1:53` is the sibling runner
-work's job (the `[network.wfc.providers.local-oracle]` entry already
-sketched in `docs/wfc-external-facts.md` — `dns_server = "127.0.0.1"`).
+it. Pointing the *guest's* DNS at the host-loopback service is the
+runner's job: use `--wfc-provider local` (or `local-oracle`), which hands
+the guest `10.64.0.1` via DHCP and lets Slirp translate traffic for that
+address back to host loopback.
 
 ### Verified resolution (real output, this session)
 
@@ -254,13 +257,13 @@ PS> Resolve-DnsName -Name gpcm.gs.nintendowifi.net -Server 127.0.0.1 -Type A
 
 Name                     Type TTL Section IPAddress
 ----                     ---- --- ------- ---------
-gpcm.gs.nintendowifi.net A    60  Answer  127.0.0.1
+gpcm.gs.nintendowifi.net A    60  Answer  10.64.0.1
 
 PS> Resolve-DnsName -Name nas.nintendowifi.net -Server 127.0.0.1 -Type A
-nas.nintendowifi.net A    60  Answer  127.0.0.1
+nas.nintendowifi.net A    60  Answer  10.64.0.1
 
 PS> Resolve-DnsName -Name conntest.nintendowifi.net -Server 127.0.0.1 -Type A
-conntest.nintendowifi.net A    60  Answer  127.0.0.1
+conntest.nintendowifi.net A    60  Answer  10.64.0.1
 
 PS> Resolve-DnsName -Name example.com -Server 127.0.0.1 -Type A
 Resolve-DnsName : example.com : DNS operation refused
@@ -599,14 +602,15 @@ enabled = true
 provider = "local-oracle"
 
 [network.wfc.providers.local-oracle]
-dns_server = "127.0.0.1"   # wfc_dns.py, port 53
+dns_server = "10.64.0.1"   # Slirp guest-visible host alias for wfc_dns.py on host loopback
 description = "Local dwc_network_server_emulator instance (AGPL-3.0, protocol oracle only, never linked)."
 ```
 
-The guest's DNS traffic should be pointed at `127.0.0.1:53` (where
-`wfc_dns.py` listens). Everything the guest subsequently connects to over
-TCP/UDP will resolve to `127.0.0.1`, where the Docker containers publish
-the exact ports in the table in §3.
+The guest's DNS traffic should be pointed at `10.64.0.1:53`. Slirp maps
+that guest-visible host alias to the real host loopback, where
+`wfc_dns.py` listens on `127.0.0.1:53`. Everything the guest subsequently
+connects to over TCP/UDP should also resolve to `10.64.0.1`, which Slirp
+maps to the Docker-published `127.0.0.1` ports in the table in §3.
 
 ---
 
@@ -621,9 +625,9 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 9000    # NAS
 Invoke-WebRequest http://127.0.0.1:9000/ac -UseBasicParsing
 ```
 
-A healthy stack: both containers `Up`, the DNS query returns
-`127.0.0.1`, the port tests report `TcpTestSucceeded : True`, and the NAS
-request returns HTTP 200.
+A healthy stack: both containers `Up`, the host-side DNS query returns
+`10.64.0.1`, the port tests against `127.0.0.1` report
+`TcpTestSucceeded : True`, and the NAS request returns HTTP 200.
 
 ---
 
