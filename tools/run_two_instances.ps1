@@ -26,13 +26,14 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
-# To collect rolling ring/framebuffer evidence automatically while driving the
+# Rolling ring/framebuffer evidence starts automatically while driving the
 # Friend Roster attempt:
 #
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -EvidenceWatchSeconds 900
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
-# Add -EvidenceStopOnVerdict direct_client_udp_bidirectional_observed when you
-# want the rolling collector to stop as soon as peer UDP is proven.
+# By default the collector watches for 900 seconds and stops early as soon as
+# bidirectional peer UDP is proven. Pass -EvidenceWatchSeconds 0 only for a
+# deliberate no-evidence launch.
 #
 # To also prove the two pcap-backed instances can concurrently reach the
 # authenticated match setup menu before opening the interactive windows:
@@ -55,12 +56,14 @@ param(
     [string] $WfcProvider = 'wiimmfi',
     [switch] $DriveB,
     [string] $PythonExe = '.venv\Scripts\python.exe',
-    [double] $EvidenceWatchSeconds = 0,
+    [double] $EvidenceWatchSeconds = 900,
     [double] $EvidenceStartupTimeoutSeconds = 30,
     [double] $EvidenceInterval = 5,
     [int] $EvidenceMaxPerKind = 4096,
     [string] $EvidenceOutDir = '',
-    [string[]] $EvidenceStopOnVerdict = @(),
+    [string[]] $EvidenceStopOnVerdict = @(
+        'direct_client_udp_bidirectional_observed'
+    ),
     [switch] $SkipSavePreflight,
     [switch] $SkipPortPreflight,
     [switch] $SkipNetworkRuntimePreflight,
@@ -554,7 +557,7 @@ if ($collector) {
     Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
     Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
     Write-Host '  Add --stop-on-verdict direct_client_udp_bidirectional_observed to stop once peer UDP is proven.'
-    Write-Host 'Or pass -EvidenceWatchSeconds 900 to this launcher.'
+    Write-Host 'The launcher normally starts this automatically; this run used -EvidenceWatchSeconds 0 or could not start the collector.'
 }
 Write-Host 'For a final post-run snapshot, omit --watch-seconds/--interval.'
 Write-Host ''
