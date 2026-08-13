@@ -405,6 +405,60 @@ def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
         f"diagnostic screenshot: {fail_path}")
 
 
+def start_connection_test(client: DebugClient, shots_dir: Path,
+                          down: int, up: int, stall: int,
+                          max_attempts: int = 3
+                          ) -> tuple[Any, int, Any]:
+    """Press A from WFC setup step 1 and verify the test actually starts.
+
+    MKDS occasionally ignores the first A press after returning from AP
+    selection while leaving the screen byte-identical to setup step 1. Retry
+    that one input only; once an actual test/error screen appears, hand off to
+    the normal result poller so backend failures remain failures.
+    """
+    attempt_down = down
+    attempt_up = up
+    names = (
+        "connection_test_running",
+        "connection_test_settled",
+        "connection_test_error",
+        "wfc_connection_setup_step1",
+    )
+    last_img = None
+    last_diffs: dict[str, float] = {}
+    for attempt in range(1, max_attempts + 1):
+        hit = press_a(client, attempt_down, attempt_up, stall)
+        last_img = capture_rgb(client)
+        last_diffs = diff_report(last_img, names)
+        error_label_diff = connection_test_error_label_diff(last_img)
+        if error_label_diff <= ERROR_CODE_LABEL_THRESHOLD:
+            return hit, attempt_up, last_img
+
+        ranked = sorted(last_diffs.items(), key=lambda kv: kv[1])
+        best_name, best_diff = ranked[0]
+        runner_up_diff = ranked[1][1]
+        confident = (
+            best_diff <= THRESHOLD_FOR.get(best_name, DEFAULT_THRESHOLD)
+            and (runner_up_diff - best_diff) >= MIN_CLASSIFICATION_MARGIN
+        )
+        if confident and best_name != "wfc_connection_setup_step1":
+            return hit, attempt_up, last_img
+
+        print(
+            f"  connection test did not start after A attempt {attempt}; "
+            f"nearest={best_name} diff={best_diff:.1f}; retrying")
+        attempt_down = attempt_up + 60
+        attempt_up = attempt_down + 140
+
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    fail_path = shots_dir / "connection_test_START_STUCK_setup_step1.png"
+    if last_img is not None:
+        last_img.save(fail_path)
+    raise ScreenTimeoutError(
+        "connection_test: A did not start the WFC connection test after "
+        f"{max_attempts} attempts; diffs={last_diffs}; screenshot: {fail_path}")
+
+
 def converge_to_title(client: DebugClient, shots_dir: Path, label: str,
                        start: int, stall: int, max_presses: int = 6
                        ) -> tuple[Any, int]:
@@ -868,11 +922,12 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
 
         tap(client, AP_LIST_FIRST_ROW, 3510, 3650, stall)
         shoot(client, shots_dir / "13_ap_selected_connection_test_prompt.png")
-        press_a(client, 3660, 3800, stall)
-        shoot(client, shots_dir / "14_connection_test_running.png")
+        _, test_start, test_start_img = start_connection_test(
+            client, shots_dir, 3660, 3800, stall)
+        test_start_img.save(shots_dir / "14_connection_test_running.png")
         _, test_target, test_img = wait_for_connection_test_result(
-            client, shots_dir, "connection_test", start=3800, stride=100,
-            max_extra=4000, stall=stall)
+            client, shots_dir, "connection_test", start=test_start,
+            stride=100, max_extra=4000, stall=stall)
         print(f"  connection test succeeded at vblank9={test_target}")
         test_img.save(shots_dir / "15_connection_test_settled.png")
         step("connection_test_settled")
