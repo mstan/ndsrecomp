@@ -619,15 +619,28 @@ maps to the Docker-published `127.0.0.1` ports in the table in §3.
 ```powershell
 docker compose -f "<scratch>\wfc-server\dwc-docker\docker-compose.yml" ps
 docker logs dwc_server --tail 20
-Resolve-DnsName -Name gpcm.gs.nintendowifi.net -Server 127.0.0.1 -Type A
-Test-NetConnection -ComputerName 127.0.0.1 -Port 29900   # GPCM
-Test-NetConnection -ComputerName 127.0.0.1 -Port 9000    # NAS
-Invoke-WebRequest http://127.0.0.1:9000/ac -UseBasicParsing
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  F:\Projects\ndsrecomp\ndsrecomp\tools\check_local_wfc_stack.ps1 `
+  -OutJson "<scratch>\wfc-server\preflight.json"
 ```
 
-A healthy stack: both containers `Up`, the host-side DNS query returns
-`10.64.0.1`, the port tests against `127.0.0.1` report
-`TcpTestSucceeded : True`, and the NAS request returns HTTP 200.
+For a quick connection-routing check, `basic_local_services_ready` should
+be `true`: DNS answers `10.64.0.1`, haproxy is reachable on `127.0.0.1:80`,
+the direct NAS HTTP backend is reachable on `127.0.0.1:9000`, and plain HTTP
+probes succeed.
+
+For an actual unmodified MKDS connection test, `unmodified_mkds_connection_test_ready`
+must also be `true`. That currently requires a local SSLv3-capable NAS HTTPS
+terminator on `127.0.0.1:443`; without it, MKDS reaches the local HTTP
+connection test and then fails later when it opens `nas.nintendowifi.net:443`.
+Use `-RequireNasHttps` when the preflight is gating a run that is expected to
+pass the in-game connection test:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  F:\Projects\ndsrecomp\ndsrecomp\tools\check_local_wfc_stack.ps1 `
+  -RequireNasHttps -OutJson "<scratch>\wfc-server\preflight-require-https.json"
+```
 
 ---
 
