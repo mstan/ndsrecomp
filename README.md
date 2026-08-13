@@ -4,10 +4,10 @@
 >
 > This is an experimental developer snapshot, not a ready-to-use emulator or
 > a stable framework. It has demonstrated one specific, hash-verified Nintendo
-> DS firmware path and an experimental local Super Mario 64 DS target through
-> its title flow. It has no compatibility promise, no stable API, and no
-> turnkey clean-clone game build yet. Internals and instructions may change
-> without notice.
+> DS firmware path, early title bring-up across multiple games, experimental
+> online play through Wiimmfi, and same-machine local wireless multiplayer. It
+> has no compatibility promise, no stable API, and no turnkey clean-clone game
+> build yet. Internals and instructions may change without notice.
 
 ndsrecomp is a static recompiler for the **Nintendo DS**. In the same family
 as `nesrecomp`, `snesrecomp`, `psxrecomp`, `segagenesisrecomp`, and
@@ -18,19 +18,28 @@ This is **not** a general-purpose emulator. A thin runtime supplies the memory
 bus, two-CPU scheduling, hardware models, and optional SDL presentation. Code
 copied into RAM by the guest currently uses a bounded interpreter tier.
 
-## Current demonstrated target
+## Current demonstrated targets
 
 The original DS firmware menu remains the baseline target: boot through the
 ARM7 and ARM9 BIOSes, pass the Health & Safety screen, reach the main menu, and
 interact with it through mouse-driven touch input.
 
-The first experimental game target is a locally supplied European revision-0
-Super Mario 64 DS dump. A second Metroid Prime Hunters AMHE0 project now
-completes its no-input attract loop through ROM-gated generic title banks,
-configurable cartridge saves, and interpreter fallback. These are narrow
-bring-up results, not compatibility or gameplay claims.
+The first experimental game target was a locally supplied European revision-0
+Super Mario 64 DS dump. Mario Kart DS now demonstrates real Wiimmfi online
+matching and experimental same-machine local wireless multiplayer. Metroid
+Prime Hunters has early gameplay footage and title-specific 21:9 display
+bring-up. These are narrow bring-up results, not broad compatibility claims.
 
 Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
+
+## Showcase
+
+Prime Hunters early gameplay footage:
+**[watch on YouTube](https://www.youtube.com/watch?v=tvqnW6J6KU0)**.
+
+| Super Mario 64 DS adaptive 21:9 | Mario Kart DS local wireless | Mario Kart DS Wiimmfi |
+|---|---|---|
+| ![Super Mario 64 DS running with the top screen widened to 21:9](docs/showcase/sm64ds-adaptive-21x9.webp) | ![Two Mario Kart DS instances racing over experimental local wireless on one machine](docs/showcase/mkds-local-wireless-2p.webp) | ![Two Mario Kart DS instances racing through Wiimmfi online play](docs/showcase/mkds-wiimmfi-2p.webp) |
 
 ## What currently works
 
@@ -41,6 +50,10 @@ Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/t
   behavior for the demonstrated local game dump.
 - Interactive SDL video, touch, keyboard, and paced stereo audio in the tested
   developer build.
+- Title-owned adaptive widescreen presentation for audited upper-screen 3D
+  scenes.
+- Experimental Nintendo WFC plumbing for title projects, demonstrated with
+  Mario Kart DS reaching Wiimmfi multiplayer.
 - Experimental same-machine local wireless multiplayer for MKDS through a
   localhost transport. LAN/across-machine play is not validated or claimed.
 - A separate melonDS-based accuracy oracle and machine-readable traversal
@@ -48,10 +61,10 @@ Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/t
 
 Important limitations:
 
-- SM64DS reaches its title flow, but gameplay is not supported. Lower-screen
-  Engine B/3D composition is incomplete and currently renders incorrectly.
-- Prime Hunters completes its no-input attract loop, but gameplay is not yet
-  supported or claimed compatible.
+- SM64DS, Mario Kart DS, and Prime Hunters are separate title repositories with
+  their own exact-ROM gates, generated banks, and release status. This
+  framework repository does not ship turnkey game builds.
+- Prime Hunters gameplay is early footage, not a compatibility claim.
 - The checked-in tree intentionally omits generated recompiled banks, because
   they contain code derived from user-provided Nintendo dumps.
 - Building the demonstrated targets requires local BIOS, firmware, ROM, and
@@ -248,9 +261,10 @@ running game.
 
 ## Copyright and licensing
 
-This repository intentionally contains no Nintendo BIOS, firmware, ROM,
-screenshot, save data, generated recompiled code, or binary embedding those
-materials. The reachable Git history is intended to be source-only as well.
+This repository intentionally contains no Nintendo BIOS, firmware, ROM, save
+data, generated recompiled code, or binary embedding those materials. The
+checked-in showcase images are manually selected demonstration screenshots;
+do not add raw captures, save files, generated banks, or dumped game material.
 
 The original code in this repository is released under the MIT License; see
 [`LICENSE`](LICENSE). This grant covers only the project's own source. Ported
