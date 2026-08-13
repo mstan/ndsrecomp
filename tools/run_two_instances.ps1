@@ -162,6 +162,12 @@ function Resolve-GamePath {
     return (Join-Path $GameRoot $Path)
 }
 
+function Format-PowerShellArg {
+    param([string] $Value)
+
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
 function Test-DebugPort {
     param([int] $Port)
 
@@ -679,6 +685,7 @@ function Start-EvidenceCollector {
     } else {
         Join-Path $outDir 'race_entered.marker'
     }
+    $postRunOutDir = Join-Path $outDir 'final-post-run'
 
     $collectorOut = Join-Path $outDir 'collector.out.log'
     $collectorErr = Join-Path $outDir 'collector.err.log'
@@ -713,6 +720,24 @@ function Start-EvidenceCollector {
     Write-Host "  race-entry marker: $raceEntryMarker"
     Write-Host "  after both clients enter the online race, mark acceptance with:"
     Write-Host "    Set-Content -LiteralPath '$raceEntryMarker' -Value race-entered"
+    $postRunArgs = @(
+        '&',
+        (Format-PowerShellArg $PythonExe),
+        (Format-PowerShellArg 'ndsrecomp\tools\collect_two_instance_evidence.py'),
+        '--port-a', "$PortA",
+        '--port-b', "$PortB",
+        '--max-per-kind', "$EvidenceMaxPerKind",
+        '--out-dir', (Format-PowerShellArg $postRunOutDir),
+        '--race-entry-marker', (Format-PowerShellArg $raceEntryMarker)
+    )
+    foreach ($status in $EvidenceRequireVerdict) {
+        $postRunArgs += @('--require-verdict', (Format-PowerShellArg $status))
+    }
+    foreach ($status in $EvidenceRequireAcceptance) {
+        $postRunArgs += @('--require-acceptance', (Format-PowerShellArg $status))
+    }
+    Write-Host "  final post-run validation snapshot:"
+    Write-Host ("    {0}" -f ($postRunArgs -join ' '))
     return $p
 }
 
