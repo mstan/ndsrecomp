@@ -312,7 +312,6 @@ constexpr size_t kWifiNetMaxPacketBytes = 2048;
 // of growing memory.
 constexpr size_t kWifiNetTxQueueCapacity = 1024;
 constexpr size_t kWifiNetRxQueueCapacity = 8192;
-constexpr size_t kWifiNetPcapMaxRxPacketBytes = 1518;
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)
 uint16_t ReadBe16(const uint8_t* p) {
@@ -684,6 +683,10 @@ struct WifiBridgeState {
     // the actual ring write happens on the emulation thread's next
     // Net_RecvPacket call, which drains this counter via exchange(0).
     std::atomic<uint32_t> rx_dropped_since_last_report{0};
+    // Pcap frames that match this guest but exceed the emulated RX buffer
+    // limit use the same emulation-thread rendezvous, with a distinct aux.
+    // Oversized unrelated LAN frames are rejected before this counter.
+    std::atomic<uint32_t> pcap_rx_oversize_since_last_report{0};
 
     std::atomic<bool> worker_stop{false};
     std::mutex wake_mutex;
@@ -761,11 +764,6 @@ void LearnGuestIpv4FromTx(WifiBridgeState* state, const uint8_t* data,
 bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
                              int len) {
     if (!state || !data || len < 14) return false;
-    if (static_cast<size_t>(len) > kWifiNetPcapMaxRxPacketBytes) {
-        state->rx_dropped_since_last_report.fetch_add(
-            1, std::memory_order_relaxed);
-        return false;
-    }
 
     std::array<uint8_t, 6> guest_mac{};
     bool guest_mac_known = false;
@@ -943,6 +941,15 @@ int Net_RecvPacket(u8* data, void* userdata) {
     for (uint32_t i = 0; i < dropped; ++i) {
         net_ring_push(NDS_NET_EVENT_BACKEND_DROP, /*direction=*/1, 0, 0,
                       nullptr, nullptr, 0, 0, 0, 0, 0, /*aux=*/1u);
+    }
+    const uint32_t oversized =
+        g_bridge->pcap_rx_oversize_since_last_report.exchange(
+            0, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < oversized; ++i) {
+        net_ring_push(NDS_NET_EVENT_BACKEND_DROP, /*direction=*/1, 0, 0,
+                      nullptr, nullptr, 0, 0, 0, 0,
+                      static_cast<uint16_t>(kWifiNetMaxPacketBytes),
+                      /*aux=*/3u);
     }
 
     // ndsrecomp: PollHostSockets() (worker thread, see Net_Slirp.h's
@@ -1129,6 +1136,11 @@ melonDS::Wifi* nds_wifi3d_attach() {
                     if (!g_bridge || len <= 0) return;
                     if (!ShouldAcceptPcapRxFrame(g_bridge.get(), data, len))
                         return;
+                    if (static_cast<size_t>(len) > kWifiNetMaxPacketBytes) {
+                        g_bridge->pcap_rx_oversize_since_last_report.fetch_add(
+                            1, std::memory_order_relaxed);
+                        return;
+                    }
                     std::vector<uint8_t> pkt(
                         data, data + static_cast<size_t>(len));
                     if (g_network_config.wfc_enabled &&
