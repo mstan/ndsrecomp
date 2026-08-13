@@ -17,7 +17,10 @@
 #   A: --instance-index 0 (default) -> 00:09:BF:10:C3:87   (your real dump)
 #   B: --instance-index 1           -> 00:09:BF:11:07:97
 #
-# Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON:
+# Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON.
+# To initialize the per-instance saves before the owner-driven Friend Roster
+# run, use ndsrecomp\tools\prepare_two_instance_saves.ps1.
+#
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
 # (pwsh / PowerShell 7 is NOT installed on this machine -- use powershell.exe.)
