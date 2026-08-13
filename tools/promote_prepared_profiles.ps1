@@ -14,6 +14,9 @@
 # directly with -SavePrefix scratch\m7-fwprobe-instance and
 # -FirmwarePrefix scratch\m7-fwprobe-instance.
 #
+# When -Force replaces existing target files, the old files are copied to a
+# timestamped backup directory before promotion.
+#
 [CmdletBinding()]
 param(
     [string] $GameRoot = 'F:\Projects\ndsrecomp\mariokartdsrecomp',
@@ -31,6 +34,7 @@ param(
     [string] $WfcProvider = 'wiimmfi',
     [int] $Attempts = 2,
     [string] $OutDir = '',
+    [string] $BackupDir = '',
     [switch] $SkipValidation,
     [switch] $Force
 )
@@ -182,6 +186,33 @@ function Invoke-Validation {
     }
 }
 
+function Backup-ExistingTargets {
+    param([object[]] $TargetPairs, [string] $Destination)
+
+    $copied = @()
+    foreach ($pair in $TargetPairs) {
+        foreach ($kind in @('Save', 'Firmware')) {
+            $path = $pair.$kind
+            if (-not (Test-Path -LiteralPath $path)) {
+                continue
+            }
+            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            $name = [System.IO.Path]::GetFileName($path)
+            $backupPath = Join-Path $Destination $name
+            Copy-Item -LiteralPath $path -Destination $backupPath -Force
+            $copied += $backupPath
+        }
+    }
+
+    if ($copied.Count -gt 0) {
+        Write-Host "backed up existing target profile files:" -ForegroundColor Cyan
+        foreach ($path in $copied) {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA1).Hash
+            Write-Host ("  {0} {1}" -f $path, $hash)
+        }
+    }
+}
+
 function Copy-Pair {
     param([object[]] $SourcePairs, [object[]] $TargetPairs)
 
@@ -206,6 +237,17 @@ $targetPairs = Get-PairPaths -SavePrefix $TargetSavePrefix `
 Assert-InputPair -Pairs $sourcePairs -Label 'source'
 Assert-TargetsWritable -Pairs $targetPairs
 Invoke-Validation
+$promotionStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$resolvedBackupDir = if ($BackupDir) {
+    Resolve-GamePath $BackupDir
+} else {
+    Resolve-GamePath (
+        Join-Path 'generated\captures' "promote-prepared-profiles-backup-$promotionStamp"
+    )
+}
+if ($Force) {
+    Backup-ExistingTargets -TargetPairs $targetPairs -Destination $resolvedBackupDir
+}
 Copy-Pair -SourcePairs $sourcePairs -TargetPairs $targetPairs
 Assert-InputPair -Pairs $targetPairs -Label 'target'
 
