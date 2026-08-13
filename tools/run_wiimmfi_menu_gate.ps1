@@ -92,6 +92,74 @@ function Get-LogTail {
     return ((Get-Content -LiteralPath $Path -Tail $Lines) -join [Environment]::NewLine)
 }
 
+function Assert-WiimmfiMenuEvidence {
+    param([string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "scenario completed but evidence JSON was not written: $Path"
+    }
+
+    $report = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    if (-not $report.stopped_at_match_setup) {
+        throw "evidence JSON did not record stopped_at_match_setup=true: $Path"
+    }
+
+    $steps = @($report.steps | ForEach-Object { $_.name })
+    foreach ($required in @(
+        'connection_test_settled',
+        'wfc_login_settled',
+        'wfc_login_next',
+        'wfc_match_setup_screen'
+    )) {
+        if ($steps -notcontains $required) {
+            throw "evidence JSON is missing required step ${required}: $Path"
+        }
+    }
+
+    $matchEvidence = $report.net_evidence.D_match_setup_screen
+    if (-not $matchEvidence) {
+        throw "evidence JSON is missing D_match_setup_screen network evidence: $Path"
+    }
+
+    $requiredKinds = @{
+        dns_query    = 1
+        dns_response = 1
+        tcp_open     = 1
+        tls_record   = 1
+        udp_packet   = 1
+    }
+    foreach ($kind in $requiredKinds.Keys) {
+        $events = @($matchEvidence.kinds.$kind)
+        if ($events.Count -lt $requiredKinds[$kind]) {
+            throw (
+                "D_match_setup_screen evidence has $($events.Count) " +
+                "$kind event(s), expected at least $($requiredKinds[$kind])"
+            )
+        }
+    }
+
+    $backendErrors = @($matchEvidence.kinds.backend_error)
+    if ($backendErrors.Count -gt 0) {
+        throw "D_match_setup_screen evidence contains backend_error event(s): $($backendErrors.Count)"
+    }
+
+    $setupStep = $report.steps |
+        Where-Object { $_.name -eq 'wfc_match_setup_screen' } |
+        Select-Object -Last 1
+    $summary = (
+        "evidence OK: wfc_match_setup_screen vblank9={0}, dns={1}/{2}, " +
+        "tcp_open={3}, udp={4}, tls={5}"
+    ) -f (
+        $setupStep.vblank9,
+        @($matchEvidence.kinds.dns_query).Count,
+        @($matchEvidence.kinds.dns_response).Count,
+        @($matchEvidence.kinds.tcp_open).Count,
+        @($matchEvidence.kinds.udp_packet).Count,
+        @($matchEvidence.kinds.tls_record).Count
+    )
+    Write-Host $summary -ForegroundColor Green
+}
+
 if (Test-DebugPort -TestPort $Port) {
     throw "debug port already accepts connections: $Port"
 }
@@ -145,9 +213,7 @@ try {
         throw "mkds_online_menus.py failed with exit code $LASTEXITCODE"
     }
 
-    if (-not (Test-Path -LiteralPath $EvidenceJson)) {
-        throw "scenario completed but evidence JSON was not written: $EvidenceJson"
-    }
+    Assert-WiimmfiMenuEvidence -Path $EvidenceJson
 
     Write-Host "Wiimmfi menu gate complete" -ForegroundColor Green
     Write-Host "  evidence: $EvidenceJson"
