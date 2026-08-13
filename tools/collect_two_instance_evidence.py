@@ -602,6 +602,71 @@ def snapshot_delta(current: dict[str, Any],
     }
 
 
+def screen_name(screen: dict[str, Any]) -> str | None:
+    if not screen.get("available") or not screen.get("confident"):
+        return None
+    name = screen.get("nearest")
+    return name if isinstance(name, str) and name else None
+
+
+def summarize_menu_progress(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    progress: dict[str, Any] = {}
+    for snapshot in snapshots:
+        for instance in snapshot.get("instances", []):
+            label = instance.get("label")
+            if not label:
+                continue
+            state = progress.setdefault(label, {
+                "first_confident_screen": None,
+                "latest_confident_screen": None,
+                "screens_seen": {},
+                "reached_connection_setup": False,
+                "reached_connection_test": False,
+                "reached_authenticated_menu": False,
+            })
+            name = screen_name(instance.get("screen", {}))
+            if name is None:
+                continue
+            if state["first_confident_screen"] is None:
+                state["first_confident_screen"] = {
+                    "screen": name,
+                    "snapshot": snapshot.get("snapshot"),
+                    "elapsed_sec": snapshot.get("elapsed_sec"),
+                }
+            state["latest_confident_screen"] = {
+                "screen": name,
+                "snapshot": snapshot.get("snapshot"),
+                "elapsed_sec": snapshot.get("elapsed_sec"),
+            }
+            state["screens_seen"][name] = state["screens_seen"].get(name, 0) + 1
+            if name in ("wfc_connection_menu", "wfc_connection_setup_step1"):
+                state["reached_connection_setup"] = True
+            if name.startswith("connection_test_"):
+                state["reached_connection_test"] = True
+            if name in (
+                "wfc_login_settled",
+                "wfc_login_next",
+                "wfc_match_setup_screen",
+            ):
+                state["reached_authenticated_menu"] = True
+    return progress
+
+
+def print_menu_progress(progress: dict[str, Any]) -> None:
+    if not progress:
+        return
+    print("menu progress:")
+    for label in sorted(progress):
+        state = progress[label]
+        latest = state.get("latest_confident_screen") or {}
+        print(
+            f"  {label}: latest={latest.get('screen')} "
+            f"setup={state.get('reached_connection_setup', False)} "
+            f"test={state.get('reached_connection_test', False)} "
+            f"auth_menu={state.get('reached_authenticated_menu', False)}"
+        )
+
+
 def print_snapshot_delta(delta: dict[str, Any]) -> None:
     if delta.get("baseline"):
         print("delta: baseline snapshot")
@@ -758,10 +823,12 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
             index[-1]["m7_transport_verdict"] if index else {}
         ),
         "stop_reason": stop_reason,
+        "menu_progress": summarize_menu_progress(index),
         "snapshots": index,
     }
     report_path = out_dir / "evidence.json"
     report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print_menu_progress(summary["menu_progress"])
     print(f"wrote {report_path}")
     if args.require_verdict:
         latest_status = summary.get("latest_m7_transport_verdict", {}).get(
