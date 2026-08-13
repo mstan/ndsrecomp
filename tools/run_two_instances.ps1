@@ -23,6 +23,11 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
+# To collect rolling ring/framebuffer evidence automatically while driving the
+# Friend Roster attempt:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -EvidenceWatchSeconds 900
+#
 # (pwsh / PowerShell 7 is NOT installed on this machine -- use powershell.exe.)
 #
 [CmdletBinding()]
@@ -36,7 +41,13 @@ param(
     [string] $NetworkBackend = 'pcap',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
-    [switch] $DriveB
+    [switch] $DriveB,
+    [string] $PythonExe = '.venv\Scripts\python.exe',
+    [double] $EvidenceWatchSeconds = 0,
+    [double] $EvidenceStartupTimeoutSeconds = 30,
+    [double] $EvidenceInterval = 5,
+    [int] $EvidenceMaxPerKind = 4096,
+    [string] $EvidenceOutDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +56,12 @@ Set-Location $GameRoot
 $exe = Join-Path $GameRoot (Join-Path $BuildDir 'nds_runner.exe')
 if (-not (Test-Path $exe)) { throw "runner not found: $exe" }
 if (-not (Test-Path (Join-Path $GameRoot $Rom))) { throw "ROM not found: $Rom" }
+if ($EvidenceWatchSeconds -lt 0) { throw "-EvidenceWatchSeconds must be non-negative" }
+if ($EvidenceStartupTimeoutSeconds -lt 0) { throw "-EvidenceStartupTimeoutSeconds must be non-negative" }
+if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
+if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
+    throw "-EvidenceMaxPerKind must be in 1..4096"
+}
 
 # Never kill by process name -- other sessions and agents may own runners.
 # Only the PIDs this script starts are ours to stop.
@@ -97,8 +114,100 @@ function Start-Instance {
     return $p
 }
 
+function Test-DebugPort {
+    param([int] $Port)
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $async = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(500, $false)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Wait-DebugPorts {
+    param([int] $PortA, [int] $PortB)
+
+    if ($EvidenceStartupTimeoutSeconds -eq 0) {
+        return ((Test-DebugPort -Port $PortA) -and (Test-DebugPort -Port $PortB))
+    }
+
+    $deadline = (Get-Date).AddSeconds($EvidenceStartupTimeoutSeconds)
+    do {
+        if ((Test-DebugPort -Port $PortA) -and (Test-DebugPort -Port $PortB)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
+function Start-EvidenceCollector {
+    param([int] $PortA, [int] $PortB)
+
+    if ($EvidenceWatchSeconds -le 0) { return $null }
+
+    $pythonPath = if ([System.IO.Path]::IsPathRooted($PythonExe)) {
+        $PythonExe
+    } else {
+        Join-Path $GameRoot $PythonExe
+    }
+    $collector = Join-Path $GameRoot 'ndsrecomp\tools\collect_two_instance_evidence.py'
+    if (-not (Test-Path -LiteralPath $pythonPath)) { throw "python not found: $pythonPath" }
+    if (-not (Test-Path -LiteralPath $collector)) { throw "collector not found: $collector" }
+    if (-not (Wait-DebugPorts -PortA $PortA -PortB $PortB)) {
+        Write-Warning (
+            "debug ports $PortA and $PortB did not both accept connections " +
+            "within $EvidenceStartupTimeoutSeconds seconds; evidence collector not started"
+        )
+        return $null
+    }
+
+    $outDir = if ($EvidenceOutDir) {
+        if ([System.IO.Path]::IsPathRooted($EvidenceOutDir)) {
+            $EvidenceOutDir
+        } else {
+            Join-Path $GameRoot $EvidenceOutDir
+        }
+    } else {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        Join-Path $GameRoot (Join-Path 'generated\captures' "m7-two-instance-evidence-$stamp")
+    }
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+    $collectorOut = Join-Path $outDir 'collector.out.log'
+    $collectorErr = Join-Path $outDir 'collector.err.log'
+    $argv = @('-B', $collector,
+              '--port-a', "$PortA", '--port-b', "$PortB",
+              '--watch-seconds', "$EvidenceWatchSeconds",
+              '--interval', "$EvidenceInterval",
+              '--max-per-kind', "$EvidenceMaxPerKind",
+              '--out-dir', $outDir)
+    $p = Start-Process -FilePath $pythonPath -WorkingDirectory $GameRoot `
+            -ArgumentList $argv -PassThru `
+            -RedirectStandardOutput $collectorOut `
+            -RedirectStandardError $collectorErr `
+            -WindowStyle Hidden
+    Write-Host ("started evidence collector: pid {0}  out {1}" -f $p.Id, $outDir) `
+        -ForegroundColor Green
+    Write-Host "  stdout: $collectorOut"
+    Write-Host "  stderr: $collectorErr"
+    return $p
+}
+
 $a = Start-Instance -Label 'A' -Port $PortA -InstanceIndex 0
 $b = Start-Instance -Label 'B' -Port $PortB -InstanceIndex 1 -Headless:$DriveB
+$collector = Start-EvidenceCollector -PortA $PortA -PortB $PortB
 
 Write-Host ''
 Write-Host 'Both instances are up. Logs:' -ForegroundColor Cyan
@@ -113,8 +222,15 @@ Write-Host '  Register each as the other''s friend, then connect via Friend Rost
 Write-Host '  That pairs the two instances directly instead of matchmaking with a'
 Write-Host '  real stranger who would suffer if we desync.'
 Write-Host ''
-Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
-Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
+if ($collector) {
+    Write-Host 'Rolling evidence collection is already running.' -ForegroundColor Cyan
+} else {
+    Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
+    Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
+    Write-Host 'Or pass -EvidenceWatchSeconds 900 to this launcher.'
+}
 Write-Host 'For a final post-run snapshot, omit --watch-seconds/--interval.'
 Write-Host ''
-Write-Host ('to stop: Stop-Process -Id {0},{1}' -f $a.Id, $b.Id) -ForegroundColor DarkGray
+$ids = @($a.Id, $b.Id)
+if ($collector) { $ids += $collector.Id }
+Write-Host ('to stop: Stop-Process -Id {0}' -f ($ids -join ',')) -ForegroundColor DarkGray
