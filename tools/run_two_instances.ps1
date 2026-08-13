@@ -31,6 +31,11 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -EvidenceWatchSeconds 900
 #
+# To also prove the two pcap-backed instances can concurrently reach the
+# authenticated match setup menu before opening the interactive windows:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1 -RunLoginGatePreflight
+#
 # (pwsh / PowerShell 7 is NOT installed on this machine -- use powershell.exe.)
 #
 [CmdletBinding()]
@@ -55,6 +60,10 @@ param(
     [switch] $SkipSavePreflight,
     [switch] $SkipPortPreflight,
     [switch] $SkipNetworkRuntimePreflight,
+    [switch] $RunLoginGatePreflight,
+    [string] $LoginGateOutDir = '',
+    [int] $LoginGateAttempts = 2,
+    [double] $LoginGateTimeoutSeconds = 900,
     [switch] $PreflightOnly
 )
 
@@ -78,6 +87,10 @@ if ($EvidenceInterval -le 0) { throw "-EvidenceInterval must be positive" }
 if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
     throw "-EvidenceMaxPerKind must be in 1..4096"
 }
+if ($LoginGateAttempts -lt 1) { throw "-LoginGateAttempts must be positive" }
+if ($LoginGateTimeoutSeconds -le 0) { throw "-LoginGateTimeoutSeconds must be positive" }
+
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Resolve-GamePath {
     param([string] $Path)
@@ -300,10 +313,50 @@ function Assert-NetworkRuntimePreflight {
     }
 }
 
+function Assert-TwoLoginGatePreflight {
+    if (-not $RunLoginGatePreflight) {
+        return
+    }
+
+    $loginGate = Join-Path $ScriptRoot 'run_two_login_gate.ps1'
+    if (-not (Test-Path -LiteralPath $loginGate)) {
+        throw "two-login gate script not found: $loginGate"
+    }
+
+    $outDir = $LoginGateOutDir
+    if (-not $outDir) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $outDir = Join-Path $GameRoot (Join-Path 'generated\captures' "m7-login-preflight-$stamp")
+    }
+
+    $argv = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $loginGate,
+        '-GameRoot', $GameRoot,
+        '-PortA', "$PortA",
+        '-PortB', "$PortB",
+        '-NetworkBackend', $NetworkBackend,
+        '-WfcProvider', $WfcProvider,
+        '-Attempts', "$LoginGateAttempts",
+        '-TimeoutSeconds', "$LoginGateTimeoutSeconds",
+        '-OutDir', $outDir
+    )
+    if ($PcapAdapter) {
+        $argv += @('-PcapAdapter', $PcapAdapter)
+    }
+
+    Write-Host "two-login preflight: proving concurrent authenticated menus" `
+        -ForegroundColor Cyan
+    & powershell.exe @argv
+    if ($LASTEXITCODE -ne 0) {
+        throw "two-login preflight failed with exit code $LASTEXITCODE"
+    }
+}
+
 Assert-InstanceSaves
 Assert-DebugPortsFree
 Assert-EvidenceCollectorPreflight
 Assert-NetworkRuntimePreflight
+Assert-TwoLoginGatePreflight
 
 if ($PreflightOnly) {
     Write-Host "preflight complete; no instances launched" -ForegroundColor Cyan
