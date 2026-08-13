@@ -949,7 +949,7 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
     current, _, target, img = wait_for_any_screen(
         client, shots_dir, "prepared_after_match_tap", candidates,
         start=menu_target + 140, stride=50, max_extra=1500, stall=stall,
-        margin=2.0, verbose=False)
+        margin=0.5, verbose=False)
     img.save(shots_dir / f"03_{current}.png")
     step(current)
     if current == "wfc_wifi_id_update_warning":
@@ -964,7 +964,7 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
              "wfc_login_settled", "wfc_login_next",
              "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
             start=target + 140, stride=50, max_extra=1500, stall=stall,
-            margin=2.0, verbose=False)
+            margin=0.5, verbose=False)
         img.save(shots_dir / f"04_{current}.png")
         step(current)
         if current == "wfc_wifi_id_update_warning":
@@ -978,7 +978,7 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
             ("wfc_connecting", "wfc_login_settled", "wfc_login_next",
              "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
             start=target + 140, stride=50, max_extra=1500, stall=stall,
-            margin=2.0, verbose=False)
+            margin=0.5, verbose=False)
         img.save(shots_dir / f"05_{current}.png")
         step(current)
         if current == "wfc_wifi_id_update_warning":
@@ -992,7 +992,7 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
                 ("wfc_login_settled", "wfc_login_next",
                  "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
                 start=target, stride=200, max_extra=24000, stall=stall,
-                margin=2.0, verbose=False)
+                margin=0.5, verbose=False)
             img.save(shots_dir / f"06_{current}.png")
             step(current)
         elif current in ("wfc_login_settled", "wfc_login_next"):
@@ -1002,7 +1002,7 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
                 ("wfc_login_next", "wfc_match_setup_screen",
                  "wfc_connecting", "wfc_wifi_id_update_warning"),
                 start=target + 140, stride=50, max_extra=2000, stall=stall,
-                margin=2.0, verbose=False)
+                margin=0.5, verbose=False)
             img.save(shots_dir / f"07_{current}.png")
             step(current)
         elif current == "wfc_wifi_id_update_warning":
