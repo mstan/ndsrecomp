@@ -17,19 +17,22 @@
 #   A: --instance-index 0 (default) -> 00:09:BF:10:C3:87   (your real dump)
 #   B: --instance-index 1           -> 00:09:BF:11:07:97
 #
-# Run from the GAME worktree:
+# Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
 # (pwsh / PowerShell 7 is NOT installed on this machine -- use powershell.exe.)
 #
 [CmdletBinding()]
 param(
-    [string] $GameRoot   = 'F:\Projects\ndsrecomp\mariokartdsrecomp-wiimmfi',
-    [string] $BuildDir   = 'ndsrecomp\runner\build-wiimmfi',
+    [string] $GameRoot   = 'F:\Projects\ndsrecomp\mariokartdsrecomp',
+    [string] $BuildDir   = '..\ndsrecomp\runner\build-mkds-pcap',
     [string] $Rom        = 'Mario Kart DS.nds',
     [int]    $PortA      = 19860,
     [int]    $PortB      = 19861,
-    [string] $WfcProvider = 'kaeru',
+    [ValidateSet('slirp', 'pcap')]
+    [string] $NetworkBackend = 'pcap',
+    [string] $PcapAdapter = '',
+    [string] $WfcProvider = 'wiimmfi',
     [switch] $DriveB
 )
 
@@ -76,8 +79,10 @@ function Start-Instance {
     $save = "mkds_instance$InstanceIndex.sav"
     $argv = @('ndsrecomp\bios', '--config', 'game.toml', '--rom', "`"$Rom`"",
               '--save-path', $save,
-              '--network', 'on', '--wfc', 'on', '--wfc-provider', $WfcProvider,
+              '--network', 'on', '--network-backend', $NetworkBackend,
+              '--wfc', 'on', '--wfc-provider', $WfcProvider,
               '--port', "$Port", '--instance-index', "$InstanceIndex")
+    if ($PcapAdapter) { $argv += @('--pcap-adapter', $PcapAdapter) }
     if ($Headless) { $argv += '--serve' } else { $argv += '--interactive' }
 
     $p = Start-Process -FilePath $exe -ArgumentList $argv -PassThru `
@@ -96,6 +101,8 @@ Write-Host ''
 Write-Host 'Both instances are up. Logs:' -ForegroundColor Cyan
 Write-Host "  A: $env:TEMP\nds_A.{out,err}.log   (debug port $PortA)"
 Write-Host "  B: $env:TEMP\nds_B.{out,err}.log   (debug port $PortB)"
+Write-Host "  network: backend=$NetworkBackend provider=$WfcProvider"
+if ($PcapAdapter) { Write-Host "  pcap adapter: $PcapAdapter" }
 Write-Host ''
 Write-Host 'Suggested route -- use FRIEND ROSTER, not a public search:' -ForegroundColor Cyan
 Write-Host '  Each instance now has its own friend code (they derive from the MAC).'

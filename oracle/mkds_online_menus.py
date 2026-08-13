@@ -14,11 +14,11 @@ not code; this file re-derives everything past `wfc_match_setup_screen` --
 the match-conditions ("Choose the conditions for this match") screen and
 beyond -- which no existing driver reaches.
 
-Run against a real Kaeru/Wiimmfi session:
+Run against the current DS-compatible Wiimmfi route:
 
   nds_runner <bios-dir> --serve --port 19842 --config game.toml \
       --rom "Mario Kart DS.nds" --no-save --startup-mode manual \
-      --network on --wfc on --wfc-provider kaeru
+      --network on --network-backend pcap --wfc on --wfc-provider wiimmfi
   python oracle/mkds_online_menus.py [--shots-dir DIR] [--port 19842]
 
 ------------------------------------------------------------------------
@@ -111,8 +111,8 @@ except ImportError:  # pragma: no cover - Pillow is a repo dependency
     ImageStat = None
 
 
-GAME_ROOT = Path(__file__).resolve().parents[2] / "mariokartdsrecomp-wiimmfi"
-DEFAULT_SHOTS_DIR = GAME_ROOT / "generated" / "captures" / "wiimmfi-i14-m6"
+GAME_ROOT = Path(__file__).resolve().parents[2] / "mariokartdsrecomp"
+DEFAULT_SHOTS_DIR = GAME_ROOT / "generated" / "captures" / "wiimmfi-online-menus"
 REFS_DIR = Path(__file__).with_name("wfc_screen_refs")
 
 STALL_DEFAULT = 300_000
@@ -173,7 +173,10 @@ GAME_BOOT_IPCSYNC_W = 12520
 REGION_FOR = {
     "title_screen": "full",
     "wfc_connection_menu": "full",
-    "connection_test_settled": "top",
+    "wfc_connection_setup_step1": "full",
+    "connection_test_running": "test_band",
+    "connection_test_settled": "test_band",
+    "connection_test_error": "test_band",
     "wfc_match_disclaimer": "full",
     "wfc_connecting": "full",
     "wfc_match_save_confirm": "full",
@@ -182,12 +185,19 @@ REGION_FOR = {
     "wfc_match_setup_screen": "top",
 }
 THRESHOLD_FOR = {
-    "connection_test_settled": 20.0,
     "wfc_login_settled": 20.0,
     "wfc_login_next": 20.0,
     "wfc_match_setup_screen": 20.0,
 }
 DEFAULT_THRESHOLD = 10.0
+CONNECTION_TEST_OUTCOME_MAX_DIFF = 25.0
+ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
+ERROR_CODE_LABEL_THRESHOLD = 5.0
+MIN_CLASSIFICATION_MARGIN = 3.0
+CONNECTION_TEST_OUT_OF_SET = (
+    "wfc_connection_menu",
+    "wfc_connection_setup_step1",
+)
 
 _ref_cache: dict[str, Any] = {}
 
@@ -210,7 +220,12 @@ def capture_rgb(client: DebugClient):
 
 
 def to_gray_region(img, region: str):
-    cropped = img.crop((0, 0, 256, 192)) if region == "top" else img
+    if region == "top":
+        cropped = img.crop((0, 0, 256, 192))
+    elif region == "test_band":
+        cropped = img.crop((0, 230, 256, 344))
+    else:
+        cropped = img
     return cropped.convert("L")
 
 
@@ -218,6 +233,17 @@ def mean_abs_diff(img_a, img_b, region: str) -> float:
     a = to_gray_region(img_a, region)
     b = to_gray_region(img_b, region)
     return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def mean_abs_diff_box(img_a, img_b, box: tuple[int, int, int, int]) -> float:
+    a = img_a.crop(box).convert("L")
+    b = img_b.crop(box).convert("L")
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def connection_test_error_label_diff(img) -> float:
+    return mean_abs_diff_box(
+        img, load_ref("connection_test_error"), ERROR_CODE_LABEL_REGION)
 
 
 def diff_report(img, names) -> dict[str, float]:
@@ -229,6 +255,10 @@ def diff_report(img, names) -> dict[str, float]:
 
 class ScreenTimeoutError(RuntimeError):
     pass
+
+
+class ConnectionTestFailed(RuntimeError):
+    """Raised when the WFC Settings connection test reaches an Error Code screen."""
 
 
 class PlayersFoundError(RuntimeError):
@@ -284,6 +314,83 @@ def wait_for_screen(client: DebugClient, shots_dir: Path, label: str,
         f"{max_extra}) waiting for {expect!r}; closest actually-seen="
         f"{best!r} (diff={diffs[best]:.1f}); all diffs={diffs}; "
         f"screenshot: {fail_path}")
+
+
+def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
+                                     label: str, start: int, stride: int,
+                                     max_extra: int, stall: int
+                                     ) -> tuple[Any, int, Any]:
+    """Poll the WFC Settings connection test until it succeeds or fails.
+
+    The status text for this screen is on the bottom screen, so the top-screen
+    crop cannot distinguish Testing connection from Connection successful. Use
+    the same debounced nearest-outcome classifier as mkds_wfc_scenario.py.
+    """
+    target = start
+    img = None
+    diffs = {}
+    outcomes = ("connection_test_running", "connection_test_settled",
+                "connection_test_error")
+    previous = None
+    while True:
+        hit = client.cmd("run_to_event", event="vblank9", count=target, stall=stall)
+        if hit.get("terminal") or hit.get("stalled"):
+            raise ScreenTimeoutError(
+                f"{label}: execution stalled/halted waiting for the "
+                f"connection test to conclude at vblank9 target={target}: {hit}")
+        img = capture_rgb(client)
+        diffs = diff_report(img, outcomes)
+        error_label_diff = connection_test_error_label_diff(img)
+        if error_label_diff <= ERROR_CODE_LABEL_THRESHOLD:
+            nearest = "connection_test_error"
+            confident = True
+        else:
+            ordered = sorted(diffs, key=diffs.get)
+            nearest = ordered[0]
+            margin = diffs[ordered[1]] - diffs[nearest]
+            confident = (
+                margin >= MIN_CLASSIFICATION_MARGIN and
+                diffs[nearest] <= CONNECTION_TEST_OUTCOME_MAX_DIFF
+            )
+            if not confident:
+                out_of_set_diffs = diff_report(img, CONNECTION_TEST_OUT_OF_SET)
+                out_of_set = min(out_of_set_diffs, key=out_of_set_diffs.get)
+                if out_of_set_diffs[out_of_set] <= DEFAULT_THRESHOLD:
+                    shots_dir.mkdir(parents=True, exist_ok=True)
+                    fail_path = (
+                        shots_dir /
+                        f"{label}_MISMATCH_observed_{out_of_set}.png"
+                    )
+                    img.save(fail_path)
+                    raise ScreenTimeoutError(
+                        f"{label}: expected connection-test result screen, "
+                        f"but observed {out_of_set!r} at vblank9={target}; "
+                        f"connection-test diffs={diffs}; "
+                        f"out_of_set_diffs={out_of_set_diffs}; "
+                        f"screenshot: {fail_path}")
+        confirmed = (nearest == previous) if confident else False
+        previous = nearest if confident else None
+        if nearest == "connection_test_settled" and confident and confirmed:
+            return hit, target, img
+        if nearest == "connection_test_error" and confident and confirmed:
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            fail_path = shots_dir / f"{label}_CONNECTION_TEST_ERROR.png"
+            img.save(fail_path)
+            raise ConnectionTestFailed(
+                f"{label}: the WFC connection test reported an on-screen "
+                f"Error Code at vblank9={target} (diffs={diffs}); "
+                f"error_label_diff={error_label_diff:.1f}; "
+                f"screenshot: {fail_path}")
+        if target - start >= max_extra:
+            break
+        target += stride
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    fail_path = shots_dir / f"{label}_TIMEOUT_still_running.png"
+    img.save(fail_path)
+    raise ScreenTimeoutError(
+        f"{label}: connection test never concluded after vblank9 "
+        f"{start}..{target} (budget {max_extra}); diffs={diffs}; "
+        f"diagnostic screenshot: {fail_path}")
 
 
 def tap(client: DebugClient, xy: tuple[int, int], vblank_down: int,
@@ -552,23 +659,26 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
         shoot(client, shots_dir / "13_ap_selected_connection_test_prompt.png")
         press_a(client, 3660, 3800, stall)
         shoot(client, shots_dir / "14_connection_test_running.png")
-        client.cmd("run_to_event", event="vblank9", count=4500, stall=stall)
-        shoot(client, shots_dir / "15_connection_test_settled.png")
+        _, test_target, test_img = wait_for_connection_test_result(
+            client, shots_dir, "connection_test", start=3900, stride=150,
+            max_extra=6000, stall=stall)
+        print(f"  connection test succeeded at vblank9={test_target}")
+        test_img.save(shots_dir / "15_connection_test_settled.png")
         step("connection_test_settled")
         net_dump("B_conntest")
 
-        press_a(client, 4510, 4650, stall)
-        press_b(client, 4660, 4780, stall)
-        press_b(client, 4790, 4910, stall)
-        press_b(client, 4920, 5040, stall)
+        press_a(client, test_target + 10, test_target + 140, stall)
+        press_b(client, test_target + 150, test_target + 270, stall)
+        press_b(client, test_target + 280, test_target + 400, stall)
+        press_b(client, test_target + 410, test_target + 530, stall)
         shoot(client, shots_dir / "16_back_at_title_with_saved_connection.png")
-        tap(client, TITLE_NINTENDO_WFC, 5050, 5200, stall)
+        tap(client, TITLE_NINTENDO_WFC, test_target + 540, test_target + 690, stall)
         shoot(client, shots_dir / "17_wfc_connection_menu_direct.png")
-        tap(client, WFC_MATCH, 5210, 5340, stall)
+        tap(client, WFC_MATCH, test_target + 700, test_target + 830, stall)
         shoot(client, shots_dir / "18_wfc_match_disclaimer.png")
-        tap(client, ONE_BUTTON_DIALOG, 5350, 5480, stall)
+        tap(client, ONE_BUTTON_DIALOG, test_target + 840, test_target + 970, stall)
         shoot(client, shots_dir / "19_wfc_match_save_confirm.png")
-        tap(client, WFC_MATCH_CONFIRM_YES, 5490, 5620, stall)
+        tap(client, WFC_MATCH_CONFIRM_YES, test_target + 980, test_target + 1110, stall)
         shoot(client, shots_dir / "20_wfc_connecting.png")
         step("wfc_connecting_tap_sent")
 
@@ -576,11 +686,11 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
               "(argmin-classified, no bare-threshold false-accept)...")
         hit, target, img = wait_for_screen(
             client, shots_dir, "login", "wfc_login_settled",
-            start=5720, stride=150, max_extra=10000, stall=stall,
+            start=test_target + 1210, stride=150, max_extra=10000, stall=stall,
             diag_candidates=("wfc_connecting", "wfc_login_next", "wfc_match_setup_screen"),
             verbose=False)
         print(f"  real settlement at vblank9={target} "
-              f"(+{target - 5620} VBlanks past the connecting-screen tap)")
+              f"(+{target - (test_target + 1110)} VBlanks past the connecting-screen tap)")
         img.save(shots_dir / "21_wfc_login_settled.png")
         step("wfc_login_settled")
         net_dump("C_login")
