@@ -318,6 +318,13 @@ uint16_t ReadBe16(const uint8_t* p) {
     return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) | p[1]);
 }
 
+uint32_t ReadBe32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24u) |
+           (static_cast<uint32_t>(p[1]) << 16u) |
+           (static_cast<uint32_t>(p[2]) << 8u) |
+           static_cast<uint32_t>(p[3]);
+}
+
 void WriteBe16(uint8_t* p, uint16_t value) {
     p[0] = static_cast<uint8_t>(value >> 8u);
     p[1] = static_cast<uint8_t>(value);
@@ -472,8 +479,19 @@ bool IsBroadcastMac(const uint8_t* mac) {
     return true;
 }
 
-bool IsPcapArpFrame(const uint8_t* data, int len) {
-    return len >= 14 && ReadBe16(data + 12u) == 0x0806u;
+bool IsPcapArpFrameForGuest(const uint8_t* data, int len,
+                            uint32_t guest_ipv4,
+                            bool guest_ipv4_known) {
+    if (!guest_ipv4_known) return false;
+    if (len < 14 + 28) return false;
+    if (ReadBe16(data + 12u) != 0x0806u) return false;
+
+    const size_t arp = 14u;
+    if (ReadBe16(data + arp + 0u) != 1u) return false;       // Ethernet
+    if (ReadBe16(data + arp + 2u) != 0x0800u) return false;  // IPv4
+    if (data[arp + 4u] != 6u || data[arp + 5u] != 4u) return false;
+    const uint32_t target_ip = ReadBe32(data + arp + 24u);
+    return target_ip == guest_ipv4;
 }
 
 bool IsPcapDhcpFrameForGuest(const uint8_t* data, int len,
@@ -508,8 +526,11 @@ bool IsPcapDhcpFrameForGuest(const uint8_t* data, int len,
 
 bool IsPcapRequiredBroadcastFrame(const uint8_t* data, int len,
                                   const std::array<uint8_t, 6>& guest_mac,
-                                  bool guest_mac_known) {
-    return IsPcapArpFrame(data, len) ||
+                                  bool guest_mac_known,
+                                  uint32_t guest_ipv4,
+                                  bool guest_ipv4_known) {
+    return IsPcapArpFrameForGuest(data, len, guest_ipv4,
+                                  guest_ipv4_known) ||
            IsPcapDhcpFrameForGuest(data, len, guest_mac, guest_mac_known);
 }
 
@@ -626,6 +647,8 @@ struct WifiBridgeState {
     std::mutex guest_mac_mutex;
     std::array<uint8_t, 6> guest_mac{};
     bool guest_mac_known = false;
+    uint32_t guest_ipv4 = 0;
+    bool guest_ipv4_known = false;
 
     // Incremented (worker thread) whenever rx_queue.TryPush fails.
     // net_ring_push is not thread-safe (see the design comment above), so
@@ -679,6 +702,33 @@ void LearnGuestMacFromTx(WifiBridgeState* state, const uint8_t* data,
 }
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)
+void LearnGuestIpv4FromTx(WifiBridgeState* state, const uint8_t* data,
+                          int len) {
+    if (!state || !data || len < 14) return;
+    uint32_t ip = 0;
+    const uint16_t ethertype = ReadBe16(data + 12u);
+    if (ethertype == 0x0800u && len >= 14 + 20) {
+        const size_t ipv4 = 14u;
+        const uint8_t version = static_cast<uint8_t>(data[ipv4] >> 4u);
+        const size_t ihl = static_cast<size_t>(data[ipv4] & 0x0Fu) * 4u;
+        if (version == 4u && ihl >= 20u &&
+            static_cast<size_t>(len) >= ipv4 + ihl) {
+            ip = ReadBe32(data + ipv4 + 12u);
+        }
+    } else if (ethertype == 0x0806u && len >= 14 + 28) {
+        const size_t arp = 14u;
+        if (ReadBe16(data + arp + 0u) == 1u &&
+            ReadBe16(data + arp + 2u) == 0x0800u &&
+            data[arp + 4u] == 6u && data[arp + 5u] == 4u) {
+            ip = ReadBe32(data + arp + 14u);
+        }
+    }
+    if (ip == 0u || ip == 0xFFFFFFFFu) return;
+    std::lock_guard<std::mutex> lock(state->guest_mac_mutex);
+    state->guest_ipv4 = ip;
+    state->guest_ipv4_known = true;
+}
+
 bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
                              int len) {
     if (!state || !data || len < 14) return false;
@@ -690,10 +740,14 @@ bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
 
     std::array<uint8_t, 6> guest_mac{};
     bool guest_mac_known = false;
+    uint32_t guest_ipv4 = 0;
+    bool guest_ipv4_known = false;
     {
         std::lock_guard<std::mutex> lock(state->guest_mac_mutex);
         guest_mac = state->guest_mac;
         guest_mac_known = state->guest_mac_known;
+        guest_ipv4 = state->guest_ipv4;
+        guest_ipv4_known = state->guest_ipv4_known;
     }
 
     const uint8_t* dst = data;
@@ -702,7 +756,8 @@ bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
     if (guest_mac_known && MacEqual(dst, guest_mac)) return true;
     if (IsBroadcastMac(dst)) {
         return IsPcapRequiredBroadcastFrame(
-            data, len, guest_mac, guest_mac_known);
+            data, len, guest_mac, guest_mac_known,
+            guest_ipv4, guest_ipv4_known);
     }
     if (dst[0] & 1u) return false;
     return false;
@@ -770,6 +825,10 @@ int Net_SendPacket(u8* data, int len, void* userdata) {
         return 0;
     }
     LearnGuestMacFromTx(g_bridge.get(), data, len);
+#if defined(NDS_ENABLE_PCAP_BACKEND)
+    if (g_network_config.backend == NdsNetBackendKind::Pcap)
+        LearnGuestIpv4FromTx(g_bridge.get(), data, len);
+#endif
     // Passive protocol classification (Wiimmfi M3 task 1): read-only decode
     // of the exact bytes about to be queued -- never alters what gets sent.
     // See net_classify.h for the full design note. This is the guest->host
