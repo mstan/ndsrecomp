@@ -138,6 +138,116 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def infer_client_ip(instance: dict[str, Any]) -> str | None:
+    votes: Counter[str] = Counter()
+    for kind in ("dns_query", "tcp_open", "tcp_packet", "udp_packet"):
+        for event in instance["kinds"].get(kind, []):
+            if event.get("direction") == 0:
+                src_ip = event.get("src_ip")
+                if src_ip and src_ip != "0.0.0.0":
+                    votes[src_ip] += 1
+    if votes:
+        return votes.most_common(1)[0][0]
+
+    # DHCP offer/ack entries carry the leased address in wifi_value and as the
+    # destination IPv4 in the ring event. Use that as a fallback for early
+    # captures that happen before DNS/TCP/UDP traffic exists.
+    for event in instance["kinds"].get("dhcp", []):
+        if event.get("direction") == 1:
+            dst_ip = event.get("dst_ip")
+            if dst_ip and dst_ip != "0.0.0.0" and dst_ip != "255.255.255.255":
+                return dst_ip
+    return None
+
+
+def summarize_local_candidate_udp(instance: dict[str, Any],
+                                  local_ip: str | None
+                                  ) -> list[dict[str, Any]]:
+    if not local_ip:
+        return []
+    out = []
+    for event in instance["udp_summary"]["candidate_peer_udp"]:
+        src_ip = event.get("src_ip")
+        dst_ip = event.get("dst_ip")
+        if src_ip == local_ip:
+            out.append({
+                "direction": "out",
+                "local_ip": src_ip,
+                "local_port": event.get("src_port"),
+                "remote_ip": dst_ip,
+                "remote_port": event.get("dst_port"),
+                "count": event.get("count"),
+                "payload_len": event.get("payload_len"),
+            })
+        elif dst_ip == local_ip:
+            out.append({
+                "direction": "in",
+                "local_ip": dst_ip,
+                "local_port": event.get("dst_port"),
+                "remote_ip": src_ip,
+                "remote_port": event.get("src_port"),
+                "count": event.get("count"),
+                "payload_len": event.get("payload_len"),
+            })
+    return out
+
+
+def correlate_instances(instances: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(instances) != 2:
+        return {}
+    a, b = instances
+    ip_a = infer_client_ip(a)
+    ip_b = infer_client_ip(b)
+    peer_ips = {ip for ip in (ip_a, ip_b) if ip}
+
+    direct = []
+    for label, instance in (("A", a), ("B", b)):
+        for event in instance["udp_summary"]["candidate_peer_udp"]:
+            src_ip = event.get("src_ip")
+            dst_ip = event.get("dst_ip")
+            if src_ip in peer_ips and dst_ip in peer_ips and src_ip != dst_ip:
+                direct.append({
+                    "observed_by": label,
+                    "count": event.get("count"),
+                    "direction": event.get("direction"),
+                    "src_ip": src_ip,
+                    "src_port": event.get("src_port"),
+                    "dst_ip": dst_ip,
+                    "dst_port": event.get("dst_port"),
+                    "payload_len": event.get("payload_len"),
+                })
+
+    local_a = summarize_local_candidate_udp(a, ip_a)
+    local_b = summarize_local_candidate_udp(b, ip_b)
+    endpoints_a = Counter(
+        (e["remote_ip"], e["remote_port"]) for e in local_a
+    )
+    endpoints_b = Counter(
+        (e["remote_ip"], e["remote_port"]) for e in local_b
+    )
+    shared = [
+        {
+            "remote_ip": ip,
+            "remote_port": port,
+            "a_events": endpoints_a[(ip, port)],
+            "b_events": endpoints_b[(ip, port)],
+        }
+        for ip, port in sorted(set(endpoints_a) & set(endpoints_b))
+    ]
+
+    return {
+        "inferred_client_ips": {"A": ip_a, "B": ip_b},
+        "direct_client_udp": direct[:128],
+        "direct_client_udp_count": len(direct),
+        "shared_candidate_peer_endpoints": shared[:64],
+        "shared_candidate_peer_endpoint_count": len(shared),
+        "local_candidate_udp": {
+            "A": local_a[:128],
+            "B": local_b[:128],
+        },
+    }
+
+
 def collect_instance(label: str, port: int, out_dir: Path,
                      max_per_kind: int, screenshot_prefix: str = ""
                      ) -> dict[str, Any]:
@@ -205,10 +315,29 @@ def print_summary(report: dict[str, Any]) -> None:
         print(f"  framebuffer={report['framebuffer_path']}")
 
 
+def print_correlation(correlation: dict[str, Any]) -> None:
+    if not correlation:
+        return
+    ips = correlation.get("inferred_client_ips", {})
+    print(
+        "correlation: "
+        f"A_ip={ips.get('A')} B_ip={ips.get('B')} "
+        f"direct_client_udp={correlation.get('direct_client_udp_count', 0)} "
+        "shared_candidate_peer_endpoints="
+        f"{correlation.get('shared_candidate_peer_endpoint_count', 0)}"
+    )
+    for endpoint in correlation.get("shared_candidate_peer_endpoints", [])[:8]:
+        print(
+            "  shared endpoint "
+            f"{endpoint['remote_ip']}:{endpoint['remote_port']} "
+            f"A={endpoint['a_events']} B={endpoint['b_events']}"
+        )
+
+
 def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
                    created_at: str, screenshot_prefix: str = ""
                    ) -> dict[str, Any]:
-    return {
+    report = {
         "created_at": created_at,
         "ports": {"A": port_a, "B": port_b},
         "instances": [
@@ -216,6 +345,8 @@ def collect_report(port_a: int, port_b: int, out_dir: Path, max_per_kind: int,
             collect_instance("B", port_b, out_dir, max_per_kind, screenshot_prefix),
         ],
     }
+    report["correlation"] = correlate_instances(report["instances"])
+    return report
 
 
 def compact_snapshot(snapshot_index: int, snapshot_path: Path,
@@ -226,6 +357,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
         "elapsed_sec": round(elapsed_sec, 3),
         "created_at": report["created_at"],
         "path": str(snapshot_path),
+        "correlation": report.get("correlation", {}),
         "instances": [
             {
                 "label": instance["label"],
@@ -252,6 +384,7 @@ def write_single_snapshot(args: argparse.Namespace, out_dir: Path,
 
     for instance in report["instances"]:
         print_summary(instance)
+    print_correlation(report.get("correlation", {}))
     print(f"wrote {report_path}")
     return 0
 
@@ -280,6 +413,7 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
         print(f"\n--- snapshot {snapshot_index} elapsed={elapsed:.1f}s ---")
         for instance in report["instances"]:
             print_summary(instance)
+        print_correlation(report.get("correlation", {}))
 
         snapshot_index += 1
         remaining = args.watch_seconds - (time.monotonic() - started)
