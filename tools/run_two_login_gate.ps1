@@ -68,17 +68,21 @@ function Get-LogTail {
 }
 
 function Test-GateEvidence {
-    param([string] $InstanceOutDir)
+    param([string] $InstanceOutDir, [datetime] $Since)
 
     $evidence = Get-ChildItem -LiteralPath $InstanceOutDir -Recurse `
         -Filter 'evidence.json' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $Since } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $evidence) {
         return [pscustomobject]@{
             Ok = $false
             Path = $null
-            Message = "no evidence.json was written under $InstanceOutDir"
+            Message = (
+                "no fresh evidence.json was written under $InstanceOutDir " +
+                "after $($Since.ToString('o'))"
+            )
         }
     }
 
@@ -209,6 +213,7 @@ function Start-Gate {
         $args += @('-PcapAdapter', $PcapAdapter)
     }
 
+    $startedAt = Get-Date
     $process = Start-Process -FilePath 'powershell.exe' `
         -ArgumentList $args -WorkingDirectory $GameRoot -PassThru `
         -RedirectStandardOutput $stdout `
@@ -220,6 +225,7 @@ function Start-Gate {
         Label = $Label
         Port = $Port
         InstanceIndex = $InstanceIndex
+        StartedAt = $startedAt
         Process = $process
         OutDir = $instanceOut
         Stdout = $stdout
@@ -244,7 +250,8 @@ try {
         }
         $child.Process.Refresh()
         $exitCode = $child.Process.ExitCode
-        $evidence = Test-GateEvidence -InstanceOutDir $child.OutDir
+        $evidence = Test-GateEvidence -InstanceOutDir $child.OutDir `
+            -Since $child.StartedAt
         if ($null -ne $exitCode -and $exitCode -ne 0) {
             $failed += (
                 "$($child.Label): gate exited with code $exitCode" +
