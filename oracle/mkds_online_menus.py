@@ -104,6 +104,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from collections import Counter
 
 from _client import DebugClient
 
@@ -199,6 +200,12 @@ ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
 ERROR_CODE_LABEL_THRESHOLD = 5.0
 MIN_CLASSIFICATION_MARGIN = 3.0
 SEARCH_PLACEHOLDER_DIFF_THRESHOLD = 3.0
+WFC_SERVICE_UDP_PORTS = {27900}
+NATNEG_UDP_PORTS = {27901}
+LAN_NOISE_PORTS = {
+    53, 67, 68, 137, 138, 1900, 3702, 5353, 5355, 6537, 9478, 9999,
+    10101, 32412, 32414,
+}
 CONNECTION_TEST_OUT_OF_SET = (
     "wfc_connection_menu",
     "wfc_connection_setup_step1",
@@ -590,6 +597,154 @@ def ipv4_str(value: int) -> str:
     return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
 
 
+def is_multicast_or_broadcast_ip(ip: str) -> bool:
+    if ip == "255.255.255.255":
+        return True
+    parts = [int(p) for p in ip.split(".")]
+    return parts[0] >= 224 or parts[-1] == 255
+
+
+def udp_bucket(event: dict[str, Any]) -> str:
+    src_ip = ipv4_str(event.get("src_ipv4", 0))
+    dst_ip = ipv4_str(event.get("dst_ipv4", 0))
+    src_port = event.get("src_port", 0)
+    dst_port = event.get("dst_port", 0)
+    if src_ip == "0.0.0.0" or dst_ip == "0.0.0.0" or src_port == 0 or dst_port == 0:
+        return "invalid_udp"
+    if src_port in WFC_SERVICE_UDP_PORTS or dst_port in WFC_SERVICE_UDP_PORTS:
+        return "wfc_service_udp"
+    if src_port in NATNEG_UDP_PORTS or dst_port in NATNEG_UDP_PORTS:
+        return "natneg_udp"
+    if (
+        src_port in LAN_NOISE_PORTS or dst_port in LAN_NOISE_PORTS or
+        is_multicast_or_broadcast_ip(src_ip) or is_multicast_or_broadcast_ip(dst_ip)
+    ):
+        return "lan_noise_udp"
+    return "candidate_peer_udp"
+
+
+def summarize_online_transport(report: dict[str, Any]) -> dict[str, Any]:
+    stages = report.get("net_evidence", {})
+    last_tag = None
+    for tag in ("F_after_cancel", "E_search_observed", "D_search_started",
+                "D_match_setup_screen", "C_login", "B_conntest"):
+        if tag in stages:
+            last_tag = tag
+            break
+
+    stage_summaries: dict[str, Any] = {}
+    totals: Counter[str] = Counter()
+    udp_endpoints: Counter[tuple[str, int, str, int, str]] = Counter()
+    for tag, stage in stages.items():
+        kinds = stage.get("kinds", {})
+        udp_counts: Counter[str] = Counter()
+        for event in kinds.get("udp_packet", []):
+            bucket = udp_bucket(event)
+            udp_counts[bucket] += 1
+            if tag == last_tag:
+                udp_endpoints[(
+                    ipv4_str(event.get("src_ipv4", 0)),
+                    event.get("src_port", 0),
+                    ipv4_str(event.get("dst_ipv4", 0)),
+                    event.get("dst_port", 0),
+                    bucket,
+                )] += 1
+        stage_summary = {
+            "kind_counts": {kind: len(events) for kind, events in kinds.items()},
+            "udp_counts": dict(udp_counts),
+        }
+        stage_summaries[tag] = stage_summary
+        for kind, count in stage_summary["kind_counts"].items():
+            totals[kind] = max(totals[kind], count)
+
+    search_safety = report.get("search_safety", [])
+    max_search_diff = max(
+        (entry.get("diff_from_empty_search_baseline", 0.0)
+         for entry in search_safety),
+        default=0.0,
+    )
+    search_threshold = SEARCH_PLACEHOLDER_DIFF_THRESHOLD
+    if search_safety:
+        search_threshold = search_safety[0].get(
+            "threshold", SEARCH_PLACEHOLDER_DIFF_THRESHOLD)
+
+    udp_totals = Counter()
+    if last_tag:
+        udp_totals.update(stage_summaries[last_tag]["udp_counts"])
+
+    backend_errors = totals.get("backend_error", 0)
+    tcp_resets = totals.get("tcp_reset", 0)
+    if backend_errors:
+        status = "backend_errors_observed"
+    elif tcp_resets:
+        status = "tcp_resets_observed"
+    elif udp_totals["natneg_udp"] > 0 and udp_totals["candidate_peer_udp"] > 0:
+        status = "natneg_and_candidate_peer_udp_observed"
+    elif udp_totals["natneg_udp"] > 0:
+        status = "natneg_without_candidate_peer_udp"
+    elif udp_totals["wfc_service_udp"] > 0:
+        status = "server_browser_only_no_natneg"
+    elif report.get("stopped_at_match_setup"):
+        status = "authenticated_menu_only"
+    else:
+        status = "no_online_udp_observed"
+
+    return {
+        "status": status,
+        "last_stage": last_tag,
+        "max_kind_counts": dict(totals),
+        "last_stage_udp_counts": dict(udp_totals),
+        "top_udp_endpoints": [
+            {
+                "src_ip": src_ip,
+                "src_port": src_port,
+                "dst_ip": dst_ip,
+                "dst_port": dst_port,
+                "bucket": bucket,
+                "count": count,
+            }
+            for (src_ip, src_port, dst_ip, dst_port, bucket), count
+            in udp_endpoints.most_common(16)
+        ],
+        "search_safety": {
+            "checks": len(search_safety),
+            "max_diff_from_empty_search_baseline": round(max_search_diff, 3),
+            "threshold": search_threshold,
+            "passed": max_search_diff <= search_threshold,
+        },
+        "stage_summaries": stage_summaries,
+        "notes": [
+            "This summarizes one-client public-search/menu evidence only.",
+            "M7 completion still requires two-client peer UDP and race entry.",
+        ],
+    }
+
+
+def print_online_transport_summary(summary: dict[str, Any]) -> None:
+    print("\n--- online transport summary ---")
+    print(
+        f"status={summary.get('status')} "
+        f"last_stage={summary.get('last_stage')}"
+    )
+    print(f"last_stage_udp_counts={summary.get('last_stage_udp_counts', {})}")
+    search = summary.get("search_safety", {})
+    if search:
+        print(
+            "search_safety="
+            f"checks={search.get('checks')} "
+            f"max_diff={search.get('max_diff_from_empty_search_baseline')} "
+            f"threshold={search.get('threshold')} "
+            f"passed={search.get('passed')}"
+        )
+    for endpoint in summary.get("top_udp_endpoints", [])[:8]:
+        print(
+            "  udp "
+            f"{endpoint['src_ip']}:{endpoint['src_port']} -> "
+            f"{endpoint['dst_ip']}:{endpoint['dst_port']} "
+            f"{endpoint['bucket']} count={endpoint['count']}"
+        )
+
+
 def print_net_evidence_summary(report: dict[str, Any], kinds=(
         "dns_query", "dns_response", "tcp_open", "tcp_close", "tcp_reset",
         "udp_packet", "backend_drop", "backend_error", "tls_record")) -> None:
@@ -940,7 +1095,17 @@ def main() -> int:
     parser.add_argument("--stop-at-match-setup", action="store_true",
                          help="stop after authenticated match setup menu "
                               "instead of starting a public opponent search")
+    parser.add_argument("--summarize-evidence", type=Path, default=None,
+                         help="read an existing mkds_online_menus evidence "
+                              "JSON, print the transport summary, and exit")
     args = parser.parse_args()
+
+    if args.summarize_evidence:
+        with open(args.summarize_evidence, "r") as f:
+            report = json.load(f)
+        summary = summarize_online_transport(report)
+        print_online_transport_summary(summary)
+        return 0
 
     if Image is None:
         print("Pillow is required (screen capture/verification) -- "
@@ -962,6 +1127,9 @@ def main() -> int:
         print_net_evidence_summary(report["net_evidence"]["E_search_observed"])
     if "F_after_cancel" in report["net_evidence"]:
         print_net_evidence_summary(report["net_evidence"]["F_after_cancel"])
+
+    report["online_transport_summary"] = summarize_online_transport(report)
+    print_online_transport_summary(report["online_transport_summary"])
 
     if args.evidence_json:
         args.evidence_json.parent.mkdir(parents=True, exist_ok=True)
