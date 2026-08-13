@@ -104,6 +104,68 @@ function Test-GateEvidence {
     }
 }
 
+function Format-IPv4 {
+    param([object] $Value)
+
+    if ($null -eq $Value) { return $null }
+    $u = [uint32]$Value
+    return ("{0}.{1}.{2}.{3}" -f `
+        (($u -shr 24) -band 0xFF),
+        (($u -shr 16) -band 0xFF),
+        (($u -shr 8) -band 0xFF),
+        ($u -band 0xFF))
+}
+
+function Get-ClientIPv4 {
+    param([object] $MatchEvidence)
+
+    foreach ($kind in @('dns_query', 'tcp_open', 'udp_packet')) {
+        foreach ($event in @($MatchEvidence.kinds.$kind)) {
+            if ($event.direction -eq 0 -and $event.src_ipv4 -and $event.src_ipv4 -ne 0) {
+                return (Format-IPv4 $event.src_ipv4)
+            }
+        }
+    }
+    return $null
+}
+
+function Get-GateSummary {
+    param([object] $Child)
+
+    $report = Get-Content -Raw -LiteralPath $Child.Evidence | ConvertFrom-Json
+    $match = $report.net_evidence.D_match_setup_screen
+    $setupStep = $report.steps |
+        Where-Object { $_.name -eq 'wfc_match_setup_screen' } |
+        Select-Object -Last 1
+    $gpcmTcp = @(
+        $match.kinds.tcp_open |
+        Where-Object { $_.src_port -eq 29900 -or $_.dst_port -eq 29900 }
+    )
+    $masterUdp = @(
+        $match.kinds.udp_packet |
+        Where-Object { $_.src_port -eq 27900 -or $_.dst_port -eq 27900 }
+    )
+    return [pscustomobject]@{
+        label = $Child.Label
+        port = $Child.Port
+        instance_index = $Child.InstanceIndex
+        evidence = $Child.Evidence
+        out_dir = $Child.OutDir
+        client_ipv4 = Get-ClientIPv4 $match
+        wfc_match_setup_vblank9 = $setupStep.vblank9
+        dns_query = @($match.kinds.dns_query).Count
+        dns_response = @($match.kinds.dns_response).Count
+        tcp_open = @($match.kinds.tcp_open).Count
+        gpcm_tcp_out = @($gpcmTcp | Where-Object { $_.dst_port -eq 29900 }).Count
+        gpcm_tcp_in = @($gpcmTcp | Where-Object { $_.src_port -eq 29900 }).Count
+        udp_packet = @($match.kinds.udp_packet).Count
+        master_udp_out = @($masterUdp | Where-Object { $_.dst_port -eq 27900 }).Count
+        master_udp_in = @($masterUdp | Where-Object { $_.src_port -eq 27900 }).Count
+        tls_record = @($match.kinds.tls_record).Count
+        backend_error = @($match.kinds.backend_error).Count
+    }
+}
+
 $busy = @()
 foreach ($port in @($PortA, $PortB)) {
     if (Test-DebugPort -TestPort $port) {
@@ -156,6 +218,8 @@ function Start-Gate {
         $Label, $process.Id, $Port, $InstanceIndex) -ForegroundColor Cyan
     return [pscustomobject]@{
         Label = $Label
+        Port = $Port
+        InstanceIndex = $InstanceIndex
         Process = $process
         OutDir = $instanceOut
         Stdout = $stdout
@@ -212,8 +276,26 @@ if ($failed.Count -gt 0) {
     throw ($failed -join ([Environment]::NewLine + [Environment]::NewLine))
 }
 
+$instanceSummaries = @($children | ForEach-Object { Get-GateSummary $_ })
+$clientIps = @($instanceSummaries | ForEach-Object { $_.client_ipv4 } | Where-Object { $_ })
+if ($clientIps.Count -ne 2 -or @($clientIps | Select-Object -Unique).Count -ne 2) {
+    throw "two-login gate did not observe two distinct client IPv4 addresses: $($clientIps -join ', ')"
+}
+
+$summaryPath = Join-Path $GateOutDir 'summary.json'
+$summary = [pscustomobject]@{
+    created_at = $stamp
+    game_root = $GameRoot
+    network_backend = $NetworkBackend
+    wfc_provider = $WfcProvider
+    pcap_adapter = $PcapAdapter
+    instances = $instanceSummaries
+}
+$summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+
 Write-Host 'two-instance Wiimmfi login gate complete' -ForegroundColor Green
 foreach ($child in $children) {
     Write-Host "  $($child.Label): $($child.OutDir)"
     Write-Host "     evidence: $($child.Evidence)"
 }
+Write-Host "  summary: $summaryPath"
