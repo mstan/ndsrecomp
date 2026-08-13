@@ -763,6 +763,17 @@ def watch(args: argparse.Namespace, out_dir: Path, stamp: str) -> int:
     report_path = out_dir / "evidence.json"
     report_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"wrote {report_path}")
+    if args.require_verdict:
+        latest_status = summary.get("latest_m7_transport_verdict", {}).get(
+            "status")
+        if latest_status not in args.require_verdict:
+            required = ", ".join(args.require_verdict)
+            print(
+                "required M7 transport verdict not observed: "
+                f"latest={latest_status} required={required}",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
@@ -782,6 +793,12 @@ def main() -> int:
                             "snapshot whose M7 transport verdict has this "
                             "status; may be repeated"
                         ))
+    parser.add_argument("--require-verdict", action="append", default=[],
+                        help=(
+                            "in watch mode, exit nonzero after writing the "
+                            "summary unless the latest M7 transport verdict "
+                            "has this status; may be repeated"
+                        ))
     args = parser.parse_args()
     if args.max_per_kind < 1 or args.max_per_kind > 4096:
         parser.error("--max-per-kind must be in 1..4096")
@@ -789,6 +806,10 @@ def main() -> int:
         parser.error("--interval must be positive")
     if args.watch_seconds < 0:
         parser.error("--watch-seconds must be non-negative")
+    if any(not status.strip() for status in args.stop_on_verdict):
+        parser.error("--stop-on-verdict entries must be non-empty")
+    if any(not status.strip() for status in args.require_verdict):
+        parser.error("--require-verdict entries must be non-empty")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = args.out_dir or (

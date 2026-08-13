@@ -31,9 +31,10 @@
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_two_instances.ps1
 #
-# By default the collector watches for 900 seconds and stops early as soon as
-# bidirectional peer UDP is proven. Pass -EvidenceWatchSeconds 0 only for a
-# deliberate no-evidence launch.
+# By default the collector watches for 900 seconds, stops early as soon as
+# bidirectional peer UDP is proven, and exits nonzero if that proof is never
+# observed. Pass -EvidenceWatchSeconds 0 only for a deliberate no-evidence
+# launch.
 #
 # Before opening interactive windows, the launcher also proves the two
 # pcap-backed instances can concurrently reach the authenticated match setup
@@ -64,6 +65,9 @@ param(
     [int] $EvidenceMaxPerKind = 4096,
     [string] $EvidenceOutDir = '',
     [string[]] $EvidenceStopOnVerdict = @(
+        'direct_client_udp_bidirectional_observed'
+    ),
+    [string[]] $EvidenceRequireVerdict = @(
         'direct_client_udp_bidirectional_observed'
     ),
     [switch] $SkipSavePreflight,
@@ -101,6 +105,11 @@ if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
 foreach ($status in $EvidenceStopOnVerdict) {
     if ([string]::IsNullOrWhiteSpace($status)) {
         throw "-EvidenceStopOnVerdict entries must be non-empty"
+    }
+}
+foreach ($status in $EvidenceRequireVerdict) {
+    if ([string]::IsNullOrWhiteSpace($status)) {
+        throw "-EvidenceRequireVerdict entries must be non-empty"
     }
 }
 if ($LoginGateAttempts -lt 1) { throw "-LoginGateAttempts must be positive" }
@@ -526,6 +535,9 @@ function Start-EvidenceCollector {
     foreach ($status in $EvidenceStopOnVerdict) {
         $argv += @('--stop-on-verdict', $status)
     }
+    foreach ($status in $EvidenceRequireVerdict) {
+        $argv += @('--require-verdict', $status)
+    }
     $p = Start-Process -FilePath $pythonPath -WorkingDirectory $GameRoot `
             -ArgumentList $argv -PassThru `
             -RedirectStandardOutput $collectorOut `
@@ -557,6 +569,7 @@ Write-Host '  real stranger who would suffer if we desync.'
 Write-Host ''
 if ($collector) {
     Write-Host 'Rolling evidence collection is already running.' -ForegroundColor Cyan
+    Write-Host 'By default it exits nonzero unless bidirectional peer UDP is proven; check collector.err.log after the run.'
 } else {
     Write-Host 'During the attempt, collect rolling proof from both always-on rings:' -ForegroundColor Cyan
     Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py --watch-seconds 900 --interval 5'
