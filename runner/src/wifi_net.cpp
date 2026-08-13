@@ -304,13 +304,14 @@ NdsWifiNetworkConfig g_network_config{};
 // SlirpCbSendPacket() -- no packet on either queue can ever exceed this,
 // so the worst-case memory bound below is exact, not a guess.
 constexpr size_t kWifiNetMaxPacketBytes = 2048;
-// Chosen generously relative to any plausible per-guest-tick packet burst
-// (Wifi::CheckRX(0) drains a whole tick's worth in one WifiAP::RecvPacket
-// call) while keeping the worst-case bound (2 queues * capacity *
-// kWifiNetMaxPacketBytes = 1 MiB) small and fixed regardless of host
-// traffic volume -- a host flood drops packets past this point instead of
+// Chosen generously relative to real pcap bursts. Slirp tends to emit a small
+// guest-specific stream, but pcap sees the live LAN and can enqueue many
+// accepted broadcasts or peer frames before the guest's next Wifi::CheckRX(0)
+// tick drains them. Keep the worst-case bound (2 queues * capacity *
+// kWifiNetMaxPacketBytes = 4 MiB) small and fixed regardless of host traffic
+// volume -- a host flood still drops packets past this point instead of
 // growing memory.
-constexpr size_t kWifiNetQueueCapacity = 256;
+constexpr size_t kWifiNetQueueCapacity = 1024;
 constexpr size_t kWifiNetPcapMaxRxPacketBytes = 1518;
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)

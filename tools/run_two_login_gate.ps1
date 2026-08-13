@@ -101,6 +101,15 @@ function Test-GateEvidence {
             Message = "evidence is missing D_match_setup_screen"
         }
     }
+    $match = $report.net_evidence.D_match_setup_screen
+    $backendDrops = @($match.kinds.backend_drop).Count
+    if ($backendDrops -ne 0) {
+        return [pscustomobject]@{
+            Ok = $false
+            Path = $evidence.FullName
+            Message = "evidence has $backendDrops backend_drop event(s)"
+        }
+    }
     return [pscustomobject]@{
         Ok = $true
         Path = $evidence.FullName
@@ -166,6 +175,7 @@ function Get-GateSummary {
         master_udp_out = @($masterUdp | Where-Object { $_.dst_port -eq 27900 }).Count
         master_udp_in = @($masterUdp | Where-Object { $_.src_port -eq 27900 }).Count
         tls_record = @($match.kinds.tls_record).Count
+        backend_drop = @($match.kinds.backend_drop).Count
         backend_error = @($match.kinds.backend_error).Count
     }
 }
