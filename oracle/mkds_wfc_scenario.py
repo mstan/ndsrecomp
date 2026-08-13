@@ -177,6 +177,7 @@ REGION_FOR = {
     "connection_test_settled": "test_band",
     "connection_test_error": "test_band",
     "wfc_match_disclaimer": "full",
+    "wfc_wifi_id_update_warning": "full",
     "wfc_connecting": "full",
     "wfc_match_save_confirm": "full",
     "wfc_login_settled": "top",           # real-network-timing-dependent
