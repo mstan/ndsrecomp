@@ -113,4 +113,7 @@ Write-Host '  Register each as the other''s friend, then connect via Friend Rost
 Write-Host '  That pairs the two instances directly instead of matchmaking with a'
 Write-Host '  real stranger who would suffer if we desync.'
 Write-Host ''
+Write-Host 'After the attempt, collect proof from both always-on rings:' -ForegroundColor Cyan
+Write-Host '  .venv\Scripts\python.exe ndsrecomp\tools\collect_two_instance_evidence.py'
+Write-Host ''
 Write-Host ('to stop: Stop-Process -Id {0},{1}' -f $a.Id, $b.Id) -ForegroundColor DarkGray
