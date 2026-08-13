@@ -472,6 +472,47 @@ bool IsBroadcastMac(const uint8_t* mac) {
     return true;
 }
 
+bool IsPcapArpFrame(const uint8_t* data, int len) {
+    return len >= 14 && ReadBe16(data + 12u) == 0x0806u;
+}
+
+bool IsPcapDhcpFrameForGuest(const uint8_t* data, int len,
+                             const std::array<uint8_t, 6>& guest_mac,
+                             bool guest_mac_known) {
+    if (len < 14 + 20 + 8 + 44) return false;
+    if (ReadBe16(data + 12u) != 0x0800u) return false;
+
+    const size_t ip = 14u;
+    const uint8_t version = static_cast<uint8_t>(data[ip] >> 4u);
+    const size_t ihl = static_cast<size_t>(data[ip] & 0x0Fu) * 4u;
+    if (version != 4u || ihl < 20u ||
+        static_cast<size_t>(len) < ip + ihl + 8u + 44u) {
+        return false;
+    }
+    if (data[ip + 9u] != 17u) return false;  // UDP
+
+    const size_t udp = ip + ihl;
+    const uint16_t src_port = ReadBe16(data + udp);
+    const uint16_t dst_port = ReadBe16(data + udp + 2u);
+    if (!((src_port == 67u && dst_port == 68u) ||
+          (src_port == 68u && dst_port == 67u))) {
+        return false;
+    }
+
+    if (!guest_mac_known) return true;
+    const size_t bootp = udp + 8u;
+    const uint8_t hlen = data[bootp + 2u];
+    if (hlen != 6u) return false;
+    return MacEqual(data + bootp + 28u, guest_mac);
+}
+
+bool IsPcapRequiredBroadcastFrame(const uint8_t* data, int len,
+                                  const std::array<uint8_t, 6>& guest_mac,
+                                  bool guest_mac_known) {
+    return IsPcapArpFrame(data, len) ||
+           IsPcapDhcpFrameForGuest(data, len, guest_mac, guest_mac_known);
+}
+
 const melonDS::AdapterData* ChoosePcapAdapter(
     const std::vector<melonDS::AdapterData>& adapters,
     const std::string& requested) {
@@ -658,8 +699,13 @@ bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
     const uint8_t* dst = data;
     const uint8_t* src = data + 6u;
     if (guest_mac_known && MacEqual(src, guest_mac)) return false;
-    if (IsBroadcastMac(dst) || (dst[0] & 1u) != 0u) return true;
-    return guest_mac_known && MacEqual(dst, guest_mac);
+    if (guest_mac_known && MacEqual(dst, guest_mac)) return true;
+    if (IsBroadcastMac(dst)) {
+        return IsPcapRequiredBroadcastFrame(
+            data, len, guest_mac, guest_mac_known);
+    }
+    if (dst[0] & 1u) return false;
+    return false;
 }
 #endif
 
