@@ -64,6 +64,7 @@ param(
     [string] $LoginGateOutDir = '',
     [int] $LoginGateAttempts = 2,
     [double] $LoginGateTimeoutSeconds = 900,
+    [double] $LoginGatePortReleaseTimeoutSeconds = 15,
     [switch] $PreflightOnly
 )
 
@@ -89,6 +90,9 @@ if ($EvidenceMaxPerKind -lt 1 -or $EvidenceMaxPerKind -gt 4096) {
 }
 if ($LoginGateAttempts -lt 1) { throw "-LoginGateAttempts must be positive" }
 if ($LoginGateTimeoutSeconds -le 0) { throw "-LoginGateTimeoutSeconds must be positive" }
+if ($LoginGatePortReleaseTimeoutSeconds -lt 0) {
+    throw "-LoginGatePortReleaseTimeoutSeconds must be non-negative"
+}
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -239,6 +243,37 @@ function Assert-DebugPortsFree {
         -ForegroundColor Green
 }
 
+function Wait-DebugPortsFree {
+    param([int] $PortA, [int] $PortB, [double] $TimeoutSeconds)
+
+    if ($SkipPortPreflight) {
+        Write-Warning "skipping debug-port release preflight"
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $busy = @()
+        foreach ($port in @($PortA, $PortB)) {
+            if (Test-DebugPort -Port $port) {
+                $busy += $port
+            }
+        }
+        if ($busy.Count -eq 0) {
+            Write-Host ("debug-port release OK: {0}, {1}" -f $PortA, $PortB) `
+                -ForegroundColor Green
+            return
+        }
+        if ($TimeoutSeconds -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    throw (
+        "debug port(s) still accept connections after login preflight: " +
+        "$($busy -join ', ')"
+    )
+}
+
 function Assert-EvidenceCollectorPreflight {
     if ($EvidenceWatchSeconds -le 0) { return }
 
@@ -350,6 +385,9 @@ function Assert-TwoLoginGatePreflight {
     if ($LASTEXITCODE -ne 0) {
         throw "two-login preflight failed with exit code $LASTEXITCODE"
     }
+
+    Wait-DebugPortsFree -PortA $PortA -PortB $PortB `
+        -TimeoutSeconds $LoginGatePortReleaseTimeoutSeconds
 }
 
 Assert-InstanceSaves
