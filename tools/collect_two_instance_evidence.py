@@ -415,16 +415,16 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
         status = "backend_errors_observed"
     elif missing_ips:
         status = "missing_client_ip"
+    elif direct_client_udp_bidirectional:
+        status = "direct_client_udp_bidirectional_observed"
+    elif direct_client_udp:
+        status = "direct_client_udp_one_way"
+    elif bucket_totals["candidate_peer_udp"]:
+        status = "candidate_peer_udp_without_direct_client_udp"
     elif bucket_totals["natneg_udp"] == 0:
         status = "no_natneg_udp"
-    elif bucket_totals["candidate_peer_udp"] == 0:
-        status = "natneg_without_peer_udp"
-    elif direct_client_udp == 0:
-        status = "candidate_peer_udp_without_direct_client_udp"
-    elif not direct_client_udp_bidirectional:
-        status = "direct_client_udp_one_way"
     else:
-        status = "direct_client_udp_bidirectional_observed"
+        status = "natneg_without_peer_udp"
 
     return {
         "status": status,
@@ -443,6 +443,12 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
                 "truncation_risk means at least one filtered ring query "
                 "returned the requested maximum and may not include every "
                 "retained event of that kind."
+            ),
+            (
+                "Bidirectional direct client UDP is stronger transport "
+                "evidence than a retained NATNEG packet. A long run may retain "
+                "later peer traffic after earlier NATNEG packets age out of "
+                "the ring."
             ),
             "Race entry and lobby return still require framebuffer or operator confirmation.",
         ],
