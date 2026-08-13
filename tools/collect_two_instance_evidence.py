@@ -25,9 +25,11 @@ sys.path.insert(0, str(ROOT / "oracle"))
 from _client import DebugClient  # noqa: E402
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageChops, ImageStat
 except ImportError:  # pragma: no cover - Pillow is available in the game venv
     Image = None
+    ImageChops = None
+    ImageStat = None
 
 
 EVIDENCE_KINDS = (
@@ -50,6 +52,46 @@ LAN_NOISE_PORTS = {
 }
 WFC_SERVICE_UDP_PORTS = {27900}
 NATNEG_UDP_PORTS = {27901}
+REFS_DIR = ROOT / "oracle" / "wfc_screen_refs"
+SCREEN_REFS = (
+    "title_screen",
+    "nickname_confirm_dialog",
+    "wfc_connection_menu",
+    "wfc_connection_setup_step1",
+    "connection_test_running",
+    "connection_test_settled",
+    "connection_test_error",
+    "wfc_match_disclaimer",
+    "wfc_connecting",
+    "wfc_match_save_confirm",
+    "wfc_login_settled",
+    "wfc_login_next",
+    "wfc_match_setup_screen",
+)
+REGION_FOR = {
+    "title_screen": "full",
+    "nickname_confirm_dialog": "full",
+    "wfc_connection_menu": "full",
+    "wfc_connection_setup_step1": "full",
+    "connection_test_running": "test_band",
+    "connection_test_settled": "test_band",
+    "connection_test_error": "test_band",
+    "wfc_match_disclaimer": "full",
+    "wfc_connecting": "full",
+    "wfc_match_save_confirm": "full",
+    "wfc_login_settled": "top",
+    "wfc_login_next": "top",
+    "wfc_match_setup_screen": "top",
+}
+THRESHOLD_FOR = {
+    "wfc_login_settled": 20.0,
+    "wfc_login_next": 20.0,
+    "wfc_match_setup_screen": 20.0,
+}
+DEFAULT_SCREEN_THRESHOLD = 10.0
+MIN_SCREEN_MARGIN = 2.0
+
+_ref_cache: dict[str, Any] = {}
 
 
 def ipv4(value: int) -> str:
@@ -74,21 +116,83 @@ def sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def capture_framebuffer(client: DebugClient, out_path: Path) -> bool:
+def load_ref(name: str):
+    img = _ref_cache.get(name)
+    if img is None:
+        img = Image.open(REFS_DIR / f"{name}.png").convert("RGB")
+        _ref_cache[name] = img
+    return img
+
+
+def gray_region(img, region: str):
+    if region == "top":
+        cropped = img.crop((0, 0, 256, 192))
+    elif region == "test_band":
+        cropped = img.crop((0, 230, 256, 344))
+    else:
+        cropped = img
+    return cropped.convert("L")
+
+
+def mean_abs_diff(img_a, img_b, region: str) -> float:
+    a = gray_region(img_a, region)
+    b = gray_region(img_b, region)
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def classify_screen(img) -> dict[str, Any]:
+    if Image is None or ImageChops is None or ImageStat is None:
+        return {"available": False, "reason": "pillow_missing"}
+    if not REFS_DIR.is_dir():
+        return {"available": False, "reason": "refs_missing"}
+
+    diffs = {
+        name: mean_abs_diff(img, load_ref(name), REGION_FOR.get(name, "full"))
+        for name in SCREEN_REFS
+    }
+    ranked = sorted(diffs.items(), key=lambda kv: kv[1])
+    best_name, best_diff = ranked[0]
+    runner_up_name, runner_up_diff = ranked[1]
+    threshold = THRESHOLD_FOR.get(best_name, DEFAULT_SCREEN_THRESHOLD)
+    margin = runner_up_diff - best_diff
+    confident = best_diff <= threshold and margin >= MIN_SCREEN_MARGIN
+    return {
+        "available": True,
+        "nearest": best_name,
+        "confident": confident,
+        "best_diff": round(best_diff, 3),
+        "runner_up": runner_up_name,
+        "runner_up_diff": round(runner_up_diff, 3),
+        "margin": round(margin, 3),
+        "threshold": threshold,
+    }
+
+
+def capture_framebuffer(client: DebugClient, out_path: Path) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "saved": False,
+        "path": None,
+        "screen": {"available": False, "reason": "not_captured"},
+    }
     if Image is None:
-        return False
+        report["screen"] = {"available": False, "reason": "pillow_missing"}
+        return report
     try:
         w, h, rgb_a = client.framebuffer("A")
         wb, hb, rgb_b = client.framebuffer("B")
     except Exception as exc:  # Keep evidence collection best-effort.
         print(f"warning: framebuffer capture failed for {out_path}: {exc}")
-        return False
+        report["screen"] = {"available": False, "reason": "capture_failed"}
+        return report
     img = Image.new("RGB", (max(w, wb), h + hb))
     img.paste(Image.frombytes("RGB", (w, h), rgb_a), (0, 0))
     img.paste(Image.frombytes("RGB", (wb, hb), rgb_b), (0, h))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
-    return True
+    report["saved"] = True
+    report["path"] = str(out_path)
+    report["screen"] = classify_screen(img)
+    return report
 
 
 def udp_bucket(event: dict[str, Any]) -> str:
@@ -315,8 +419,10 @@ def collect_instance(label: str, port: int, out_dir: Path,
             "kinds": {},
         }
         screenshot = out_dir / f"{screenshot_prefix}{label}_framebuffer.png"
-        report["framebuffer_saved"] = capture_framebuffer(client, screenshot)
-        report["framebuffer_path"] = str(screenshot) if report["framebuffer_saved"] else None
+        framebuffer = capture_framebuffer(client, screenshot)
+        report["framebuffer_saved"] = framebuffer["saved"]
+        report["framebuffer_path"] = framebuffer["path"]
+        report["screen"] = framebuffer["screen"]
 
         for kind in EVIDENCE_KINDS:
             dump = client.cmd("net_ring_dump", max=max_per_kind, filter=kind)
@@ -365,6 +471,16 @@ def print_summary(report: dict[str, Any]) -> None:
     backend_errors = report["kind_counts"].get("backend_error", 0)
     if backend_errors:
         print(f"  backend_error={backend_errors}")
+    screen = report.get("screen", {})
+    if screen.get("available"):
+        print(
+            "  screen: "
+            f"nearest={screen.get('nearest')} "
+            f"confident={screen.get('confident')} "
+            f"diff={screen.get('best_diff')} "
+            f"runner_up={screen.get('runner_up')} "
+            f"margin={screen.get('margin')}"
+        )
     if report.get("framebuffer_saved"):
         print(f"  framebuffer={report['framebuffer_path']}")
 
@@ -438,6 +554,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
                 "candidate_peer_udp": instance["udp_summary"]["candidate_peer_udp"],
                 "wfc_service_udp": instance["udp_summary"]["wfc_service_udp"],
                 "natneg_udp": instance["udp_summary"]["natneg_udp"],
+                "screen": instance.get("screen", {}),
                 "framebuffer_path": instance.get("framebuffer_path"),
             }
             for instance in report["instances"]
