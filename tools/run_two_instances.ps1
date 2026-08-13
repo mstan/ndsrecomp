@@ -784,6 +784,15 @@ These hashes are duplicate-profile guards only. They are not MKDS friend codes.
 Read and exchange the actual 12-digit friend codes through the in-game Friend
 Roster UI.
 
+Friend-code worksheet:
+  A friend code as shown in A:
+
+  B friend code as shown in B:
+
+  Entered B's friend code into A: [ ]
+  Entered A's friend code into B: [ ]
+  Both games show the other instance in Friend Roster: [ ]
+
 Use Friend Roster, not public matchmaking.
 
 Operator steps:
