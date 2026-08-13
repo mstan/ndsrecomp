@@ -59,6 +59,9 @@ beads-yjp.1.15).
       --rom "Mario Kart DS.nds" --boot firmware --port 19843
 
   python oracle/mkds_wfc_scenario.py [--shots-dir DIR]
+
+Native-only runs include the debug port in their screenshot label by default
+so concurrent drivers do not overwrite each other's diagnostics.
 """
 
 from __future__ import annotations
@@ -1062,10 +1065,15 @@ def main() -> int:
     parser.add_argument("--native-only", action="store_true",
                         help="skip the oracle entirely; run native only and "
                              "dump network-ring evidence at the end")
+    parser.add_argument("--native-label", default=None,
+                        help="screenshot/checkpoint label for --native-only; "
+                             "defaults to native_p<port> to keep concurrent "
+                             "diagnostics distinct")
     args = parser.parse_args()
 
     if args.native_only:
-        native = run_scenario(args.native_port, args.shots_dir, "native",
+        native_label = args.native_label or f"native_p{args.native_port}"
+        native = run_scenario(args.native_port, args.shots_dir, native_label,
                               args.stall)
         print(f"{'step':<36} result")
         for name, counts in native:
