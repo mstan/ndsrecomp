@@ -398,9 +398,24 @@ function Assert-NetworkRuntimePreflight {
         if ($state.capacity -lt 1) {
             throw "pcap preflight returned invalid net_state"
         }
+        $firmwarePath = Join-Path $GameRoot 'ndsrecomp\bios\firmware.bin'
+        if (-not (Test-Path -LiteralPath $firmwarePath)) {
+            throw "firmware_replace preflight firmware not found: $firmwarePath"
+        }
+        $replace = Invoke-DebugCommand -Port $PortA -Command @{
+            cmd = 'firmware_replace'
+            hex = (Convert-FileToHex -Path $firmwarePath)
+        } -TimeoutMilliseconds 120000
+        if (-not $replace.ok -or $replace.size -ne 262144) {
+            throw (
+                "firmware_replace preflight failed; rebuild the runner from " +
+                "current ndsrecomp before the owner-run launch: " +
+                ($replace | ConvertTo-Json -Compress)
+            )
+        }
         Write-Host (
-            "pcap runtime preflight OK: vblank9={0} ring_capacity={1}" -f `
-            $result.counts.vblank9, $state.capacity
+            "pcap runtime preflight OK: vblank9={0} ring_capacity={1} firmware_replace={2}" -f `
+            $result.counts.vblank9, $state.capacity, $replace.size
         ) -ForegroundColor Green
     }
     finally {
