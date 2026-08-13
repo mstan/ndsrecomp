@@ -36,7 +36,7 @@
 [CmdletBinding()]
 param(
     [string] $GameRoot   = 'F:\Projects\ndsrecomp\mariokartdsrecomp',
-    [string] $BuildDir   = '..\ndsrecomp\runner\build-mkds-pcap',
+    [string] $BuildDir   = 'ndsrecomp\runner\build-mkds-pcap',
     [string] $Rom        = 'Mario Kart DS.nds',
     [string] $SavePrefix = 'mkds_instance',
     [int]    $PortA      = 19860,
