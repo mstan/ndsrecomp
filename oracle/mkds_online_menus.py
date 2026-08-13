@@ -198,6 +198,7 @@ CONNECTION_TEST_OUTCOME_MAX_DIFF = 25.0
 ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
 ERROR_CODE_LABEL_THRESHOLD = 5.0
 MIN_CLASSIFICATION_MARGIN = 3.0
+SEARCH_PLACEHOLDER_DIFF_THRESHOLD = 3.0
 CONNECTION_TEST_OUT_OF_SET = (
     "wfc_connection_menu",
     "wfc_connection_setup_step1",
@@ -608,20 +609,28 @@ def print_net_evidence_summary(report: dict[str, Any], kinds=(
             print(line)
 
 
-def check_no_players_found(client: DebugClient, shots_dir: Path, label: str) -> None:
+def check_no_players_found(client: DebugClient, shots_dir: Path, label: str,
+                           baseline_img=None) -> None:
     """Courtesy stop condition (see module docstring). This project has no
-    reference image for a "players found" state (none has been observed),
-    so this deliberately does NOT try to positive-match one -- it only
-    confirms the CURRENT frame still matches the empty-search placeholder
-    state via the same argmin-classification discipline as
-    `wait_for_screen`. Any ambiguous/unrecognized frame here should be
-    treated as "stop and look", not "assume it's fine and continue" -- the
-    caller is responsible for actually inspecting a saved screenshot before
-    ever tapping forward past this point.
+    committed reference image for a "players found" state (none has been
+    observed), so this deliberately does NOT try to positive-match one. It
+    fails closed instead: compare the current frame to this run's own
+    initial empty-search placeholder, and stop if the screen changed enough
+    that a human should inspect it before any further input.
     """
     img = capture_rgb(client)
     shots_dir.mkdir(parents=True, exist_ok=True)
-    img.save(shots_dir / f"{label}.png")
+    path = shots_dir / f"{label}.png"
+    img.save(path)
+    if baseline_img is None:
+        return img
+    diff = mean_abs_diff(img, baseline_img, "full")
+    if diff > SEARCH_PLACEHOLDER_DIFF_THRESHOLD:
+        raise PlayersFoundError(
+            f"{label}: search screen changed from empty-search baseline "
+            f"(diff={diff:.2f}, threshold={SEARCH_PLACEHOLDER_DIFF_THRESHOLD}); "
+            f"screenshot: {path}")
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -641,7 +650,11 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
     """
     shots_dir.mkdir(parents=True, exist_ok=True)
     client = DebugClient(port=port, timeout=900.0)
-    report: dict[str, Any] = {"steps": [], "net_evidence": {}}
+    report: dict[str, Any] = {
+        "steps": [],
+        "net_evidence": {},
+        "search_safety": [],
+    }
 
     def step(name: str) -> None:
         counts = client.cmd("event_counts")
@@ -815,7 +828,8 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
         # New territory past here (see MATCH_SETUP_OK's comment for why the
         # first coordinate attempt at this button was a proven no-op).
         tap(client, MATCH_SETUP_OK, v2 + 10, v2 + 140, stall)
-        shoot(client, shots_dir / "24_searching_for_opponents_regional.png")
+        search_baseline = capture_rgb(client)
+        search_baseline.save(shots_dir / "24_searching_for_opponents_regional.png")
         step("search_started_regional")
         net_dump("D_search_started")
 
@@ -825,7 +839,15 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
             target_v = v3 + i * search_stride
             hit = client.cmd("run_to_event", event="vblank9", count=target_v, stall=stall)
             fname = shots_dir / f"25_searching_observe_{i:02d}_vblank{target_v}.png"
-            shoot(client, fname)
+            img = check_no_players_found(client, shots_dir, fname.stem,
+                                         search_baseline)
+            report["search_safety"].append({
+                "label": fname.stem,
+                "vblank9": target_v,
+                "diff_from_empty_search_baseline": mean_abs_diff(
+                    img, search_baseline, "full"),
+                "threshold": SEARCH_PLACEHOLDER_DIFF_THRESHOLD,
+            })
             if hit.get("terminal") or hit.get("stalled"):
                 print(f"  execution stalled/halted mid-search at step {i}: {hit}")
                 break
@@ -835,11 +857,19 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
         # Courtesy: this driver never proceeds past an active search into a
         # race. The observation loop above only ever advances time and
         # screenshots -- it never taps -- so no input has been sent that
-        # could confirm/join anything. Whoever reviews the saved
-        # 25_searching_observe_*.png screenshots is the actual check for
-        # "did a real opponent ever appear"; this script does not attempt
-        # to auto-detect that (see check_no_players_found's docstring).
-        check_no_players_found(client, shots_dir, "26_pre_cancel_check")
+        # could confirm/join anything. Each saved 25_searching_observe_*.png
+        # frame was also compared against this run's initial empty-search
+        # baseline; a changed or ambiguous frame raises PlayersFoundError
+        # before any cancel/confirm input is sent.
+        pre_cancel_img = check_no_players_found(
+            client, shots_dir, "26_pre_cancel_check", search_baseline)
+        report["search_safety"].append({
+            "label": "26_pre_cancel_check",
+            "vblank9": client.cmd("event_counts").get("vblank9"),
+            "diff_from_empty_search_baseline": mean_abs_diff(
+                pre_cancel_img, search_baseline, "full"),
+            "threshold": SEARCH_PLACEHOLDER_DIFF_THRESHOLD,
+        })
 
         cur = client.cmd("event_counts")
         v4 = cur["vblank9"]
