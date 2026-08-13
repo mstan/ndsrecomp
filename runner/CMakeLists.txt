@@ -451,6 +451,8 @@ if(WIN32)
     endif()
 endif()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
   add_executable(frontend_config_test
       tests/frontend_config_test.cpp
       src/frontend_config.cpp)
@@ -495,3 +497,10 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/net/net_sanitize.cpp)
   target_include_directories(net_capture_test PRIVATE src)
   add_test(NAME net_capture_test COMMAND net_capture_test)
+
+  if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME m7_collect_two_instance_evidence_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_collect_two_instance_evidence.py")
+  endif()
