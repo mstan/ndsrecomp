@@ -437,11 +437,41 @@ def m7_transport_verdict(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def empty_udp_summary() -> dict[str, Any]:
+    return summarize_udp([])
+
+
+def unavailable_instance_report(label: str, port: int, error: Exception
+                                ) -> dict[str, Any]:
+    return {
+        "label": label,
+        "port": port,
+        "ping": False,
+        "collect_error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "event_counts": {},
+        "net_state": {},
+        "kinds": {kind: [] for kind in EVIDENCE_KINDS},
+        "kind_counts": {kind: 0 for kind in EVIDENCE_KINDS},
+        "udp_summary": empty_udp_summary(),
+        "framebuffer_saved": False,
+        "framebuffer_path": None,
+        "screen": {
+            "available": False,
+            "reason": "collect_failed",
+            "error_type": type(error).__name__,
+        },
+    }
+
+
 def collect_instance(label: str, port: int, out_dir: Path,
                      max_per_kind: int, screenshot_prefix: str = ""
                      ) -> dict[str, Any]:
-    client = DebugClient(port=port, timeout=30.0)
+    client: DebugClient | None = None
     try:
+        client = DebugClient(port=port, timeout=30.0)
         report: dict[str, Any] = {
             "label": label,
             "port": port,
@@ -466,8 +496,15 @@ def collect_instance(label: str, port: int, out_dir: Path,
         }
         report["udp_summary"] = summarize_udp(report["kinds"]["udp_packet"])
         return report
+    except Exception as exc:
+        print(
+            f"warning: failed to collect instance {label} on port {port}: {exc}",
+            file=sys.stderr,
+        )
+        return unavailable_instance_report(label, port, exc)
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def default_game_root() -> Path:
@@ -482,6 +519,12 @@ def default_game_root() -> Path:
 
 def print_summary(report: dict[str, Any]) -> None:
     print(f"{report['label']} port {report['port']}:")
+    if report.get("collect_error"):
+        error = report["collect_error"]
+        print(
+            "  collect_error="
+            f"{error.get('type')}: {error.get('message')}"
+        )
     counts = report["event_counts"]
     print(
         f"  vblank9={counts.get('vblank9')} vblank7={counts.get('vblank7')} "
