@@ -201,6 +201,8 @@ ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
 ERROR_CODE_LABEL_THRESHOLD = 5.0
 MIN_CLASSIFICATION_MARGIN = 3.0
 SEARCH_PLACEHOLDER_DIFF_THRESHOLD = 3.0
+PREPARED_LOGIN_PROGRESS_MAX_EXTRA = 36000
+PREPARED_POST_LOGIN_DIALOG_MAX_EXTRA = 12000
 WFC_SERVICE_UDP_PORTS = {27900}
 NATNEG_UDP_PORTS = {27901}
 LAN_NOISE_PORTS = {
@@ -991,7 +993,8 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
                 client, shots_dir, "prepared_login_progress",
                 ("wfc_login_settled", "wfc_login_next",
                  "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
-                start=target, stride=200, max_extra=24000, stall=stall,
+                start=target, stride=200,
+                max_extra=PREPARED_LOGIN_PROGRESS_MAX_EXTRA, stall=stall,
                 margin=0.5, verbose=False)
             img.save(shots_dir / f"06_{current}.png")
             step(current)
@@ -1001,7 +1004,8 @@ def run_prepared_profile_scenario(port: int, shots_dir: Path,
                 client, shots_dir, f"prepared_after_{current}",
                 ("wfc_login_next", "wfc_match_setup_screen",
                  "wfc_connecting", "wfc_wifi_id_update_warning"),
-                start=target + 140, stride=50, max_extra=2000, stall=stall,
+                start=target + 140, stride=50,
+                max_extra=PREPARED_POST_LOGIN_DIALOG_MAX_EXTRA, stall=stall,
                 margin=0.5, verbose=False)
             img.save(shots_dir / f"07_{current}.png")
             step(current)
