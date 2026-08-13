@@ -164,8 +164,26 @@ function Assert-WiimmfiMenuEvidence {
         $matchEvidence.kinds.udp_packet |
         Where-Object { $_.src_port -eq 27900 -or $_.dst_port -eq 27900 }
     )
-    if ($wfcServiceUdp.Count -lt 1) {
-        throw "D_match_setup_screen evidence has no UDP packet involving port 27900"
+    $wfcServiceUdpOut = @($wfcServiceUdp | Where-Object { $_.dst_port -eq 27900 })
+    $wfcServiceUdpIn = @($wfcServiceUdp | Where-Object { $_.src_port -eq 27900 })
+    if ($wfcServiceUdpOut.Count -lt 1 -or $wfcServiceUdpIn.Count -lt 1) {
+        throw (
+            "D_match_setup_screen evidence has incomplete UDP exchange on port 27900: " +
+            "out=$($wfcServiceUdpOut.Count) in=$($wfcServiceUdpIn.Count)"
+        )
+    }
+
+    $gpcmTcp = @(
+        $matchEvidence.kinds.tcp_open |
+        Where-Object { $_.src_port -eq 29900 -or $_.dst_port -eq 29900 }
+    )
+    $gpcmTcpOut = @($gpcmTcp | Where-Object { $_.dst_port -eq 29900 })
+    $gpcmTcpIn = @($gpcmTcp | Where-Object { $_.src_port -eq 29900 })
+    if ($gpcmTcpOut.Count -lt 1 -or $gpcmTcpIn.Count -lt 1) {
+        throw (
+            "D_match_setup_screen evidence has incomplete GPCM TCP exchange on port 29900: " +
+            "out=$($gpcmTcpOut.Count) in=$($gpcmTcpIn.Count)"
+        )
     }
 
     $setupStep = $report.steps |
@@ -173,14 +191,17 @@ function Assert-WiimmfiMenuEvidence {
         Select-Object -Last 1
     $summary = (
         "evidence OK: wfc_match_setup_screen vblank9={0}, dns={1}/{2}, " +
-        "tcp_open={3}, udp={4}, wfc_udp={5}, tls={6}"
+        "tcp_open={3}, gpcm_tcp={4}/{5}, udp={6}, wfc_udp={7}/{8}, tls={9}"
     ) -f (
         $setupStep.vblank9,
         @($matchEvidence.kinds.dns_query).Count,
         @($matchEvidence.kinds.dns_response).Count,
         @($matchEvidence.kinds.tcp_open).Count,
+        $gpcmTcpOut.Count,
+        $gpcmTcpIn.Count,
         @($matchEvidence.kinds.udp_packet).Count,
-        $wfcServiceUdp.Count,
+        $wfcServiceUdpOut.Count,
+        $wfcServiceUdpIn.Count,
         @($matchEvidence.kinds.tls_record).Count
     )
     Write-Host $summary -ForegroundColor Green
