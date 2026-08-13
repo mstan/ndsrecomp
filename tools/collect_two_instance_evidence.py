@@ -200,6 +200,11 @@ def udp_bucket(event: dict[str, Any]) -> str:
     dst_ip = event["dst_ip"]
     src_port = event.get("src_port", 0)
     dst_port = event.get("dst_port", 0)
+    if (
+        src_ip == "0.0.0.0" or dst_ip == "0.0.0.0" or
+        src_port == 0 or dst_port == 0
+    ):
+        return "invalid_udp"
     if src_port in WFC_SERVICE_UDP_PORTS or dst_port in WFC_SERVICE_UDP_PORTS:
         return "wfc_service_udp"
     if src_port in NATNEG_UDP_PORTS or dst_port in NATNEG_UDP_PORTS:
@@ -218,6 +223,7 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
         "natneg_udp": [],
         "candidate_peer_udp": [],
         "lan_noise_udp": [],
+        "invalid_udp": [],
     }
     endpoint_counts: Counter[tuple[str, int, str, int]] = Counter()
     for event in events:
@@ -243,6 +249,7 @@ def summarize_udp(events: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_peer_udp": buckets["candidate_peer_udp"][:128],
         "wfc_service_udp": buckets["wfc_service_udp"][:128],
         "natneg_udp": buckets["natneg_udp"][:128],
+        "invalid_udp": buckets["invalid_udp"][:128],
         "top_udp_endpoints": top_endpoints,
     }
 
@@ -466,7 +473,8 @@ def print_summary(report: dict[str, Any]) -> None:
         f"wfc_service={udp['wfc_service_udp']} "
         f"natneg={udp['natneg_udp']} "
         f"candidate_peer={udp['candidate_peer_udp']} "
-        f"lan_noise={udp['lan_noise_udp']}"
+        f"lan_noise={udp['lan_noise_udp']} "
+        f"invalid={udp['invalid_udp']}"
     )
     backend_errors = report["kind_counts"].get("backend_error", 0)
     if backend_errors:
@@ -554,6 +562,7 @@ def compact_snapshot(snapshot_index: int, snapshot_path: Path,
                 "candidate_peer_udp": instance["udp_summary"]["candidate_peer_udp"],
                 "wfc_service_udp": instance["udp_summary"]["wfc_service_udp"],
                 "natneg_udp": instance["udp_summary"]["natneg_udp"],
+                "invalid_udp": instance["udp_summary"]["invalid_udp"],
                 "screen": instance.get("screen", {}),
                 "framebuffer_path": instance.get("framebuffer_path"),
             }
