@@ -329,6 +329,45 @@ def wait_for_screen(client: DebugClient, shots_dir: Path, label: str,
         f"screenshot: {fail_path}")
 
 
+def wait_for_any_screen(client: DebugClient, shots_dir: Path, label: str,
+                        candidates: tuple[str, ...], start: int, stride: int,
+                        max_extra: int, stall: int, margin: float = 2.0,
+                        verbose: bool = True) -> tuple[str, Any, int, Any]:
+    """Poll until any candidate is the confident nearest-neighbor match."""
+    target = start
+    img = None
+    while True:
+        hit = client.cmd("run_to_event", event="vblank9", count=target,
+                         stall=stall)
+        if hit.get("terminal") or hit.get("stalled"):
+            raise ScreenTimeoutError(
+                f"{label}: execution stalled/halted waiting for one of "
+                f"{candidates!r} at vblank9 target={target}: {hit}")
+        img = capture_rgb(client)
+        diffs = diff_report(img, candidates)
+        ranked = sorted(diffs.items(), key=lambda kv: kv[1])
+        best_name, best_diff = ranked[0]
+        runner_up_diff = ranked[1][1] if len(ranked) > 1 else float("inf")
+        if verbose:
+            print(f"    [{label} @vblank9={target}] {diffs}")
+        if (best_diff <= THRESHOLD_FOR.get(best_name, DEFAULT_THRESHOLD)
+                and (runner_up_diff - best_diff) >= margin):
+            return best_name, hit, target, img
+        if target - start >= max_extra:
+            break
+        target += stride
+    diffs = diff_report(img, candidates)
+    best = min(diffs, key=diffs.get)
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    fail_path = shots_dir / f"{label}_TIMEOUT_wanted_any.png"
+    img.save(fail_path)
+    raise ScreenTimeoutError(
+        f"{label}: timed out after vblank9 {start}..{target} (budget "
+        f"{max_extra}) waiting for one of {candidates!r}; closest "
+        f"actually-seen={best!r} (diff={diffs[best]:.1f}); "
+        f"all diffs={diffs}; screenshot: {fail_path}")
+
+
 def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
                                      label: str, start: int, stride: int,
                                      max_extra: int, stall: int
@@ -819,6 +858,170 @@ def print_net_evidence_summary(report: dict[str, Any], kinds=(
             print(line)
 
 
+def install_prepared_firmware(client: DebugClient, firmware_path: Path) -> None:
+    data = firmware_path.read_bytes()
+    if len(data) != 262144:
+        raise RuntimeError(
+            f"prepared firmware image has {len(data)} bytes, expected 262144: "
+            f"{firmware_path}")
+    reply = client.cmd("firmware_replace", hex=data.hex())
+    if not reply.get("ok") or reply.get("size") != 262144:
+        raise RuntimeError(f"firmware_replace failed: {reply}")
+
+
+def run_prepared_profile_scenario(port: int, shots_dir: Path,
+                                  firmware_path: Path,
+                                  stall: int = STALL_DEFAULT
+                                  ) -> dict[str, Any]:
+    """Use an existing MKDS save plus matching firmware profile.
+
+    The runner must already be launched with --save-path for the matching
+    cartridge save and without --firmware-path. This function boots the
+    pristine firmware menu to the regression gate, installs the prepared
+    in-memory firmware image, then navigates MKDS directly into the
+    authenticated match setup screen.
+    """
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    client = DebugClient(port=port, timeout=900.0)
+    report: dict[str, Any] = {
+        "steps": [],
+        "net_evidence": {},
+        "search_safety": [],
+        "prepared_profile": True,
+        "prepared_firmware": str(firmware_path),
+    }
+
+    def step(name: str) -> None:
+        counts = client.cmd("event_counts")
+        report["steps"].append({
+            "name": name,
+            "t": time.time(),
+            "vblank9": counts.get("vblank9"),
+        })
+        print(f"-- step: {name} @ vblank9={counts.get('vblank9')}")
+
+    def net_dump(tag: str, kinds=ALL_NET_KINDS) -> None:
+        report["net_evidence"][tag] = dump_net_evidence(client, kinds)
+        n = sum(len(v) for v in report["net_evidence"][tag]["kinds"].values())
+        print(f"  [net dump {tag}] {n} classified events; "
+              f"net_state={report['net_evidence'][tag]['net_state']}")
+
+    report["regression_gate"] = run_regression_gate(client, stall)
+    print_regression_gate(report["regression_gate"])
+    install_prepared_firmware(client, firmware_path)
+    step("prepared_firmware_installed")
+
+    client.cmd("touch", x=CART_ICON[0], y=CART_ICON[1], down=True)
+    client.cmd("run_to_event", event="vblank9", count=130, stall=stall)
+    client.cmd("touch", x=CART_ICON[0], y=CART_ICON[1], down=False)
+    hit = client.cmd("run_to_event", event="ipcsync_w",
+                     count=GAME_BOOT_IPCSYNC_W, stall=stall)
+    if not hit.get("reached") or hit.get("terminal"):
+        raise RuntimeError(
+            f"cart launch failed to reach the game-boot IPC handshake: {hit}")
+    step("cart_boot_handshake")
+
+    client.cmd("run_to_event", event="vblank9", count=900, stall=stall)
+    shoot(client, shots_dir / "01_title_screen.png")
+    step("title_screen")
+
+    tap(client, TITLE_NINTENDO_WFC, 910, 1050, stall)
+    _, menu_target, menu_img = wait_for_screen(
+        client, shots_dir, "prepared_wfc_connection_menu",
+        "wfc_connection_menu", start=1050, stride=50, max_extra=1200,
+        stall=stall,
+        diag_candidates=("title_screen", "wfc_wifi_id_update_warning",
+                         "wfc_match_disclaimer", "wfc_match_save_confirm"),
+        margin=2.0, verbose=False)
+    menu_img.save(shots_dir / "02_wfc_connection_menu.png")
+    step("wfc_connection_menu_prepared")
+
+    tap(client, WFC_MATCH, menu_target + 10, menu_target + 140, stall)
+    candidates = (
+        "wfc_wifi_id_update_warning",
+        "wfc_match_disclaimer",
+        "wfc_match_save_confirm",
+        "wfc_connecting",
+        "wfc_login_settled",
+        "wfc_login_next",
+        "wfc_match_setup_screen",
+    )
+    current, _, target, img = wait_for_any_screen(
+        client, shots_dir, "prepared_after_match_tap", candidates,
+        start=menu_target + 140, stride=50, max_extra=1500, stall=stall,
+        margin=2.0, verbose=False)
+    img.save(shots_dir / f"03_{current}.png")
+    step(current)
+    if current == "wfc_wifi_id_update_warning":
+        raise RuntimeError(
+            "prepared save/firmware pair still shows Wi-Fi ID mismatch")
+
+    if current == "wfc_match_disclaimer":
+        tap(client, ONE_BUTTON_DIALOG, target + 10, target + 140, stall)
+        current, _, target, img = wait_for_any_screen(
+            client, shots_dir, "prepared_after_disclaimer",
+            ("wfc_match_save_confirm", "wfc_connecting",
+             "wfc_login_settled", "wfc_login_next",
+             "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
+            start=target + 140, stride=50, max_extra=1500, stall=stall,
+            margin=2.0, verbose=False)
+        img.save(shots_dir / f"04_{current}.png")
+        step(current)
+        if current == "wfc_wifi_id_update_warning":
+            raise RuntimeError(
+                "prepared save/firmware pair shows Wi-Fi ID mismatch")
+
+    if current == "wfc_match_save_confirm":
+        tap(client, WFC_MATCH_CONFIRM_YES, target + 10, target + 140, stall)
+        current, _, target, img = wait_for_any_screen(
+            client, shots_dir, "prepared_after_save_confirm",
+            ("wfc_connecting", "wfc_login_settled", "wfc_login_next",
+             "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
+            start=target + 140, stride=50, max_extra=1500, stall=stall,
+            margin=2.0, verbose=False)
+        img.save(shots_dir / f"05_{current}.png")
+        step(current)
+        if current == "wfc_wifi_id_update_warning":
+            raise RuntimeError(
+                "prepared save/firmware pair shows Wi-Fi ID mismatch")
+
+    while current != "wfc_match_setup_screen":
+        if current == "wfc_connecting":
+            current, _, target, img = wait_for_any_screen(
+                client, shots_dir, "prepared_login_progress",
+                ("wfc_login_settled", "wfc_login_next",
+                 "wfc_match_setup_screen", "wfc_wifi_id_update_warning"),
+                start=target, stride=200, max_extra=24000, stall=stall,
+                margin=2.0, verbose=False)
+            img.save(shots_dir / f"06_{current}.png")
+            step(current)
+        elif current in ("wfc_login_settled", "wfc_login_next"):
+            tap(client, ONE_BUTTON_DIALOG, target + 10, target + 140, stall)
+            current, _, target, img = wait_for_any_screen(
+                client, shots_dir, f"prepared_after_{current}",
+                ("wfc_login_next", "wfc_match_setup_screen",
+                 "wfc_connecting", "wfc_wifi_id_update_warning"),
+                start=target + 140, stride=50, max_extra=2000, stall=stall,
+                margin=2.0, verbose=False)
+            img.save(shots_dir / f"07_{current}.png")
+            step(current)
+        elif current == "wfc_wifi_id_update_warning":
+            raise RuntimeError(
+                "prepared save/firmware pair shows Wi-Fi ID mismatch")
+        else:
+            raise RuntimeError(f"unexpected prepared WFC screen: {current}")
+
+    report["stopped_at_match_setup"] = True
+    net_dump("D_match_setup_screen")
+    print("\n=== STEP TIMELINE ===")
+    t0 = report["steps"][0]["t"]
+    for s in report["steps"]:
+        print(f"  {s['name']:<36} vblank9={s['vblank9']:<8} "
+              f"+{s['t'] - t0:6.1f}s")
+    print("PREPARED PROFILE SCENARIO COMPLETE")
+    return report
+
+
 def check_no_players_found(client: DebugClient, shots_dir: Path, label: str,
                            baseline_img=None) -> None:
     """Courtesy stop condition (see module docstring). This project has no
@@ -1151,6 +1354,13 @@ def main() -> int:
     parser.add_argument("--stop-at-match-setup", action="store_true",
                          help="stop after authenticated match setup menu "
                               "instead of starting a public opponent search")
+    parser.add_argument("--prepared-profile", action="store_true",
+                         help="drive an existing prepared MKDS save instead "
+                              "of the first-run WFC setup flow")
+    parser.add_argument("--prepared-firmware", type=Path, default=None,
+                         help="matching prepared firmware image to install "
+                              "with firmware_replace when using "
+                              "--prepared-profile")
     parser.add_argument("--summarize-evidence", type=Path, default=None,
                          help="read an existing mkds_online_menus evidence "
                               "JSON, print the transport summary, and exit")
@@ -1169,11 +1379,20 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    report = run_full_scenario(args.port, args.shots_dir, args.stall,
-                                args.search_observe_steps, args.search_stride,
-                                args.stop_at_match_setup)
+    if args.prepared_profile:
+        if args.prepared_firmware is None:
+            print("--prepared-profile requires --prepared-firmware",
+                  file=sys.stderr)
+            return 2
+        report = run_prepared_profile_scenario(
+            args.port, args.shots_dir, args.prepared_firmware, args.stall)
+    else:
+        report = run_full_scenario(args.port, args.shots_dir, args.stall,
+                                    args.search_observe_steps,
+                                    args.search_stride,
+                                    args.stop_at_match_setup)
 
-    if args.stop_at_match_setup:
+    if args.stop_at_match_setup or args.prepared_profile:
         print("\n--- final net evidence summary (authenticated menu) ---")
         if "D_match_setup_screen" in report["net_evidence"]:
             print_net_evidence_summary(report["net_evidence"]["D_match_setup_screen"])
