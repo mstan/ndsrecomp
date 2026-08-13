@@ -54,6 +54,7 @@ param(
     [string] $EvidenceOutDir = '',
     [switch] $SkipSavePreflight,
     [switch] $SkipPortPreflight,
+    [switch] $SkipNetworkRuntimePreflight,
     [switch] $PreflightOnly
 )
 
@@ -105,6 +106,62 @@ function Test-DebugPort {
     finally {
         $client.Close()
     }
+}
+
+function Wait-DebugPort {
+    param([int] $Port, [double] $TimeoutSeconds)
+
+    if ($TimeoutSeconds -eq 0) {
+        return (Test-DebugPort -Port $Port)
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-DebugPort -Port $Port) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
+function Invoke-DebugCommand {
+    param([int] $Port, [hashtable] $Command, [int] $TimeoutMilliseconds = 30000)
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $client.ReceiveTimeout = $TimeoutMilliseconds
+    $client.SendTimeout = $TimeoutMilliseconds
+    try {
+        $client.Connect('127.0.0.1', $Port)
+        $stream = $client.GetStream()
+        $writer = New-Object System.IO.StreamWriter($stream)
+        $writer.NewLine = "`n"
+        $writer.AutoFlush = $true
+        $reader = New-Object System.IO.StreamReader($stream)
+        $writer.WriteLine(($Command | ConvertTo-Json -Compress))
+        $line = $reader.ReadLine()
+        if (-not $line) {
+            throw "debug server closed the connection"
+        }
+        $response = $line | ConvertFrom-Json
+        if ($response.error) {
+            throw "$($Command.cmd): $($response.error)"
+        }
+        return $response
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Get-LogTail {
+    param([string] $Path, [int] $Lines = 80)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ''
+    }
+    return ((Get-Content -LiteralPath $Path -Tail $Lines) -join [Environment]::NewLine)
 }
 
 function Assert-InstanceSaves {
@@ -171,9 +228,73 @@ function Assert-EvidenceCollectorPreflight {
     Write-Host "evidence collector preflight OK" -ForegroundColor Green
 }
 
+function Assert-NetworkRuntimePreflight {
+    if ($SkipNetworkRuntimePreflight) {
+        Write-Warning "skipping network runtime preflight"
+        return
+    }
+    if ($NetworkBackend -ne 'pcap') {
+        return
+    }
+
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $outLog = Join-Path $env:TEMP "nds_m7_pcap_preflight_$stamp.out.log"
+    $errLog = Join-Path $env:TEMP "nds_m7_pcap_preflight_$stamp.err.log"
+    $argv = @('ndsrecomp\bios', '--serve', '--port', "$PortA",
+              '--config', 'game.toml', '--rom', "`"$Rom`"",
+              '--no-save', '--startup-mode', 'manual',
+              '--network', 'on', '--network-backend', 'pcap',
+              '--wfc', 'on', '--wfc-provider', $WfcProvider,
+              '--instance-index', '0')
+    if ($PcapAdapter) { $argv += @('--pcap-adapter', $PcapAdapter) }
+
+    Write-Host "pcap runtime preflight: launching headless probe on port $PortA" `
+        -ForegroundColor Cyan
+    $p = Start-Process -FilePath $exe -ArgumentList $argv -PassThru `
+            -RedirectStandardOutput $outLog `
+            -RedirectStandardError  $errLog `
+            -WindowStyle Hidden
+    try {
+        if (-not (Wait-DebugPort -Port $PortA -TimeoutSeconds $EvidenceStartupTimeoutSeconds)) {
+            $exitText = if ($p.HasExited) { " exited with code $($p.ExitCode)" } else { '' }
+            throw (
+                "pcap preflight runner did not open debug port $PortA$exitText" +
+                [Environment]::NewLine + (Get-LogTail -Path $errLog)
+            )
+        }
+
+        $result = Invoke-DebugCommand -Port $PortA -Command @{
+            cmd = 'run_to_event'
+            event = 'vblank9'
+            count = 120
+        }
+        if (-not $result.reached -or $result.counts.vblank9 -ne 120) {
+            throw (
+                "pcap preflight failed to reach vblank9=120: " +
+                ($result | ConvertTo-Json -Compress)
+            )
+        }
+        $state = Invoke-DebugCommand -Port $PortA -Command @{ cmd = 'net_state' }
+        if ($state.capacity -lt 1) {
+            throw "pcap preflight returned invalid net_state"
+        }
+        Write-Host (
+            "pcap runtime preflight OK: vblank9={0} ring_capacity={1}" -f `
+            $result.counts.vblank9, $state.capacity
+        ) -ForegroundColor Green
+    }
+    finally {
+        if ($p -and -not $p.HasExited) {
+            Stop-Process -Id $p.Id -Force
+            Wait-Process -Id $p.Id -Timeout 10 -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Assert-InstanceSaves
 Assert-DebugPortsFree
 Assert-EvidenceCollectorPreflight
+Assert-NetworkRuntimePreflight
 
 if ($PreflightOnly) {
     Write-Host "preflight complete; no instances launched" -ForegroundColor Cyan
