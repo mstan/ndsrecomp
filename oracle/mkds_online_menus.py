@@ -21,6 +21,10 @@ Run against the current DS-compatible Wiimmfi route:
       --network on --network-backend pcap --wfc on --wfc-provider wiimmfi
   python oracle/mkds_online_menus.py [--shots-dir DIR] [--port 19842]
 
+For a non-public-matchmaking proof of authenticated menu reachability, add
+`--stop-at-match-setup`; this stops after the authenticated "Choose the
+conditions for this match" screen and still writes the network evidence.
+
 ------------------------------------------------------------------------
 Screen-verification methodology, and a false-positive this task found in
 the process of building it (fully described here because the SAME latent
@@ -393,6 +397,43 @@ def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
         f"diagnostic screenshot: {fail_path}")
 
 
+def converge_to_title(client: DebugClient, shots_dir: Path, label: str,
+                       start: int, stall: int, max_presses: int = 6
+                       ) -> tuple[Any, int]:
+    """Press B until the title screen is actually observed.
+
+    The connection-test result dismissal path is timing-sensitive enough that
+    a fixed number of B presses can land on the setup menu instead of the title
+    screen. The title screen is an absorbing state for B, so checking the frame
+    after each press is both stricter and harmless.
+    """
+    target = start
+    img = None
+    hit = None
+    for _ in range(max_presses):
+        client.cmd("keys", mask=B_PRESSED)
+        target += 40
+        client.cmd("run_to_event", event="vblank9", count=target, stall=stall)
+        client.cmd("keys", mask=B_RELEASED)
+        target += 80
+        hit = client.cmd("run_to_event", event="vblank9", count=target, stall=stall)
+        img = capture_rgb(client)
+        d = mean_abs_diff(img, load_ref("title_screen"),
+                          REGION_FOR["title_screen"])
+        if d <= THRESHOLD_FOR.get("title_screen", DEFAULT_THRESHOLD):
+            return hit, target
+
+    shots_dir.mkdir(parents=True, exist_ok=True)
+    fail_path = shots_dir / f"{label}_TIMEOUT_never_converged_to_title.png"
+    img.save(fail_path)
+    diffs = diff_report(img, ("title_screen", "wfc_connection_menu",
+                              "wfc_connection_setup_step1"))
+    raise ScreenTimeoutError(
+        f"{label}: never converged to the title screen after {max_presses} "
+        f"B-presses (vblank9 target={target}); diffs={diffs}; "
+        f"diagnostic screenshot: {fail_path}")
+
+
 def tap(client: DebugClient, xy: tuple[int, int], vblank_down: int,
         vblank_up: int, stall: int = STALL_DEFAULT) -> dict[str, Any]:
     x, y = xy
@@ -585,7 +626,9 @@ def check_no_players_found(client: DebugClient, shots_dir: Path, label: str) -> 
 
 # ---------------------------------------------------------------------------
 def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
-                       search_observe_steps: int = 20, search_stride: int = 200
+                       search_observe_steps: int = 20,
+                       search_stride: int = 200,
+                       stop_at_match_setup: bool = False,
                        ) -> dict[str, Any]:
     """Boot from firmware, through the WFC setup + NAS login + presence
     flow, into the real "Choose the conditions for this match" screen, then
@@ -660,50 +703,114 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
         press_a(client, 3660, 3800, stall)
         shoot(client, shots_dir / "14_connection_test_running.png")
         _, test_target, test_img = wait_for_connection_test_result(
-            client, shots_dir, "connection_test", start=3900, stride=150,
-            max_extra=6000, stall=stall)
+            client, shots_dir, "connection_test", start=3800, stride=100,
+            max_extra=4000, stall=stall)
         print(f"  connection test succeeded at vblank9={test_target}")
         test_img.save(shots_dir / "15_connection_test_settled.png")
         step("connection_test_settled")
         net_dump("B_conntest")
 
         press_a(client, test_target + 10, test_target + 140, stall)
-        press_b(client, test_target + 150, test_target + 270, stall)
-        press_b(client, test_target + 280, test_target + 400, stall)
-        press_b(client, test_target + 410, test_target + 530, stall)
+        _, title_target = converge_to_title(
+            client, shots_dir, "converge_to_title",
+            start=test_target + 140, stall=stall)
         shoot(client, shots_dir / "16_back_at_title_with_saved_connection.png")
-        tap(client, TITLE_NINTENDO_WFC, test_target + 540, test_target + 690, stall)
-        shoot(client, shots_dir / "17_wfc_connection_menu_direct.png")
-        tap(client, WFC_MATCH, test_target + 700, test_target + 830, stall)
-        shoot(client, shots_dir / "18_wfc_match_disclaimer.png")
-        tap(client, ONE_BUTTON_DIALOG, test_target + 840, test_target + 970, stall)
-        shoot(client, shots_dir / "19_wfc_match_save_confirm.png")
-        tap(client, WFC_MATCH_CONFIRM_YES, test_target + 980, test_target + 1110, stall)
-        shoot(client, shots_dir / "20_wfc_connecting.png")
+        step("back_at_title_with_saved_connection")
+
+        tap(client, TITLE_NINTENDO_WFC, title_target + 10,
+            title_target + 160, stall)
+        _, menu_target, menu_img = wait_for_screen(
+            client, shots_dir, "wfc_connection_menu_direct",
+            "wfc_connection_menu", start=title_target + 160, stride=50,
+            max_extra=800, stall=stall,
+            diag_candidates=("nickname_confirm_dialog", "title_screen"),
+            verbose=False)
+        menu_img.save(shots_dir / "17_wfc_connection_menu_direct.png")
+        step("wfc_connection_menu_direct")
+
+        tap(client, WFC_MATCH, menu_target + 10, menu_target + 140, stall)
+        _, disclaimer_target, disclaimer_img = wait_for_screen(
+            client, shots_dir, "wfc_match_disclaimer",
+            "wfc_match_disclaimer", start=menu_target + 140, stride=50,
+            max_extra=800, stall=stall,
+            diag_candidates=("wfc_match_save_confirm", "wfc_connecting",
+                             "wfc_login_settled", "wfc_match_setup_screen"),
+            margin=2.0, verbose=False)
+        disclaimer_img.save(shots_dir / "18_wfc_match_disclaimer.png")
+        step("wfc_match_disclaimer")
+
+        tap(client, ONE_BUTTON_DIALOG, disclaimer_target + 10,
+            disclaimer_target + 140, stall)
+        _, confirm_target, confirm_img = wait_for_screen(
+            client, shots_dir, "wfc_match_save_confirm",
+            "wfc_match_save_confirm", start=disclaimer_target + 140,
+            stride=50, max_extra=800, stall=stall,
+            diag_candidates=("wfc_match_disclaimer", "wfc_connecting",
+                             "wfc_login_settled", "wfc_match_setup_screen"),
+            margin=2.0, verbose=False)
+        confirm_img.save(shots_dir / "19_wfc_match_save_confirm.png")
+        step("wfc_match_save_confirm")
+
+        tap(client, WFC_MATCH_CONFIRM_YES, confirm_target + 10,
+            confirm_target + 140, stall)
+        _, connecting_target, connecting_img = wait_for_screen(
+            client, shots_dir, "wfc_connecting",
+            "wfc_connecting", start=confirm_target + 140, stride=50,
+            max_extra=800, stall=stall,
+            diag_candidates=("wfc_match_disclaimer", "wfc_match_save_confirm",
+                             "wfc_login_settled", "wfc_match_setup_screen"),
+            margin=2.0, verbose=False)
+        connecting_img.save(shots_dir / "20_wfc_connecting.png")
         step("wfc_connecting_tap_sent")
 
         print("polling for real NAS login settlement "
               "(argmin-classified, no bare-threshold false-accept)...")
         hit, target, img = wait_for_screen(
             client, shots_dir, "login", "wfc_login_settled",
-            start=test_target + 1210, stride=150, max_extra=10000, stall=stall,
+            start=connecting_target, stride=200, max_extra=20000, stall=stall,
             diag_candidates=("wfc_connecting", "wfc_login_next", "wfc_match_setup_screen"),
-            verbose=False)
+            margin=2.0, verbose=False)
         print(f"  real settlement at vblank9={target} "
-              f"(+{target - (test_target + 1110)} VBlanks past the connecting-screen tap)")
+              f"(+{target - connecting_target} VBlanks past the connecting screen)")
         img.save(shots_dir / "21_wfc_login_settled.png")
         step("wfc_login_settled")
         net_dump("C_login")
 
         v = target
         tap(client, ONE_BUTTON_DIALOG, v + 10, v + 140, stall)
-        shoot(client, shots_dir / "22_wfc_login_next.png")
+        _, next_target, next_img = wait_for_screen(
+            client, shots_dir, "wfc_login_next", "wfc_login_next",
+            start=v + 140, stride=50, max_extra=1500, stall=stall,
+            diag_candidates=("wfc_connecting", "wfc_login_settled",
+                             "wfc_match_setup_screen"),
+            margin=2.0, verbose=False)
+        next_img.save(shots_dir / "22_wfc_login_next.png")
         step("wfc_login_next")
 
-        tap(client, ONE_BUTTON_DIALOG, v + 150, v + 280, stall)
-        shoot(client, shots_dir / "23_wfc_match_setup_screen.png")
+        tap(client, ONE_BUTTON_DIALOG, next_target + 10,
+            next_target + 140, stall)
+        _, setup_target, setup_img = wait_for_screen(
+            client, shots_dir, "wfc_match_setup_screen",
+            "wfc_match_setup_screen", start=next_target + 140, stride=50,
+            max_extra=1500, stall=stall,
+            diag_candidates=("wfc_connecting", "wfc_login_settled",
+                             "wfc_login_next"),
+            margin=2.0, verbose=False)
+        setup_img.save(shots_dir / "23_wfc_match_setup_screen.png")
         step("wfc_match_setup_screen")
-        v2 = v + 280
+        net_dump("D_match_setup_screen")
+        v2 = setup_target
+
+        if stop_at_match_setup:
+            report["stopped_at_match_setup"] = True
+            print("stopping before public matchmaking as requested")
+            print("\n=== STEP TIMELINE ===")
+            t0 = report["steps"][0]["t"]
+            for s in report["steps"]:
+                print(f"  {s['name']:<36} vblank9={s['vblank9']:<8} "
+                      f"+{s['t'] - t0:6.1f}s")
+            print("SCENARIO COMPLETE")
+            return report
 
         # New territory past here (see MATCH_SETUP_OK's comment for why the
         # first coordinate attempt at this button was a proven no-op).
@@ -800,6 +907,9 @@ def main() -> int:
                          help="also write the full structured report "
                               "(regression gate + per-stage net evidence + "
                               "step timeline) to this path as JSON")
+    parser.add_argument("--stop-at-match-setup", action="store_true",
+                         help="stop after authenticated match setup menu "
+                              "instead of starting a public opponent search")
     args = parser.parse_args()
 
     if Image is None:
@@ -809,9 +919,15 @@ def main() -> int:
         return 2
 
     report = run_full_scenario(args.port, args.shots_dir, args.stall,
-                                args.search_observe_steps, args.search_stride)
+                                args.search_observe_steps, args.search_stride,
+                                args.stop_at_match_setup)
 
-    print("\n--- final net evidence summary (search + cancel window) ---")
+    if args.stop_at_match_setup:
+        print("\n--- final net evidence summary (authenticated menu) ---")
+        if "D_match_setup_screen" in report["net_evidence"]:
+            print_net_evidence_summary(report["net_evidence"]["D_match_setup_screen"])
+    else:
+        print("\n--- final net evidence summary (search + cancel window) ---")
     if "E_search_observed" in report["net_evidence"]:
         print_net_evidence_summary(report["net_evidence"]["E_search_observed"])
     if "F_after_cancel" in report["net_evidence"]:
