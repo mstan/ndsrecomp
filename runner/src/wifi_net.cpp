@@ -525,6 +525,32 @@ bool IsPcapDhcpFrameForGuest(const uint8_t* data, int len,
     return MacEqual(data + bootp + 28u, guest_mac);
 }
 
+bool IsPcapGuestUnicastFrame(const uint8_t* data, int len,
+                             const std::array<uint8_t, 6>& guest_mac,
+                             bool guest_mac_known,
+                             uint32_t guest_ipv4,
+                             bool guest_ipv4_known) {
+    const uint16_t ethertype = ReadBe16(data + 12u);
+    if (ethertype == 0x0806u)
+        return IsPcapArpFrameForGuest(data, len, guest_ipv4,
+                                      guest_ipv4_known);
+    if (ethertype != 0x0800u) return false;
+
+    if (IsPcapDhcpFrameForGuest(data, len, guest_mac, guest_mac_known))
+        return true;
+
+    if (!guest_ipv4_known) return false;
+    if (len < 14 + 20) return false;
+    const size_t ipv4 = 14u;
+    const uint8_t version = static_cast<uint8_t>(data[ipv4] >> 4u);
+    const size_t ihl = static_cast<size_t>(data[ipv4] & 0x0Fu) * 4u;
+    if (version != 4u || ihl < 20u ||
+        static_cast<size_t>(len) < ipv4 + ihl) {
+        return false;
+    }
+    return ReadBe32(data + ipv4 + 16u) == guest_ipv4;
+}
+
 bool IsPcapRequiredBroadcastFrame(const uint8_t* data, int len,
                                   const std::array<uint8_t, 6>& guest_mac,
                                   bool guest_mac_known,
@@ -756,7 +782,10 @@ bool ShouldAcceptPcapRxFrame(WifiBridgeState* state, const uint8_t* data,
     const uint8_t* dst = data;
     const uint8_t* src = data + 6u;
     if (guest_mac_known && MacEqual(src, guest_mac)) return false;
-    if (guest_mac_known && MacEqual(dst, guest_mac)) return true;
+    if (guest_mac_known && MacEqual(dst, guest_mac)) {
+        return IsPcapGuestUnicastFrame(data, len, guest_mac, guest_mac_known,
+                                       guest_ipv4, guest_ipv4_known);
+    }
     if (IsBroadcastMac(dst)) {
         return IsPcapRequiredBroadcastFrame(
             data, len, guest_mac, guest_mac_known,
