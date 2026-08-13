@@ -420,7 +420,7 @@ backend = "slirp"
 
 [network.wfc]
 enabled = false        # explicit opt-in: this reaches a live third-party service by default
-provider = "kaeru"     # selects one of [network.wfc.providers.*] below
+provider = "wiimmfi"   # DS-compatible Wiimmfi ecosystem route; "kaeru" is the same DNS
 dns_mode = "all"       # "all" = Option A (plan §11): all guest DNS -> provider's server.
                         # "wfc-domains" = Option B: only *.nintendowifi.net -> provider; else normal DNS.
 
@@ -434,8 +434,13 @@ description = "Kaeru WFC: no client patch documented as required for DS/DSi. Pro
 source = "https://kaeru.world/projects/wfc"
 
 [network.wfc.providers.wiimmfi]
+dns_server = "178.62.43.212"
+description = "User-facing DS-compatible Wiimmfi ecosystem route. This intentionally aliases Kaeru WFC because DS guides commonly call this Wiimmfi, and raw Wiimmfi DNS returns 20100 for stock MKDS in local validation."
+source = "https://kaeru.world/projects/wfc"
+
+[network.wfc.providers.wiimmfi-direct]
 dns_server = "95.217.77.181"
-description = "Wiimmfi's own official DNS. Wiimmfi's general/official model expects a client patch; this address's documented DNS-only patcher is Wii/WiiU-specific, not confirmed for DS."
+description = "Wiimmfi's own official DNS. Wiimmfi's general/official model expects a client patch; this address's documented DNS-only patcher is Wii/WiiU-specific, not confirmed for stock DS."
 source = "https://wiimmfi.de/patcher/dnspatch"
 
 [network.wfc.providers.altwfc]

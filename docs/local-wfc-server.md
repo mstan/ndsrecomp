@@ -688,10 +688,11 @@ site, fetched directly):
   Wiimmfi's own site claims it works for DS. Wiimmfi's general/official
   model otherwise expects a client-side ROM patch.
 - To switch over: change only the `[network.wfc.providers.*]` selection
-  (`provider = "kaeru"` instead of `"local-oracle"`), which points guest
-  DNS at `178.62.43.212` instead of this machine's `wfc_dns.py`. No other
-  ndsrecomp-side change should be needed if the `[network.wfc]` provider
-  model is wired the way `docs/wfc-external-facts.md` sketches it.
+  (`provider = "wiimmfi"` or `"kaeru"` instead of `"local-oracle"`), which
+  points guest DNS at `178.62.43.212` instead of this machine's
+  `wfc_dns.py`. No other ndsrecomp-side change should be needed if the
+  `[network.wfc]` provider model is wired the way
+  `docs/wfc-external-facts.md` sketches it.
 - Before switching over: stop hammering it with iterative development
   traffic. Live Wiimmfi/Kaeru is free, volunteer-run infrastructure with a
   public ban list and real concurrent players (verified live on

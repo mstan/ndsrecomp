@@ -194,6 +194,13 @@ THRESHOLD_FOR = {
     "wfc_match_setup_screen": 20.0,
 }
 DEFAULT_THRESHOLD = 10.0
+CONNECTION_TEST_OUTCOME_MAX_DIFF = 25.0
+ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
+ERROR_CODE_LABEL_THRESHOLD = 5.0
+CONNECTION_TEST_OUT_OF_SET = (
+    "wfc_connection_menu",
+    "wfc_connection_setup_step1",
+)
 
 _ref_cache: dict[str, Any] = {}
 
@@ -236,6 +243,17 @@ def mean_abs_diff(img_a, img_b, region: str) -> float:
     a = to_gray_region(img_a, region)
     b = to_gray_region(img_b, region)
     return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def mean_abs_diff_box(img_a, img_b, box: tuple[int, int, int, int]) -> float:
+    a = img_a.crop(box).convert("L")
+    b = img_b.crop(box).convert("L")
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
+def connection_test_error_label_diff(img) -> float:
+    return mean_abs_diff_box(
+        img, load_ref("connection_test_error"), ERROR_CODE_LABEL_REGION)
 
 
 def diff_report(img, names) -> dict[str, float]:
@@ -418,12 +436,10 @@ def wait_for_nearest_screen(client: DebugClient, shots_dir: Path, label: str,
 
 
 class ConnectionTestFailed(RuntimeError):
-    """Raised when the WFC Settings connection test itself reports failure
-    (an "Error Code: ..." screen) -- a genuine backend/connectivity fact,
-    not a driver bug. Distinguished from ScreenTimeoutError so a caller (and
-    a human reading the traceback) can tell "the driver's polling logic is
-    broken" apart from "the driver worked correctly and observed a real
-    connection failure"."""
+    """Raised when the WFC Settings connection test reaches an
+    "Error Code: ..." screen. Distinguished from ScreenTimeoutError so a
+    caller can tell an observed in-game connection-test failure apart from a
+    polling timeout or navigation mismatch."""
     pass
 
 
@@ -448,13 +464,10 @@ def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
 
     Returns (hit, target) on a *successful* settle. Raises
     ConnectionTestFailed (not a timeout) if the test concludes with an
-    on-screen "Error Code" -- this is expected to happen sometimes against
-    a real backend (a previous session's own historical capture,
+    on-screen "Error Code". A previous session's own historical capture,
     wiimmfi-i9-kaeru/native_16_connection_test_settled.png, turns out to
     show this exact error screen despite its filename -- another instance
-    of the mislabeling defect this task exists to fix) and should be
-    reported clearly, not silently swallowed or misreported as a script
-    timeout.
+    of the mislabeling defect this task exists to fix.
 
     Debounced: a "settled"/"error" classification is only trusted once seen
     on two consecutive polls. Caught empirically: the message box passes
@@ -486,10 +499,36 @@ def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
             )
         img = capture_rgb(client)
         diffs = diff_report(img, outcomes)
-        ordered = sorted(diffs, key=diffs.get)
-        nearest = ordered[0]
-        margin = diffs[ordered[1]] - diffs[nearest]
-        confident = margin >= MIN_CLASSIFICATION_MARGIN
+        error_label_diff = connection_test_error_label_diff(img)
+        if error_label_diff <= ERROR_CODE_LABEL_THRESHOLD:
+            nearest = "connection_test_error"
+            margin = float("inf")
+            confident = True
+        else:
+            ordered = sorted(diffs, key=diffs.get)
+            nearest = ordered[0]
+            margin = diffs[ordered[1]] - diffs[nearest]
+            confident = (
+                margin >= MIN_CLASSIFICATION_MARGIN and
+                diffs[nearest] <= CONNECTION_TEST_OUTCOME_MAX_DIFF
+            )
+            if not confident:
+                out_of_set_diffs = diff_report(img, CONNECTION_TEST_OUT_OF_SET)
+                out_of_set = min(out_of_set_diffs, key=out_of_set_diffs.get)
+                if out_of_set_diffs[out_of_set] <= DEFAULT_THRESHOLD:
+                    shots_dir.mkdir(parents=True, exist_ok=True)
+                    fail_path = (
+                        shots_dir /
+                        f"{label}_MISMATCH_observed_{out_of_set}.png"
+                    )
+                    img.save(fail_path)
+                    raise ScreenTimeoutError(
+                        f"{label}: expected connection-test result screen, "
+                        f"but observed {out_of_set!r} at vblank9={target}; "
+                        f"connection-test diffs={diffs}; "
+                        f"out_of_set_diffs={out_of_set_diffs}; "
+                        f"screenshot: {fail_path}"
+                    )
         confirmed = (nearest == previous) if confident else False
         previous = nearest if confident else None
         if nearest == "connection_test_settled" and confident and confirmed:
@@ -501,7 +540,7 @@ def wait_for_connection_test_result(client: DebugClient, shots_dir: Path,
             raise ConnectionTestFailed(
                 f"{label}: the WFC connection test itself reported an "
                 f"on-screen Error Code at vblank9={target} (diffs={diffs}); "
-                f"this is a backend/connectivity fact, not a driver bug; "
+                f"error_label_diff={error_label_diff:.1f}; "
                 f"screenshot: {fail_path}"
             )
         # Still running, or an unconfirmed single-sample "settled"/"error"

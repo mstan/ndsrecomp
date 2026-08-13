@@ -496,7 +496,8 @@ int main(int argc, char** argv) {
                 "[--net-ring-filter <class>|all] "
                 "[--network on|off] [--network-backend slirp|replay|pcap] "
                 "[--pcap-adapter NAME] "
-                "[--wfc on|off] [--wfc-provider kaeru|wiimmfi|<ipv4>] "
+                "[--wfc on|off] "
+                "[--wfc-provider kaeru|wiimmfi|wiimmfi-direct|<ipv4>] "
                 "[--net-capture-out FILE] [--net-capture-in FILE] "
                 "[--net-capture-raw] [--net-capture-no-pcap] "
                 "[--net-capture-scenario NAME]\n",
@@ -701,7 +702,8 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr,
                 "invalid --wfc-provider %s (expected a known provider name "
-                "[kaeru, wiimmfi] or a dotted-quad IPv4 address)\n",
+                "[kaeru, wiimmfi, wiimmfi-direct] or a dotted-quad IPv4 "
+                "address)\n",
                 cli_wfc_provider.c_str());
             return 2;
         }
@@ -817,8 +819,8 @@ int main(int argc, char** argv) {
             if (!info) {
                 std::fprintf(stderr,
                     "network.wfc.provider %s is not a known provider name "
-                    "(expected kaeru or wiimmfi) and no dns_server override "
-                    "was given\n", wfc.name.c_str());
+                    "(expected kaeru, wiimmfi, or wiimmfi-direct) and no "
+                    "dns_server override was given\n", wfc.name.c_str());
                 return 2;
             }
             dns_str = info->dns_server;

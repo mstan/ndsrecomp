@@ -20,12 +20,17 @@ bool iequals(const char* a, const char* b) {
 }  // namespace
 
 const NdsWfcProviderInfo kNdsWfcProviders[] = {
-    // Verified default (task spec): Kaeru WFC, DNS-only, no-ROM-patch,
-    // primary and secondary both this same address.
+    // Verified DS route: Kaeru WFC, DNS-only, no-ROM-patch, primary and
+    // secondary both this same address. This fronts the Wiimmfi ecosystem
+    // for stock DS/DSi clients.
     {"kaeru", "178.62.43.212"},
-    // Listed for completeness/selectability, NOT the default -- see the
-    // header comment.
-    {"wiimmfi", "95.217.77.181"},
+    // User-facing Wiimmfi provider name: DS guides often call the Kaeru
+    // route "Wiimmfi", and live validation shows the raw Wiimmfi DNS path
+    // reaches DNS/TCP but returns Error Code 20100 for stock MKDS.
+    {"wiimmfi", "178.62.43.212"},
+    // Raw official Wiimmfi DNS endpoint. Kept for diagnostics and future
+    // patched-client compatibility; not the stock-DS route.
+    {"wiimmfi-direct", "95.217.77.181"},
 };
 const size_t kNdsWfcProviderCount =
     sizeof(kNdsWfcProviders) / sizeof(kNdsWfcProviders[0]);

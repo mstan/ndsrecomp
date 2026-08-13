@@ -458,6 +458,12 @@ target_include_directories(frontend_config_test PRIVATE src)
 ndsrecomp_link_tomlpp(frontend_config_test)
   add_test(NAME frontend_config_test COMMAND frontend_config_test)
 
+  add_executable(wfc_provider_test
+      tests/wfc_provider_test.cpp
+      src/net/wfc_provider.cpp)
+  target_include_directories(wfc_provider_test PRIVATE src)
+  add_test(NAME wfc_provider_test COMMAND wfc_provider_test)
+
   add_executable(relative_mouse_touch_test
       tests/relative_mouse_touch_test.cpp
       src/relative_mouse_touch.cpp)

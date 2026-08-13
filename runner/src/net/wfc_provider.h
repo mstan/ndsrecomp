@@ -13,11 +13,12 @@
 // NdsWfcProvider in runner/src/frontend.h).
 //
 // Default provider is "kaeru" (178.62.43.212): the DNS-only, no-ROM-patch
-// WFC replacement service verified appropriate for a stock DS game.
-// "wiimmfi" is also listed (its own DNS endpoint is DS-compatible) but is
-// deliberately NOT the default -- Wiimmfi's headline patcher service
-// targets Wii/WiiU and expects a patched game, a different model than a
-// stock DS cartridge run through this recompiler.
+// DS/DSi entry point into the Wiimmfi ecosystem, verified appropriate for a
+// stock DS game. "wiimmfi" intentionally aliases that same DS-compatible
+// route because that is what DS setup guides often call the Wiimmfi option.
+// "wiimmfi-direct" remains available for diagnostics against Wiimmfi's raw
+// official DNS endpoint, but that path is expected to require client-side
+// patch support and is not the no-ROM-patch DS default.
 
 #pragma once
 

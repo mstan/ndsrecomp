@@ -37,8 +37,9 @@ enum NdsAdaptiveScreen : uint8_t {
 // pointing at a local/test DWC server without inventing a second config
 // shape. Default provider is "kaeru" (178.62.43.212), the DNS-only,
 // no-ROM-patch WFC service verified appropriate for DS; "wiimmfi" is also
-// selectable (its own service, DS-compatible for DNS purposes) but is
-// NOT the default -- Wiimmfi's own primary patcher targets Wii/WiiU.
+// selectable and aliases that DS-compatible Wiimmfi ecosystem route.
+// "wiimmfi-direct" selects Wiimmfi's raw official DNS endpoint for
+// diagnostics/future patched-client work, not for stock DS bring-up.
 struct NdsWfcProvider {
     std::string name = "kaeru";
     std::string dns_server;  // optional override; empty = use `name`'s default
