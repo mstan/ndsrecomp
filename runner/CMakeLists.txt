@@ -34,6 +34,8 @@ option(NDS_PROFILE_MEM_TIMING
 set(NDS_PGO_MODE "OFF" CACHE STRING
     "Runner-only GCC PGO mode: OFF, GENERATE, or USE")
 set_property(CACHE NDS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+set(NDS_GENERATED_DIR "" CACHE PATH
+    "Optional ignored generated directory override for worktree builds")
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated sm64ds_arm7/arm9 banks")
 set(NDS_TITLE_BANK_DIR "" CACHE PATH
@@ -44,7 +46,11 @@ set(NDS_TITLE_ROM_SHA1 "" CACHE STRING
 # The recompiled ARM9 BIOS bank (generated; compiled as C). Generated TUs
 # trade warning-cleanliness for uniform emission — silence the expected
 # unused-temp warnings rather than touch generated/.
-set(GEN ${CMAKE_CURRENT_SOURCE_DIR}/../generated)
+if(NDS_GENERATED_DIR)
+    set(GEN "${NDS_GENERATED_DIR}")
+else()
+    set(GEN ${CMAKE_CURRENT_SOURCE_DIR}/../generated)
+endif()
 if(NDS_BOOTSTRAP_FIRMWARE)
     set(FW_BANK_BODIES)
     set(FW_BANK_DISPATCH)

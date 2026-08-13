@@ -41,6 +41,8 @@ Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/t
   behavior for the demonstrated local game dump.
 - Interactive SDL video, touch, keyboard, and paced stereo audio in the tested
   developer build.
+- Experimental same-machine local wireless multiplayer for MKDS through a
+  localhost transport. LAN/across-machine play is not validated or claimed.
 - A separate melonDS-based accuracy oracle and machine-readable traversal
   evidence for differential testing.
 

@@ -103,6 +103,11 @@ struct NdsNetworkOptions {
                                      // header, e.g. "dhcp"
 };
 
+struct NdsLocalWirelessOptions {
+    bool enabled = false;
+    uint16_t base_port = 26710;
+};
+
 struct NdsFrontendOptions {
     // Optional exact cartridge identity from [game]. When present, every
     // title-owned setting in this config is rejected for any other ROM.
@@ -153,6 +158,7 @@ struct NdsFrontendOptions {
     bool relative_mouse_direct_aim = false;
     NdsCartridgeSaveConfig cartridge_save{};
     NdsNetworkOptions network{};
+    NdsLocalWirelessOptions local_wireless{};
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.
@@ -183,6 +189,8 @@ bool nds_parse_cartridge_save_type(const std::string& value,
 // --wfc-provider CLI flag's raw-IP form.
 bool nds_parse_ipv4(const std::string& value, uint32_t* out);
 bool nds_parse_network_backend(const std::string& value, std::string* out);
+bool nds_parse_local_wireless_base_port(const std::string& value,
+                                        uint16_t* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_adaptive_screens_name(uint8_t value);

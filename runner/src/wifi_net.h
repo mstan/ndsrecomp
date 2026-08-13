@@ -101,6 +101,14 @@ struct NdsWifiNetworkConfig {
     // adapter; otherwise match this exact device, friendly, or description
     // string from LibPCap::GetAdapters().
     std::string pcap_adapter;
+
+    // Local wireless / Download Play / NiFi transport. Disabled by default;
+    // when enabled, each runner process binds localhost UDP port
+    // local_wireless_base_port + instance_index and fans MP frames out to
+    // the other local instance slots.
+    bool local_wireless_enabled = false;
+    uint32_t local_wireless_instance = 0;
+    uint16_t local_wireless_base_port = 26710;
 };
 
 // Wiimmfi M8: query surface for a --network-backend replay run's outcome.

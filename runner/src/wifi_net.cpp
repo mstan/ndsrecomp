@@ -26,19 +26,25 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <array>
+#include <thread>
 #include <vector>
 
-#if defined(NDS_ENABLE_PCAP_BACKEND) && defined(_WIN32)
-// WIN32_LEAN_AND_MEAN keeps windows.h from pulling in the old winsock.h --
-// Net_Slirp.h (included below) already pulls in ws2tcpip.h/winsock2.h for
-// __WIN32__, and winsock.h-after-winsock2.h is a hard conflict GCC flags
-// with "#warning Please include winsock2.h before windows.h".
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <mswsock.h>
+#include <ws2tcpip.h>
+#endif
+
+#if defined(NDS_ENABLE_PCAP_BACKEND) && defined(_WIN32)
 #include <windows.h>
 #endif
 
@@ -161,21 +167,10 @@ void Mutex_Free(Mutex* mutex) { delete mutex; }
 void Mutex_Lock(Mutex* mutex) { mutex->m.lock(); }
 void Mutex_Unlock(Mutex* mutex) { mutex->m.unlock(); }
 
-// ── melonDS::Platform::MP_* (local wireless) ────────────────────────────
-// Verified safe as unconditional no-ops -- docs/adr-melonds-wifi-vendoring.md
-// §5. Local wireless/Download Play/NiFi stays out of scope (plan §17); every
-// infrastructure-mode TX/RX path in Wifi.cpp falls through to WifiAP when
-// these report "no local peer."
-
-void MP_Begin(void*) {}
-void MP_End(void*) {}
-int MP_SendPacket(u8*, int, u64, void*) { return 0; }
-int MP_RecvPacket(u8*, u64*, void*) { return 0; }
-int MP_SendCmd(u8*, int, u64, void*) { return 0; }
-int MP_SendReply(u8*, int, u64, u16, void*) { return 0; }
-int MP_SendAck(u8*, int, u64, void*) { return 0; }
-int MP_RecvHostPacket(u8*, u64*, void*) { return 0; }
-u16 MP_RecvReplies(u8*, u64, u16, void*) { return 0; }
+// melonDS::Platform::MP_* (local wireless).
+// Defined below, after WifiBridgeState. With local wireless disabled these
+// hooks report no local peer, so infrastructure-mode TX/RX still falls through
+// to WifiAP exactly as it did when the hooks were unconditional no-ops.
 
 #if defined(NDS_ENABLE_PCAP_BACKEND)
 // Backs Net_PCap's runtime (not link-time) load of wpcap.dll/Packet.dll.
@@ -628,6 +623,318 @@ private:
     size_t capacity_;
 };
 
+uint32_t ReadLe32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8u) |
+           (static_cast<uint32_t>(p[2]) << 16u) |
+           (static_cast<uint32_t>(p[3]) << 24u);
+}
+
+uint64_t ReadLe64(const uint8_t* p) {
+    return static_cast<uint64_t>(ReadLe32(p)) |
+           (static_cast<uint64_t>(ReadLe32(p + 4u)) << 32u);
+}
+
+void WriteLe32(std::vector<uint8_t>* out, uint32_t value) {
+    out->push_back(static_cast<uint8_t>(value));
+    out->push_back(static_cast<uint8_t>(value >> 8u));
+    out->push_back(static_cast<uint8_t>(value >> 16u));
+    out->push_back(static_cast<uint8_t>(value >> 24u));
+}
+
+void WriteLe64(std::vector<uint8_t>* out, uint64_t value) {
+    WriteLe32(out, static_cast<uint32_t>(value));
+    WriteLe32(out, static_cast<uint32_t>(value >> 32u));
+}
+
+struct LocalMpFrame {
+    uint32_t sender = 0;
+    uint32_t type = 0;
+    uint64_t timestamp = 0;
+    std::vector<uint8_t> payload;
+};
+
+class LocalMpFrameQueue {
+public:
+    explicit LocalMpFrameQueue(size_t capacity) : capacity_(capacity) {}
+
+    bool TryPush(LocalMpFrame&& frame) {
+        if (queue_.size() >= capacity_) return false;
+        queue_.push_back(std::move(frame));
+        return true;
+    }
+
+    bool TryPop(LocalMpFrame* out) {
+        if (queue_.empty()) return false;
+        *out = std::move(queue_.front());
+        queue_.pop_front();
+        return true;
+    }
+
+    void Clear() { queue_.clear(); }
+
+private:
+    std::deque<LocalMpFrame> queue_;
+    size_t capacity_;
+};
+
+class LocalMpTransport {
+public:
+    void Configure(bool enabled, uint32_t instance, uint16_t base_port) {
+        enabled_ = enabled && instance < kMaxInstances;
+        instance_ = instance;
+        base_port_ = base_port;
+    }
+
+    void Begin() {
+        if (!enabled_) return;
+#ifdef _WIN32
+        if (socket_ != INVALID_SOCKET) return;
+
+        socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket_ == INVALID_SOCKET) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[local_mp] socket failed: %d\n", WSAGetLastError());
+            return;
+        }
+
+        BOOL reset_enabled = FALSE;
+        DWORD bytes_returned = 0;
+        WSAIoctl(socket_, SIO_UDP_CONNRESET, &reset_enabled,
+                 sizeof(reset_enabled), nullptr, 0, &bytes_returned,
+                 nullptr, nullptr);
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(static_cast<uint16_t>(base_port_ + instance_));
+        if (::bind(socket_, reinterpret_cast<sockaddr*>(&addr),
+                   sizeof(addr)) == SOCKET_ERROR) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[local_mp] bind 127.0.0.1:%u failed: %d\n",
+                static_cast<unsigned>(base_port_ + instance_),
+                WSAGetLastError());
+            CloseSocket();
+            return;
+        }
+
+        u_long nonblocking = 1;
+        if (ioctlsocket(socket_, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[local_mp] nonblocking setup failed: %d\n", WSAGetLastError());
+            CloseSocket();
+            return;
+        }
+
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[local_mp] enabled instance=%u port=%u\n",
+            static_cast<unsigned>(instance_),
+            static_cast<unsigned>(base_port_ + instance_));
+#else
+        melonDS::Platform::Log(melonDS::Platform::Warn,
+            "[local_mp] localhost UDP transport is currently Windows-only\n");
+#endif
+    }
+
+    void End() {
+        packet_queue_.Clear();
+        reply_queue_.Clear();
+        last_host_id_ = -1;
+#ifdef _WIN32
+        CloseSocket();
+#endif
+    }
+
+    int SendPacket(uint8_t* data, int len, uint64_t timestamp) {
+        return SendGeneric(0, data, len, timestamp);
+    }
+
+    int RecvPacket(uint8_t* data, uint64_t* timestamp) {
+        return RecvPacketGeneric(data, timestamp, false);
+    }
+
+    int SendCmd(uint8_t* data, int len, uint64_t timestamp) {
+        return SendGeneric(1, data, len, timestamp);
+    }
+
+    int SendReply(uint8_t* data, int len, uint64_t timestamp, uint16_t aid) {
+        return SendGeneric(2u | (static_cast<uint32_t>(aid) << 16u),
+                           data, len, timestamp);
+    }
+
+    int SendAck(uint8_t* data, int len, uint64_t timestamp) {
+        return SendGeneric(3, data, len, timestamp);
+    }
+
+    int RecvHostPacket(uint8_t* data, uint64_t* timestamp) {
+        (void)last_host_id_;
+        return RecvPacketGeneric(data, timestamp, true);
+    }
+
+    uint16_t RecvReplies(uint8_t* data, uint64_t timestamp, uint16_t aidmask) {
+        uint16_t received = 0;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(25);
+        for (;;) {
+            DrainSocket();
+            LocalMpFrame frame;
+            if (!reply_queue_.TryPop(&frame)) {
+                if (std::chrono::steady_clock::now() >= deadline) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (frame.timestamp + 32u < timestamp) continue;
+            const uint16_t aid = static_cast<uint16_t>(frame.type >> 16u);
+            if (aid == 0 || aid > 15) continue;
+            if ((aidmask & (1u << aid)) == 0) continue;
+            if (!frame.payload.empty()) {
+                std::memcpy(&data[(aid - 1u) * 1024u],
+                            frame.payload.data(), frame.payload.size());
+            }
+            received |= static_cast<uint16_t>(1u << aid);
+            if ((received & aidmask) == aidmask) break;
+        }
+        return received;
+    }
+
+private:
+    static constexpr uint32_t kMagic = 0x4946494Eu;
+    static constexpr uint32_t kMaxInstances = 16;
+    static constexpr uint32_t kHeaderBytes = 24;
+    static constexpr size_t kMaxFrameBytes = 0x948;
+    static constexpr size_t kQueueCapacity = 1024;
+
+    int RecvPacketGeneric(uint8_t* data, uint64_t* timestamp, bool block) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(25);
+        for (;;) {
+            DrainSocket();
+            LocalMpFrame frame;
+            if (!packet_queue_.TryPop(&frame)) {
+                if (!block || std::chrono::steady_clock::now() >= deadline)
+                    return 0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (timestamp) *timestamp = frame.timestamp;
+            if (frame.type == 1u) last_host_id_ = static_cast<int>(frame.sender);
+            if (!frame.payload.empty())
+                std::memcpy(data, frame.payload.data(), frame.payload.size());
+            return static_cast<int>(frame.payload.size());
+        }
+    }
+
+    int SendGeneric(uint32_t type, uint8_t* data, int len,
+                    uint64_t timestamp) {
+        if (!enabled_) return 0;
+#ifdef _WIN32
+        if (socket_ == INVALID_SOCKET) return 0;
+        if (len < 0 || static_cast<size_t>(len) > kMaxFrameBytes) return 0;
+        if (len > 0 && !data) return 0;
+
+        std::vector<uint8_t> datagram;
+        datagram.reserve(kHeaderBytes + static_cast<size_t>(len));
+        WriteLe32(&datagram, kMagic);
+        WriteLe32(&datagram, instance_);
+        WriteLe32(&datagram, type);
+        WriteLe32(&datagram, static_cast<uint32_t>(len));
+        WriteLe64(&datagram, timestamp);
+        if (len > 0)
+            datagram.insert(datagram.end(), data, data + len);
+
+        int sent = 0;
+        for (uint32_t i = 0; i < kMaxInstances; ++i) {
+            if (i == instance_) continue;
+            sockaddr_in target{};
+            target.sin_family = AF_INET;
+            target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            target.sin_port = htons(static_cast<uint16_t>(base_port_ + i));
+            if (::sendto(socket_,
+                         reinterpret_cast<const char*>(datagram.data()),
+                         static_cast<int>(datagram.size()), 0,
+                         reinterpret_cast<sockaddr*>(&target),
+                         sizeof(target)) != SOCKET_ERROR) {
+                sent = len;
+            } else if (send_error_log_counter_ < 8u) {
+                ++send_error_log_counter_;
+                melonDS::Platform::Log(melonDS::Platform::Warn,
+                    "[local_mp] sendto 127.0.0.1:%u failed: %d\n",
+                    static_cast<unsigned>(base_port_ + i),
+                    WSAGetLastError());
+            }
+        }
+        return sent;
+#else
+        (void)type;
+        (void)data;
+        (void)len;
+        (void)timestamp;
+        return 0;
+#endif
+    }
+
+    void DrainSocket() {
+#ifdef _WIN32
+        if (!enabled_ || socket_ == INVALID_SOCKET) return;
+        for (;;) {
+            uint8_t datagram[kHeaderBytes + kMaxFrameBytes];
+            sockaddr_in from{};
+            int from_len = sizeof(from);
+            const int got = ::recvfrom(
+                socket_, reinterpret_cast<char*>(datagram), sizeof(datagram),
+                0, reinterpret_cast<sockaddr*>(&from), &from_len);
+            if (got == SOCKET_ERROR) {
+                const int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK && err != WSAECONNRESET) {
+                    melonDS::Platform::Log(melonDS::Platform::Warn,
+                        "[local_mp] recvfrom failed: %d\n", err);
+                }
+                return;
+            }
+            if (got < static_cast<int>(kHeaderBytes)) continue;
+            if (ReadLe32(datagram) != kMagic) continue;
+
+            LocalMpFrame frame;
+            frame.sender = ReadLe32(datagram + 4u);
+            frame.type = ReadLe32(datagram + 8u);
+            const uint32_t len = ReadLe32(datagram + 12u);
+            frame.timestamp = ReadLe64(datagram + 16u);
+            if (frame.sender == instance_) continue;
+            if (frame.sender >= kMaxInstances) continue;
+            if (len > kMaxFrameBytes) continue;
+            if (kHeaderBytes + len != static_cast<uint32_t>(got)) continue;
+            frame.payload.assign(datagram + kHeaderBytes,
+                                 datagram + kHeaderBytes + len);
+
+            const uint32_t low_type = frame.type & 0xFFFFu;
+            if (low_type == 2u)
+                reply_queue_.TryPush(std::move(frame));
+            else
+                packet_queue_.TryPush(std::move(frame));
+        }
+#endif
+    }
+
+#ifdef _WIN32
+    void CloseSocket() {
+        if (socket_ == INVALID_SOCKET) return;
+        closesocket(socket_);
+        socket_ = INVALID_SOCKET;
+    }
+#endif
+
+    bool enabled_ = false;
+    uint32_t instance_ = 0;
+    uint16_t base_port_ = 26710;
+    LocalMpFrameQueue packet_queue_{kQueueCapacity};
+    LocalMpFrameQueue reply_queue_{kQueueCapacity};
+    int last_host_id_ = -1;
+    uint32_t send_error_log_counter_ = 0;
+#ifdef _WIN32
+    SOCKET socket_ = INVALID_SOCKET;
+#endif
+};
+
 struct WifiBridgeState {
     melonDS::NDS nds;
     std::unique_ptr<melonDS::Wifi> wifi;
@@ -666,6 +973,7 @@ struct WifiBridgeState {
     // == false) unless a capture_out_path was configured and its Open()
     // call actually succeeded.
     NdsNetCaptureWriter capture_writer;
+    LocalMpTransport local_mp;
 
     NdsWifiNetworkState network_state;
 
@@ -990,6 +1298,59 @@ int Net_RecvPacket(u8* data, void* userdata) {
     return recv_len;
 }
 
+void MP_Begin(void* userdata) {
+    (void)userdata;
+    if (g_bridge) g_bridge->local_mp.Begin();
+}
+
+void MP_End(void* userdata) {
+    (void)userdata;
+    if (g_bridge) g_bridge->local_mp.End();
+}
+
+int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.SendPacket(data, len, timestamp);
+}
+
+int MP_RecvPacket(u8* data, u64* timestamp, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.RecvPacket(data, timestamp);
+}
+
+int MP_SendCmd(u8* data, int len, u64 timestamp, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.SendCmd(data, len, timestamp);
+}
+
+int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid,
+                 void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.SendReply(data, len, timestamp, aid);
+}
+
+int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.SendAck(data, len, timestamp);
+}
+
+int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.RecvHostPacket(data, timestamp);
+}
+
+u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidmask, void* userdata) {
+    (void)userdata;
+    if (!g_bridge) return 0;
+    return g_bridge->local_mp.RecvReplies(data, timestamp, aidmask);
+}
+
 }  // namespace melonDS::Platform
 
 // ── process-wide Winsock lifecycle ──────────────────────────────────────
@@ -1038,6 +1399,16 @@ melonDS::Wifi* nds_wifi3d_attach() {
     g_bridge->network_state.wfc_dns_ipv4 = g_network_config.wfc_dns_ipv4;
     g_bridge->network_state.pcap_adapter_requested =
         g_network_config.pcap_adapter;
+    g_bridge->local_mp.Configure(
+        g_network_config.local_wireless_enabled,
+        g_network_config.local_wireless_instance,
+        g_network_config.local_wireless_base_port);
+    if (g_network_config.local_wireless_enabled) {
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[local_mp] configured instance=%u base_port=%u\n",
+            static_cast<unsigned>(g_network_config.local_wireless_instance),
+            static_cast<unsigned>(g_network_config.local_wireless_base_port));
+    }
     g_bridge->nds.SPI.SetFirmwareSource(nds_firmware_bytes(),
                                          nds_firmware_size());
 

@@ -380,6 +380,8 @@ int main(int argc, char** argv) {
     std::string cli_pcap_adapter;
     std::string cli_wfc_enabled;
     std::string cli_wfc_provider;
+    std::string cli_local_wireless_enabled;
+    std::string cli_local_wireless_base_port;
     // Wiimmfi M8: capture/replay at the Ethernet backend boundary.
     std::string cli_net_capture_out;
     std::string cli_net_capture_in;
@@ -472,6 +474,10 @@ int main(int argc, char** argv) {
             cli_wfc_enabled = argv[++i];
         } else if (a == "--wfc-provider" && i + 1 < argc) {
             cli_wfc_provider = argv[++i];
+        } else if (a == "--local-wireless" && i + 1 < argc) {
+            cli_local_wireless_enabled = argv[++i];
+        } else if (a == "--local-wireless-port" && i + 1 < argc) {
+            cli_local_wireless_base_port = argv[++i];
         } else if (a == "--net-capture-out" && i + 1 < argc) {
             cli_net_capture_out = argv[++i];
         } else if (a == "--net-capture-in" && i + 1 < argc) {
@@ -506,6 +512,7 @@ int main(int argc, char** argv) {
                 "[--pcap-adapter NAME] "
                 "[--wfc on|off] "
                 "[--wfc-provider kaeru|wiimmfi|wiimmfi-direct|local|<ipv4>] "
+                "[--local-wireless on|off] [--local-wireless-port 1024..65520] "
                 "[--net-capture-out FILE] [--net-capture-in FILE] "
                 "[--net-capture-raw] [--net-capture-no-pcap] "
                 "[--net-capture-scenario NAME]\n",
@@ -696,6 +703,27 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "invalid --wfc (expected on or off)\n");
         return 2;
     }
+    if (!cli_local_wireless_enabled.empty() &&
+        !nds_parse_on_off(cli_local_wireless_enabled,
+                          &frontend_options.local_wireless.enabled)) {
+        std::fprintf(stderr,
+                     "invalid --local-wireless (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_local_wireless_base_port.empty() &&
+        !nds_parse_local_wireless_base_port(
+            cli_local_wireless_base_port,
+            &frontend_options.local_wireless.base_port)) {
+        std::fprintf(stderr,
+                     "invalid --local-wireless-port (expected 1024..65520)\n");
+        return 2;
+    }
+    if (frontend_options.local_wireless.enabled &&
+        frontend_options.instance_index > 15u) {
+        std::fprintf(stderr,
+            "--local-wireless on requires --instance-index 0..15\n");
+        return 2;
+    }
     if (!cli_wfc_provider.empty()) {
         uint32_t probe = 0;
         if (nds_parse_ipv4(cli_wfc_provider, &probe)) {
@@ -736,6 +764,12 @@ int main(int argc, char** argv) {
     resolved_network.enabled = frontend_options.network.enabled;
     resolved_network.wfc_enabled = frontend_options.network.wfc_enabled;
     resolved_network.pcap_adapter = frontend_options.network.pcap_adapter;
+    resolved_network.local_wireless_enabled =
+        frontend_options.local_wireless.enabled;
+    resolved_network.local_wireless_instance =
+        frontend_options.instance_index;
+    resolved_network.local_wireless_base_port =
+        frontend_options.local_wireless.base_port;
 
     // Resolve the user-facing backend name to the bridge enum. Replay is
     // always available; pcap is available only in builds that opt into the

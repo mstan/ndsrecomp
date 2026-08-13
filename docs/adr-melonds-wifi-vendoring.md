@@ -135,7 +135,7 @@ line counts read in this session.
 | File | Why "now" rather than "later" |
 |---|---|
 | `src/net/Net_PCap.cpp` (461 lines) / `.h` (136) / `src/net/pcap/ipnet.h` | Revised from an earlier draft of this ADR, which deferred this file entirely. On reading `Net_PCap.h` in full: it does **not** link against the Npcap/WinPcap SDK's import library at build time. It only needs the `<pcap/pcap.h>` **header** for type declarations (`pcap_t`, `pcap_if_t`, `pcap_pkthdr`, `Net_PCap.h:27`); the actual `wpcap.dll`/`Packet.dll` is loaded **dynamically at runtime** through `Platform::DynamicLibrary_Load`/`LoadFunction`/`Unload` (`Net_PCap.h:75-83,103`, and the shim declarations at `ndsref/.../Platform.h:334-355`, read this session), with `LibPCap::New()` returning `std::optional` — empty, gracefully, if Npcap isn't installed on the host (`Net_PCap.h:63`). That means the *build-integration* cost (this ADR's scope) is small — one more new `Platform::DynamicLibrary_*` shim (~20-30 LOC, trivially `LoadLibraryW`/`GetProcAddress`/`FreeLibrary` on Windows) plus the freely-distributable `pcap/pcap.h` header at compile time — and it is **decoupled from whether Npcap is installed on any given machine**, so there is no reason to defer *vendoring the source*. Gate it exactly like the existing optional-feature precedent already in this CMakeLists — `NDS_ENABLE_COMPUTE_RENDERER` (`CMakeLists.txt:287-301,318-339`) is the template for an off-by-default `NDS_ENABLE_PCAP_BACKEND` option that adds `Net_PCap.cpp` to `target_sources` only when set. This directly answers the orchestrator's question in §11: vendor both backends' source now; PCap's *licensing and NAT/hole-punching limitations* remain R4's territory and are not re-derived here, but milestone 7 (plan §14, "If Slirp is insufficient... add another backend: PcapBackend") does not have to wait on a second vendoring pass if this ADR's recommendation is adopted. |
-| `src/net/LocalMP.cpp`, `LAN.cpp`, `Netplay.cpp`, `MPInterface.cpp` | These are the **local-wireless / multi-instance-netplay** implementations behind melonDS's `net-utils` CMake target (`ndsref/.../src/net/CMakeLists.txt:3-12`) and are what pulls in the **ENet** dependency (`net/CMakeLists.txt:28-35`, `pkg_check_modules(ENet REQUIRED IMPORTED_TARGET libenet)`). None of `Wifi.cpp`/`WifiAP.cpp`/`Net.cpp`/`Net_Slirp.cpp`/`Net_PCap.cpp` `#include` any of these four files (confirmed by reading all of them). **Not vendoring these four files means we never need ENet at all** — a real, avoidable dependency the plan never asked for, and local wireless is explicitly out of scope (plan §17). This one stays deferred/never, not "now-but-gated" — there is no milestone that needs it. |
+| `src/net/LocalMP.cpp`, `LAN.cpp`, `Netplay.cpp`, `MPInterface.cpp` | These are the **local-wireless / multi-instance-netplay** implementations behind melonDS's `net-utils` CMake target (`ndsref/.../src/net/CMakeLists.txt:3-12`) and are what pulls in the **ENet** dependency (`net/CMakeLists.txt:28-35`, `pkg_check_modules(ENet REQUIRED IMPORTED_TARGET libenet)`). None of `Wifi.cpp`/`WifiAP.cpp`/`Net.cpp`/`Net_Slirp.cpp`/`Net_PCap.cpp` `#include` any of these four files (confirmed by reading all of them). **Not vendoring these four files means we never need ENet at all**. Local wireless now uses a runner-owned experimental localhost UDP transport behind the existing `Platform::MP_*` hooks rather than vendoring melonDS's in-process `LocalMP`/ENet-backed LAN stack. Same-machine MKDS two-player race entry is validated; LAN/across-machine play is not claimed. |
 
 ## 3. Symbol → runner facility → shim mapping
 
@@ -153,7 +153,7 @@ Read in full: `Wifi.cpp`, `Wifi.h`, `WifiAP.cpp` (all this session); `Net.cpp`,
 | `Platform::Log(LogLevel, fmt, ...)` | Diagnostic logging throughout. | Already shimmed (`Platform.h:36`, implemented in `gpu3d.cpp` per its own doc comment). | **None — reuse existing shim as-is.** |
 | `Platform::Thread_*`/`Semaphore_*` | Not used by Wi-Fi/net at all (no threading inside `Wifi.cpp`/`WifiAP.cpp`/`Net.cpp`; the only threading-adjacent primitive net code needs is a `Mutex`, next row). | Already shimmed for GPU3D's SoftRenderer. | **None new**, but see next row for the one *new* Platform primitive net code needs. |
 | `melonDS::Platform::Mutex*` (`PacketDispatcher.h:45`) | Guards the multi-instance packet queues. | Not currently shimmed (GPU3D never needed a mutex type, only `Thread`/`Semaphore`). | **Yes, new, tiny.** `Mutex_Create/Lock/Unlock/Free`, same shape as the existing `Semaphore_*` shim (`Platform.h:43-48`). Est. 15-20 LOC (a `std::mutex` wrapper, matching the doc comment's stated policy of "real primitives... but the runner never enables [multi-threaded] rendering" — same posture applies here: real mutex, single-instance use, no actual host thread contention expected on the MVP path). |
-| `Platform::MP_Begin/MP_End/MP_SendPacket/MP_SendCmd/MP_SendReply/MP_SendAck/MP_RecvPacket/MP_RecvHostPacket/MP_RecvReplies` (9 functions, declared `Platform.h:296-304`) | Local-wireless (multiplayer/NiFi) transport — out of scope per plan §17. | N/A | **Stub shim, no-ops.** See §5 — this is the one interface slice we deliberately give a *trivial* implementation to (not a bridge to a real device model), because local wireless is out of scope. Est. 20-30 LOC for 9 one-line stubs. |
+| `Platform::MP_Begin/MP_End/MP_SendPacket/MP_SendCmd/MP_SendReply/MP_SendAck/MP_RecvPacket/MP_RecvHostPacket/MP_RecvReplies` (9 functions, declared `Platform.h:296-304`) | Local-wireless (multiplayer/NiFi) transport. Originally stubbed during Wiimmfi bring-up; now used by the experimental same-machine local multiplayer path. | Runner-owned localhost UDP fanout keyed by `--instance-index` / `[local_wireless] base_port`, preserving melonDS's local MP packet type/timestamp shape. | **Yes.** Implemented in `runner/src/wifi_net.cpp`. It is opt-in (`--local-wireless on`), same-machine only, and not a LAN/across-machine claim. |
 | `Platform::Net_SendPacket(u8*, int, void*)` / `Net_RecvPacket(u8*, void*)` (`Platform.h:309-310`) | The frontend-level hook `WifiAP::SendPacket`/`RecvPacket` call to reach the actual `Net`/`NetDriver` singleton (`WifiAP.cpp:304,371`). | New: bridge file owns a `melonDS::Net` instance and forwards these two calls to `Net::SendPacket`/`RecvPacket`. | **New, small.** ~15-20 LOC — this is the seam where the runner's own scheduler-driven tick loop calls into the vendored `Net`/`Net_Slirp` machinery; see §8 finding 1 for why this exact seam is also where the adversarial risk lives. |
 | `Savestate::Section/VarArray/Bool32/Var8/Var16/Var32/Var64` (`Wifi.cpp:243-316`) | Wi-Fi's full savestate. | Already vendored (`Savestate.cpp`, `.h`). | **None.** Reuse as-is; this is a real win — the runner's own hand-written `wifi.cpp` has **no savestate support at all** today (confirmed: no `Savestate`/serialize symbol anywhere in the 844-line file I read in full), so vendoring is a net *improvement* to savestate coverage, not a new risk. |
 
@@ -193,15 +193,17 @@ Read in full: `Wifi.cpp`, `Wifi.h`, `WifiAP.cpp` (all this session); `Net.cpp`,
   a like-for-like swap behind a stable interface, matching exactly how
   `gpu3d.cpp` sits behind the existing GX-register bus routing today.
 
-## 5. Out-of-scope MP surface — verified safe to stub
+## 5. MP surface — infrastructure-safe and now experimentally wired
 
-Plan §17 puts local wireless / Download Play / NiFi out of scope. Read every
-call site in `Wifi.cpp` and `WifiAP.cpp` that touches `Platform::MP_*` or the
-`IsMP`/`IsMPClient` state, rather than assuming:
+The original Wiimmfi bring-up kept local wireless / Download Play / NiFi out of
+scope and verified that no-op MP hooks were safe for infrastructure/WFC mode.
+The same call-site audit still matters now that `Platform::MP_*` is wired to an
+experimental localhost transport:
 
 - **`Platform::MP_Begin`/`MP_End`** (`Wifi.cpp:357,365`) fire unconditionally
   from `Wifi::UpdatePowerOn()` on every power on/off transition — **in both
-  infra and MP modes**. A no-op stub is correct in both.
+  infra and MP modes**. The runner transport therefore stays opt-in and cheap
+  when `[local_wireless] enabled` / `--local-wireless on` is not set.
 - **TX path** (`Wifi::TXSendFrame`, `Wifi.cpp:601-671`): cases `2`/`3` (regular
   LOC1-3 data slots — the ones infrastructure-mode association/data traffic
   actually uses) call `Platform::MP_SendPacket(...)` **and then** `if (!IsMP)
@@ -579,7 +581,7 @@ should be the first thing an implementation agent checks, not assumed.
 | New shim: `Firmware`/`FirmwareHeader` view | typed view over `g_fw` | ~40-70 LOC |
 | New shim: `Platform::Mutex_*` | 4 functions | ~15-20 LOC |
 | New shim: `Platform::DynamicLibrary_*` (only if `NDS_ENABLE_PCAP_BACKEND` is turned on) | `Load`/`Unload`/`LoadFunction` + opaque struct, backing `LibPCap`'s runtime `wpcap.dll` load (§2) | ~20-30 LOC, `LoadLibraryW`/`GetProcAddress`/`FreeLibrary` |
-| New shim: `Platform::MP_*` stubs | 9 functions, all one-liners | ~20-30 LOC |
+| New shim: `Platform::MP_*` transport | 9 functions forwarding to opt-in localhost local-wireless transport | ~250-350 LOC |
 | New bridge: `Platform::Net_SendPacket`/`Net_RecvPacket` + owning `melonDS::Net` instance | new file, e.g. `runner/src/wifi_net.cpp` | ~40-60 LOC, plus the `Net_Slirp` non-blocking rework from Finding 1 (~30-60 LOC of real logic: a poll thread or non-blocking timeout clamp + a lock-free/mutexed handoff queue) |
 | `CMakeLists.txt` edits | `add_subdirectory`, `target_sources`, `target_link_libraries`, `set_source_files_properties` | ~15-25 LOC |
 | **Total new/modified project-written code** | | **roughly 200-330 LOC**, on top of ~3,900 lines of vendored-as-is melonDS device-model/net-glue code and ~15k lines of vendored-as-is libslirp. |

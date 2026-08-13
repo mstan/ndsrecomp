@@ -214,6 +214,17 @@ bool nds_parse_instance_index(const std::string& value, uint32_t* out) {
     return true;
 }
 
+bool nds_parse_local_wireless_base_port(const std::string& value,
+                                        uint16_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed < 1024 || parsed > 65520)
+        return false;
+    *out = static_cast<uint16_t>(parsed);
+    return true;
+}
+
 const char* nds_screen_layout_name(NdsScreenLayout value) {
     return value == NdsScreenLayout::Separate ? "separate" : "stacked";
 }
@@ -500,6 +511,23 @@ bool nds_load_frontend_config(const std::string& path,
                     return false;
                 }
                 options->network.wfc_provider.dns_server = *value;
+            }
+        }
+    }
+    if (const toml::table* local =
+            root["local_wireless"].as_table()) {
+        if (const auto value = (*local)["enabled"].value<bool>()) {
+            options->local_wireless.enabled = *value;
+        }
+        if (const auto value = (*local)["base_port"].value<int64_t>()) {
+            if (!nds_parse_local_wireless_base_port(
+                    std::to_string(*value),
+                    &options->local_wireless.base_port)) {
+                if (error) {
+                    *error =
+                        "local_wireless.base_port must be 1024..65520";
+                }
+                return false;
             }
         }
     }

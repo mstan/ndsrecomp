@@ -231,8 +231,9 @@ mistake anywhere reachable from the worker thread — checked
 `Net_RecvPacket` on the emulation thread), `Net_Slirp`'s own members
 (`PollList`/`PollListSize`/`IPv4ID`, all touched only from the
 worker-thread-exclusive methods), and `PacketDispatcher` (internally
-mutex-guarded, and only ever driven from the emulation thread in this
-build anyway since local wireless/`MP_*` are permanently stubbed to zero).
+mutex-guarded). At the time of this crash investigation local wireless was
+stubbed; later experimental same-machine local wireless work changed that
+separate MP surface without changing this worker-thread finding.
 `g_log_budget` looks like the *only* instance of this mistake, not the
 first of several. A plain aligned `int` race like this cannot itself
 corrupt memory or crash on x86 — worst case is a mis-counted rate limiter

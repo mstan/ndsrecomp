@@ -11,8 +11,8 @@
       - Wifi/net (surveyed 2026-08-10, see
         docs/adr-melonds-wifi-vendoring.md §3): Mutex_Create/Free/Lock/
         Unlock (PacketDispatcher's queue lock), the nine MP_* local-
-        wireless functions (verified safe to no-op -- ADR §5; local
-        wireless/Download Play stays out of scope), Net_SendPacket/
+        wireless functions (experimental localhost transport for same-
+        machine multi-instance play), Net_SendPacket/
         Net_RecvPacket + SendPacketCallback (the WifiAP<->NetDriver
         bridge), and, only when NDS_ENABLE_PCAP_BACKEND is on,
         DynamicLibrary_Load/Unload/LoadFunction (Net_PCap's runtime
@@ -69,11 +69,9 @@ void Mutex_Free(Mutex* mutex);
 void Mutex_Lock(Mutex* mutex);
 void Mutex_Unlock(Mutex* mutex);
 
-// Local-wireless (multiplayer/Download Play/NiFi) transport. Out of scope
-// (plan §17); verified safe as unconditional no-ops -- every infra-mode
-// TX/RX path in Wifi.cpp falls through to WifiAP when !IsMP, and IsMP is
-// never set true by a station merely associating with an infrastructure
-// AP (docs/adr-melonds-wifi-vendoring.md §5, evidence per call site).
+// Local-wireless (multiplayer/Download Play/NiFi) transport. The runner
+// currently implements an experimental same-machine localhost transport
+// for multi-instance play; LAN/across-machine play is not claimed.
 void MP_Begin(void* userdata);
 void MP_End(void* userdata);
 int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata);

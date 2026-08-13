@@ -40,6 +40,7 @@ int main() {
 
     bool toggle = false;
     uint16_t mouse_value = 0;
+    uint16_t local_wireless_port = 0;
     if (!require(nds_parse_on_off("on", &toggle)) || !require(toggle) ||
         !require(nds_parse_on_off("false", &toggle)) || require(toggle) ||
         !require(!nds_parse_on_off("maybe", &toggle)) ||
@@ -51,7 +52,14 @@ int main() {
         !require(mouse_value == (1u << 9)) ||
         !require(nds_parse_mouse_fire_key("none", &mouse_value)) ||
         !require(mouse_value == 0) ||
-        !require(!nds_parse_mouse_fire_key("start", &mouse_value)))
+        !require(!nds_parse_mouse_fire_key("start", &mouse_value)) ||
+        !require(nds_parse_local_wireless_base_port(
+            "26710", &local_wireless_port)) ||
+        !require(local_wireless_port == 26710) ||
+        !require(!nds_parse_local_wireless_base_port(
+            "1023", &local_wireless_port)) ||
+        !require(!nds_parse_local_wireless_base_port(
+            "65521", &local_wireless_port)))
         return 13;
 
     NdsStartupMode startup = NdsStartupMode::Preserve;
@@ -93,7 +101,10 @@ int main() {
                 "antialiasing = 4\n"
                 "[cartridge]\n"
                 "save_type = \"flash\"\n"
-                "save_size = 262144\n";
+                "save_size = 262144\n"
+                "[local_wireless]\n"
+                "enabled = true\n"
+                "base_port = 27000\n";
     }
     NdsFrontendOptions options{};
     std::string error;
@@ -113,7 +124,9 @@ int main() {
         !require(options.antialiasing == 4) ||
         !require(options.cartridge_save.type ==
                  NdsCartridgeSaveType::Flash) ||
-        !require(options.cartridge_save.size == 262144))
+        !require(options.cartridge_save.size == 262144) ||
+        !require(options.local_wireless.enabled) ||
+        !require(options.local_wireless.base_port == 27000))
         return 6;
 
     {
