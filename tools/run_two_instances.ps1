@@ -17,7 +17,10 @@
 #   A: --instance-index 0 (default) -> 00:09:BF:10:C3:87   (your real dump)
 #   B: --instance-index 1           -> 00:09:BF:11:07:97
 #
-# Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON.
+# Run from the GAME worktree, after building with NDS_ENABLE_PCAP_BACKEND=ON:
+#
+#   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\build_mkds_pcap_runner.ps1
+#
 # To initialize the per-instance saves before the owner-driven Friend Roster
 # run, use ndsrecomp\tools\prepare_two_instance_saves.ps1.
 #
@@ -58,7 +61,12 @@ $ErrorActionPreference = 'Stop'
 Set-Location $GameRoot
 
 $exe = Join-Path $GameRoot (Join-Path $BuildDir 'nds_runner.exe')
-if (-not (Test-Path $exe)) { throw "runner not found: $exe" }
+if (-not (Test-Path $exe)) {
+    throw (
+        "runner not found: $exe; build it with " +
+        "ndsrecomp\tools\build_mkds_pcap_runner.ps1 from the game worktree"
+    )
+}
 if (-not (Test-Path (Join-Path $GameRoot $Rom))) { throw "ROM not found: $Rom" }
 if ($PortA -lt 1 -or $PortA -gt 65535) { throw "-PortA must be in 1..65535" }
 if ($PortB -lt 1 -or $PortB -gt 65535) { throw "-PortB must be in 1..65535" }
