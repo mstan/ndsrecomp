@@ -229,6 +229,15 @@ bool lcdc_bank(uint32_t addr, unsigned& bank, uint32_t& offset) {
     return true;
 }
 
+bool physical_from_single_mask(uint16_t mask, uint32_t addr,
+                               uint32_t* physical) {
+    if (!physical || !mask || (mask & (mask - 1u))) return false;
+    const unsigned bank = std::countr_zero(static_cast<unsigned>(mask));
+    if (bank >= 9) return false;
+    *physical = kBankOffset[bank] + (addr & (kBankSize[bank] - 1u));
+    return *physical < kTotalVram;
+}
+
 uint32_t arm9_vram_read(uint32_t addr, uint32_t width) {
     switch (addr & 0x00E00000u) {
         case 0x00000000u: return mapped_read(g_abg[(addr >> 14) & 31u], addr, width);
@@ -334,18 +343,36 @@ namespace {
 
 bool exec_physical_offset(int cpu, uint32_t addr, uint32_t* physical) {
     if (!physical || (addr & 0xFF000000u) != 0x06000000u) return false;
-    uint16_t mask = 0u;
     if (cpu == 7) {
-        mask = g_arm7[(addr >> 17u) & 1u];
-    } else {
-        // ARM9 execution from VRAM is not currently a validated title path.
-        // Fail closed until its many BG/OBJ/LCDC mappings need explicit use.
-        return false;
+        return physical_from_single_mask(g_arm7[(addr >> 17u) & 1u],
+                                         addr, physical);
     }
-    if (!mask || (mask & (mask - 1u))) return false;
-    const unsigned bank = std::countr_zero(static_cast<unsigned>(mask));
-    *physical = kBankOffset[bank] + (addr & (kBankSize[bank] - 1u));
-    return *physical < kTotalVram;
+
+    uint16_t mask = 0u;
+    switch (addr & 0x00E00000u) {
+        case 0x00000000u:
+            mask = g_abg[(addr >> 14u) & 31u];
+            break;
+        case 0x00200000u:
+            mask = g_bbg[(addr >> 14u) & 7u];
+            break;
+        case 0x00400000u:
+            mask = g_aobj[(addr >> 14u) & 15u];
+            break;
+        case 0x00600000u:
+            mask = g_bobj[(addr >> 14u) & 7u];
+            break;
+        default: {
+            unsigned bank = 0;
+            uint32_t offset = 0;
+            if (!lcdc_bank(addr, bank, offset) ||
+                !(g_lcdc & (1u << bank)))
+                return false;
+            *physical = kBankOffset[bank] + offset;
+            return *physical < kTotalVram;
+        }
+    }
+    return physical_from_single_mask(mask, addr, physical);
 }
 
 }  // namespace
