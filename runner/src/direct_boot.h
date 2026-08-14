@@ -51,6 +51,11 @@ struct NdsDirectBootInputs {
     // Firmware image the guest would have read its user settings from.
     const uint8_t* firmware = nullptr;
     uint32_t firmware_size = 0;
+    // Chip ID the LIVE card protocol reports (io.cpp computes it from the
+    // ROM size). The boot mirror must carry the same value: NitroSDK boot
+    // code compares the mirrored ID against a fresh chip-ID read, and a
+    // mismatch is treated as "cartridge removed".
+    uint32_t cart_chip_id = 0;
     // False when the ARM9 BIOS is a reimplementation rather than a dump.
     bool arm9_bios_is_native = true;
 };

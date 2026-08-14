@@ -243,6 +243,19 @@ void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr) {
     g_slot[cpu].started = true;
 }
 
+void scheduler_set_cpu_boot(int cpu, uint32_t entry, uint32_t sp,
+                            uint32_t sp_irq, uint32_t sp_svc) {
+    const uint32_t cpsr = 0x13u | CPSR_I_BIT | CPSR_F_BIT |
+                          ((entry & 1u) ? CPSR_T_BIT : 0u);
+    scheduler_reset_cpu(cpu, entry & ~1u, cpsr);
+    ArmCpuState& st = g_slot[cpu].state;
+    st.R[12] = entry;
+    st.R[13] = sp;
+    st.R[14] = entry;
+    st.banked_sp[ARM_BANK_IRQ] = sp_irq;
+    st.banked_sp[ARM_BANK_SUPERVISOR] = sp_svc;
+}
+
 void scheduler_run_round() {
     // melonDS-faithful interleave (docs/scheduler_design.md, Commit A). Each
     // outer iteration is capped at kIterCap SYSTEM cycles (or the next scheduled

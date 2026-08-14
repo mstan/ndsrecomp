@@ -67,6 +67,7 @@ uint16_t g_keycnt[2] = {};
 uint16_t g_rcnt = 0;
 uint8_t g_wramcnt = 0;
 uint16_t g_wifiwaitcnt = 0;            // 0x206, visible only while Wi-Fi is on
+uint32_t g_biosprot = 0;               // 0x308 BIOSPROT (ARM7, write-once)
 
 // Gamecard (no cartridge inserted → data reads back 0xFFFFFFFF). The boot
 // sees empty-slot all-ones behavior when no image is installed; an installed
@@ -188,6 +189,13 @@ void key1_init(uint32_t game_code, uint32_t level = 2u) {
 void key1_encrypt_bytes(uint8_t* bytes) {
     uint32_t block[2] = {load_le32(bytes), load_le32(bytes + 4u)};
     key1_encrypt(block);
+    store_le32(bytes, block[0]);
+    store_le32(bytes + 4u, block[1]);
+}
+
+void key1_decrypt_bytes(uint8_t* bytes) {
+    uint32_t block[2] = {load_le32(bytes), load_le32(bytes + 4u)};
+    key1_decrypt(block);
     store_le32(bytes, block[0]);
     store_le32(bytes + 4u, block[1]);
 }
@@ -1804,6 +1812,7 @@ void nds_io_reset() {
     g_wramcnt = 0;
     bus_fast_refresh();
     g_wifiwaitcnt = 0;
+    g_biosprot = 0;
     g_warned = 0;
     nds_wifi_reset();
     nds_spu_reset();
@@ -2219,6 +2228,72 @@ uint16_t nds_powercontrol9() {
 }
 uint16_t nds_wifiwaitcnt() { return g_wifiwaitcnt; }
 uint8_t nds_wramcnt() { return g_wramcnt; }
+
+// ── Direct-boot seams (driven by nds_direct_boot via main.cpp's machine
+// adapter). These are device-state assignments, not guest bus writes: they
+// reproduce the state the firmware's own boot code would have left behind.
+void nds_io_set_wramcnt(uint8_t value) {
+    g_wramcnt = value;
+    bus_fast_refresh();
+}
+
+void nds_io_set_arm7_bios_prot(uint32_t value) { g_biosprot = value; }
+
+uint32_t nds_cart_chip_id() { return g_card_chip_id; }
+
+void nds_io_apply_direct_boot_latches() {
+    // One atomic "the firmware already ran" statement — melonDS
+    // NDS::SetupDirectBoot tail. POSTFLG both cores, POWCNT9 fully on and
+    // pushed to the GPU, RCNT, cart AUXSPICNT enabled, SOUNDBIAS at its
+    // post-ramp value, WIFIWAITCNT as the firmware programs it.
+    g_postflg[0] = 0x01;
+    g_postflg[1] = 0x01;
+    io_mem_write(0x04000304u, 0x820Fu, 2);
+    nds_gpu3d_set_power(0x820Fu);
+    g_rcnt = 0x8000;
+    g_auxspicnt = 0x8000;
+    io_mem_write(0x04000504u, 0x200u, 2);
+    g_wifiwaitcnt = 0x0030;
+    // The firmware's boot already walked the card through Raw -> KEY1 ->
+    // normal, so direct boot must leave the protocol in normal mode
+    // (melonDS CartCommon::SetupDirectBoot: CmdEncMode = DataEncMode = 2).
+    // Left in Raw, the game's own chip-ID read (0xB8) hits the raw-mode
+    // default case, disagrees with the boot mirror, and the game takes its
+    // cartridge-removed path -- MPH deadlocked exactly there.
+    g_card_mode = CardCommandMode::Normal;
+    g_card_data_mode = 2;
+}
+
+bool nds_cart_secure_area_plaintext(uint8_t* out) {
+    constexpr uint32_t kSecureSize = 0x800u;
+    if (g_card_rom.size() < 0x24u || !g_key1_available) return false;
+    const uint32_t arm9_rom_offset = load_le32(g_card_rom.data() + 0x20u);
+    if (arm9_rom_offset < 0x4000u || arm9_rom_offset >= 0x8000u ||
+        uint64_t{arm9_rom_offset} + kSecureSize > g_card_rom.size())
+        return false;
+    // The stored image is always the card-side KEY1-encrypted form
+    // (card_reencrypt_secure_area_if_needed normalizes decrypted dumps at
+    // load), so this is the exact inverse of that normalization. The card
+    // protocol re-inits g_key1_schedule when it enters KEY1 mode, so
+    // clobbering it here is safe.
+    std::memcpy(out, g_card_rom.data() + arm9_rom_offset, kSecureSize);
+    const uint32_t game_code = load_le32(g_card_rom.data() + 0x0Cu);
+    key1_init(game_code, 2u);
+    key1_decrypt_bytes(out);
+    key1_init(game_code, 3u);
+    for (uint32_t pos = 0; pos < kSecureSize; pos += 8u)
+        key1_decrypt_bytes(out + pos);
+    static constexpr uint8_t kSecureMagic[8] = {
+        'e', 'n', 'c', 'r', 'y', 'O', 'b', 'j'
+    };
+    if (std::memcmp(out, kSecureMagic, sizeof(kSecureMagic)) != 0)
+        return false;
+    // The ARM7 BIOS replaces the verified 'encryObj' marker with two
+    // 0xE7FFDEFF words; direct boot lands the post-BIOS form.
+    store_le32(out, 0xE7FFDEFFu);
+    store_le32(out + 4u, 0xE7FFDEFFu);
+    return true;
+}
 bool nds_powered_off() { return g_powered_off; }
 
 void nds_rtc_debug_state(NdsRtcDebugState* out) {
@@ -2611,6 +2686,9 @@ uint32_t nds_io_read(uint32_t addr, uint32_t width) {
             return (g_wifiwaitcnt >> ((addr & 1u) * 8u)) & m;
         case 0x04000300:
             return g_postflg[cpu] & m;
+        case 0x04000308: case 0x04000309:
+        case 0x0400030A: case 0x0400030B:  // BIOSPROT (ARM7)
+            return cpu == 1 ? ((g_biosprot >> ((addr & 3u) * 8u)) & m) : 0u;
         case 0x04000304: case 0x04000305:
             return cpu == 1
                 ? ((g_powercontrol7 >> ((addr & 1u) * 8u)) & m)
@@ -2844,6 +2922,10 @@ void nds_io_write(uint32_t addr, uint32_t value, uint32_t width) {
         case 0x04000300:
             // POSTFLG: bit0 latches set; ARM9 may also set bit1.
             g_postflg[cpu] |= static_cast<uint8_t>(value & (cpu == 0 ? 0x3u : 0x1u));
+            return;
+        case 0x04000308:  // BIOSPROT (ARM7): write-once, melonDS ARM7IOWrite32
+            if (cpu == 1 && g_biosprot == 0)
+                g_biosprot = value & 0xFFFEu;
             return;
         case 0x04000301:  // HALTCNT (ARM7): 0x80 enters HALT
             g_haltcnt[cpu] = static_cast<uint8_t>(value);

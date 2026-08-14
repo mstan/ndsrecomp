@@ -207,6 +207,20 @@ uint16_t nds_powercontrol7();
 uint16_t nds_powercontrol9();
 uint16_t nds_wifiwaitcnt();
 uint8_t nds_wramcnt();
+// Direct-boot seams (nds_direct_boot drives these through main.cpp's machine
+// adapter): device-state assignments reproducing what the firmware's own boot
+// would have left behind, plus the decrypted secure area the boot sequence
+// copies to RAM (the stored cartridge image keeps it card-side encrypted).
+void nds_io_set_wramcnt(uint8_t value);
+void nds_io_set_arm7_bios_prot(uint32_t value);
+// Chip ID the live card protocol reports (0 when no cartridge is loaded).
+// Direct boot mirrors it: guest boot code compares the mirror against a
+// fresh chip-ID read to detect cartridge removal.
+uint32_t nds_cart_chip_id();
+void nds_io_apply_direct_boot_latches();
+// out must hold 0x800 bytes. False when the cartridge has no secure area in
+// [0x4000,0x8000), KEY1 tables are unavailable, or verification fails.
+bool nds_cart_secure_area_plaintext(uint8_t* out);
 bool nds_powered_off();
 
 // Symmetric RTC state checkpoint used by the reset/replay bisector.  This is

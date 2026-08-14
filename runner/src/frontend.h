@@ -22,6 +22,18 @@ enum class NdsStartupMode : uint8_t {
     Automatic,
 };
 
+// Which boot path establishes the pre-game machine state. Lle executes the
+// real BIOS + firmware boot (the default and the oracle-diffed source of
+// truth). Direct is the opt-in melonDS SetupDirectBoot equivalent: the
+// runner establishes the post-firmware state itself and starts the
+// cartridge binaries immediately (runner/src/direct_boot.cpp,
+// beads-yjp.15). Never a silent fallback — every input dump is still
+// mandatory and verified in either mode.
+enum class NdsBootMode : uint8_t {
+    Lle,
+    Direct,
+};
+
 enum NdsAdaptiveScreen : uint8_t {
     NDS_ADAPTIVE_NONE = 0,
     NDS_ADAPTIVE_TOP = 1u << 0,
@@ -140,6 +152,7 @@ struct NdsFrontendOptions {
     std::string expected_rom_sha1;
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
+    NdsBootMode boot_mode = NdsBootMode::Lle;
     // Wiimmfi: which of several concurrently-run instances this process is
     // (--instance-index CLI flag / [system] instance_index game.toml key).
     // 0 (the default) is a deliberate no-op everywhere this is consumed:
@@ -199,6 +212,7 @@ bool nds_parse_screen_layout(const std::string& value,
                              NdsScreenLayout* out);
 bool nds_parse_startup_mode(const std::string& value,
                             NdsStartupMode* out);
+bool nds_parse_boot_mode(const std::string& value, NdsBootMode* out);
 // 0..255 (fits the byte-wise MAC perturbation in main.cpp's
 // apply_instance_mac(), which wraps mod-256 exactly like melonDS's own u8
 // arithmetic -- see that function's comment for why a wider range would
@@ -225,6 +239,7 @@ bool nds_parse_local_wireless_base_port(const std::string& value,
                                         uint16_t* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
 const char* nds_startup_mode_name(NdsStartupMode value);
+const char* nds_boot_mode_name(NdsBootMode value);
 const char* nds_adaptive_screens_name(uint8_t value);
 
 int nds_run_interactive_frontend(const NdsFrontendOptions& options);

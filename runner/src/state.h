@@ -88,6 +88,10 @@ uint8_t bus_debug_read8(int cpu, uint32_t addr);
 // bus ring, independent of which CPU the scheduler last loaded.
 uint32_t bus_device_read32(int cpu, uint32_t addr);
 void bus_device_write32(int cpu, uint32_t addr, uint32_t value);
+void bus_device_write16(int cpu, uint32_t addr, uint16_t value);
+// Overlay bytes onto the loaded ARM9 BIOS image (direct boot on a
+// reimplemented BIOS copies the cartridge's Nintendo logo in at +0x20).
+void bus_patch_arm9_bios(uint32_t offset, const uint8_t* p, uint32_t n);
 // Tier-3 provenance. A writable mapping alone is not permission to interpret:
 // its physical backing page must have been written by a guest CPU or hardware
 // bus master since reset. Aliases share the same backing generation.

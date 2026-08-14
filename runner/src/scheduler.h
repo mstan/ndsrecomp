@@ -13,6 +13,15 @@
 
 void scheduler_init();
 void scheduler_reset_cpu(int cpu, uint32_t pc, uint32_t cpsr);
+// Direct-boot entry state for one core (melonDS NDS::SetupDirectBoot):
+// resets the core to `entry` in SVC mode (IRQ+FIQ masked, Thumb from
+// entry bit 0), then sets R12 = R14 = entry, the active SP, and the
+// banked IRQ/SVC stack pointers. The active R13 IS the SVC bank while
+// the mode is SVC — both are still set separately, exactly as melonDS
+// does, so a later mode round-trip observes the same values the oracle's
+// would.
+void scheduler_set_cpu_boot(int cpu, uint32_t entry, uint32_t sp,
+                            uint32_t sp_irq, uint32_t sp_svc);
 
 struct SchedResult {
     bool        halted[2];

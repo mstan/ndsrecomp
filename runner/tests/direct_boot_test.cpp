@@ -122,7 +122,9 @@ std::vector<uint8_t> make_firmware() {
     // UserSettingsOffset is stored >> 3.
     put16(fw, 0x20, uint16_t(0x3FE00 >> 3));
     put16(fw, 0x26, 0x1234);
-    put16(fw, 0x28, 0x5678);
+    // GUIWifiCodeChecksum is the THIRD u16 of the firmware header (melonDS
+    // FirmwareHeader), far from the user-settings fields.
+    put16(fw, 0x04, 0x5678);
     for (uint32_t i = 0; i < 0x70; i += 4) put32(fw, 0x3FE00 + i, 0x5E000000u | i);
     return fw;
 }
@@ -143,6 +145,10 @@ NdsDirectBootInputs base_inputs(const std::vector<uint8_t>& rom,
     in.firmware_size = uint32_t(fw.size());
     in.secure_area = secure.data();
     in.arm9_bios_is_native = true;
+    // Chip ID as the live card protocol would report it for a 64 MB image
+    // (0xC2 | (MB-1)<<8) -- the mirror must carry the SAME value or guest
+    // boot code treats the cartridge as removed.
+    in.cart_chip_id = 0x00003FC2;
     return in;
 }
 
@@ -164,7 +170,10 @@ void test_sequence_matches_melonds() {
           "header mirror carries the ARM9 ROM offset");
     check(m.count_at(0x027FFE00 + 0x16C) == 1, "header mirror covers 0x170 bytes");
 
-    // Cart ID / CRC block, both copies.
+    // Cart ID / CRC block, both copies. The chip ID must be the live
+    // protocol's value, never a constant.
+    check(m.wrote(0, 0x027FF800, 0x3FC2, 32), "live chip ID at 0x027FF800");
+    check(m.wrote(0, 0x027FFC00, 0x3FC2, 32), "live chip ID at 0x027FFC00");
     check(m.wrote(0, 0x027FF808, 0xC0DE, 16), "header CRC lands at 0x027FF808");
     check(m.wrote(0, 0x027FF80A, 0xBEEF, 16), "secure CRC lands at 0x027FF80A");
     check(m.wrote(0, 0x027FF850, 0x5835, 16), "0x5835 marker at 0x027FF850");
@@ -254,6 +263,65 @@ void test_cartridge_without_secure_area() {
           "the ARM9 binary is copied from offset 0");
 }
 
+uint16_t fw_crc16(const uint8_t* data, uint32_t length, uint16_t start) {
+    static constexpr uint16_t kPolynomial[8] = {
+        0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001,
+    };
+    for (uint32_t i = 0; i < length; ++i) {
+        start = uint16_t(start ^ data[i]);
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            start = (start & 1u)
+                ? uint16_t((start >> 1) ^ (kPolynomial[bit] << (7 - bit)))
+                : uint16_t(start >> 1);
+        }
+    }
+    return start;
+}
+
+// melonDS mirrors the EFFECTIVE user-settings copy (GetEffectiveUserData):
+// CRC-valid, higher update counter when both validate, ties keep copy 0,
+// copy 0 again when neither validates (make_firmware's copies pin that
+// fallback in test_sequence_matches_melonds).
+void test_effective_user_settings() {
+    const auto rom = make_rom(), secure = make_secure();
+    auto fw = make_firmware();
+    constexpr uint32_t kCopy0 = 0x3FE00, kCopy1 = 0x3FF00;
+    for (uint32_t i = 0; i < 0x70; i += 4) put32(fw, kCopy1 + i, 0x5F000000u | i);
+
+    auto seal = [&](uint32_t base, uint16_t counter) {
+        put16(fw, base + 0x70, counter);
+        put16(fw, base + 0x72, fw_crc16(fw.data() + base, 0x70, 0xFFFF));
+    };
+
+    {   // Copy 1 valid and newer: it is the one mirrored.
+        seal(kCopy0, 5);
+        seal(kCopy1, 6);
+        Recorder m;
+        std::string error;
+        check(nds_direct_boot(m, base_inputs(rom, fw, secure), &error),
+              "direct boot succeeds with two valid user-settings copies");
+        check(m.wrote(0, 0x027FFC80, 0x5F000000u, 32),
+              "the newer valid copy 1 is mirrored");
+    }
+    {   // Equal counters: copy 0 wins the tie.
+        seal(kCopy0, 6);
+        Recorder m;
+        std::string error;
+        nds_direct_boot(m, base_inputs(rom, fw, secure), &error);
+        check(m.wrote(0, 0x027FFC80, 0x5E000000u, 32),
+              "copy 0 wins an update-counter tie");
+    }
+    {   // Copy 1 newer but CRC-invalid: copy 0 is mirrored.
+        seal(kCopy1, 7);
+        fw[kCopy1 + 0x72] ^= 0xFF;
+        Recorder m;
+        std::string error;
+        nds_direct_boot(m, base_inputs(rom, fw, secure), &error);
+        check(m.wrote(0, 0x027FFC80, 0x5E000000u, 32),
+              "a CRC-invalid copy is never mirrored");
+    }
+}
+
 void test_refusals() {
     const auto rom = make_rom(), fw = make_firmware(), secure = make_secure();
     std::string error;
@@ -300,6 +368,7 @@ int main() {
     test_sequence_matches_melonds();
     test_freebios_gets_the_logo();
     test_cartridge_without_secure_area();
+    test_effective_user_settings();
     test_refusals();
     return g_failures == 0 ? 0 : 1;
 }

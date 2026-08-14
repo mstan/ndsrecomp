@@ -825,6 +825,18 @@ void bus_device_write32(int cpu, uint32_t addr, uint32_t value) {
     g_nds_active = old;
 }
 
+void bus_device_write16(int cpu, uint32_t addr, uint16_t value) {
+    const NdsCpu old = g_nds_active;
+    g_nds_active = cpu == 7 ? NDS_ARM7 : NDS_ARM9;
+    bus_write_u16(addr, value);
+    g_nds_active = old;
+}
+
+void bus_patch_arm9_bios(uint32_t offset, const uint8_t* p, uint32_t n) {
+    if (uint64_t{offset} + n > g_arm9_bios.size()) return;
+    std::memcpy(g_arm9_bios.data() + offset, p, n);
+}
+
 // ARM7 (ARMv4T) region N/S bus timings, ported from melonDS's effective model
 // (NDS::InitTimings / NDS::SetARM7RegionTimings â€” third_party/melonDS/src/NDS.cpp).
 // Unlike the uncached ARM9, the ARM7 has NO +3 nonseq CPU penalty and (mostly)

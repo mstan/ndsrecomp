@@ -18,6 +18,7 @@
 
 #include "state.h"
 #include "scheduler.h"
+#include "direct_boot.h"
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
@@ -210,6 +211,39 @@ bool apply_startup_mode(std::vector<uint8_t>& fw, NdsStartupMode mode) {
     return true;
 }
 
+// Concrete direct-boot machine (beads-yjp.15 increment 1). Guest memory
+// writes go through the device bus path — never raw RAM pokes — so the
+// copied ARM9/ARM7 binaries acquire write provenance (Tier-3 and static
+// bank validation both require it). Note the cpu convention translation:
+// nds_direct_boot speaks 0=ARM9/1=ARM7, bus_device_write* speaks 9/7.
+struct RunnerDirectBootMachine final : NdsDirectBootMachine {
+    void write16(int cpu, uint32_t addr, uint16_t value) override {
+        bus_device_write16(cpu == 1 ? 7 : 9, addr, value);
+    }
+    void write32(int cpu, uint32_t addr, uint32_t value) override {
+        bus_device_write32(cpu == 1 ? 7 : 9, addr, value);
+    }
+    void cp15_write(uint32_t crn, uint32_t crm, uint32_t op2,
+                    uint32_t value) override {
+        runtime_coproc_write(15, 0, crn, crm, op2, value);
+    }
+    void set_cpu_boot(int cpu, uint32_t entry, uint32_t sp, uint32_t sp_irq,
+                      uint32_t sp_svc) override {
+        scheduler_set_cpu_boot(cpu, entry, sp, sp_irq, sp_svc);
+    }
+    void set_wramcnt(uint8_t value) override { nds_io_set_wramcnt(value); }
+    void set_arm7_bios_prot(uint32_t value) override {
+        nds_io_set_arm7_bios_prot(value);
+    }
+    void set_post_boot_latches() override {
+        nds_io_apply_direct_boot_latches();
+    }
+    void copy_logo_into_arm9_bios(const uint8_t* logo,
+                                  uint32_t size) override {
+        bus_patch_arm9_bios(0x20, logo, size);
+    }
+};
+
 // Wiimmfi (beads-yjp.1.11): two ndsrecomp instances booted from the SAME
 // firmware dump present the SAME console MAC, so Wiimmfi identity and DS
 // friend codes -- both derived from it -- collide: two such clients look
@@ -373,6 +407,7 @@ int main(int argc, char** argv) {
     std::string cli_mph_prime_controls;
     std::string cli_mph_virtual_stylus_sensitivity;
     std::string cli_startup_mode;
+    std::string cli_boot_mode;
     std::string cli_instance_index;
     std::string cli_save_path;
     std::string cli_firmware_path;
@@ -466,6 +501,8 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
+        } else if (a == "--boot" && i + 1 < argc) {
+            cli_boot_mode = argv[++i];
         } else if (a == "--instance-index" && i + 1 < argc) {
             cli_instance_index = argv[++i];
         } else if (a == "--net-ring-dump") {
@@ -522,6 +559,7 @@ int main(int argc, char** argv) {
                 "[--mph-virtual-stylus-sensitivity 10..400] "
                 "[--mph-bind-<action> <key-or-mouse>] "
                 "[--startup-mode preserve|manual|automatic] "
+                "[--boot lle|direct] "
                 "[--instance-index 0..255] "
                 "[--discover-static-misses] [--rtc-host] "
                 "[--net-ring-dump] [--net-ring-last N] "
@@ -604,6 +642,13 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                          "invalid NDS_STARTUP_MODE "
                          "(expected preserve, manual, or automatic)\n");
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_BOOT_MODE")) {
+        if (!nds_parse_boot_mode(value, &frontend_options.boot_mode)) {
+            std::fprintf(stderr,
+                         "invalid NDS_BOOT_MODE (expected lle or direct)\n");
             return 2;
         }
     }
@@ -697,6 +742,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "invalid --startup-mode "
                      "(expected preserve, manual, or automatic)\n");
+        return 2;
+    }
+    if (!cli_boot_mode.empty() &&
+        !nds_parse_boot_mode(cli_boot_mode, &frontend_options.boot_mode)) {
+        std::fprintf(stderr, "invalid --boot (expected lle or direct)\n");
         return 2;
     }
     if (!cli_instance_index.empty() &&
@@ -1293,6 +1343,51 @@ int main(int argc, char** argv) {
         scheduler_init();
         scheduler_reset_cpu(0, 0xFFFF0000u, reset_cpsr);  // ARM9
         scheduler_reset_cpu(1, 0x00000000u, reset_cpsr);  // ARM7
+
+        // Opt-in direct boot (beads-yjp.15): establish the post-firmware
+        // machine state and start the cartridge binaries immediately. Any
+        // failure is a refusal, never a fallback to another boot path.
+        if (frontend_options.boot_mode == NdsBootMode::Direct) {
+            if (rom.empty()) {
+                std::fprintf(stderr,
+                             "refusing to boot: --boot direct requires --rom\n");
+                std::exit(1);
+            }
+            const uint32_t arm9_rom_offset =
+                rom.size() >= 0x24u
+                    ? (uint32_t{rom[0x20]} | (uint32_t{rom[0x21]} << 8) |
+                       (uint32_t{rom[0x22]} << 16) | (uint32_t{rom[0x23]} << 24))
+                    : 0u;
+            std::vector<uint8_t> secure_area(0x800);
+            const bool has_secure_area =
+                arm9_rom_offset >= 0x4000u && arm9_rom_offset < 0x8000u;
+            if (has_secure_area &&
+                !nds_cart_secure_area_plaintext(secure_area.data())) {
+                std::fprintf(stderr,
+                             "refusing to boot: cartridge secure area could "
+                             "not be decrypted for direct boot\n");
+                std::exit(1);
+            }
+            NdsDirectBootInputs inputs;
+            inputs.rom = rom.data();
+            inputs.rom_size = static_cast<uint32_t>(rom.size());
+            inputs.secure_area =
+                has_secure_area ? secure_area.data() : nullptr;
+            inputs.firmware = fw.data();
+            inputs.firmware_size = static_cast<uint32_t>(fw.size());
+            inputs.cart_chip_id = nds_cart_chip_id();
+            inputs.arm9_bios_is_native = true;  // retail dumps (increment 1)
+            RunnerDirectBootMachine machine;
+            std::string boot_error;
+            if (!nds_direct_boot(machine, inputs, &boot_error)) {
+                std::fprintf(stderr, "refusing to boot: direct boot: %s\n",
+                             boot_error.c_str());
+                std::exit(1);
+            }
+            std::fprintf(stderr, "[boot] direct boot (opt-in): cartridge "
+                                 "entry state established, firmware not "
+                                 "executed\n");
+        }
         nds_gpu3d_set_threaded(gpu3d_threaded);
     };
     boot();

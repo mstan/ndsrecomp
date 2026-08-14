@@ -237,6 +237,21 @@ bool nds_parse_startup_mode(const std::string& value,
     return false;
 }
 
+bool nds_parse_boot_mode(const std::string& value, NdsBootMode* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "lle" || normalized == "firmware" ||
+        normalized == "default") {
+        *out = NdsBootMode::Lle;
+        return true;
+    }
+    if (normalized == "direct") {
+        *out = NdsBootMode::Direct;
+        return true;
+    }
+    return false;
+}
+
 bool nds_parse_instance_index(const std::string& value, uint32_t* out) {
     if (!out || value.empty()) return false;
     char* end = nullptr;
@@ -267,6 +282,10 @@ const char* nds_startup_mode_name(NdsStartupMode value) {
         case NdsStartupMode::Automatic: return "automatic";
         default: return "preserve";
     }
+}
+
+const char* nds_boot_mode_name(NdsBootMode value) {
+    return value == NdsBootMode::Direct ? "direct" : "lle";
 }
 
 const char* nds_adaptive_screens_name(uint8_t value) {
@@ -322,6 +341,14 @@ bool nds_load_frontend_config(const std::string& path,
                     *error =
                         "system.startup_mode must be preserve, manual, or "
                         "automatic";
+                }
+                return false;
+            }
+        }
+        if (const auto value = (*system)["boot"].value<std::string>()) {
+            if (!nds_parse_boot_mode(*value, &options->boot_mode)) {
+                if (error) {
+                    *error = "system.boot must be lle or direct";
                 }
                 return false;
             }
