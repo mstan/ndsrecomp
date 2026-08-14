@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "battery_save.h"
+#include "cart_backup.h"
 #include "state.h"
 #include "scheduler.h"
 #include "gpu2d.h"
@@ -102,13 +103,8 @@ uint8_t  g_auxspi_data = 0;
 bool     g_auxspi_hold = false;
 uint32_t g_auxspi_pos = 0;
 uint64_t g_auxspi_deadline = UINT64_MAX;   // busy-clear, system cycles
-uint8_t  g_sram_cmd = 0;
-uint8_t  g_sram_status = 0;
-uint32_t g_sram_addr = 0;
-std::vector<uint8_t> g_cart_sram;
-NdsCartridgeSaveConfig g_cart_save_config;
+NdsCartBackup g_cart_backup;
 std::string g_cart_save_path;
-bool g_cart_save_dirty = false;
 
 uint32_t load_le32(const uint8_t* p) {
     return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
@@ -1628,175 +1624,13 @@ void io_mem_write(uint32_t addr, uint32_t value, uint32_t width) {
 
 int active() { return (g_nds_active == NDS_ARM9) ? 0 : 1; }
 
-// ── AUXSPI backup-chip protocol (melonDS CartRetail::SPIWrite) ─────────
-uint8_t cart_eeprom_spi_write(uint8_t val, uint32_t pos) {
-    const uint32_t mask = static_cast<uint32_t>(g_cart_sram.size()) - 1u;
-    const uint32_t addrsize = g_cart_sram.size() > 65536u ? 3u : 2u;
-    switch (g_sram_cmd) {
-        case 0x01:  // write status register
-            if (pos == 1) g_sram_status = (g_sram_status & 0x01u) | (val & 0x0Cu);
-            return 0;
-        case 0x05:  // read status register
-            return g_sram_status;
-        case 0x02:  // write
-            if (pos <= addrsize) {
-                g_sram_addr = (g_sram_addr << 8) | val;
-            } else {
-                if (g_sram_status & 0x02u) {
-                    uint8_t& destination =
-                        g_cart_sram[g_sram_addr & mask];
-                    if (destination != val) {
-                        destination = val;
-                        g_cart_save_dirty = true;
-                    }
-                }
-                ++g_sram_addr;
-            }
-            return 0;
-        case 0x03:  // read
-            if (pos <= addrsize) {
-                g_sram_addr = (g_sram_addr << 8) | val;
-                return 0;
-            } else {
-                const uint8_t ret = g_cart_sram[g_sram_addr & mask];
-                ++g_sram_addr;
-                return ret;
-            }
-        case 0x9F:  // read JEDEC ID
-            return 0xFF;
-        default:
-            return 0xFF;
-    }
-}
-
-uint8_t cart_eeprom_tiny_spi_write(uint8_t val, uint32_t pos) {
-    const uint32_t high =
-        (g_sram_cmd == 0x0Au || g_sram_cmd == 0x0Bu) ? 0x100u : 0u;
-    switch (g_sram_cmd) {
-        case 0x01:
-            if (pos == 1) {
-                g_sram_status =
-                    (g_sram_status & 0x01u) | (val & 0x0Cu);
-            }
-            return 0;
-        case 0x05:
-            return g_sram_status | 0xF0u;
-        case 0x02:
-        case 0x0A:
-            if (pos < 2) {
-                g_sram_addr = val;
-            } else {
-                if (g_sram_status & 0x02u) {
-                    uint8_t& destination =
-                        g_cart_sram[(g_sram_addr + high) & 0x1FFu];
-                    if (destination != val) {
-                        destination = val;
-                        g_cart_save_dirty = true;
-                    }
-                }
-                ++g_sram_addr;
-            }
-            return 0;
-        case 0x03:
-        case 0x0B:
-            if (pos < 2) {
-                g_sram_addr = val;
-                return 0;
-            }
-            return g_cart_sram[(g_sram_addr++ + high) & 0x1FFu];
-        case 0x9F:
-            return 0xFF;
-        default:
-            return 0xFF;
-    }
-}
-
-uint8_t cart_flash_spi_write(uint8_t val, uint32_t pos) {
-    const uint32_t mask = static_cast<uint32_t>(g_cart_sram.size()) - 1u;
-    switch (g_sram_cmd) {
-        case 0x05:
-            return g_sram_status;
-        case 0x02:
-        case 0x0A:
-            if (pos <= 3) {
-                g_sram_addr = (g_sram_addr << 8) | val;
-            } else {
-                if (g_sram_status & 0x02u) {
-                    uint8_t& destination = g_cart_sram[g_sram_addr & mask];
-                    // Match melonDS's currently modelled distinction between
-                    // page-program (0x02) and page-write (0x0A).
-                    const uint8_t programmed =
-                        g_sram_cmd == 0x02 ? 0u : val;
-                    if (destination != programmed) {
-                        destination = programmed;
-                        g_cart_save_dirty = true;
-                    }
-                }
-                ++g_sram_addr;
-            }
-            return 0;
-        case 0x03:
-        case 0x0B:
-            if (pos <= 3) {
-                g_sram_addr = (g_sram_addr << 8) | val;
-                return 0;
-            }
-            if (g_sram_cmd == 0x0B && pos == 4) return 0;
-            return g_cart_sram[g_sram_addr++ & mask];
-        case 0x9F:
-            return 0xFF;
-        case 0xD8:
-        case 0xDB: {
-            if (pos <= 3) g_sram_addr = (g_sram_addr << 8) | val;
-            if (pos == 3 && (g_sram_status & 0x02u)) {
-                const uint32_t length =
-                    g_sram_cmd == 0xD8 ? 0x10000u : 0x100u;
-                for (uint32_t i = 0; i < length; ++i) {
-                    uint8_t& destination =
-                        g_cart_sram[(g_sram_addr + i) & mask];
-                    if (destination != 0u) {
-                        destination = 0u;
-                        g_cart_save_dirty = true;
-                    }
-                }
-            }
-            return 0;
-        }
-        default:
-            return 0xFF;
-    }
-}
-
+// The AUXSPI backup-chip protocol itself lives in cart_backup.cpp so it can be
+// pinned by cart_backup_test; this only adds the write-through to disk.
 uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
-    if (g_cart_sram.empty()) return 0;
-    if (pos == 0) {
-        switch (val) {
-            case 0x04: g_sram_status &= ~0x02u; return 0;    // WRDI
-            case 0x06: g_sram_status |= 0x02u; return 0;     // WREN
-            default: g_sram_cmd = val; g_sram_addr = 0; break;
-        }
-        return 0xFF;
-    }
-    uint8_t result = 0xFF;
-    switch (g_cart_save_config.type) {
-        case NdsCartridgeSaveType::EepromTiny:
-            result = cart_eeprom_tiny_spi_write(val, pos);
-            break;
-        case NdsCartridgeSaveType::Eeprom:
-            result = cart_eeprom_spi_write(val, pos);
-            break;
-        case NdsCartridgeSaveType::Flash:
-            result = cart_flash_spi_write(val, pos);
-            break;
-        case NdsCartridgeSaveType::None:
-            result = 0;
-            break;
-    }
-    if (last) {
-        g_sram_status &= ~0x02u;
-        if (g_cart_save_dirty && !g_cart_save_path.empty())
-            nds_io_flush_cartridge_save();
-    }
+    const uint8_t result =
+        nds_cart_backup_spi_write(g_cart_backup, val, pos, last);
+    if (last && g_cart_backup.dirty && !g_cart_save_path.empty())
+        nds_io_flush_cartridge_save();
     return result;
 }
 
@@ -1914,7 +1748,7 @@ void nds_io_reset() {
     g_auxspicnt = 0; g_auxspi_data = 0;
     g_auxspi_hold = false; g_auxspi_pos = 0;
     g_auxspi_deadline = UINT64_MAX;
-    g_sram_cmd = 0; g_sram_status = 0; g_sram_addr = 0;
+    nds_cart_backup_reset_command(g_cart_backup);
     g_divcnt = 0; g_div_deadline = UINT64_MAX;
     std::memset(g_div_numer, 0, sizeof(g_div_numer));
     std::memset(g_div_denom, 0, sizeof(g_div_denom));
@@ -2020,18 +1854,18 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 
     // Blank backup memory is 0xFF. Interactive play loads an exact-size
     // battery file; parity/automation runs explicitly keep persistence off.
-    if (g_cart_sram.size() != g_cart_save_config.size) {
-        g_cart_sram.assign(g_cart_save_config.size, 0xFFu);
-        g_cart_save_dirty = false;
+    if (g_cart_backup.sram.size() != g_cart_backup.config.size) {
+        g_cart_backup.sram.assign(g_cart_backup.config.size, 0xFFu);
+        g_cart_backup.dirty = false;
         if (!g_cart_save_path.empty()) {
             std::string error;
             switch (nds_battery_save_load_exact(
-                    g_cart_save_path, g_cart_sram.data(),
-                    g_cart_sram.size(), &error)) {
+                    g_cart_save_path, g_cart_backup.sram.data(),
+                    g_cart_backup.sram.size(), &error)) {
                 case NdsBatterySaveLoadResult::Loaded:
                     std::fprintf(stderr,
                                  "[save] loaded %zu bytes from %s\n",
-                                 g_cart_sram.size(),
+                                 g_cart_backup.sram.size(),
                                  g_cart_save_path.c_str());
                     break;
                 case NdsBatterySaveLoadResult::Missing:
@@ -2053,7 +1887,7 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 
 void nds_io_configure_cartridge_save(
         const NdsCartridgeSaveConfig& config) {
-    g_cart_save_config = config;
+    g_cart_backup.config = config;
 }
 
 void nds_io_set_cartridge_save_path(const char* path) {
@@ -2061,29 +1895,29 @@ void nds_io_set_cartridge_save_path(const char* path) {
 }
 
 bool nds_io_flush_cartridge_save() {
-    if (!g_cart_save_dirty || g_cart_save_path.empty())
+    if (!g_cart_backup.dirty || g_cart_save_path.empty())
         return true;
     std::string error;
     if (!nds_battery_save_write_atomic(
-            g_cart_save_path, g_cart_sram.data(),
-            g_cart_sram.size(), &error)) {
+            g_cart_save_path, g_cart_backup.sram.data(),
+            g_cart_backup.sram.size(), &error)) {
         std::fprintf(stderr, "[save] flush failed for %s: %s\n",
                      g_cart_save_path.c_str(), error.c_str());
         return false;
     }
-    g_cart_save_dirty = false;
+    g_cart_backup.dirty = false;
     std::fprintf(stderr, "[save] wrote %zu bytes to %s\n",
-                 g_cart_sram.size(), g_cart_save_path.c_str());
+                 g_cart_backup.sram.size(), g_cart_save_path.c_str());
     return true;
 }
 
 bool nds_io_cartridge_save_snapshot(const uint8_t** data, uint32_t* size,
                                     bool* dirty) {
-    if (!data || !size || !dirty || g_cart_sram.empty())
+    if (!data || !size || !dirty || g_cart_backup.sram.empty())
         return false;
-    *data = g_cart_sram.data();
-    *size = static_cast<uint32_t>(g_cart_sram.size());
-    *dirty = g_cart_save_dirty;
+    *data = g_cart_backup.sram.data();
+    *size = static_cast<uint32_t>(g_cart_backup.sram.size());
+    *dirty = g_cart_backup.dirty;
     return true;
 }
 

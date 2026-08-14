@@ -262,6 +262,7 @@ add_executable(nds_runner
     src/runtime_arm.cpp
     src/battery_save.cpp
     src/bus.cpp
+    src/cart_backup.cpp
     src/cp15.cpp
     src/io.cpp
     src/wifi_net.cpp
@@ -491,6 +492,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/battery_save.cpp)
   target_include_directories(battery_save_test PRIVATE src)
   add_test(NAME battery_save_test COMMAND battery_save_test)
+
+  # AUXSPI backup-chip protocol: pins the write-enable latch's lifetime across
+  # chip-select transfers, which is what silently dropped every cartridge save.
+  add_executable(cart_backup_test
+      tests/cart_backup_test.cpp
+      src/cart_backup.cpp)
+  target_include_directories(cart_backup_test PRIVATE src)
+  add_test(NAME cart_backup_test COMMAND cart_backup_test)
 
   # Wiimmfi M8: format round-trip, corruption/truncation detection, and
   # sanitizer determinism -- pure host-side logic with zero melonDS/
