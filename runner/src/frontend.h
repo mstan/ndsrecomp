@@ -157,6 +157,10 @@ struct NdsFrontendOptions {
     // boot — the generated image carries no boot code — and the runner
     // refuses any other pairing rather than silently switching paths.
     bool generated_firmware = false;
+    // Opt-in vendored FreeBIOS (no BIOS dumps): a real BSD-2-Clause BIOS
+    // reimplementation executed through its own recompiled banks. It cannot
+    // boot the firmware menu, so it also requires --boot direct.
+    bool freebios = false;
     // Wiimmfi: which of several concurrently-run instances this process is
     // (--instance-index CLI flag / [system] instance_index game.toml key).
     // 0 (the default) is a deliberate no-op everywhere this is consumed:

@@ -20,6 +20,7 @@
 #include "scheduler.h"
 #include "direct_boot.h"
 #include "generated_firmware.h"
+#include "freebios_images.h"
 
 #include <array>
 #include <random>
@@ -46,6 +47,10 @@ extern "C" const DispatchEntry g_dispatch_arm9_bios[];
 extern "C" const unsigned g_dispatch_arm9_bios_len;
 extern "C" const DispatchEntry g_dispatch_arm7_bios[];
 extern "C" const unsigned g_dispatch_arm7_bios_len;
+extern "C" const DispatchEntry g_dispatch_freebios_arm9[];
+extern "C" const unsigned g_dispatch_freebios_arm9_len;
+extern "C" const DispatchEntry g_dispatch_freebios_arm7[];
+extern "C" const unsigned g_dispatch_freebios_arm7_len;
 #ifdef NDS_HAVE_SM64DS_BANKS
 extern "C" const DispatchEntry g_dispatch_sm64ds_arm9[];
 extern "C" const unsigned g_dispatch_sm64ds_arm9_len;
@@ -470,6 +475,7 @@ int main(int argc, char** argv) {
     std::string cli_boot_mode;
     std::string cli_identity_mac;
     bool cli_generated_firmware = false;
+    bool cli_freebios = false;
     std::string cli_instance_index;
     std::string cli_save_path;
     std::string cli_firmware_path;
@@ -567,6 +573,8 @@ int main(int argc, char** argv) {
             cli_boot_mode = argv[++i];
         } else if (a == "--generated-firmware") {
             cli_generated_firmware = true;
+        } else if (a == "--freebios") {
+            cli_freebios = true;
         } else if (a == "--identity-mac" && i + 1 < argc) {
             cli_identity_mac = argv[++i];
         } else if (a == "--instance-index" && i + 1 < argc) {
@@ -627,6 +635,7 @@ int main(int argc, char** argv) {
                 "[--startup-mode preserve|manual|automatic] "
                 "[--boot lle|direct] "
                 "[--generated-firmware] [--identity-mac AA:BB:CC:DD:EE:FF] "
+                "[--freebios] "
                 "[--instance-index 0..255] "
                 "[--discover-static-misses] [--rtc-host] "
                 "[--net-ring-dump] [--net-ring-last N] "
@@ -728,6 +737,15 @@ int main(int argc, char** argv) {
             return 2;
         }
         frontend_options.generated_firmware = enabled;
+    }
+    if (const char* value = std::getenv("NDS_FREEBIOS")) {
+        bool enabled = false;
+        if (!nds_parse_on_off(value, &enabled)) {
+            std::fprintf(stderr,
+                         "invalid NDS_FREEBIOS (expected on or off)\n");
+            return 2;
+        }
+        frontend_options.freebios = enabled;
     }
     if (!cli_screen_layout.empty() &&
         !nds_parse_screen_layout(cli_screen_layout,
@@ -1116,6 +1134,15 @@ int main(int argc, char** argv) {
                  gpu3d_threaded ? "on" : "off");
 
     if (cli_generated_firmware) frontend_options.generated_firmware = true;
+    if (cli_freebios) frontend_options.freebios = true;
+    if (frontend_options.freebios &&
+        frontend_options.boot_mode != NdsBootMode::Direct) {
+        // A reimplemented BIOS cannot boot the firmware menu (melonDS
+        // NeedsDirectBoot); refuse rather than silently switch paths.
+        std::fprintf(stderr,
+            "refusing to start: --freebios requires --boot direct\n");
+        return 1;
+    }
     if (frontend_options.generated_firmware) {
         // Generated firmware carries no boot code, so the pairing is
         // enforced rather than silently switched (melonDS NeedsDirectBoot).
@@ -1138,8 +1165,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto a9 = read_file(dir + "/biosnds9.rom");
-    auto a7 = read_file(dir + "/biosnds7.rom");
+    std::vector<uint8_t> a9, a7;
+    if (frontend_options.freebios) {
+        a9.assign(nds_freebios9, nds_freebios9 + sizeof(nds_freebios9));
+        a7.assign(nds_freebios7, nds_freebios7 + sizeof(nds_freebios7));
+        std::fprintf(stderr,
+            "[bios] FREEBIOS (opt-in, no dumps): arm9 %zu bytes SHA-1 %s, "
+            "arm7 %zu bytes SHA-1 %s\n",
+            a9.size(), gba::sha1(a9.data(), a9.size()).hex().c_str(),
+            a7.size(), gba::sha1(a7.data(), a7.size()).hex().c_str());
+    } else {
+        a9 = read_file(dir + "/biosnds9.rom");
+        a7 = read_file(dir + "/biosnds7.rom");
+    }
     std::vector<uint8_t> fw;
     if (frontend_options.generated_firmware) {
         std::array<uint8_t, 6> identity_mac{};
@@ -1175,8 +1213,15 @@ int main(int argc, char** argv) {
 #ifdef NDS_HAVE_SM64DS_BANKS
     bool sm64ds_title = false;
 #endif
-    bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
-            & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios");
+    // Per-backend identity check (psxrecomp bios_backend_for_file model):
+    // the retail dumps and the embedded FreeBIOS each verify against their
+    // own pinned hashes -- the loaded bytes must match the recompiled banks
+    // that will execute them.
+    bool ok = frontend_options.freebios
+        ? verify(a9, "b85d6afdbf65d87c9ab11d4e7fb5ecfd6192ccf8", "freebios arm9")
+        & verify(a7, "eaab9b21610978f05a0eb14a9c8ff345698f56a2", "freebios arm7")
+        : verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
+        & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios");
     if (frontend_options.generated_firmware) {
         // Already synthesized and reported above; nothing to verify.
     } else if (cli_firmware_path.empty()) {
@@ -1351,10 +1396,20 @@ int main(int argc, char** argv) {
         runtime_trace_reset();
         net_ring_reset();
 
-        nds_register_dispatch(NDS_ARM9, g_dispatch_arm9_bios,
-                              g_dispatch_arm9_bios_len, 0xFFFF0000u);
-        nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
-                              g_dispatch_arm7_bios_len, 0x00000000u);
+        // Both BIOS backends are linked; the one matching the loaded (and
+        // hash-verified) images is registered — the psxrecomp runtime-
+        // selection model, never a silent substitution.
+        if (frontend_options.freebios) {
+            nds_register_dispatch(NDS_ARM9, g_dispatch_freebios_arm9,
+                                  g_dispatch_freebios_arm9_len, 0xFFFF0000u);
+            nds_register_dispatch(NDS_ARM7, g_dispatch_freebios_arm7,
+                                  g_dispatch_freebios_arm7_len, 0x00000000u);
+        } else {
+            nds_register_dispatch(NDS_ARM9, g_dispatch_arm9_bios,
+                                  g_dispatch_arm9_bios_len, 0xFFFF0000u);
+            nds_register_dispatch(NDS_ARM7, g_dispatch_arm7_bios,
+                                  g_dispatch_arm7_bios_len, 0x00000000u);
+        }
 #ifndef NDS_BOOTSTRAP_FIRMWARE
         nds_register_dispatch(NDS_ARM9, g_dispatch_fw_arm9_early,
                               g_dispatch_fw_arm9_early_len, 0xFFFF0000u);
@@ -1507,7 +1562,9 @@ int main(int argc, char** argv) {
             inputs.firmware = fw.data();
             inputs.firmware_size = static_cast<uint32_t>(fw.size());
             inputs.cart_chip_id = nds_cart_chip_id();
-            inputs.arm9_bios_is_native = true;  // retail dumps (increment 1)
+            // FreeBIOS has no Nintendo logo, so direct boot copies the
+            // cartridge's into the ARM9 BIOS image (DS<->GBA comm reads it).
+            inputs.arm9_bios_is_native = !frontend_options.freebios;
             RunnerDirectBootMachine machine;
             std::string boot_error;
             if (!nds_direct_boot(machine, inputs, &boot_error)) {

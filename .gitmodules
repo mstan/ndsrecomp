@@ -1,0 +1,3 @@
+[submodule "third_party/freebios"]
+	path = third_party/freebios
+	url = https://github.com/mstan/freebios.git

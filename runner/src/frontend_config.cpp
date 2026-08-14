@@ -356,6 +356,9 @@ bool nds_load_frontend_config(const std::string& path,
         if (const auto value = (*system)["generated_firmware"].value<bool>()) {
             options->generated_firmware = *value;
         }
+        if (const auto value = (*system)["freebios"].value<bool>()) {
+            options->freebios = *value;
+        }
         if (const auto value = (*system)["instance_index"].value<int64_t>()) {
             if (!nds_parse_instance_index(std::to_string(*value),
                                           &options->instance_index)) {

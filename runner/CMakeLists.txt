@@ -100,6 +100,10 @@ add_library(nds_banks STATIC
     ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c
     ${GEN}/arm7_bios_dispatch.c
+    ${GEN}/freebios_arm9.c
+    ${GEN}/freebios_arm9_dispatch.c
+    ${GEN}/freebios_arm7.c
+    ${GEN}/freebios_arm7_dispatch.c
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
     ${SM64DS_BANK_SOURCES}
@@ -113,6 +117,8 @@ target_include_directories(nds_banks PRIVATE
 set_source_files_properties(
     ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
+    ${GEN}/freebios_arm9.c ${GEN}/freebios_arm9_dispatch.c
+    ${GEN}/freebios_arm7.c ${GEN}/freebios_arm7_dispatch.c
     ${FW_BANK_BODIES}
     ${FW_BANK_DISPATCH}
     ${SM64DS_BANK_SOURCES}
@@ -133,8 +139,10 @@ endif()
 # Every immutable bank is CPU-specific even though both use one runtime ABI.
 # Tell the C compiler which core owns each source so it can fold the emitted
 # timing selection without changing generated C or the two-CPU scheduler.
-set(ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c)
-set(ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c)
+set(ARM9_BANK_SOURCES ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
+    ${GEN}/freebios_arm9.c ${GEN}/freebios_arm9_dispatch.c)
+set(ARM7_BANK_SOURCES ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
+    ${GEN}/freebios_arm7.c ${GEN}/freebios_arm7_dispatch.c)
 set(SM64DS_ARM9_BANK_SOURCES)
 set(SM64DS_HLE_PROFILE_SOURCES)
 foreach(src IN LISTS FW_BANK_BODIES FW_BANK_DISPATCH)
@@ -262,6 +270,7 @@ add_executable(nds_runner
     src/runtime_arm.cpp
     src/battery_save.cpp
     src/generated_firmware.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/freebios/freebios_images.cpp
     src/bus.cpp
     src/cart_backup.cpp
     src/cp15.cpp
@@ -369,7 +378,8 @@ target_include_directories(nds_runner PRIVATE
     src
     vendor/melonds                                     # vendored melonDS GPU3D + Wifi + shims (GPL-3.0-or-later)
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)  # sha1.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support   # sha1.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/freebios)     # embedded FreeBIOS (BSD-2-Clause)
 ndsrecomp_link_tomlpp(nds_runner)
 if(NOT MSVC)
     # Unmodified upstream melonDS sources carry their own warning posture;
