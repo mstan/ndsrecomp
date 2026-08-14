@@ -99,6 +99,24 @@ the pinned melonDS source tree. That mechanical check cannot prove independent
 authorship; provenance comments and the repository history remain the primary
 record.
 
+## melonPrimeDS Metroid Prime Hunters controls reference
+
+The MPH-specific `Prime Controls` input layer mirrors the user-facing control
+scheme and gameplay touch-helper behavior from makinori's melonPrimeDS fork.
+
+- Upstream: https://github.com/makinori/melonPrimeDS
+- Upstream license: GPL-3.0-or-later, inherited from melonDS
+- Local scope: the AMHE0 control binding defaults and touch-helper behavior in
+  `runner/src/frontend.cpp`, plus the game launcher's Mods-page control
+  surface in the Metroid Prime Hunters title repository
+- Source reference: melonPrimeDS `metroid/mph-us-1.0.lua`,
+  `metroid/mph-us-1.1.lua`, and `src/frontend/qt_sdl/EmuThread.cpp`
+
+This repository already distributes the runner as a GPL-3.0-or-later combined
+work because it vendors melonDS device-model code. The control-layer port stays
+inside that same runner/launcher boundary; the recompiler and generated banks
+remain outside it.
+
 ## melonDS vendored Wifi device model + net glue (runner)
 
 Since 2026-08 the native runner additionally vendors melonDS's DS Wi-Fi

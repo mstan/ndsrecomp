@@ -1,5 +1,7 @@
 #include "debug_server.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -88,12 +90,20 @@ bool parse_hex_bytes(const std::string& hex, std::vector<uint8_t>& out) {
 
 bool json_find(const std::string& s, const std::string& key, size_t& pos) {
     std::string pat = "\"" + key + "\"";
-    size_t p = s.find(pat);
-    if (p == std::string::npos) return false;
-    p += pat.size();
-    while (p < s.size() && (s[p] == ' ' || s[p] == ':' || s[p] == '\t')) ++p;
-    pos = p;
-    return true;
+    size_t start = 0;
+    while (true) {
+        size_t p = s.find(pat, start);
+        if (p == std::string::npos) return false;
+        p += pat.size();
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+        if (p < s.size() && s[p] == ':') {
+            ++p;
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+            pos = p;
+            return true;
+        }
+        start = p;
+    }
 }
 
 std::string json_str(const std::string& s, const std::string& key,
@@ -162,6 +172,16 @@ uint64_t json_u64(const std::string& s, const std::string& key,
     return (end == s.c_str() + p) ? def : v;
 }
 
+int64_t json_i64(const std::string& s, const std::string& key,
+                 int64_t def = 0) {
+    size_t p;
+    if (!json_find(s, key, p)) return def;
+    if (p < s.size() && s[p] == '"') ++p;
+    char* end = nullptr;
+    int64_t v = std::strtoll(s.c_str() + p, &end, 0);
+    return (end == s.c_str() + p) ? def : v;
+}
+
 bool json_bool(const std::string& s, const std::string& key, bool def = false) {
     size_t p;
     if (!json_find(s, key, p)) return def;
@@ -171,6 +191,41 @@ bool json_bool(const std::string& s, const std::string& key, bool def = false) {
     char* end = nullptr;
     const unsigned long value = std::strtoul(s.c_str() + p, &end, 10);
     return end == s.c_str() + p ? def : value != 0;
+}
+
+uint8_t mouse_button_from_string(const std::string& value) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) {
+                       if (c == '_' || c == '-') return ' ';
+                       return static_cast<char>(std::tolower(c));
+                   });
+    while (!normalized.empty() && normalized.front() == ' ')
+        normalized.erase(normalized.begin());
+    while (!normalized.empty() && normalized.back() == ' ')
+        normalized.pop_back();
+    if (normalized.empty()) return 0;
+    if (normalized == "left" || normalized == "mouse left" ||
+        normalized == "left mouse") {
+        return 1;
+    }
+    if (normalized == "middle" || normalized == "mouse middle" ||
+        normalized == "middle mouse") {
+        return 2;
+    }
+    if (normalized == "right" || normalized == "mouse right" ||
+        normalized == "right mouse") {
+        return 3;
+    }
+    if (normalized == "mouse 4" || normalized == "x1")
+        return 4;
+    if (normalized == "mouse 5" || normalized == "x2")
+        return 5;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(normalized.c_str(), &end, 10);
+    if (end == normalized.c_str() || parsed == 0 || parsed > 255)
+        return 0;
+    return static_cast<uint8_t>(parsed);
 }
 
 std::string counts_json() {
@@ -855,6 +910,88 @@ std::string handle(const std::string& line) {
                ",\"now_ticks\":" + std::to_string(s.now_ticks) +
                ",\"freq\":" + std::to_string(s.freq) +
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
+    }
+    if (cmd == "frontend_input_stats") {
+        NdsFrontendInputDebugState s{};
+        nds_frontend_input_debug_state(&s);
+        return "{\"active\":" + std::to_string(s.active) +
+               ",\"mph_prime_controls_available\":" +
+               std::to_string(s.mph_prime_controls_available) +
+               ",\"mph_prime_controls_active\":" +
+               std::to_string(s.mph_prime_controls_active) +
+               ",\"relative_mouse_captured\":" +
+               std::to_string(s.relative_mouse_captured) +
+               ",\"keyboard_pressed\":" +
+               std::to_string(s.keyboard_pressed) +
+               ",\"mouse_pressed\":" + std::to_string(s.mouse_pressed) +
+               ",\"mph_prime_pressed\":" +
+               std::to_string(s.mph_prime_pressed) +
+               ",\"published_key_mask\":" +
+               std::to_string(s.published_key_mask) +
+               ",\"relative_direct_writes\":" +
+               std::to_string(s.relative_direct_writes) +
+               ",\"mph_prime_key_downs\":" +
+               std::to_string(s.mph_prime_key_downs) +
+               ",\"mph_prime_mouse_downs\":" +
+               std::to_string(s.mph_prime_mouse_downs) +
+               ",\"debug_key_events\":" +
+               std::to_string(s.debug_key_events) +
+               ",\"debug_mouse_button_events\":" +
+               std::to_string(s.debug_mouse_button_events) +
+               ",\"debug_mouse_motion_events\":" +
+               std::to_string(s.debug_mouse_motion_events) +
+               ",\"debug_touch_events\":" +
+               std::to_string(s.debug_touch_events) +
+               ",\"debug_capture_events\":" +
+               std::to_string(s.debug_capture_events) +
+               ",\"debug_release_events\":" +
+               std::to_string(s.debug_release_events) +
+               ",\"debug_event_errors\":" +
+               std::to_string(s.debug_event_errors) +
+               ",\"debug_last_key_scancode\":" +
+               std::to_string(s.debug_last_key_scancode) +
+               ",\"virtual_stylus_x\":" +
+               std::to_string(s.virtual_stylus_x) +
+               ",\"virtual_stylus_y\":" +
+               std::to_string(s.virtual_stylus_y) +
+               ",\"top_window_id\":" + std::to_string(s.top_window_id) +
+               ",\"bottom_window_id\":" +
+               std::to_string(s.bottom_window_id) +
+               ",\"bottom_content_left\":" +
+               std::to_string(s.bottom_content_left) +
+               ",\"separate\":" + std::to_string(s.separate) + "}";
+    }
+    if (cmd == "frontend_input") {
+        const std::string action = json_str(line, "action");
+        bool ok = false;
+        if (action == "capture") {
+            ok = nds_frontend_debug_capture_mouse();
+        } else if (action == "release") {
+            ok = nds_frontend_debug_release_mouse();
+        } else if (action == "key") {
+            ok = nds_frontend_debug_key(
+                json_str(line, "key").c_str(),
+                json_bool(line, "down", true));
+        } else if (action == "mouse") {
+            const std::string named = json_str(line, "button");
+            uint8_t button = mouse_button_from_string(named);
+            if (button == 0)
+                button = static_cast<uint8_t>(json_u64(line, "button", 0));
+            ok = nds_frontend_debug_mouse_button(
+                button, json_bool(line, "down", true));
+        } else if (action == "motion") {
+            ok = nds_frontend_debug_mouse_motion(
+                static_cast<int>(json_i64(line, "dx", 0)),
+                static_cast<int>(json_i64(line, "dy", 0)));
+        } else if (action == "touch") {
+            ok = nds_frontend_debug_touch(
+                static_cast<uint16_t>(json_u64(line, "x", 0)),
+                static_cast<uint16_t>(json_u64(line, "y", 0)),
+                json_bool(line, "down", true));
+        } else {
+            return "{\"error\":\"unknown frontend_input action\"}";
+        }
+        return "{\"ok\":" + std::string(ok ? "true" : "false") + "}";
     }
     if (cmd == "frontend_exit") {
         const bool requested = nds_frontend_request_exit();

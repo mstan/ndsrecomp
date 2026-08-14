@@ -72,6 +72,12 @@ int main() {
         !require(!nds_parse_startup_mode("fast", &startup)))
         return 4;
 
+    {
+        NdsFrontendOptions defaults{};
+        if (!require(defaults.mph_virtual_stylus_sensitivity == 20))
+            return 17;
+    }
+
     NdsCartridgeSaveType save_type = NdsCartridgeSaveType::Eeprom;
     if (!require(nds_parse_cartridge_save_type("flash", &save_type)) ||
         !require(save_type == NdsCartridgeSaveType::Flash) ||
@@ -104,7 +110,13 @@ int main() {
                 "save_size = 262144\n"
                 "[local_wireless]\n"
                 "enabled = true\n"
-                "base_port = 27000\n";
+                "base_port = 27000\n"
+                "[controls.prime]\n"
+                "enabled = true\n"
+                "virtual_stylus_sensitivity = 125\n"
+                "[controls.prime.bindings]\n"
+                "move-forward = \"Up\"\n"
+                "shoot = \"Mouse Left\"\n";
     }
     NdsFrontendOptions options{};
     std::string error;
@@ -126,7 +138,11 @@ int main() {
                  NdsCartridgeSaveType::Flash) ||
         !require(options.cartridge_save.size == 262144) ||
         !require(options.local_wireless.enabled) ||
-        !require(options.local_wireless.base_port == 27000))
+        !require(options.local_wireless.base_port == 27000) ||
+        !require(options.mph_prime_controls) ||
+        !require(options.mph_virtual_stylus_sensitivity == 125) ||
+        !require(options.mph_bindings.move_forward == "Up") ||
+        !require(options.mph_bindings.shoot == "Mouse Left"))
         return 6;
 
     {
@@ -203,6 +219,25 @@ int main() {
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
         return 12;
+    {
+        std::ofstream file(path);
+        file << "[controls.prime]\n"
+                "virtual_stylus_sensitivity = 401\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 15;
+
+    {
+        std::ofstream file(path);
+        file << "[controls.prime.bindings]\n"
+                "bad-action = \"W\"\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 16;
     std::filesystem::remove(path);
     return 0;
 }

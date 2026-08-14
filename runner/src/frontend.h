@@ -108,6 +108,32 @@ struct NdsLocalWirelessOptions {
     uint16_t base_port = 26710;
 };
 
+struct NdsMphPrimeControlBindings {
+    std::string move_forward = "W";
+    std::string move_back = "S";
+    std::string move_left = "A";
+    std::string move_right = "D";
+    std::string jump = "Space";
+    std::string morph_ball = "Left Ctrl";
+    std::string boost_zoom = "Left Shift";
+    std::string scan_visor = "C";
+    std::string ui_left = "Q";
+    std::string ui_right = "E";
+    std::string ui_ok = "F";
+    std::string shoot = "Mouse Left";
+    std::string scan_shoot = "Mouse Right";
+    std::string beam = "Mouse 5";
+    std::string missile = "Mouse 4";
+    std::string weapon1 = "1";
+    std::string weapon2 = "2";
+    std::string weapon3 = "3";
+    std::string weapon4 = "4";
+    std::string weapon5 = "5";
+    std::string weapon6 = "6";
+    std::string virtual_stylus = "Tab";
+    std::string menu = "V";
+};
+
 struct NdsFrontendOptions {
     // Optional exact cartridge identity from [game]. When present, every
     // title-owned setting in this config is rejected for any other ROM.
@@ -153,6 +179,9 @@ struct NdsFrontendOptions {
     bool relative_mouse_invert_y = false;
     // Active-high frontend pressed-bit mask (same layout as key_bit()).
     uint16_t relative_mouse_fire_mask = 0;
+    bool mph_prime_controls = false;
+    uint16_t mph_virtual_stylus_sensitivity = 20;  // 10%..400%
+    NdsMphPrimeControlBindings mph_bindings{};
     // Internal exact-ROM capability selected after cartridge verification.
     // MPH consumes unbounded host deltas through its native aim fields.
     bool relative_mouse_direct_aim = false;
@@ -181,6 +210,9 @@ bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
 bool nds_parse_on_off(const std::string& value, bool* out);
 bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
 bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);
+bool nds_set_mph_prime_binding(NdsFrontendOptions* options,
+                               const std::string& action,
+                               const std::string& value);
 bool nds_parse_cartridge_save_type(const std::string& value,
                                    NdsCartridgeSaveType* out);
 // Strict dotted-quad IPv4 ("a.b.c.d", each octet 0..255, no leading zeros
@@ -221,6 +253,46 @@ struct NdsFrontendLiveStats {
     uint64_t underruns;       // audio underruns so far
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
+
+// SDL-event injection and counters for play-mode TCP validation. These
+// commands intentionally enter through the frontend's normal event path, so
+// game-specific input layers such as MPH Prime Controls are exercised the same
+// way as real host input.
+struct NdsFrontendInputDebugState {
+    int active;
+    int mph_prime_controls_available;
+    int mph_prime_controls_active;
+    int relative_mouse_captured;
+    uint16_t keyboard_pressed;
+    uint16_t mouse_pressed;
+    uint16_t mph_prime_pressed;
+    uint16_t published_key_mask;
+    uint64_t relative_direct_writes;
+    uint64_t mph_prime_key_downs;
+    uint64_t mph_prime_mouse_downs;
+    uint64_t debug_key_events;
+    uint64_t debug_mouse_button_events;
+    uint64_t debug_mouse_motion_events;
+    uint64_t debug_touch_events;
+    uint64_t debug_capture_events;
+    uint64_t debug_release_events;
+    uint64_t debug_event_errors;
+    uint32_t debug_last_key_scancode;
+    int virtual_stylus_x;
+    int virtual_stylus_y;
+    uint32_t top_window_id;
+    uint32_t bottom_window_id;
+    int bottom_content_left;
+    int separate;
+};
+
+bool nds_frontend_debug_key(const char* key_name, bool down);
+bool nds_frontend_debug_mouse_button(uint8_t button, bool down);
+bool nds_frontend_debug_mouse_motion(int dx, int dy);
+bool nds_frontend_debug_touch(uint16_t x, uint16_t y, bool down);
+bool nds_frontend_debug_capture_mouse();
+bool nds_frontend_debug_release_mouse();
+void nds_frontend_input_debug_state(NdsFrontendInputDebugState* out);
 
 // Opt-in visual-artifact observer for the interactive TCP surface. A partial
 // black band is a run of 8..191 nearly-all-black top-screen rows; full-black

@@ -370,6 +370,8 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_sensitivity;
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
+    std::string cli_mph_prime_controls;
+    std::string cli_mph_virtual_stylus_sensitivity;
     std::string cli_startup_mode;
     std::string cli_instance_index;
     std::string cli_save_path;
@@ -449,6 +451,19 @@ int main(int argc, char** argv) {
             cli_relative_mouse_invert_y = argv[++i];
         } else if (a == "--relative-mouse-fire-key" && i + 1 < argc) {
             cli_relative_mouse_fire_key = argv[++i];
+        } else if (a == "--mph-prime-controls" && i + 1 < argc) {
+            cli_mph_prime_controls = argv[++i];
+        } else if (a == "--mph-virtual-stylus-sensitivity" && i + 1 < argc) {
+            cli_mph_virtual_stylus_sensitivity = argv[++i];
+        } else if (a.rfind("--mph-bind-", 0) == 0 && i + 1 < argc) {
+            const std::string action = a.substr(std::strlen("--mph-bind-"));
+            if (!nds_set_mph_prime_binding(
+                    &frontend_options, action, argv[++i])) {
+                std::fprintf(stderr,
+                    "invalid %s (unknown action or too-long value)\n",
+                    a.c_str());
+                return 2;
+            }
         } else if (a == "--startup-mode" && i + 1 < argc) {
             cli_startup_mode = argv[++i];
         } else if (a == "--instance-index" && i + 1 < argc) {
@@ -503,6 +518,9 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-sensitivity 10..400] "
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
+                "[--mph-prime-controls on|off] "
+                "[--mph-virtual-stylus-sensitivity 10..400] "
+                "[--mph-bind-<action> <key-or-mouse>] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--instance-index 0..255] "
                 "[--discover-static-misses] [--rtc-host] "
@@ -652,6 +670,26 @@ int main(int argc, char** argv) {
                      "invalid --relative-mouse-fire-key "
                      "(expected none, a, b, l, r, x, or y)\n");
         return 2;
+    }
+    if (!cli_mph_prime_controls.empty() &&
+        !nds_parse_on_off(cli_mph_prime_controls,
+                          &frontend_options.mph_prime_controls)) {
+        std::fprintf(stderr,
+                     "invalid --mph-prime-controls (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_mph_virtual_stylus_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_mph_virtual_stylus_sensitivity,
+            &frontend_options.mph_virtual_stylus_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --mph-virtual-stylus-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (frontend_options.mph_prime_controls &&
+        cli_relative_mouse_sensitivity.empty()) {
+        frontend_options.relative_mouse_sensitivity = 30;
     }
     if (!cli_startup_mode.empty() &&
         !nds_parse_startup_mode(cli_startup_mode,
@@ -1032,6 +1070,8 @@ int main(int argc, char** argv) {
         rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
         frontend_options.relative_mouse_touch;
     frontend_options.relative_mouse_direct_aim = mph_mouse_aim_policy;
+    frontend_options.mph_prime_controls =
+        frontend_options.mph_prime_controls && mph_mouse_aim_policy;
 #ifdef NDS_HAVE_SM64DS_BANKS
     // Static title banks and host-side enhancements are valid only for the
     // exact image they were generated and audited against. In particular,

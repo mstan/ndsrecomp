@@ -121,6 +121,38 @@ bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out) {
     return true;
 }
 
+bool nds_set_mph_prime_binding(NdsFrontendOptions* options,
+                               const std::string& action,
+                               const std::string& value) {
+    if (!options || value.size() >= 64u) return false;
+    NdsMphPrimeControlBindings& b = options->mph_bindings;
+    if (action == "move-forward") b.move_forward = value;
+    else if (action == "move-back") b.move_back = value;
+    else if (action == "move-left") b.move_left = value;
+    else if (action == "move-right") b.move_right = value;
+    else if (action == "jump") b.jump = value;
+    else if (action == "morph-ball") b.morph_ball = value;
+    else if (action == "boost-zoom") b.boost_zoom = value;
+    else if (action == "scan-visor") b.scan_visor = value;
+    else if (action == "ui-left") b.ui_left = value;
+    else if (action == "ui-right") b.ui_right = value;
+    else if (action == "ui-ok") b.ui_ok = value;
+    else if (action == "shoot") b.shoot = value;
+    else if (action == "scan-shoot") b.scan_shoot = value;
+    else if (action == "beam") b.beam = value;
+    else if (action == "missile") b.missile = value;
+    else if (action == "weapon1") b.weapon1 = value;
+    else if (action == "weapon2") b.weapon2 = value;
+    else if (action == "weapon3") b.weapon3 = value;
+    else if (action == "weapon4") b.weapon4 = value;
+    else if (action == "weapon5") b.weapon5 = value;
+    else if (action == "weapon6") b.weapon6 = value;
+    else if (action == "virtual-stylus") b.virtual_stylus = value;
+    else if (action == "menu") b.menu = value;
+    else return false;
+    return true;
+}
+
 bool nds_parse_cartridge_save_type(const std::string& value,
                                    NdsCartridgeSaveType* out) {
     if (!out) return false;
@@ -528,6 +560,41 @@ bool nds_load_frontend_config(const std::string& path,
                         "local_wireless.base_port must be 1024..65520";
                 }
                 return false;
+            }
+        }
+    }
+
+    if (const toml::table* controls = root["controls"].as_table()) {
+        if (const toml::table* prime = (*controls)["prime"].as_table()) {
+            if (const auto value = (*prime)["enabled"].value<bool>()) {
+                options->mph_prime_controls = *value;
+            }
+            if (const auto value =
+                    (*prime)["virtual_stylus_sensitivity"].value<int64_t>()) {
+                if (!nds_parse_mouse_sensitivity(std::to_string(*value),
+                                                 &options->mph_virtual_stylus_sensitivity)) {
+                    if (error) {
+                        *error =
+                            "controls.prime.virtual_stylus_sensitivity "
+                            "must be 10..400";
+                    }
+                    return false;
+                }
+            }
+            if (const toml::table* bindings = (*prime)["bindings"].as_table()) {
+                for (const auto& item : *bindings) {
+                    const auto value = item.second.value<std::string>();
+                    if (!value) continue;
+                    if (!nds_set_mph_prime_binding(
+                            options, std::string(item.first.str()), *value)) {
+                        if (error) {
+                            *error =
+                                "controls.prime.bindings contains an "
+                                "unknown binding name or too-long value";
+                        }
+                        return false;
+                    }
+                }
             }
         }
     }

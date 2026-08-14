@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <string>
 
@@ -16,6 +19,7 @@
 #include "io.h"
 #include "profile_report.h"
 #include "relative_mouse_touch.h"
+#include "runtime_arm.h"
 #include "scheduler.h"
 #include "spu.h"
 #include "title_patches.h"
@@ -29,6 +33,7 @@ namespace {
 // point. Stays all-zero (active=0) when no frontend is running.
 NdsFrontendLiveStats g_live_stats{};
 NdsFrontendBlackBandCapture g_black_band{};
+NdsFrontendInputDebugState g_input_debug{};
 
 void observe_top_black_bands(const uint32_t* pixels, uint64_t frame) {
     if (!g_black_band.enabled || !pixels) return;
@@ -79,6 +84,284 @@ namespace {
 
 constexpr int kScreenWidth = 256;
 constexpr int kScreenHeight = 192;
+constexpr uint32_t kMphUs10MorphState = 0x020DA818u;
+
+enum class MphPrimeInputKind : uint8_t {
+    None,
+    Key,
+    Mouse,
+};
+
+struct MphPrimeBinding {
+    MphPrimeInputKind kind = MphPrimeInputKind::None;
+    SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
+    uint8_t mouse = 0;
+};
+
+enum class MphPrimeAction : uint8_t {
+    MoveForward,
+    MoveBack,
+    MoveLeft,
+    MoveRight,
+    Jump,
+    MorphBall,
+    BoostZoom,
+    ScanVisor,
+    UiLeft,
+    UiRight,
+    UiOk,
+    Shoot,
+    ScanShoot,
+    Beam,
+    Missile,
+    Weapon1,
+    Weapon2,
+    Weapon3,
+    Weapon4,
+    Weapon5,
+    Weapon6,
+    VirtualStylus,
+    Menu,
+    Count,
+};
+
+struct MphPrimeBindingSet {
+    std::array<MphPrimeBinding,
+               static_cast<size_t>(MphPrimeAction::Count)> bindings{};
+    bool valid = true;
+};
+
+struct MphTouchStep {
+    uint16_t x = 0;
+    uint16_t y = 0;
+    bool down = false;
+    uint8_t frames = 0;
+};
+
+struct MphTouchSequence {
+    std::array<MphTouchStep, 6> steps{};
+    uint8_t count = 0;
+    uint8_t index = 0;
+    uint8_t remaining = 0;
+
+    bool active() const { return index < count; }
+
+    void start(std::initializer_list<MphTouchStep> source) {
+        count = static_cast<uint8_t>(
+            std::min(source.size(), steps.size()));
+        std::copy_n(source.begin(), count, steps.begin());
+        index = 0;
+        remaining = count ? steps[0].frames : 0;
+    }
+
+    void tick() {
+        if (!active()) return;
+        const MphTouchStep& step = steps[index];
+        nds_set_touch(step.x, step.y, step.down);
+        if (remaining > 0) --remaining;
+        if (remaining == 0) {
+            ++index;
+            if (active()) remaining = steps[index].frames;
+        }
+    }
+};
+
+std::string binding_name_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       if (c == '_' || c == '-') return ' ';
+                       return static_cast<char>(std::tolower(c));
+                   });
+    while (!value.empty() && value.front() == ' ') value.erase(value.begin());
+    while (!value.empty() && value.back() == ' ') value.pop_back();
+    return value;
+}
+
+SDL_Scancode scancode_from_binding_name(const std::string& value) {
+    const std::string normalized = binding_name_lower(value);
+    SDL_Scancode key = SDL_GetScancodeFromName(value.c_str());
+    if (key != SDL_SCANCODE_UNKNOWN)
+        return key;
+    if (normalized.size() == 1) {
+        const char c = normalized[0];
+        if (c >= 'a' && c <= 'z') {
+            return static_cast<SDL_Scancode>(
+                SDL_SCANCODE_A + (c - 'a'));
+        }
+        if (c >= '1' && c <= '9') {
+            return static_cast<SDL_Scancode>(
+                SDL_SCANCODE_1 + (c - '1'));
+        }
+        if (c == '0')
+            return SDL_SCANCODE_0;
+    }
+    if (normalized == "ctrl" || normalized == "control" ||
+        normalized == "left ctrl" || normalized == "left control") {
+        return SDL_SCANCODE_LCTRL;
+    }
+    if (normalized == "right ctrl" || normalized == "right control")
+        return SDL_SCANCODE_RCTRL;
+    if (normalized == "shift" || normalized == "left shift")
+        return SDL_SCANCODE_LSHIFT;
+    if (normalized == "right shift")
+        return SDL_SCANCODE_RSHIFT;
+    if (normalized == "space")
+        return SDL_SCANCODE_SPACE;
+    if (normalized == "tab")
+        return SDL_SCANCODE_TAB;
+    if (normalized == "enter" || normalized == "return")
+        return SDL_SCANCODE_RETURN;
+    if (normalized == "backspace")
+        return SDL_SCANCODE_BACKSPACE;
+    return SDL_SCANCODE_UNKNOWN;
+}
+
+MphPrimeBinding parse_mph_prime_binding(const std::string& value) {
+    const std::string normalized = binding_name_lower(value);
+    if (normalized.empty() || normalized == "none" ||
+        normalized == "unbound") {
+        return {};
+    }
+    if (normalized == "mouse left" || normalized == "left mouse")
+        return {MphPrimeInputKind::Mouse, SDL_SCANCODE_UNKNOWN,
+                SDL_BUTTON_LEFT};
+    if (normalized == "mouse right" || normalized == "right mouse")
+        return {MphPrimeInputKind::Mouse, SDL_SCANCODE_UNKNOWN,
+                SDL_BUTTON_RIGHT};
+    if (normalized == "mouse middle" || normalized == "middle mouse")
+        return {MphPrimeInputKind::Mouse, SDL_SCANCODE_UNKNOWN,
+                SDL_BUTTON_MIDDLE};
+    if (normalized == "mouse 4")
+        return {MphPrimeInputKind::Mouse, SDL_SCANCODE_UNKNOWN,
+                SDL_BUTTON_X1};
+    if (normalized == "mouse 5")
+        return {MphPrimeInputKind::Mouse, SDL_SCANCODE_UNKNOWN,
+                SDL_BUTTON_X2};
+
+    SDL_Scancode key = scancode_from_binding_name(value);
+    return {key == SDL_SCANCODE_UNKNOWN ? MphPrimeInputKind::None
+                                        : MphPrimeInputKind::Key,
+            key, 0};
+}
+
+bool binding_matches_key(const MphPrimeBinding& binding, SDL_Scancode key) {
+    return binding.kind == MphPrimeInputKind::Key && binding.key == key;
+}
+
+bool binding_matches_mouse(const MphPrimeBinding& binding, uint8_t button) {
+    return binding.kind == MphPrimeInputKind::Mouse &&
+           binding.mouse == button;
+}
+
+uint16_t mph_prime_hold_mask(MphPrimeAction action) {
+    switch (action) {
+        case MphPrimeAction::MoveForward: return 1u << 6;  // Up
+        case MphPrimeAction::MoveBack:    return 1u << 7;  // Down
+        case MphPrimeAction::MoveLeft:    return 1u << 5;  // Left
+        case MphPrimeAction::MoveRight:   return 1u << 4;  // Right
+        case MphPrimeAction::Jump:        return 1u << 1;  // B
+        case MphPrimeAction::BoostZoom:   return 1u << 8;  // R
+        case MphPrimeAction::Shoot:
+        case MphPrimeAction::ScanShoot:   return 1u << 9;  // L
+        case MphPrimeAction::Menu:        return 1u << 3;  // Start
+        default:                          return 0;
+    }
+}
+
+void start_mph_touch_action(MphPrimeAction action,
+                            MphTouchSequence& sequence) {
+    const MphTouchStep up{0, 0, false, 2};
+    auto tap = [&](uint16_t x, uint16_t y, uint8_t touch_frames = 2,
+                   uint8_t release_frames = 2) {
+        sequence.start({up, {x, y, true, touch_frames},
+                        {0, 0, false, release_frames}});
+    };
+    switch (action) {
+        case MphPrimeAction::MorphBall:
+            // melonPrimeDS releases late here; boost ball is unreliable if
+            // the stylus is restored to aim-center immediately after morph.
+            tap(231, 167, 2, 8);
+            break;
+        case MphPrimeAction::ScanVisor:
+            // Hold the visor touch long enough for the transition path that
+            // melonPrimeDS handled with a 30-frame loop.
+            tap(128, 173, 30, 2);
+            break;
+        case MphPrimeAction::UiOk:
+            tap(128, 142);
+            break;
+        case MphPrimeAction::UiLeft:
+            tap(71, 141);
+            break;
+        case MphPrimeAction::UiRight:
+            tap(185, 141);
+            break;
+        case MphPrimeAction::Beam:
+            tap(85, 32);
+            break;
+        case MphPrimeAction::Missile:
+            tap(125, 32);
+            break;
+        case MphPrimeAction::Weapon1:
+        case MphPrimeAction::Weapon2:
+        case MphPrimeAction::Weapon3:
+        case MphPrimeAction::Weapon4:
+        case MphPrimeAction::Weapon5:
+        case MphPrimeAction::Weapon6: {
+            const unsigned index =
+                static_cast<unsigned>(action) -
+                static_cast<unsigned>(MphPrimeAction::Weapon1);
+            const uint16_t x = static_cast<uint16_t>(93 + 25 * index);
+            const uint16_t y = static_cast<uint16_t>(48 + 25 * index);
+            sequence.start({up, {232, 34, true, 2}, {x, y, true, 2},
+                            {0, 0, false, 2}});
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+MphPrimeBindingSet make_mph_prime_bindings(
+    const NdsMphPrimeControlBindings& source) {
+    MphPrimeBindingSet set{};
+    auto put = [&](MphPrimeAction action, const std::string& value) {
+        MphPrimeBinding binding = parse_mph_prime_binding(value);
+        if (binding.kind == MphPrimeInputKind::None &&
+            binding_name_lower(value) != "none" &&
+            binding_name_lower(value) != "unbound") {
+            std::fprintf(stderr,
+                         "[sdl] invalid MPH Prime Controls binding: %s\n",
+                         value.c_str());
+            set.valid = false;
+        }
+        set.bindings[static_cast<size_t>(action)] = binding;
+    };
+    put(MphPrimeAction::MoveForward, source.move_forward);
+    put(MphPrimeAction::MoveBack, source.move_back);
+    put(MphPrimeAction::MoveLeft, source.move_left);
+    put(MphPrimeAction::MoveRight, source.move_right);
+    put(MphPrimeAction::Jump, source.jump);
+    put(MphPrimeAction::MorphBall, source.morph_ball);
+    put(MphPrimeAction::BoostZoom, source.boost_zoom);
+    put(MphPrimeAction::ScanVisor, source.scan_visor);
+    put(MphPrimeAction::UiLeft, source.ui_left);
+    put(MphPrimeAction::UiRight, source.ui_right);
+    put(MphPrimeAction::UiOk, source.ui_ok);
+    put(MphPrimeAction::Shoot, source.shoot);
+    put(MphPrimeAction::ScanShoot, source.scan_shoot);
+    put(MphPrimeAction::Beam, source.beam);
+    put(MphPrimeAction::Missile, source.missile);
+    put(MphPrimeAction::Weapon1, source.weapon1);
+    put(MphPrimeAction::Weapon2, source.weapon2);
+    put(MphPrimeAction::Weapon3, source.weapon3);
+    put(MphPrimeAction::Weapon4, source.weapon4);
+    put(MphPrimeAction::Weapon5, source.weapon5);
+    put(MphPrimeAction::Weapon6, source.weapon6);
+    put(MphPrimeAction::VirtualStylus, source.virtual_stylus);
+    put(MphPrimeAction::Menu, source.menu);
+    return set;
+}
 constexpr int kWindowScale = 2;
 constexpr uint64_t kSystemCyclesPerFrame = 2130ull * 263ull;
 constexpr int kAudioFrequency = 33513982 / 1024;
@@ -690,6 +973,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             options.relative_mouse_direct_aim ? "direct-unbounded"
                                               : "virtual-touch");
     }
+    const bool mph_prime_controls_available =
+        options.mph_prime_controls && options.relative_mouse_direct_aim;
+    MphPrimeBindingSet mph_prime_bindings{};
+    if (mph_prime_controls_available) {
+        mph_prime_bindings = make_mph_prime_bindings(options.mph_bindings);
+        if (!mph_prime_bindings.valid) {
+            destroy_presentation(presentation);
+            SDL_Quit();
+            return 1;
+        }
+        std::fprintf(stderr,
+            "[sdl] MPH Prime Controls: melonPrimeDS bindings enabled; "
+            "virtual stylus sensitivity=%u%%\n",
+            static_cast<unsigned>(
+                options.mph_virtual_stylus_sensitivity));
+    }
 
     SDL_GameController* controller = open_first_controller();
     SDL_JoystickID controller_id = controller
@@ -698,10 +997,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     uint16_t keyboard_pressed = 0;
     uint16_t controller_pressed = 0;
     uint16_t mouse_pressed = 0;
+    uint16_t mph_prime_pressed = 0;
     auto publish_keys = [&]() {
         nds_set_key_mask(static_cast<uint16_t>(
             0x0FFFu &
-            ~(keyboard_pressed | controller_pressed | mouse_pressed)));
+            ~(keyboard_pressed | controller_pressed | mouse_pressed |
+              mph_prime_pressed)));
     };
     publish_keys();
     nds_set_touch(0, 0, false);
@@ -713,7 +1014,86 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     int64_t relative_delta_x = 0;
     int64_t relative_delta_y = 0;
     uint64_t relative_direct_writes = 0;
+    uint64_t mph_prime_key_downs = 0;
+    uint64_t mph_prime_mouse_downs = 0;
     NdsRelativeMouseTouch relative_mouse;
+    std::array<bool, static_cast<size_t>(MphPrimeAction::Count)>
+        mph_prime_held{};
+    MphTouchSequence mph_touch_sequence{};
+    float mph_virtual_x = 128.0f;
+    float mph_virtual_y = 96.0f;
+    auto mph_prime_active = [&]() {
+        return mph_prime_controls_available && relative_mouse.captured();
+    };
+    auto update_mph_prime_pressed = [&]() {
+        uint16_t mask = 0;
+        const bool virtual_stylus =
+            mph_prime_held[static_cast<size_t>(
+                MphPrimeAction::VirtualStylus)];
+        for (size_t i = 0; i < mph_prime_held.size(); ++i) {
+            if (!mph_prime_held[i]) continue;
+            const auto action = static_cast<MphPrimeAction>(i);
+            if (virtual_stylus &&
+                (action == MphPrimeAction::Shoot ||
+                 action == MphPrimeAction::ScanShoot)) {
+                continue;
+            }
+            mask |= mph_prime_hold_mask(action);
+        }
+        mph_prime_pressed = mask;
+        publish_keys();
+    };
+    auto clear_mph_prime_controls = [&]() {
+        mph_prime_held.fill(false);
+        mph_prime_pressed = 0;
+        mph_touch_sequence = {};
+    };
+    auto set_mph_prime_action = [&](MphPrimeAction action, bool down,
+                                    bool repeat) {
+        const size_t index = static_cast<size_t>(action);
+        const uint16_t mask = mph_prime_hold_mask(action);
+        if (mask != 0 ||
+            action == MphPrimeAction::VirtualStylus) {
+            mph_prime_held[index] = down;
+            update_mph_prime_pressed();
+            return true;
+        }
+        if (down && !repeat)
+            start_mph_touch_action(action, mph_touch_sequence);
+        return true;
+    };
+    auto process_mph_prime_key = [&](SDL_Scancode key, bool down,
+                                     bool repeat) {
+        if (!mph_prime_active()) return false;
+        bool consumed = false;
+        for (size_t i = 0; i < mph_prime_bindings.bindings.size(); ++i) {
+            if (!binding_matches_key(mph_prime_bindings.bindings[i], key))
+                continue;
+            consumed = true;
+            set_mph_prime_action(static_cast<MphPrimeAction>(i), down,
+                                 repeat);
+        }
+        if (consumed && down && !repeat)
+            ++mph_prime_key_downs;
+        return consumed;
+    };
+    auto process_mph_prime_mouse = [&](uint8_t button, bool down,
+                                       bool repeat) {
+        if (!mph_prime_active()) return false;
+        bool consumed = false;
+        for (size_t i = 0; i < mph_prime_bindings.bindings.size(); ++i) {
+            if (!binding_matches_mouse(mph_prime_bindings.bindings[i],
+                                       button)) {
+                continue;
+            }
+            consumed = true;
+            set_mph_prime_action(static_cast<MphPrimeAction>(i), down,
+                                 repeat);
+        }
+        if (consumed && down && !repeat)
+            ++mph_prime_mouse_downs;
+        return consumed;
+    };
     auto release_relative_mouse = [&]() {
         if (relative_mouse.captured()) {
             SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -726,6 +1106,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             mouse_pressed = 0;
             publish_keys();
         }
+        clear_mph_prime_controls();
+        publish_keys();
         relative_delta_x = 0;
         relative_delta_y = 0;
     };
@@ -742,6 +1124,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         SDL_GetRelativeMouseState(nullptr, nullptr);
         relative_mouse.capture(options.relative_mouse_sensitivity,
                                options.relative_mouse_invert_y);
+        if (mph_prime_controls_available && keyboard_pressed != 0) {
+            keyboard_pressed = 0;
+            publish_keys();
+        }
         nds_set_touch(relative_mouse.x(), relative_mouse.y(), true);
         std::fprintf(stderr, "[sdl] relative mouse captured\n");
     };
@@ -786,6 +1172,34 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     g_live_stats.active = 1;
     g_live_stats.freq = frequency;
     g_black_band = {};
+    g_input_debug = {};
+    auto publish_input_debug = [&]() {
+        g_input_debug.active = 1;
+        g_input_debug.mph_prime_controls_available =
+            mph_prime_controls_available ? 1 : 0;
+        g_input_debug.mph_prime_controls_active =
+            mph_prime_active() ? 1 : 0;
+        g_input_debug.relative_mouse_captured =
+            relative_mouse.captured() ? 1 : 0;
+        g_input_debug.keyboard_pressed = keyboard_pressed;
+        g_input_debug.mouse_pressed = mouse_pressed;
+        g_input_debug.mph_prime_pressed = mph_prime_pressed;
+        g_input_debug.published_key_mask = static_cast<uint16_t>(
+            0x0FFFu & ~(keyboard_pressed | controller_pressed |
+                        mouse_pressed | mph_prime_pressed));
+        g_input_debug.relative_direct_writes = relative_direct_writes;
+        g_input_debug.mph_prime_key_downs = mph_prime_key_downs;
+        g_input_debug.mph_prime_mouse_downs = mph_prime_mouse_downs;
+        g_input_debug.virtual_stylus_x =
+            static_cast<int>(std::lround(mph_virtual_x));
+        g_input_debug.virtual_stylus_y =
+            static_cast<int>(std::lround(mph_virtual_y));
+        g_input_debug.top_window_id = presentation.window_ids[0];
+        g_input_debug.bottom_window_id = presentation.window_ids[1];
+        g_input_debug.bottom_content_left = bottom_content_left;
+        g_input_debug.separate = presentation.separate ? 1 : 0;
+    };
+    publish_input_debug();
     uint64_t max_emu_ticks = 0;
     uint64_t max_emu_frame = 0;
     uint64_t slow_frames_32ms = 0;
@@ -807,6 +1221,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         // Play-mode debug surface: execute any pending TCP command at this
         // between-frames safe point (no-op when no pump was started or no
         // client is connected). See debug_server.h.
+        publish_input_debug();
         debug_pump();
         if (selftest_menu) {
             const NdsEventCounts& counts = nds_event_counts();
@@ -942,6 +1357,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         release_relative_mouse();
                     else
                         running = false;
+                } else if (process_mph_prime_key(
+                               event.key.keysym.scancode, true, false)) {
+                    // Consumed by the MPH-specific keyboard/mouse layer.
+                } else if (mph_prime_active()) {
+                    // Prime Controls replaces the normal keyboard keypad map;
+                    // unbound keys must not leak through as DS buttons.
                 } else if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
                     ++host_key_presses;
                     keyboard_pressed |= bit;
@@ -949,7 +1370,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 }
             }
             if (event.type == SDL_KEYUP && !event.key.repeat) {
-                if (const uint16_t bit = key_bit(event.key.keysym.scancode)) {
+                if (process_mph_prime_key(
+                        event.key.keysym.scancode, false, false)) {
+                    // Consumed by the MPH-specific keyboard/mouse layer.
+                } else if (mph_prime_active()) {
+                    // See keydown path: ignore generic keyboard bindings
+                    // while the Prime Controls capture owns the keyboard.
+                } else if (const uint16_t bit = key_bit(
+                               event.key.keysym.scancode)) {
                     keyboard_pressed &= static_cast<uint16_t>(~bit);
                     publish_keys();
                 }
@@ -996,17 +1424,32 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     // The acquisition click only captures; the next click is
                     // the first guest fire press, avoiding an accidental shot.
                     capture_relative_mouse();
+                } else if (process_mph_prime_mouse(
+                               event.button.button, true, false)) {
+                    // Consumed by Prime Controls.
                 } else if (options.relative_mouse_fire_mask != 0) {
                     mouse_pressed |= options.relative_mouse_fire_mask;
                     publish_keys();
                 }
             }
+            if (event.type == SDL_MOUSEBUTTONDOWN &&
+                event.button.button != SDL_BUTTON_LEFT &&
+                event.button.windowID == presentation.window_ids[0] &&
+                process_mph_prime_mouse(event.button.button, true, false)) {
+                // Consumed by Prime Controls.
+            }
             if (event.type == SDL_MOUSEBUTTONUP &&
-                event.button.button == SDL_BUTTON_LEFT &&
-                relative_mouse.captured() && mouse_pressed != 0) {
-                mouse_pressed &= static_cast<uint16_t>(
-                    ~options.relative_mouse_fire_mask);
-                publish_keys();
+                event.button.windowID == presentation.window_ids[0] &&
+                relative_mouse.captured()) {
+                if (process_mph_prime_mouse(
+                        event.button.button, false, false)) {
+                    // Consumed by Prime Controls.
+                } else if (event.button.button == SDL_BUTTON_LEFT &&
+                           mouse_pressed != 0) {
+                    mouse_pressed &= static_cast<uint16_t>(
+                        ~options.relative_mouse_fire_mask);
+                    publish_keys();
+                }
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
@@ -1049,7 +1492,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 relative_mouse.captured() &&
                 (event.motion.windowID == presentation.window_ids[0] ||
                  event.motion.windowID == 0)) {
-                if (options.relative_mouse_direct_aim) {
+                const bool prime_virtual_stylus = mph_prime_active() &&
+                    mph_prime_held[static_cast<size_t>(
+                        MphPrimeAction::VirtualStylus)];
+                if (prime_virtual_stylus) {
+                    mph_virtual_x +=
+                        static_cast<float>(event.motion.xrel) *
+                        options.mph_virtual_stylus_sensitivity * 0.01f;
+                    mph_virtual_y +=
+                        static_cast<float>(event.motion.yrel) *
+                        (256.0f / 192.0f) *
+                        options.mph_virtual_stylus_sensitivity * 0.01f;
+                    mph_virtual_x = std::clamp(mph_virtual_x, 0.0f, 255.0f);
+                    mph_virtual_y = std::clamp(mph_virtual_y, 0.0f, 191.0f);
+                } else if (options.relative_mouse_direct_aim) {
                     relative_delta_x += event.motion.xrel;
                     relative_delta_y += event.motion.yrel;
                 } else if (relative_mouse.move(event.motion.xrel,
@@ -1068,7 +1524,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
         }
 
+        const bool mph_prime_is_active = mph_prime_active();
+        const bool mph_prime_virtual_stylus = mph_prime_is_active &&
+            mph_prime_held[static_cast<size_t>(
+                MphPrimeAction::VirtualStylus)];
         if (relative_mouse.captured() && options.relative_mouse_direct_aim &&
+            !mph_prime_virtual_stylus && !mph_touch_sequence.active() &&
             (relative_delta_x != 0 || relative_delta_y != 0)) {
             // AMHE0 consumes signed per-frame aim deltas. Keep the native
             // stylus held at center, but feed motion through those title-owned
@@ -1083,6 +1544,29 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             relative_delta_x = 0;
             relative_delta_y = 0;
         }
+        if (mph_prime_is_active) {
+            if (mph_touch_sequence.active()) {
+                mph_touch_sequence.tick();
+            } else if (mph_prime_virtual_stylus) {
+                const bool touch_down =
+                    mph_prime_held[static_cast<size_t>(
+                        MphPrimeAction::Shoot)] ||
+                    mph_prime_held[static_cast<size_t>(
+                        MphPrimeAction::ScanShoot)];
+                nds_set_touch(
+                    static_cast<uint16_t>(std::lround(mph_virtual_x)),
+                    static_cast<uint16_t>(std::lround(mph_virtual_y)),
+                    touch_down);
+            } else {
+                const bool in_ball =
+                    bus_read_u8_slow(kMphUs10MorphState) == 0x02u;
+                if (in_ball)
+                    nds_set_touch(0, 0, false);
+                else
+                    nds_set_touch(128, 96, true);
+            }
+        }
+        publish_input_debug();
 
         const uint64_t phase0 = SDL_GetPerformanceCounter();
         const uint64_t now = scheduler_system_timestamp();
@@ -1238,6 +1722,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     nds_set_touch(0, 0, false);
     nds_set_key_mask(0x0FFFu);
     g_live_stats.active = 0;
+    g_input_debug.active = 0;
     const double soak_seconds = static_cast<double>(
         SDL_GetPerformanceCounter() - soak_start) /
         static_cast<double>(frequency);
@@ -1341,6 +1826,138 @@ bool nds_frontend_request_exit() {
 #endif
 }
 
+bool nds_frontend_debug_key(const char* key_name, bool down) {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active || !key_name || key_name[0] == '\0')
+        return false;
+    const SDL_Scancode key = scancode_from_binding_name(key_name);
+    g_input_debug.debug_last_key_scancode = static_cast<uint32_t>(key);
+    if (key == SDL_SCANCODE_UNKNOWN)
+        return false;
+    SDL_Event event{};
+    event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+    event.key.windowID = g_input_debug.top_window_id;
+    event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.key.repeat = 0;
+    event.key.keysym.scancode = key;
+    event.key.keysym.sym = SDL_GetKeyFromScancode(key);
+    const bool pushed = SDL_PushEvent(&event) == 1;
+    if (pushed) ++g_input_debug.debug_key_events;
+    else ++g_input_debug.debug_event_errors;
+    return pushed;
+#else
+    (void)key_name;
+    (void)down;
+    return false;
+#endif
+}
+
+bool nds_frontend_debug_mouse_button(uint8_t button, bool down) {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active || button == 0)
+        return false;
+    SDL_Event event{};
+    event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+    event.button.windowID = g_input_debug.top_window_id;
+    event.button.button = button;
+    event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.button.clicks = 1;
+    event.button.x = 128 * kWindowScale;
+    event.button.y = 96 * kWindowScale;
+    const bool pushed = SDL_PushEvent(&event) == 1;
+    if (pushed) ++g_input_debug.debug_mouse_button_events;
+    else ++g_input_debug.debug_event_errors;
+    return pushed;
+#else
+    (void)button;
+    (void)down;
+    return false;
+#endif
+}
+
+bool nds_frontend_debug_mouse_motion(int dx, int dy) {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active)
+        return false;
+    SDL_Event event{};
+    event.type = SDL_MOUSEMOTION;
+    event.motion.windowID = g_input_debug.top_window_id;
+    event.motion.x = 128 * kWindowScale;
+    event.motion.y = 96 * kWindowScale;
+    event.motion.xrel = dx;
+    event.motion.yrel = dy;
+    const bool pushed = SDL_PushEvent(&event) == 1;
+    if (pushed) ++g_input_debug.debug_mouse_motion_events;
+    else ++g_input_debug.debug_event_errors;
+    return pushed;
+#else
+    (void)dx;
+    (void)dy;
+    return false;
+#endif
+}
+
+bool nds_frontend_debug_touch(uint16_t x, uint16_t y, bool down) {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active || x >= kScreenWidth || y >= kScreenHeight)
+        return false;
+    SDL_Event event{};
+    event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+    event.button.windowID = g_input_debug.bottom_window_id;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.button.clicks = 1;
+    event.button.x = (g_input_debug.bottom_content_left +
+                      static_cast<int>(x)) * kWindowScale;
+    event.button.y = (g_input_debug.separate ? static_cast<int>(y)
+                                             : kScreenHeight +
+                                                   static_cast<int>(y)) *
+                     kWindowScale;
+    const bool pushed = SDL_PushEvent(&event) == 1;
+    if (pushed) ++g_input_debug.debug_touch_events;
+    else ++g_input_debug.debug_event_errors;
+    return pushed;
+#else
+    (void)x;
+    (void)y;
+    (void)down;
+    return false;
+#endif
+}
+
+bool nds_frontend_debug_capture_mouse() {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active)
+        return false;
+    if (g_input_debug.relative_mouse_captured)
+        return true;
+    const bool pushed = nds_frontend_debug_mouse_button(SDL_BUTTON_LEFT, true);
+    if (pushed) ++g_input_debug.debug_capture_events;
+    return pushed;
+#else
+    return false;
+#endif
+}
+
+bool nds_frontend_debug_release_mouse() {
+#if defined(NDS_HAVE_SDL2)
+    if (!g_input_debug.active)
+        return false;
+    if (!g_input_debug.relative_mouse_captured)
+        return true;
+    SDL_Event event{};
+    event.type = SDL_WINDOWEVENT;
+    event.window.windowID = g_input_debug.top_window_id;
+    event.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+    const bool pushed = SDL_PushEvent(&event) == 1;
+    if (pushed) ++g_input_debug.debug_release_events;
+    else ++g_input_debug.debug_event_errors;
+    return pushed;
+#else
+    return false;
+#endif
+}
+
 void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
     if (!out) return;
     *out = g_live_stats;
@@ -1348,6 +1965,10 @@ void nds_frontend_live_stats(NdsFrontendLiveStats* out) {
     if (g_live_stats.active)
         out->now_ticks = SDL_GetPerformanceCounter();
 #endif
+}
+
+void nds_frontend_input_debug_state(NdsFrontendInputDebugState* out) {
+    if (out) *out = g_input_debug;
 }
 
 void nds_frontend_black_band_scan(bool enabled, bool reset) {
