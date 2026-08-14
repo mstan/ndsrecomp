@@ -81,7 +81,13 @@ int main(int argc, char** argv) {
         check(load16(u + 0x72) == crc16(u, 0x70, 0xFFFF),
               "user settings checksum is valid");
         check(load16(u + 0x00) == 5, "user settings version 5");
-        check(load16(u + 0x1A) == 7, "nickname length 7");
+        // Deliberate divergence from melonDS: the project's own nickname.
+        check(load16(u + 0x1A) == 9, "nickname length 9");
+        static constexpr char16_t kName[] = u"ndsrecomp";
+        bool name_ok = true;
+        for (unsigned i = 0; i < 9; ++i)
+            name_ok &= load16(u + 0x06 + i * 2) == kName[i];
+        check(name_ok, "nickname is ndsrecomp");
         check(load16(u + 0x64) == 0x31, "English, max backlight");
     }
 

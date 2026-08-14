@@ -77,9 +77,14 @@ void write_user_data(uint8_t* u) {
     put16(u + 0x00, 5);                     // Version
     u[0x03] = 1;                            // BirthdayMonth
     u[0x04] = 1;                            // BirthdayDay
-    static constexpr char16_t kName[] = u"melonDS";
-    for (unsigned i = 0; i < 7; ++i) put16(u + 0x06 + i * 2, kName[i]);
-    put16(u + 0x1A, 7);                     // NameLength
+    // Deliberate divergence from melonDS Firmware(0), like the AP SSID: the
+    // console nickname defaults to this project's identity, not "melonDS".
+    // Games surface it as the player's default name.
+    static constexpr char16_t kName[] = u"ndsrecomp";
+    constexpr unsigned kNameLength = 9;     // fits the 10-char DS limit
+    for (unsigned i = 0; i < kNameLength; ++i)
+        put16(u + 0x06 + i * 2, kName[i]);
+    put16(u + 0x1A, kNameLength);           // NameLength
     // Ideal host touch calibration, exactly as melonDS FirmwareMem::Reset
     // stamps into every firmware before the guest reads it.
     put16(u + 0x58, 0);                     // ADC1 X

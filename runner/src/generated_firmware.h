@@ -7,10 +7,11 @@
 // firmware DATA image — header with Wi-Fi calibration, three access-point
 // slots, two user-settings copies, valid checksums — byte-for-byte
 // mirroring melonDS Firmware::Firmware(0) (SPI_Firmware.cpp), which is the
-// oracle this image is diffed against, with ONE deliberate divergence: the
-// configured AP slot carries the runner's own AP SSID ("ndsrecomp", see
-// 0001-wifi-ap-identity.patch) instead of melonDS's "melonAP", because the
-// guest associates with the SSID written here. It contains NO boot code (the
+// oracle this image is diffed against, with TWO deliberate divergences,
+// both project identity: the configured AP slot carries the runner's own
+// AP SSID ("ndsrecomp", see 0001-wifi-ap-identity.patch) because the guest
+// associates with the SSID written here, and the console nickname defaults
+// to "ndsrecomp" (games surface it as the player's default name). It contains NO boot code (the
 // 'MELN' identifier marks it non-bootable), so a generated image is only
 // usable with --boot direct; the caller enforces that pairing.
 //
