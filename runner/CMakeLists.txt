@@ -264,6 +264,7 @@ add_executable(nds_runner
     src/bus.cpp
     src/cart_backup.cpp
     src/cp15.cpp
+    src/direct_boot.cpp
     src/io.cpp
     src/wifi_net.cpp
     src/net/net_ring.cpp
@@ -500,6 +501,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/cart_backup.cpp)
   target_include_directories(cart_backup_test PRIVATE src)
   add_test(NAME cart_backup_test COMMAND cart_backup_test)
+
+  # Direct boot has no LLE run to be checked against from the inside, so the
+  # sequence is pinned here against melonDS's SetupDirectBoot instead.
+  add_executable(direct_boot_test
+      tests/direct_boot_test.cpp
+      src/direct_boot.cpp)
+  target_include_directories(direct_boot_test PRIVATE src)
+  add_test(NAME direct_boot_test COMMAND direct_boot_test)
 
   # Wiimmfi M8: format round-trip, corruption/truncation detection, and
   # sanitizer determinism -- pure host-side logic with zero melonDS/
