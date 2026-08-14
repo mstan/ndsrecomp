@@ -638,6 +638,20 @@ uint32_t drain_audio(SDL_AudioDeviceID device, AudioQueue& queue,
     return queued;
 }
 
+void clear_audio_queue(SDL_AudioDeviceID device, AudioQueue& queue) {
+    if (!device) return;
+    SDL_LockAudioDevice(device);
+    queue.read = 0;
+    queue.write = 0;
+    queue.count = 0;
+    SDL_UnlockAudioDevice(device);
+}
+
+void discard_spu_output() {
+    std::array<int16_t, 2048> samples{};
+    while (nds_spu_read_output(samples.data(), 1024) != 0) {}
+}
+
 uint64_t environment_u64(const char* name) {
     const char* value = std::getenv(name);
     if (!value || !*value) return 0;
@@ -1063,7 +1077,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     std::fprintf(stderr,
         "[sdl] controls: gamepad=Player 1 | bottom mouse=touch | "
         "arrows=D-pad | Z=A X=B | A=Y S=X | Q=L W=R | "
-        "Enter=Start Backspace=Select | Esc=quit\n");
+        "Enter=Start Backspace=Select | hold Tab=turbo | Esc=quit\n");
     if (options.relative_mouse_touch) {
         std::fprintf(stderr,
             "[sdl] relative mouse: click top screen to capture; "
@@ -1293,7 +1307,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const uint64_t relative_mouse_selftest_start_vblank =
         environment_u64("NDS_FRONTEND_SELFTEST_RELATIVE_MOUSE_VBLANK");
     bool audio_started = false;
+    uint32_t audio_start_threshold = kAudioStartFrames;
     bool audio_queue_error = false;
+    bool turbo_pressed = false;
+    bool turbo_active = false;
     uint32_t audio_pace_floor = kAudioQueueFrames;
     uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
     uint32_t audio_max_queue = 0;
@@ -1508,6 +1525,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         release_relative_mouse();
                     else
                         running = false;
+                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                    turbo_pressed = true;
                 } else if (process_mph_prime_key(
                                event.key.keysym.scancode, true, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
@@ -1521,7 +1540,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 }
             }
             if (event.type == SDL_KEYUP && !event.key.repeat) {
-                if (process_mph_prime_key(
+                if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                    turbo_pressed = false;
+                } else if (process_mph_prime_key(
                         event.key.keysym.scancode, false, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
                 } else if (mph_prime_active()) {
@@ -1791,6 +1812,23 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         const bool mph_prime_virtual_stylus = mph_prime_is_active &&
             mph_prime_held[static_cast<size_t>(
                 MphPrimeAction::VirtualStylus)];
+
+        if (turbo_pressed != turbo_active) {
+            turbo_active = turbo_pressed;
+            if (audio) {
+                SDL_PauseAudioDevice(audio, 1);
+                clear_audio_queue(audio, audio_queue);
+                audio_queue.started.store(false, std::memory_order_relaxed);
+            }
+            audio_started = false;
+            audio_start_threshold = kAudioQueueFrames;
+            audio_pace_floor = audio_start_threshold;
+            audio_min_queue = std::numeric_limits<uint32_t>::max();
+            audio_max_queue = 0;
+            std::fprintf(stderr, "[sdl] turbo %s\n",
+                         turbo_active ? "on" : "off");
+        }
+
         if ((relative_mouse.captured() || mph_prime_pad_engaged) &&
             options.relative_mouse_direct_aim &&
             !mph_prime_virtual_stylus && !mph_touch_sequence.active() &&
@@ -1928,19 +1966,25 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             audio_pace_floor -= kGlideStepFrames;
         else
             audio_pace_floor = kAudioQueueFrames;
-        const uint32_t queued = drain_audio(
-            audio, audio_queue, audio_started, audio_pace_floor,
-            audio_queue_error);
+        uint32_t queued = audio_queue_count(audio, audio_queue);
+        if (turbo_active) {
+            discard_spu_output();
+        } else {
+            queued = drain_audio(
+                audio, audio_queue, audio_started, audio_pace_floor,
+                audio_queue_error);
+        }
         phase_drain_ticks += SDL_GetPerformanceCounter() - phase2;
         audio_max_queue = std::max(audio_max_queue, queued);
-        if (audio && !audio_started && queued >= kAudioStartFrames) {
+        if (audio && !audio_started && !turbo_active &&
+            queued >= audio_start_threshold) {
             // Opening paused and prebuffering avoids the guaranteed startup
             // underrun produced by unpausing an empty SDL queue.
             audio_queue.started.store(true, std::memory_order_relaxed);
             SDL_PauseAudioDevice(audio, 0);
             audio_started = true;
             audio_min_queue = queued;
-            audio_pace_floor = kAudioStartFrames;
+            audio_pace_floor = audio_start_threshold;
         }
 
         ++shown_frames;
