@@ -64,3 +64,6 @@ __pycache__/
 *.user
 .DS_Store
 Thumbs.db
+
+# third_party/ is vendored locally, EXCEPT the explicit freebios submodule.
+!third_party/freebios
