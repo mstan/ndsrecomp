@@ -49,23 +49,25 @@ bool fail(std::string* error, const char* message) {
     return false;
 }
 
-// Firmware CRC16 (start 0xFFFF), the checksum both user-settings copies carry.
-uint16_t crc16(const uint8_t* data, uint32_t length, uint16_t start) {
+// Firmware CRC16 (start 0xFFFF), the checksum both user-settings copies
+// carry. The accumulator MUST be 32-bit: the table terms overflow 16 bits
+// and their high bits shift back into range, so a uint16_t accumulator
+// computes a different (wrong) checksum — verified against the CRCs a real
+// firmware dump stores.
+uint16_t crc16(const uint8_t* data, uint32_t length, uint32_t start) {
     static constexpr uint16_t kPolynomial[8] = {
         0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001,
     };
     for (uint32_t i = 0; i < length; ++i) {
-        start = static_cast<uint16_t>(start ^ data[i]);
+        start ^= data[i];
         for (unsigned bit = 0; bit < 8; ++bit) {
-            if (start & 1u) {
-                start = static_cast<uint16_t>(
-                    (start >> 1) ^ (kPolynomial[bit] << (7 - bit)));
-            } else {
-                start = static_cast<uint16_t>(start >> 1);
-            }
+            if (start & 1u)
+                start = (start >> 1) ^ (uint32_t{kPolynomial[bit]} << (7 - bit));
+            else
+                start >>= 1;
         }
     }
-    return start;
+    return static_cast<uint16_t>(start);
 }
 
 // melonDS Firmware::UserData::ChecksumValid: the base 0x70-byte block must

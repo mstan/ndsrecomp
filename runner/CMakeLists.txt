@@ -261,6 +261,7 @@ target_include_directories(nds_armv4t PUBLIC
 add_executable(nds_runner
     src/runtime_arm.cpp
     src/battery_save.cpp
+    src/generated_firmware.cpp
     src/bus.cpp
     src/cart_backup.cpp
     src/cp15.cpp
@@ -509,6 +510,15 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/direct_boot.cpp)
   target_include_directories(direct_boot_test PRIVATE src)
   add_test(NAME direct_boot_test COMMAND direct_boot_test)
+
+  # Generated firmware is pinned against melonDS Firmware(0); with an output
+  # path argument it writes the image so the oracle byte-diff can be re-run
+  # (ndsref firmware_dump produces the golden bytes).
+  add_executable(generated_firmware_test
+      tests/generated_firmware_test.cpp
+      src/generated_firmware.cpp)
+  target_include_directories(generated_firmware_test PRIVATE src)
+  add_test(NAME generated_firmware_test COMMAND generated_firmware_test)
 
   # Wiimmfi M8: format round-trip, corruption/truncation detection, and
   # sanitizer determinism -- pure host-side logic with zero melonDS/

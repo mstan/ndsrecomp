@@ -19,6 +19,10 @@
 #include "state.h"
 #include "scheduler.h"
 #include "direct_boot.h"
+#include "generated_firmware.h"
+
+#include <array>
+#include <random>
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
@@ -149,6 +153,62 @@ uint16_t firmware_crc16(const uint8_t* data, size_t len, uint32_t start) {
         }
     }
     return static_cast<uint16_t>(start);
+}
+
+// Per-install identity for generated firmware (beads-yjp.1.11): a MAC that
+// is generated once, persisted next to the BIOS dumps (the "console"
+// directory), and reused on every boot. melonDS ships one shared
+// DEFAULT_MAC for every single-instance install, so all such consoles look
+// identical to Wiimmfi; we copy its multi-instance perturbation MECHANISM
+// (apply_instance_mac below) but never the shared default.
+bool parse_identity_mac(const std::string& text, std::array<uint8_t, 6>* out) {
+    unsigned b[6];
+    char extra = 0;
+    if (std::sscanf(text.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x%c",
+                    &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &extra) != 6)
+        return false;
+    if (b[0] & 0x01u) return false;  // multicast/broadcast is never a station
+    for (int i = 0; i < 6; ++i) (*out)[i] = static_cast<uint8_t>(b[i]);
+    return true;
+}
+
+bool load_or_create_identity_mac(const std::string& path,
+                                 std::array<uint8_t, 6>* out) {
+    {
+        std::ifstream f(path, std::ios::binary);
+        if (f) {
+            std::array<uint8_t, 6> mac{};
+            f.read(reinterpret_cast<char*>(mac.data()), 6);
+            if (f.gcount() == 6 && !(mac[0] & 0x01u)) {
+                *out = mac;
+                std::fprintf(stderr,
+                    "[identity] persisted MAC %02X:%02X:%02X:%02X:%02X:%02X "
+                    "from %s\n", mac[0], mac[1], mac[2], mac[3], mac[4],
+                    mac[5], path.c_str());
+                return true;
+            }
+            std::fprintf(stderr,
+                "refusing to start: %s exists but is not a valid identity\n",
+                path.c_str());
+            return false;
+        }
+    }
+    std::array<uint8_t, 6> mac = {0x00, 0x09, 0xBF, 0, 0, 0};
+    std::random_device rng;
+    for (int i = 3; i < 6; ++i) mac[i] = static_cast<uint8_t>(rng());
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f || !f.write(reinterpret_cast<const char*>(mac.data()), 6)) {
+        std::fprintf(stderr,
+            "refusing to start: could not persist identity to %s\n",
+            path.c_str());
+        return false;
+    }
+    std::fprintf(stderr,
+        "[identity] generated new MAC %02X:%02X:%02X:%02X:%02X:%02X, "
+        "persisted to %s\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        path.c_str());
+    *out = mac;
+    return true;
 }
 
 // melonDS exposes host screen pixels through a deterministic, ideal DS touch
@@ -408,6 +468,8 @@ int main(int argc, char** argv) {
     std::string cli_mph_virtual_stylus_sensitivity;
     std::string cli_startup_mode;
     std::string cli_boot_mode;
+    std::string cli_identity_mac;
+    bool cli_generated_firmware = false;
     std::string cli_instance_index;
     std::string cli_save_path;
     std::string cli_firmware_path;
@@ -503,6 +565,10 @@ int main(int argc, char** argv) {
             cli_startup_mode = argv[++i];
         } else if (a == "--boot" && i + 1 < argc) {
             cli_boot_mode = argv[++i];
+        } else if (a == "--generated-firmware") {
+            cli_generated_firmware = true;
+        } else if (a == "--identity-mac" && i + 1 < argc) {
+            cli_identity_mac = argv[++i];
         } else if (a == "--instance-index" && i + 1 < argc) {
             cli_instance_index = argv[++i];
         } else if (a == "--net-ring-dump") {
@@ -560,6 +626,7 @@ int main(int argc, char** argv) {
                 "[--mph-bind-<action> <key-or-mouse>] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--boot lle|direct] "
+                "[--generated-firmware] [--identity-mac AA:BB:CC:DD:EE:FF] "
                 "[--instance-index 0..255] "
                 "[--discover-static-misses] [--rtc-host] "
                 "[--net-ring-dump] [--net-ring-last N] "
@@ -651,6 +718,16 @@ int main(int argc, char** argv) {
                          "invalid NDS_BOOT_MODE (expected lle or direct)\n");
             return 2;
         }
+    }
+    if (const char* value = std::getenv("NDS_GENERATED_FIRMWARE")) {
+        bool enabled = false;
+        if (!nds_parse_on_off(value, &enabled)) {
+            std::fprintf(stderr,
+                         "invalid NDS_GENERATED_FIRMWARE "
+                         "(expected on or off)\n");
+            return 2;
+        }
+        frontend_options.generated_firmware = enabled;
     }
     if (!cli_screen_layout.empty() &&
         !nds_parse_screen_layout(cli_screen_layout,
@@ -1038,11 +1115,59 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[gpu3d] threaded soft renderer: %s\n",
                  gpu3d_threaded ? "on" : "off");
 
+    if (cli_generated_firmware) frontend_options.generated_firmware = true;
+    if (frontend_options.generated_firmware) {
+        // Generated firmware carries no boot code, so the pairing is
+        // enforced rather than silently switched (melonDS NeedsDirectBoot).
+        if (frontend_options.boot_mode != NdsBootMode::Direct) {
+            std::fprintf(stderr,
+                "refusing to start: --generated-firmware requires "
+                "--boot direct (a generated image has no boot code)\n");
+            return 1;
+        }
+        if (!cli_firmware_path.empty()) {
+            std::fprintf(stderr,
+                "refusing to start: --generated-firmware and "
+                "--firmware-path are mutually exclusive\n");
+            return 1;
+        }
+    } else if (!cli_identity_mac.empty()) {
+        std::fprintf(stderr,
+            "refusing to start: --identity-mac only applies to "
+            "--generated-firmware (a firmware dump carries its own MAC)\n");
+        return 1;
+    }
+
     auto a9 = read_file(dir + "/biosnds9.rom");
     auto a7 = read_file(dir + "/biosnds7.rom");
-    auto fw = read_file(
-        cli_firmware_path.empty() ? (dir + "/firmware.bin")
-                                  : cli_firmware_path);
+    std::vector<uint8_t> fw;
+    if (frontend_options.generated_firmware) {
+        std::array<uint8_t, 6> identity_mac{};
+        if (!cli_identity_mac.empty()) {
+            if (!parse_identity_mac(cli_identity_mac, &identity_mac)) {
+                std::fprintf(stderr,
+                    "invalid --identity-mac (expected a unicast "
+                    "AA:BB:CC:DD:EE:FF)\n");
+                return 2;
+            }
+            std::fprintf(stderr,
+                "[identity] explicit MAC %s (not persisted)\n",
+                cli_identity_mac.c_str());
+        } else if (!load_or_create_identity_mac(
+                       dir + "/generated-identity.bin", &identity_mac)) {
+            return 1;
+        }
+        fw = nds_generate_firmware(identity_mac.data());
+        // Session provenance: a generated-firmware session must never be
+        // mistaken for a dump-verified one.
+        std::fprintf(stderr,
+            "[firmware] GENERATED image (opt-in, no dump), %zu bytes, "
+            "SHA-1 %s\n", fw.size(),
+            gba::sha1(fw.data(), fw.size()).hex().c_str());
+    } else {
+        fw = read_file(cli_firmware_path.empty() ? (dir + "/firmware.bin")
+                                                 : cli_firmware_path);
+    }
     auto rom = rom_path.empty() ? std::vector<uint8_t>{} : read_file(rom_path);
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
@@ -1052,7 +1177,9 @@ int main(int argc, char** argv) {
 #endif
     bool ok = verify(a9, "bfaac75f101c135e32e2aaf541de6b1be4c8c62d", "arm9 bios")
             & verify(a7, "24f67bdea115a2c847c8813a262502ee1607b7df", "arm7 bios");
-    if (cli_firmware_path.empty()) {
+    if (frontend_options.generated_firmware) {
+        // Already synthesized and reported above; nothing to verify.
+    } else if (cli_firmware_path.empty()) {
         ok = ok & verify(fw, "ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b", "firmware");
     } else if (fw.size() != 262144u) {
         std::fprintf(stderr,
@@ -1191,6 +1318,10 @@ int main(int argc, char** argv) {
             "[firmware] instance index %u: perturbed guest MAC (bytes "
             "3/4/5) for multi-instance Wi-Fi identity\n",
             frontend_options.instance_index);
+    } else if (frontend_options.generated_firmware) {
+        std::fprintf(stderr,
+            "[firmware] instance index 0: guest MAC is the per-install "
+            "identity baked into the generated image\n");
     } else {
         std::fprintf(stderr,
             "[firmware] instance index 0: guest MAC left untouched "

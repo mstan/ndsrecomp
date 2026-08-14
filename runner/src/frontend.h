@@ -153,6 +153,10 @@ struct NdsFrontendOptions {
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
     NdsBootMode boot_mode = NdsBootMode::Lle;
+    // Opt-in synthesized firmware image (no firmware dump). Forces direct
+    // boot — the generated image carries no boot code — and the runner
+    // refuses any other pairing rather than silently switching paths.
+    bool generated_firmware = false;
     // Wiimmfi: which of several concurrently-run instances this process is
     // (--instance-index CLI flag / [system] instance_index game.toml key).
     // 0 (the default) is a deliberate no-op everywhere this is consumed:

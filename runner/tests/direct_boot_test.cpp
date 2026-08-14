@@ -263,19 +263,21 @@ void test_cartridge_without_secure_area() {
           "the ARM9 binary is copied from offset 0");
 }
 
-uint16_t fw_crc16(const uint8_t* data, uint32_t length, uint16_t start) {
+// 32-bit accumulator — the table terms overflow 16 bits and their high bits
+// shift back into range (matches the CRCs a real firmware dump stores).
+uint16_t fw_crc16(const uint8_t* data, uint32_t length, uint32_t start) {
     static constexpr uint16_t kPolynomial[8] = {
         0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001,
     };
     for (uint32_t i = 0; i < length; ++i) {
-        start = uint16_t(start ^ data[i]);
+        start ^= data[i];
         for (unsigned bit = 0; bit < 8; ++bit) {
             start = (start & 1u)
-                ? uint16_t((start >> 1) ^ (kPolynomial[bit] << (7 - bit)))
-                : uint16_t(start >> 1);
+                ? (start >> 1) ^ (uint32_t{kPolynomial[bit]} << (7 - bit))
+                : start >> 1;
         }
     }
-    return start;
+    return uint16_t(start);
 }
 
 // melonDS mirrors the EFFECTIVE user-settings copy (GetEffectiveUserData):
