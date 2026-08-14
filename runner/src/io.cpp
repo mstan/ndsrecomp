@@ -105,6 +105,15 @@ bool     g_auxspi_hold = false;
 uint32_t g_auxspi_pos = 0;
 uint64_t g_auxspi_deadline = UINT64_MAX;   // busy-clear, system cycles
 NdsCartBackup g_cart_backup;
+// Cartridges whose game code starts with 'I' carry an infrared transceiver
+// between AUXSPI and the backup chip (Pokemon HG/SS, B/W, B2/W2, Active
+// Health). Every SPI transfer's first byte selects the IR command; only the
+// 0x00 pass-through command reaches the retail chip, with positions shifted
+// by one. Mirrors melonDS CartRetailIR::SPIWrite and its gamecode gate
+// (NDSCart.cpp:1146-1166, :1692-1699). This is a hardware property of the
+// cartridge, derived from the inserted ROM, not title configuration.
+bool     g_cart_has_ir = false;
+uint8_t  g_cart_ir_cmd = 0;
 std::string g_cart_save_path;
 
 uint32_t load_le32(const uint8_t* p) {
@@ -1642,6 +1651,23 @@ uint8_t cart_sram_spi_write(uint8_t val, uint32_t pos, bool last) {
     return result;
 }
 
+// IR-cartridge SPI front end (melonDS CartRetailIR::SPIWrite). Byte 0 of a
+// transfer is the IR command and answers 0; 0x00 passes the remainder through
+// to the retail backup chip with positions shifted by one; 0x08 answers the
+// transceiver ID 0xAA; every other command answers 0.
+uint8_t cart_spi_write(uint8_t val, uint32_t pos, bool last) {
+    if (!g_cart_has_ir) return cart_sram_spi_write(val, pos, last);
+    if (pos == 0) {
+        g_cart_ir_cmd = val;
+        return 0;
+    }
+    switch (g_cart_ir_cmd) {
+        case 0x00: return cart_sram_spi_write(val, pos - 1u, last);
+        case 0x08: return 0xAA;
+    }
+    return 0;
+}
+
 void auxspi_write_cnt(uint16_t val) {
     // Deasserting NDS-slot mode mid-hold forcefully releases the chip select.
     if ((g_auxspicnt & 0x2040u) == 0x2040u && !(val & 0x2000u))
@@ -1667,7 +1693,7 @@ void auxspi_write_data(uint8_t val) {
     } else {
         ++g_auxspi_pos;
     }
-    g_auxspi_data = cart_sram_spi_write(val, g_auxspi_pos, islast);
+    g_auxspi_data = cart_spi_write(val, g_auxspi_pos, islast);
     // One bit per SPI clock, 8 bits per byte: 8*(8<<speed) system cycles,
     // based at the writing CPU's live timestamp (melonDS ScheduleEvent).
     const uint32_t delay = 8u * (8u << (g_auxspicnt & 3u));
@@ -1757,6 +1783,8 @@ void nds_io_reset() {
     g_auxspi_hold = false; g_auxspi_pos = 0;
     g_auxspi_deadline = UINT64_MAX;
     nds_cart_backup_reset_command(g_cart_backup);
+    g_cart_ir_cmd = 0;   // melonDS CartRetailIR::Reset; the IR-ness itself
+                         // is cartridge identity and survives reset
     g_divcnt = 0; g_div_deadline = UINT64_MAX;
     std::memset(g_div_numer, 0, sizeof(g_div_numer));
     std::memset(g_div_denom, 0, sizeof(g_div_denom));
@@ -1849,6 +1877,10 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
     }
 
     g_card_rom.assign(rom, rom + rom_size);
+    // 'I'-prefixed game codes ship an infrared transceiver in front of the
+    // backup chip (melonDS NDSCart.cpp:1692-1699 -> CartRetailIR).
+    g_cart_has_ir = rom[0x0Cu] == 'I';
+    g_cart_ir_cmd = 0;
     for (uint32_t i = 0; i < 0x412u; ++i)
         g_key1_base[i] = load_le32(arm7_bios + kKeyOffset + i * 4u);
     g_key1_available = true;
