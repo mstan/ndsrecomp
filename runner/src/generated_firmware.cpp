@@ -92,12 +92,16 @@ void write_user_data(uint8_t* u) {
     put16(u + 0x72, crc16(u, 0x70, 0xFFFF));
 }
 
-// One 0x100-byte access-point slot. `configured` mirrors melonDS's
-// WifiAccessPoint(int) (the "melonAP" slot) vs WifiAccessPoint() (empty).
+// One 0x100-byte access-point slot, mirroring melonDS's WifiAccessPoint(int)
+// (the configured slot) vs WifiAccessPoint() (empty) — EXCEPT the SSID: the
+// runner's emulated AP identifies as "ndsrecomp" (vendor/melonds/patches/
+// 0001-wifi-ap-identity.patch renames melonDS's "melonAP"), and the guest
+// associates with the SSID written HERE, so the two must agree or every
+// AP scan ends in error 51099 "no compatible access point in range".
 void write_access_point(uint8_t* ap, bool configured) {
     std::memset(ap, 0, 0x100);
     if (configured) {
-        static constexpr char kSsid[] = "melonAP";
+        static constexpr char kSsid[] = "ndsrecomp";
         std::memcpy(ap + 0x40, kSsid, sizeof(kSsid) - 1);  // SSID
         ap[0xE7] = 0x00;                    // Status: Normal
     } else {

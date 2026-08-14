@@ -85,8 +85,12 @@ int main(int argc, char** argv) {
         check(load16(u + 0x64) == 0x31, "English, max backlight");
     }
 
+    // Deliberate divergence from melonDS Firmware(0): the SSID must match
+    // the runner's own AP identity ("ndsrecomp", 0001-wifi-ap-identity), or
+    // the guest's AP scan fails with error 51099. Everything OUTSIDE the AP
+    // slots remains byte-identical to the melonDS golden image.
     const uint8_t* ap = fw.data() + 0x1FA00;
-    check(std::memcmp(ap + 0x40, "melonAP", 7) == 0, "AP1 SSID");
+    check(std::memcmp(ap + 0x40, "ndsrecomp\0", 10) == 0, "AP1 SSID");
     check(ap[0xE7] == 0x00, "AP1 configured");
     for (uint32_t slot = 0; slot < 3; ++slot) {
         const uint8_t* a = fw.data() + 0x1FA00 + slot * 0x100;
