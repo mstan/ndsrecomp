@@ -211,6 +211,11 @@ struct NdsFrontendOptions {
     uint16_t relative_mouse_fire_mask = 0;
     bool mph_prime_controls = false;
     uint16_t mph_virtual_stylus_sensitivity = 20;  // 10%..400%
+    // Right-stick camera speed for Prime Controls on a gamepad (percent of
+    // the built-in full-deflection turn rate). The left stick always maps
+    // to the D-pad; the right stick and triggers only act on titles where
+    // Prime Controls is active.
+    uint16_t mph_pad_aim_sensitivity = 100;       // 10%..400%
     NdsMphPrimeControlBindings mph_bindings{};
     // Internal exact-ROM capability selected after cartridge verification.
     // MPH consumes unbounded host deltas through its native aim fields.
@@ -298,6 +303,9 @@ struct NdsFrontendInputDebugState {
     uint16_t keyboard_pressed;
     uint16_t mouse_pressed;
     uint16_t mph_prime_pressed;
+    uint16_t stick_pressed;
+    int pad_engaged;
+    uint64_t pad_aim_writes;
     uint16_t published_key_mask;
     uint64_t relative_direct_writes;
     uint64_t mph_prime_key_downs;

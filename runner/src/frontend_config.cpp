@@ -621,6 +621,18 @@ bool nds_load_frontend_config(const std::string& path,
                     return false;
                 }
             }
+            if (const auto value =
+                    (*prime)["pad_aim_sensitivity"].value<int64_t>()) {
+                if (!nds_parse_mouse_sensitivity(std::to_string(*value),
+                                                 &options->mph_pad_aim_sensitivity)) {
+                    if (error) {
+                        *error =
+                            "controls.prime.pad_aim_sensitivity "
+                            "must be 10..400";
+                    }
+                    return false;
+                }
+            }
             if (const toml::table* bindings = (*prime)["bindings"].as_table()) {
                 for (const auto& item : *bindings) {
                     const auto value = item.second.value<std::string>();

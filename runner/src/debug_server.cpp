@@ -926,6 +926,9 @@ std::string handle(const std::string& line) {
                ",\"mouse_pressed\":" + std::to_string(s.mouse_pressed) +
                ",\"mph_prime_pressed\":" +
                std::to_string(s.mph_prime_pressed) +
+               ",\"stick_pressed\":" + std::to_string(s.stick_pressed) +
+               ",\"pad_engaged\":" + std::to_string(s.pad_engaged) +
+               ",\"pad_aim_writes\":" + std::to_string(s.pad_aim_writes) +
                ",\"published_key_mask\":" +
                std::to_string(s.published_key_mask) +
                ",\"relative_direct_writes\":" +

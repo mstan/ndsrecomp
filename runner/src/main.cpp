@@ -327,6 +327,7 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_fire_key;
     std::string cli_mph_prime_controls;
     std::string cli_mph_virtual_stylus_sensitivity;
+    std::string cli_mph_pad_aim_sensitivity;
     std::string cli_startup_mode;
     std::string cli_boot_mode;
     std::string cli_identity_mac;
@@ -415,6 +416,8 @@ int main(int argc, char** argv) {
             cli_mph_prime_controls = argv[++i];
         } else if (a == "--mph-virtual-stylus-sensitivity" && i + 1 < argc) {
             cli_mph_virtual_stylus_sensitivity = argv[++i];
+        } else if (a == "--mph-pad-aim-sensitivity" && i + 1 < argc) {
+            cli_mph_pad_aim_sensitivity = argv[++i];
         } else if (a.rfind("--mph-bind-", 0) == 0 && i + 1 < argc) {
             const std::string action = a.substr(std::strlen("--mph-bind-"));
             if (!nds_set_mph_prime_binding(
@@ -490,6 +493,7 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
                 "[--mph-prime-controls on|off] "
                 "[--mph-virtual-stylus-sensitivity 10..400] "
+                "[--mph-pad-aim-sensitivity 10..400] "
                 "[--mph-bind-<action> <key-or-mouse>] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--boot lle|direct] "
@@ -701,6 +705,15 @@ int main(int argc, char** argv) {
             &frontend_options.mph_virtual_stylus_sensitivity)) {
         std::fprintf(stderr,
                      "invalid --mph-virtual-stylus-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_mph_pad_aim_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_mph_pad_aim_sensitivity,
+            &frontend_options.mph_pad_aim_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --mph-pad-aim-sensitivity "
                      "(expected 10..400)\n");
         return 2;
     }

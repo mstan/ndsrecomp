@@ -998,11 +998,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     uint16_t controller_pressed = 0;
     uint16_t mouse_pressed = 0;
     uint16_t mph_prime_pressed = 0;
+    // Left analog stick mapped to the D-pad (movement in MPH, menus
+    // everywhere), kept separate from button-event state so a wobbling
+    // stick never fights explicit D-pad presses.
+    uint16_t stick_pressed = 0;
     auto publish_keys = [&]() {
         nds_set_key_mask(static_cast<uint16_t>(
             0x0FFFu &
             ~(keyboard_pressed | controller_pressed | mouse_pressed |
-              mph_prime_pressed)));
+              mph_prime_pressed | stick_pressed)));
     };
     publish_keys();
     nds_set_touch(0, 0, false);
@@ -1022,8 +1026,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     MphTouchSequence mph_touch_sequence{};
     float mph_virtual_x = 128.0f;
     float mph_virtual_y = 96.0f;
+    // ── Gamepad dual-stick state ──────────────────────────────────────────
+    // Right stick + triggers drive Prime Controls camera aim and fire,
+    // engaging while used and idling back out so the touchscreen and menus
+    // keep working when the sticks rest.
+    bool mph_prime_pad_engaged = false;
+    int mph_pad_idle_frames = 0;
+    float mph_pad_aim_rem_x = 0.0f;
+    float mph_pad_aim_rem_y = 0.0f;
+    int32_t mph_pad_frame_x = 0;
+    int32_t mph_pad_frame_y = 0;
+    bool mph_pad_shoot_held = false;
+    bool mph_pad_scan_held = false;
+    uint64_t mph_pad_aim_writes = 0;
     auto mph_prime_active = [&]() {
-        return mph_prime_controls_available && relative_mouse.captured();
+        return mph_prime_controls_available &&
+               (relative_mouse.captured() || mph_prime_pad_engaged);
     };
     auto update_mph_prime_pressed = [&]() {
         uint16_t mask = 0;
@@ -1184,9 +1202,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_input_debug.keyboard_pressed = keyboard_pressed;
         g_input_debug.mouse_pressed = mouse_pressed;
         g_input_debug.mph_prime_pressed = mph_prime_pressed;
+        g_input_debug.stick_pressed = stick_pressed;
+        g_input_debug.pad_engaged = mph_prime_pad_engaged ? 1 : 0;
+        g_input_debug.pad_aim_writes = mph_pad_aim_writes;
         g_input_debug.published_key_mask = static_cast<uint16_t>(
             0x0FFFu & ~(keyboard_pressed | controller_pressed |
-                        mouse_pressed | mph_prime_pressed));
+                        mouse_pressed | mph_prime_pressed |
+                        stick_pressed));
         g_input_debug.relative_direct_writes = relative_direct_writes;
         g_input_debug.mph_prime_key_downs = mph_prime_key_downs;
         g_input_debug.mph_prime_mouse_downs = mph_prime_mouse_downs;
@@ -1524,23 +1546,136 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
         }
 
+        // ── Gamepad dual-stick poll (once per shown frame) ───────────────
+        mph_pad_frame_x = 0;
+        mph_pad_frame_y = 0;
+        if (controller) {
+            // Left stick -> D-pad, with hysteresis so a stick resting near
+            // a threshold never flickers a direction.
+            const float lx = SDL_GameControllerGetAxis(
+                controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+            const float ly = SDL_GameControllerGetAxis(
+                controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+            auto stick_dir = [&](float value, uint16_t bit, bool positive) {
+                const float v = positive ? value : -value;
+                const bool held = (stick_pressed & bit) != 0;
+                const bool next = v > (held ? 0.35f : 0.5f);
+                if (next != held) {
+                    if (next) stick_pressed |= bit;
+                    else stick_pressed &= static_cast<uint16_t>(~bit);
+                    publish_keys();
+                }
+            };
+            stick_dir(lx, 1u << 4, true);    // Right
+            stick_dir(lx, 1u << 5, false);   // Left
+            stick_dir(ly, 1u << 6, false);   // Up (SDL Y axis points down)
+            stick_dir(ly, 1u << 7, true);    // Down
+
+            if (mph_prime_controls_available) {
+                // Right stick -> camera aim; triggers -> fire / scan-fire.
+                const float rx = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+                const float ry = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+                const bool trigger_shoot = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 9830;
+                const bool trigger_scan = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 9830;
+                const float mag = std::sqrt(rx * rx + ry * ry);
+                constexpr float kDeadzone = 0.25f;
+                const bool aiming = mag > kDeadzone;
+                if (aiming || trigger_shoot || trigger_scan) {
+                    mph_pad_idle_frames = 0;
+                    if (!mph_prime_pad_engaged) {
+                        mph_prime_pad_engaged = true;
+                        std::fprintf(stderr,
+                            "[sdl] MPH pad aim engaged (right stick / "
+                            "triggers); idles out when released\n");
+                    }
+                } else if (mph_prime_pad_engaged &&
+                           !relative_mouse.captured() &&
+                           ++mph_pad_idle_frames > 45) {
+                    mph_prime_pad_engaged = false;
+                    nds_set_touch(0, 0, false);
+                }
+                if (aiming && mph_prime_pad_engaged) {
+                    // Square-law response: fine aim near center, a full
+                    // deflection turns at the built-in rate scaled by the
+                    // pad sensitivity. Y keeps the mouse path's 150% scale
+                    // and follows the same invert option.
+                    const float curved = (mag - kDeadzone) / (1.0f - kDeadzone);
+                    const float rate = curved * curved * 14.0f *
+                        (options.mph_pad_aim_sensitivity / 100.0f) / mag;
+                    mph_pad_aim_rem_x += rx * rate;
+                    mph_pad_aim_rem_y += ry * rate * 1.5f *
+                        (options.relative_mouse_invert_y ? -1.0f : 1.0f);
+                    mph_pad_frame_x = static_cast<int32_t>(mph_pad_aim_rem_x);
+                    mph_pad_frame_y = static_cast<int32_t>(mph_pad_aim_rem_y);
+                    mph_pad_aim_rem_x -= static_cast<float>(mph_pad_frame_x);
+                    mph_pad_aim_rem_y -= static_cast<float>(mph_pad_frame_y);
+                }
+                if (mph_prime_pad_engaged) {
+                    if (trigger_shoot != mph_pad_shoot_held) {
+                        mph_pad_shoot_held = trigger_shoot;
+                        set_mph_prime_action(MphPrimeAction::Shoot,
+                                             trigger_shoot, false);
+                    }
+                    if (trigger_scan != mph_pad_scan_held) {
+                        mph_pad_scan_held = trigger_scan;
+                        set_mph_prime_action(MphPrimeAction::ScanShoot,
+                                             trigger_scan, false);
+                    }
+                } else if (mph_pad_shoot_held || mph_pad_scan_held) {
+                    if (mph_pad_shoot_held)
+                        set_mph_prime_action(MphPrimeAction::Shoot, false,
+                                             false);
+                    if (mph_pad_scan_held)
+                        set_mph_prime_action(MphPrimeAction::ScanShoot, false,
+                                             false);
+                    mph_pad_shoot_held = false;
+                    mph_pad_scan_held = false;
+                }
+            }
+        } else {
+            if (stick_pressed != 0) {
+                stick_pressed = 0;
+                publish_keys();
+            }
+            if (mph_prime_pad_engaged) {
+                mph_prime_pad_engaged = false;
+                if (!relative_mouse.captured()) nds_set_touch(0, 0, false);
+            }
+            mph_pad_shoot_held = false;
+            mph_pad_scan_held = false;
+        }
+
         const bool mph_prime_is_active = mph_prime_active();
         const bool mph_prime_virtual_stylus = mph_prime_is_active &&
             mph_prime_held[static_cast<size_t>(
                 MphPrimeAction::VirtualStylus)];
-        if (relative_mouse.captured() && options.relative_mouse_direct_aim &&
+        if ((relative_mouse.captured() || mph_prime_pad_engaged) &&
+            options.relative_mouse_direct_aim &&
             !mph_prime_virtual_stylus && !mph_touch_sequence.active() &&
-            (relative_delta_x != 0 || relative_delta_y != 0)) {
+            (relative_delta_x != 0 || relative_delta_y != 0 ||
+             mph_pad_frame_x != 0 || mph_pad_frame_y != 0)) {
             // AMHE0 consumes signed per-frame aim deltas. Keep the native
             // stylus held at center, but feed motion through those title-owned
             // fields so turning never stops at a virtual touchscreen edge.
+            // The pad's right-stick contribution is pre-scaled and merges
+            // with the mouse counts here because the title fields are
+            // OVERWRITTEN per frame, not accumulated.
             const NdsRelativeMouseDelta delta =
                 nds_scale_relative_mouse_delta(
                     relative_delta_x, relative_delta_y,
                     options.relative_mouse_sensitivity,
                     options.relative_mouse_invert_y, 150);
-            if (nds_title_patches_apply_mph_mouse_delta(delta.x, delta.y))
+            const int32_t final_x = delta.x + mph_pad_frame_x;
+            const int32_t final_y = delta.y + mph_pad_frame_y;
+            if (nds_title_patches_apply_mph_mouse_delta(final_x, final_y)) {
                 ++relative_direct_writes;
+                if (mph_pad_frame_x != 0 || mph_pad_frame_y != 0)
+                    ++mph_pad_aim_writes;
+            }
             relative_delta_x = 0;
             relative_delta_y = 0;
         }
