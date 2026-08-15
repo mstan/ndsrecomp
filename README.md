@@ -90,8 +90,8 @@ licensing boundaries.
 
 ## User-provided inputs
 
-You must dump these files from hardware you own and place them in `bios/`.
-They are hash-verified at load and are ignored by Git.
+The fully faithful path uses these files, dumped from hardware you own and
+placed in `bios/`. They are hash-verified at load and are ignored by Git.
 
 | file | SHA-1 | role |
 |---|---|---|
@@ -99,8 +99,27 @@ They are hash-verified at load and are ignored by Git.
 | `biosnds7.rom` | `24f67bdea115a2c847c8813a262502ee1607b7df` | ARM7 BIOS (16 KB, maps at `0x00000000`) |
 | `firmware.bin` | `ae22de59fbf3f35ccfbeacaeba6fa87ac5e7b14b` | 256 KB flash image used by the demonstrated path |
 
+An opt-in no-dump path also exists (`--freebios --generated-firmware
+--boot direct`): the recompiled [FreeBIOS](https://github.com/mstan/freebios)
+(the DraStic BIOS replacement, BSD-2-Clause, vendored as the
+`third_party/freebios` submodule) plus a synthesized firmware image with a
+persisted per-install identity. The retail dumps remain the default and the
+oracle-diffed source of truth.
+
 `BIOSGBA.ROM` is reserved for possible future GBA-mode work and is out of
 scope. More detail is in [`bios/README.md`](bios/README.md).
+
+## Networking and Wiimmfi
+
+Online play (Nintendo WFC via [Wiimmfi](https://wiimmfi.de/)) is built on
+[melonDS](https://github.com/melonDS-emu/melonDS)'s Wi-Fi work, vendored
+under `runner/vendor/melonds/`: its DS Wi-Fi controller model, emulated
+access point, and libslirp-based network backend are what let a recompiled
+DS title associate, obtain an address, and reach Wiimmfi as a real Nintendo
+client. Full credit to the melonDS team — their implementation, including
+Wiimmfi compatibility, is the foundation this project's networking stands
+on. Provenance and licensing are in
+[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md).
 
 ## Oracle
 
