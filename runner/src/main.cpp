@@ -201,6 +201,13 @@ bool load_or_create_identity_mac(const std::string& path,
     std::array<uint8_t, 6> mac = {0x00, 0x09, 0xBF, 0, 0, 0};
     std::random_device rng;
     for (int i = 3; i < 6; ++i) mac[i] = static_cast<uint8_t>(rng());
+    {
+        // A pure no-dump setup may not have a bios folder at all yet; the
+        // identity file is what brings it into existence.
+        std::error_code error;
+        std::filesystem::create_directories(
+            std::filesystem::path(path).parent_path(), error);
+    }
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f || !f.write(reinterpret_cast<const char*>(mac.data()), 6)) {
         std::fprintf(stderr,
