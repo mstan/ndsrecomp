@@ -1,23 +1,13 @@
 # ndsrecomp
 
-> ndsrecomp is a byproduct of developing the Nintendo DS recompilation
-> ecosystem: the title projects are the proving ground, and the framework is
-> the long-term goal. This is an in-development preview, not a finished emulator
-> or stable porting framework. Expect rough edges, crashes, hangs, visual/audio
-> issues, networking problems, and game-specific bugs. My time for any one title
-> is limited, so I ask for patience. Testing, issues, and PRs to the framework
-> or title projects are welcome and will help accelerate polish.
+> ## Status: very early pre-alpha (v0.0.1)
 >
-> ## Status: early alpha (v0.0.1)
->
-> `v0.0.1` is the first public alpha release in the ndsrecomp ecosystem. It is
-> intentionally early: instability and bugs are expected. The framework has
-> demonstrated one specific, hash-verified Nintendo DS firmware path, early
-> title bring-up across multiple games, experimental online play through
-> Wiimmfi, same-machine local wireless multiplayer, keyboard/touch input, and
-> rudimentary controller support. It has no compatibility promise, no stable
-> API, and no turnkey clean-clone game build yet. Internals and instructions may
-> change without notice.
+> This is an experimental developer snapshot, not a ready-to-use emulator or
+> a stable framework. It has demonstrated one specific, hash-verified Nintendo
+> DS firmware path, early title bring-up across multiple games, experimental
+> online play through Wiimmfi, and same-machine local wireless multiplayer. It
+> has no compatibility promise, no stable API, and no turnkey clean-clone game
+> build yet. Internals and instructions may change without notice.
 
 ndsrecomp is a static recompiler for the **Nintendo DS**. In the same family
 as `nesrecomp`, `snesrecomp`, `psxrecomp`, `segagenesisrecomp`, and
@@ -28,49 +18,42 @@ This is **not** a general-purpose emulator. A thin runtime supplies the memory
 bus, two-CPU scheduling, hardware models, and optional SDL presentation. Code
 copied into RAM by the guest currently uses a bounded interpreter tier.
 
-## Release status
-
-Current source release:
-**[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
-
-This is an early alpha and the first ndsrecomp ecosystem release. Treat it as a
-developer/tester preview: bugs are expected, regressions are possible, and
-validated behavior is limited to the specific paths called out below.
-
 ## Current demonstrated targets
 
 The original DS firmware menu remains the baseline target: boot through the
 ARM7 and ARM9 BIOSes, pass the Health & Safety screen, reach the main menu, and
 interact with it through mouse-driven touch input.
 
-Mario Kart DS demonstrates Wiimmfi lobby connectivity and experimental
-same-machine local wireless multiplayer. Metroid Prime Hunters has early
-gameplay footage, title-specific 21:9 display bring-up, and Prime-style
-keyboard/mouse controls. These are narrow bring-up results, not broad
-compatibility claims.
+The first experimental game target was a locally supplied European revision-0
+Super Mario 64 DS dump. Mario Kart DS now demonstrates real Wiimmfi online
+matching and experimental same-machine local wireless multiplayer. Metroid
+Prime Hunters has early gameplay footage and title-specific 21:9 display
+bring-up. These are narrow bring-up results, not broad compatibility claims.
+
+Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
 
 ## Showcase
 
 Prime Hunters early gameplay footage:
 **[watch on YouTube](https://www.youtube.com/watch?v=tvqnW6J6KU0)**.
 
-| Mario Kart DS local wireless | Mario Kart DS Wiimmfi lobby |
-|---|---|
-| ![Two Mario Kart DS instances racing over experimental local wireless on one machine](docs/showcase/mkds-local-wireless-2p.webp) | ![Two Mario Kart DS instances connected to a Wiimmfi lobby before in-game validation](docs/showcase/mkds-wiimmfi-2p.webp) |
+| Super Mario 64 DS adaptive 21:9 | Mario Kart DS local wireless | Mario Kart DS Wiimmfi |
+|---|---|---|
+| ![Super Mario 64 DS running with the top screen widened to 21:9](docs/showcase/sm64ds-adaptive-21x9.webp) | ![Two Mario Kart DS instances racing over experimental local wireless on one machine](docs/showcase/mkds-local-wireless-2p.webp) | ![Two Mario Kart DS instances racing through Wiimmfi online play](docs/showcase/mkds-wiimmfi-2p.webp) |
 
 ## What currently works
 
 - ARM7TDMI (ARMv4T) and ARM946E-S (ARMv5TE) decode and C emission.
 - A dual-CPU, event-aligned scheduler and the hardware paths exercised by the
-  tested firmware-menu and title traversals.
+  tested firmware-menu and SM64DS title traversals.
 - Physical-card-style command, secure-area/KEY1, DMA, and firmware launch
   behavior for the demonstrated local game dump.
-- Interactive SDL video, mouse-driven touch, keyboard input, rudimentary SDL
-  controller input, and paced stereo audio in the tested developer build.
+- Interactive SDL video, touch, keyboard, and paced stereo audio in the tested
+  developer build.
 - Title-owned adaptive widescreen presentation for audited upper-screen 3D
   scenes.
 - Experimental Nintendo WFC plumbing for title projects, demonstrated with
-  Mario Kart DS reaching the Wiimmfi lobby.
+  Mario Kart DS reaching Wiimmfi multiplayer.
 - Experimental same-machine local wireless multiplayer for MKDS through a
   localhost transport. LAN/across-machine play is not validated or claimed.
 - A separate melonDS-based accuracy oracle and machine-readable traversal
@@ -78,9 +61,9 @@ Prime Hunters early gameplay footage:
 
 Important limitations:
 
-- Game projects are separate title repositories with their own exact-ROM gates,
-  generated banks, and release status. This framework repository does not ship
-  turnkey game builds.
+- SM64DS, Mario Kart DS, and Prime Hunters are separate title repositories with
+  their own exact-ROM gates, generated banks, and release status. This
+  framework repository does not ship turnkey game builds.
 - Prime Hunters gameplay is early footage, not a compatibility claim.
 - The checked-in tree intentionally omits generated recompiled banks, because
   they contain code derived from user-provided Nintendo dumps.
@@ -133,24 +116,10 @@ Online play (Nintendo WFC via [Wiimmfi](https://wiimmfi.de/)) is built on
 under `runner/vendor/melonds/`: its DS Wi-Fi controller model, emulated
 access point, and libslirp-based network backend are what let a recompiled
 DS title associate, obtain an address, and reach Wiimmfi as a real Nintendo
-client. Full credit to the melonDS team - their implementation, including
+client. Full credit to the melonDS team — their implementation, including
 Wiimmfi compatibility, is the foundation this project's networking stands
 on. Provenance and licensing are in
 [`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md).
-
-Current alpha status: Wiimmfi can reach the lobby in validated flows, but
-in-game online play is ultimately untested. There is no guarantee that a match
-will connect, remain connected, or avoid desync.
-
-## Input
-
-Mouse-driven touch and keyboard input are implemented in the SDL frontend, and
-rudimentary controller support is also present. The Metroid Prime Hunters
-Prime-style keyboard/mouse layer uses
-[melonPrimeDS](https://github.com/makinori/melonPrimeDS) as the reference for
-its user-facing control scheme and gameplay touch-helper behavior. See
-[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md) for provenance and
-licensing details.
 
 ## Oracle
 
