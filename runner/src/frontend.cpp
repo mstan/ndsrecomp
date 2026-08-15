@@ -1604,7 +1604,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     // pad sensitivity. Y keeps the mouse path's 150% scale
                     // and follows the same invert option.
                     const float curved = (mag - kDeadzone) / (1.0f - kDeadzone);
-                    const float rate = curved * curved * 14.0f *
+                    const float rate = curved * curved * 5.0f *
                         (options.mph_pad_aim_sensitivity / 100.0f) / mag;
                     mph_pad_aim_rem_x += rx * rate;
                     mph_pad_aim_rem_y += ry * rate * 1.5f *
