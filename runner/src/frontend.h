@@ -172,6 +172,15 @@ struct NdsFrontendOptions {
     // scheme) so two instances booted from the same firmware dump present
     // different console identities to Wiimmfi/WFC and can see each other.
     uint32_t instance_index = 0;
+    // beads-yjp.16: the DS firmware console nickname, which games surface as
+    // the player's default name and which WFC/Wiimmfi shows to peers.
+    // Applied to the IN-MEMORY firmware image on every boot (main.cpp, via
+    // nds_apply_player_name) so it works identically for a retail dump and a
+    // generated image. Empty (the default) is a deliberate no-op: a dump
+    // keeps its console's real nickname, a generated image keeps
+    // "ndsrecomp". Sources, lowest to highest precedence: game.toml
+    // [system] player_name, NDS_PLAYER_NAME, --player-name.
+    std::string player_name;
     uint8_t adaptive_screens = NDS_ADAPTIVE_NONE;
     // Title-owned capability mask. A requested screen must be present here;
     // unsupported adaptive output fails closed instead of stretching pixels.

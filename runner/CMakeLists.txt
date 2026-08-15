@@ -270,6 +270,7 @@ add_executable(nds_runner
     src/runtime_arm.cpp
     src/battery_save.cpp
     src/generated_firmware.cpp
+    src/firmware_user_settings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/freebios/freebios_images.cpp
     src/bus.cpp
     src/cart_backup.cpp
@@ -534,6 +535,18 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   # sanitizer determinism -- pure host-side logic with zero melonDS/
   # emulator dependency, so this links only the three net/* sources it
   # actually needs (matching frontend_config_test's minimal-link style).
+  # In-memory firmware user-settings patches (touch calibration, startup
+  # mode, per-instance MAC, player name). Pure byte/CRC logic with no
+  # emulator dependency, so it links one source, matching
+  # frontend_config_test's minimal-link style.
+  add_executable(firmware_user_settings_test
+      tests/firmware_user_settings_test.cpp
+      src/firmware_user_settings.cpp
+      src/generated_firmware.cpp)
+  target_include_directories(firmware_user_settings_test PRIVATE src)
+  add_test(NAME firmware_user_settings_test
+           COMMAND firmware_user_settings_test)
+
   add_executable(net_capture_test
       tests/net_capture_test.cpp
       src/net/net_capture.cpp
