@@ -244,6 +244,107 @@ MphPrimeBinding parse_mph_prime_binding(const std::string& value) {
             key, 0};
 }
 
+// ── Gamepad bindings for Prime Controls actions ─────────────────────────
+enum class MphPadInputKind : uint8_t {
+    None,
+    Button,
+    TriggerLeft,
+    TriggerRight,
+};
+
+struct MphPadBinding {
+    MphPadInputKind kind = MphPadInputKind::None;
+    SDL_GameControllerButton button = SDL_CONTROLLER_BUTTON_INVALID;
+};
+
+struct MphPadBindingSet {
+    std::array<MphPadBinding,
+               static_cast<size_t>(MphPrimeAction::Count)> bindings{};
+    bool valid = true;
+};
+
+MphPadBinding parse_mph_pad_binding(const std::string& value,
+                                    bool* recognized) {
+    if (recognized) *recognized = true;
+    const std::string normalized = binding_name_lower(value);
+    if (normalized.empty() || normalized == "none" ||
+        normalized == "unbound") {
+        return {};
+    }
+    auto button = [](SDL_GameControllerButton b) {
+        return MphPadBinding{MphPadInputKind::Button, b};
+    };
+    if (normalized == "pad a") return button(SDL_CONTROLLER_BUTTON_A);
+    if (normalized == "pad b") return button(SDL_CONTROLLER_BUTTON_B);
+    if (normalized == "pad x") return button(SDL_CONTROLLER_BUTTON_X);
+    if (normalized == "pad y") return button(SDL_CONTROLLER_BUTTON_Y);
+    if (normalized == "pad lb")
+        return button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    if (normalized == "pad rb")
+        return button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    if (normalized == "pad l3")
+        return button(SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    if (normalized == "pad r3")
+        return button(SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+    if (normalized == "pad up") return button(SDL_CONTROLLER_BUTTON_DPAD_UP);
+    if (normalized == "pad down")
+        return button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    if (normalized == "pad left")
+        return button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    if (normalized == "pad right")
+        return button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    if (normalized == "pad start")
+        return button(SDL_CONTROLLER_BUTTON_START);
+    if (normalized == "pad back" || normalized == "pad select")
+        return button(SDL_CONTROLLER_BUTTON_BACK);
+    if (normalized == "pad lt")
+        return {MphPadInputKind::TriggerLeft, SDL_CONTROLLER_BUTTON_INVALID};
+    if (normalized == "pad rt")
+        return {MphPadInputKind::TriggerRight, SDL_CONTROLLER_BUTTON_INVALID};
+    if (recognized) *recognized = false;
+    return {};
+}
+
+MphPadBindingSet make_mph_pad_bindings(
+    const NdsMphPrimeControlBindings& source) {
+    MphPadBindingSet set{};
+    auto put = [&](MphPrimeAction action, const std::string& value) {
+        bool recognized = true;
+        set.bindings[static_cast<size_t>(action)] =
+            parse_mph_pad_binding(value, &recognized);
+        if (!recognized) {
+            std::fprintf(stderr,
+                         "[sdl] invalid MPH Prime Controls pad binding: %s\n",
+                         value.c_str());
+            set.valid = false;
+        }
+    };
+    put(MphPrimeAction::MoveForward, source.move_forward);
+    put(MphPrimeAction::MoveBack, source.move_back);
+    put(MphPrimeAction::MoveLeft, source.move_left);
+    put(MphPrimeAction::MoveRight, source.move_right);
+    put(MphPrimeAction::Jump, source.jump);
+    put(MphPrimeAction::MorphBall, source.morph_ball);
+    put(MphPrimeAction::BoostZoom, source.boost_zoom);
+    put(MphPrimeAction::ScanVisor, source.scan_visor);
+    put(MphPrimeAction::UiLeft, source.ui_left);
+    put(MphPrimeAction::UiRight, source.ui_right);
+    put(MphPrimeAction::UiOk, source.ui_ok);
+    put(MphPrimeAction::Shoot, source.shoot);
+    put(MphPrimeAction::ScanShoot, source.scan_shoot);
+    put(MphPrimeAction::Beam, source.beam);
+    put(MphPrimeAction::Missile, source.missile);
+    put(MphPrimeAction::Weapon1, source.weapon1);
+    put(MphPrimeAction::Weapon2, source.weapon2);
+    put(MphPrimeAction::Weapon3, source.weapon3);
+    put(MphPrimeAction::Weapon4, source.weapon4);
+    put(MphPrimeAction::Weapon5, source.weapon5);
+    put(MphPrimeAction::Weapon6, source.weapon6);
+    put(MphPrimeAction::VirtualStylus, source.virtual_stylus);
+    put(MphPrimeAction::Menu, source.menu);
+    return set;
+}
+
 bool binding_matches_key(const MphPrimeBinding& binding, SDL_Scancode key) {
     return binding.kind == MphPrimeInputKind::Key && binding.key == key;
 }
@@ -976,9 +1077,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const bool mph_prime_controls_available =
         options.mph_prime_controls && options.relative_mouse_direct_aim;
     MphPrimeBindingSet mph_prime_bindings{};
+    MphPadBindingSet mph_pad_bindings{};
     if (mph_prime_controls_available) {
         mph_prime_bindings = make_mph_prime_bindings(options.mph_bindings);
-        if (!mph_prime_bindings.valid) {
+        mph_pad_bindings = make_mph_pad_bindings(options.mph_pad_bindings);
+        if (!mph_prime_bindings.valid || !mph_pad_bindings.valid) {
             destroy_presentation(presentation);
             SDL_Quit();
             return 1;
@@ -1036,8 +1139,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     float mph_pad_aim_rem_y = 0.0f;
     int32_t mph_pad_frame_x = 0;
     int32_t mph_pad_frame_y = 0;
-    bool mph_pad_shoot_held = false;
-    bool mph_pad_scan_held = false;
+    bool mph_pad_trigger_left_held = false;
+    bool mph_pad_trigger_right_held = false;
     uint64_t mph_pad_aim_writes = 0;
     auto mph_prime_active = [&]() {
         return mph_prime_controls_available &&
@@ -1093,6 +1196,32 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         }
         if (consumed && down && !repeat)
             ++mph_prime_key_downs;
+        return consumed;
+    };
+    // Pad buttons bound to Prime actions are consumed here (never also sent
+    // as raw DS buttons). Unlike the keyboard path this gates on
+    // availability, not on active capture: pressing a bound button is
+    // itself the pad's engage gesture.
+    auto process_mph_prime_pad = [&](MphPadInputKind kind,
+                                     SDL_GameControllerButton button,
+                                     bool down) {
+        if (!mph_prime_controls_available) return false;
+        bool consumed = false;
+        for (size_t i = 0; i < mph_pad_bindings.bindings.size(); ++i) {
+            const MphPadBinding& binding = mph_pad_bindings.bindings[i];
+            if (binding.kind != kind) continue;
+            if (kind == MphPadInputKind::Button &&
+                binding.button != button) {
+                continue;
+            }
+            consumed = true;
+            if (down) {
+                mph_prime_pad_engaged = true;
+                mph_pad_idle_frames = 0;
+            }
+            set_mph_prime_action(static_cast<MphPrimeAction>(i), down,
+                                 false);
+        }
         return consumed;
     };
     auto process_mph_prime_mouse = [&](uint8_t button, bool down,
@@ -1420,20 +1549,29 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 controller = nullptr;
                 controller_id = -1;
                 controller_pressed = 0;
+                // Pad-held Prime actions must not survive the device; the
+                // keyboard/mouse can re-press theirs on the next event.
+                clear_mph_prime_controls();
                 publish_keys();
             }
             if (event.type == SDL_CONTROLLERBUTTONDOWN) {
-                if (const uint16_t bit = controller_bit(
-                        static_cast<SDL_GameControllerButton>(
-                            event.cbutton.button))) {
+                const auto button = static_cast<SDL_GameControllerButton>(
+                    event.cbutton.button);
+                if (process_mph_prime_pad(MphPadInputKind::Button, button,
+                                          true)) {
+                    // Consumed by Prime Controls.
+                } else if (const uint16_t bit = controller_bit(button)) {
                     controller_pressed |= bit;
                     publish_keys();
                 }
             }
             if (event.type == SDL_CONTROLLERBUTTONUP) {
-                if (const uint16_t bit = controller_bit(
-                        static_cast<SDL_GameControllerButton>(
-                            event.cbutton.button))) {
+                const auto button = static_cast<SDL_GameControllerButton>(
+                    event.cbutton.button);
+                if (process_mph_prime_pad(MphPadInputKind::Button, button,
+                                          false)) {
+                    // Consumed by Prime Controls.
+                } else if (const uint16_t bit = controller_bit(button)) {
                     controller_pressed &= static_cast<uint16_t>(~bit);
                     publish_keys();
                 }
@@ -1572,19 +1710,32 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             stick_dir(ly, 1u << 7, true);    // Down
 
             if (mph_prime_controls_available) {
-                // Right stick -> camera aim; triggers -> fire / scan-fire.
+                // Right stick -> camera aim; triggers act as bindable
+                // pseudo-buttons (defaults: RT shoot, LT scan-fire).
                 const float rx = SDL_GameControllerGetAxis(
                     controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
                 const float ry = SDL_GameControllerGetAxis(
                     controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
-                const bool trigger_shoot = SDL_GameControllerGetAxis(
+                const bool trigger_right = SDL_GameControllerGetAxis(
                     controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 9830;
-                const bool trigger_scan = SDL_GameControllerGetAxis(
+                const bool trigger_left = SDL_GameControllerGetAxis(
                     controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 9830;
+                if (trigger_right != mph_pad_trigger_right_held) {
+                    mph_pad_trigger_right_held = trigger_right;
+                    process_mph_prime_pad(MphPadInputKind::TriggerRight,
+                                          SDL_CONTROLLER_BUTTON_INVALID,
+                                          trigger_right);
+                }
+                if (trigger_left != mph_pad_trigger_left_held) {
+                    mph_pad_trigger_left_held = trigger_left;
+                    process_mph_prime_pad(MphPadInputKind::TriggerLeft,
+                                          SDL_CONTROLLER_BUTTON_INVALID,
+                                          trigger_left);
+                }
                 const float mag = std::sqrt(rx * rx + ry * ry);
                 constexpr float kDeadzone = 0.25f;
                 const bool aiming = mag > kDeadzone;
-                if (aiming || trigger_shoot || trigger_scan) {
+                if (aiming || trigger_right || trigger_left) {
                     mph_pad_idle_frames = 0;
                     if (!mph_prime_pad_engaged) {
                         mph_prime_pad_engaged = true;
@@ -1614,39 +1765,26 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     mph_pad_aim_rem_x -= static_cast<float>(mph_pad_frame_x);
                     mph_pad_aim_rem_y -= static_cast<float>(mph_pad_frame_y);
                 }
-                if (mph_prime_pad_engaged) {
-                    if (trigger_shoot != mph_pad_shoot_held) {
-                        mph_pad_shoot_held = trigger_shoot;
-                        set_mph_prime_action(MphPrimeAction::Shoot,
-                                             trigger_shoot, false);
-                    }
-                    if (trigger_scan != mph_pad_scan_held) {
-                        mph_pad_scan_held = trigger_scan;
-                        set_mph_prime_action(MphPrimeAction::ScanShoot,
-                                             trigger_scan, false);
-                    }
-                } else if (mph_pad_shoot_held || mph_pad_scan_held) {
-                    if (mph_pad_shoot_held)
-                        set_mph_prime_action(MphPrimeAction::Shoot, false,
-                                             false);
-                    if (mph_pad_scan_held)
-                        set_mph_prime_action(MphPrimeAction::ScanShoot, false,
-                                             false);
-                    mph_pad_shoot_held = false;
-                    mph_pad_scan_held = false;
-                }
             }
         } else {
             if (stick_pressed != 0) {
                 stick_pressed = 0;
                 publish_keys();
             }
+            if (mph_pad_trigger_right_held) {
+                mph_pad_trigger_right_held = false;
+                process_mph_prime_pad(MphPadInputKind::TriggerRight,
+                                      SDL_CONTROLLER_BUTTON_INVALID, false);
+            }
+            if (mph_pad_trigger_left_held) {
+                mph_pad_trigger_left_held = false;
+                process_mph_prime_pad(MphPadInputKind::TriggerLeft,
+                                      SDL_CONTROLLER_BUTTON_INVALID, false);
+            }
             if (mph_prime_pad_engaged) {
                 mph_prime_pad_engaged = false;
                 if (!relative_mouse.captured()) nds_set_touch(0, 0, false);
             }
-            mph_pad_shoot_held = false;
-            mph_pad_scan_held = false;
         }
 
         const bool mph_prime_is_active = mph_prime_active();

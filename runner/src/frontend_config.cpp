@@ -121,35 +121,88 @@ bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out) {
     return true;
 }
 
+namespace {
+
+std::string NdsMphPrimeControlBindings::* mph_binding_member(
+    const std::string& action) {
+    using B = NdsMphPrimeControlBindings;
+    if (action == "move-forward") return &B::move_forward;
+    if (action == "move-back") return &B::move_back;
+    if (action == "move-left") return &B::move_left;
+    if (action == "move-right") return &B::move_right;
+    if (action == "jump") return &B::jump;
+    if (action == "morph-ball") return &B::morph_ball;
+    if (action == "boost-zoom") return &B::boost_zoom;
+    if (action == "scan-visor") return &B::scan_visor;
+    if (action == "ui-left") return &B::ui_left;
+    if (action == "ui-right") return &B::ui_right;
+    if (action == "ui-ok") return &B::ui_ok;
+    if (action == "shoot") return &B::shoot;
+    if (action == "scan-shoot") return &B::scan_shoot;
+    if (action == "beam") return &B::beam;
+    if (action == "missile") return &B::missile;
+    if (action == "weapon1") return &B::weapon1;
+    if (action == "weapon2") return &B::weapon2;
+    if (action == "weapon3") return &B::weapon3;
+    if (action == "weapon4") return &B::weapon4;
+    if (action == "weapon5") return &B::weapon5;
+    if (action == "weapon6") return &B::weapon6;
+    if (action == "virtual-stylus") return &B::virtual_stylus;
+    if (action == "menu") return &B::menu;
+    return nullptr;
+}
+
+}  // namespace
+
+NdsMphPrimeControlBindings nds_default_mph_pad_bindings() {
+    NdsMphPrimeControlBindings pad;
+    // Movement comes from the left stick / D-pad natively; keep the four
+    // move actions unbound so the D-pad stays a plain D-pad.
+    pad.move_forward = "None";
+    pad.move_back = "None";
+    pad.move_left = "None";
+    pad.move_right = "None";
+    pad.jump = "Pad A";
+    pad.morph_ball = "Pad B";
+    pad.boost_zoom = "Pad RB";
+    pad.scan_visor = "Pad R3";
+    pad.ui_left = "Pad Left";
+    pad.ui_right = "Pad Right";
+    pad.ui_ok = "Pad Y";
+    pad.shoot = "Pad RT";
+    pad.scan_shoot = "Pad LT";
+    pad.beam = "Pad LB";
+    pad.missile = "Pad X";
+    pad.weapon1 = "None";
+    pad.weapon2 = "None";
+    pad.weapon3 = "None";
+    pad.weapon4 = "None";
+    pad.weapon5 = "None";
+    pad.weapon6 = "None";
+    // The virtual stylus has no on-screen cursor yet; binding it to a pad
+    // button would strand the player with an invisible pointer.
+    pad.virtual_stylus = "None";
+    pad.menu = "Pad Start";
+    return pad;
+}
+
 bool nds_set_mph_prime_binding(NdsFrontendOptions* options,
                                const std::string& action,
                                const std::string& value) {
     if (!options || value.size() >= 64u) return false;
-    NdsMphPrimeControlBindings& b = options->mph_bindings;
-    if (action == "move-forward") b.move_forward = value;
-    else if (action == "move-back") b.move_back = value;
-    else if (action == "move-left") b.move_left = value;
-    else if (action == "move-right") b.move_right = value;
-    else if (action == "jump") b.jump = value;
-    else if (action == "morph-ball") b.morph_ball = value;
-    else if (action == "boost-zoom") b.boost_zoom = value;
-    else if (action == "scan-visor") b.scan_visor = value;
-    else if (action == "ui-left") b.ui_left = value;
-    else if (action == "ui-right") b.ui_right = value;
-    else if (action == "ui-ok") b.ui_ok = value;
-    else if (action == "shoot") b.shoot = value;
-    else if (action == "scan-shoot") b.scan_shoot = value;
-    else if (action == "beam") b.beam = value;
-    else if (action == "missile") b.missile = value;
-    else if (action == "weapon1") b.weapon1 = value;
-    else if (action == "weapon2") b.weapon2 = value;
-    else if (action == "weapon3") b.weapon3 = value;
-    else if (action == "weapon4") b.weapon4 = value;
-    else if (action == "weapon5") b.weapon5 = value;
-    else if (action == "weapon6") b.weapon6 = value;
-    else if (action == "virtual-stylus") b.virtual_stylus = value;
-    else if (action == "menu") b.menu = value;
-    else return false;
+    const auto member = mph_binding_member(action);
+    if (!member) return false;
+    options->mph_bindings.*member = value;
+    return true;
+}
+
+bool nds_set_mph_prime_pad_binding(NdsFrontendOptions* options,
+                                   const std::string& action,
+                                   const std::string& value) {
+    if (!options || value.size() >= 64u) return false;
+    const auto member = mph_binding_member(action);
+    if (!member) return false;
+    options->mph_pad_bindings.*member = value;
     return true;
 }
 
@@ -642,6 +695,22 @@ bool nds_load_frontend_config(const std::string& path,
                         if (error) {
                             *error =
                                 "controls.prime.bindings contains an "
+                                "unknown binding name or too-long value";
+                        }
+                        return false;
+                    }
+                }
+            }
+            if (const toml::table* pad_bindings =
+                    (*prime)["pad_bindings"].as_table()) {
+                for (const auto& item : *pad_bindings) {
+                    const auto value = item.second.value<std::string>();
+                    if (!value) continue;
+                    if (!nds_set_mph_prime_pad_binding(
+                            options, std::string(item.first.str()), *value)) {
+                        if (error) {
+                            *error =
+                                "controls.prime.pad_bindings contains an "
                                 "unknown binding name or too-long value";
                         }
                         return false;

@@ -146,6 +146,12 @@ struct NdsMphPrimeControlBindings {
     std::string menu = "V";
 };
 
+// Gamepad bindings for the same Prime Controls actions, using pad button
+// names ("Pad A", "Pad RB", "Pad RT", "Pad R3", "Pad Up", ... or "None").
+// melonPrimeDS ships no controller bindings at all, so this layout is our
+// own dual-stick adaptation of its keyboard/mouse scheme.
+NdsMphPrimeControlBindings nds_default_mph_pad_bindings();
+
 struct NdsFrontendOptions {
     // Optional exact cartridge identity from [game]. When present, every
     // title-owned setting in this config is rejected for any other ROM.
@@ -217,6 +223,8 @@ struct NdsFrontendOptions {
     // Prime Controls is active.
     uint16_t mph_pad_aim_sensitivity = 100;       // 10%..400%
     NdsMphPrimeControlBindings mph_bindings{};
+    NdsMphPrimeControlBindings mph_pad_bindings =
+        nds_default_mph_pad_bindings();
     // Internal exact-ROM capability selected after cartridge verification.
     // MPH consumes unbounded host deltas through its native aim fields.
     bool relative_mouse_direct_aim = false;
@@ -249,6 +257,9 @@ bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);
 bool nds_set_mph_prime_binding(NdsFrontendOptions* options,
                                const std::string& action,
                                const std::string& value);
+bool nds_set_mph_prime_pad_binding(NdsFrontendOptions* options,
+                                   const std::string& action,
+                                   const std::string& value);
 bool nds_parse_cartridge_save_type(const std::string& value,
                                    NdsCartridgeSaveType* out);
 // Strict dotted-quad IPv4 ("a.b.c.d", each octet 0..255, no leading zeros

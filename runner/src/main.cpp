@@ -418,6 +418,16 @@ int main(int argc, char** argv) {
             cli_mph_virtual_stylus_sensitivity = argv[++i];
         } else if (a == "--mph-pad-aim-sensitivity" && i + 1 < argc) {
             cli_mph_pad_aim_sensitivity = argv[++i];
+        } else if (a.rfind("--mph-pad-bind-", 0) == 0 && i + 1 < argc) {
+            const std::string action =
+                a.substr(std::strlen("--mph-pad-bind-"));
+            if (!nds_set_mph_prime_pad_binding(
+                    &frontend_options, action, argv[++i])) {
+                std::fprintf(stderr,
+                    "invalid %s (unknown action or too-long value)\n",
+                    a.c_str());
+                return 1;
+            }
         } else if (a.rfind("--mph-bind-", 0) == 0 && i + 1 < argc) {
             const std::string action = a.substr(std::strlen("--mph-bind-"));
             if (!nds_set_mph_prime_binding(
@@ -495,6 +505,7 @@ int main(int argc, char** argv) {
                 "[--mph-virtual-stylus-sensitivity 10..400] "
                 "[--mph-pad-aim-sensitivity 10..400] "
                 "[--mph-bind-<action> <key-or-mouse>] "
+                "[--mph-pad-bind-<action> <pad-button|None>] "
                 "[--startup-mode preserve|manual|automatic] "
                 "[--boot lle|direct] "
                 "[--generated-firmware] [--identity-mac AA:BB:CC:DD:EE:FF] "
