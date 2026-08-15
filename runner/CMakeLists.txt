@@ -42,6 +42,15 @@ set(NDS_TITLE_BANK_DIR "" CACHE PATH
     "Optional ignored directory containing generated title banks")
 set(NDS_TITLE_ROM_SHA1 "" CACHE STRING
     "Exact lowercase ROM SHA-1 allowed to register NDS_TITLE_BANK_DIR")
+# Multi-title form: parallel lists, one bank directory per exact ROM SHA-1.
+# One runner binary can then serve several cartridges (e.g. a two-in-one
+# repository like Pokemon Black/White), registering only the bank group whose
+# SHA-1 matches the inserted ROM. The singular variables above remain fully
+# supported and are folded in as one extra group.
+set(NDS_TITLE_BANK_DIRS "" CACHE STRING
+    "Semicolon list of generated title bank directories (parallel to NDS_TITLE_ROM_SHA1S)")
+set(NDS_TITLE_ROM_SHA1S "" CACHE STRING
+    "Semicolon list of exact lowercase ROM SHA-1s (parallel to NDS_TITLE_BANK_DIRS)")
 
 # The recompiled ARM9 BIOS bank (generated; compiled as C). Generated TUs
 # trade warning-cleanliness for uniform emission — silence the expected
@@ -71,29 +80,62 @@ if(NDS_SM64DS_BANK_DIR)
             "NDS_SM64DS_BANK_DIR has no generated sm64ds bank sources")
     endif()
 endif()
+# Fold the singular variables and the list variables into one set of
+# (bank dir, ROM SHA-1) groups. Every group is validated identically; the
+# generated registry gates each group's banks behind its own SHA-1, so one
+# runner binary serves exactly the cartridges it was configured for.
+set(TITLE_GROUP_DIRS)
+set(TITLE_GROUP_SHA1S)
+if(NDS_TITLE_BANK_DIR)
+    list(APPEND TITLE_GROUP_DIRS "${NDS_TITLE_BANK_DIR}")
+    list(APPEND TITLE_GROUP_SHA1S "${NDS_TITLE_ROM_SHA1}")
+endif()
+if(NDS_TITLE_BANK_DIRS)
+    list(LENGTH NDS_TITLE_BANK_DIRS _title_dirs_len)
+    list(LENGTH NDS_TITLE_ROM_SHA1S _title_sha1s_len)
+    if(NOT _title_dirs_len EQUAL _title_sha1s_len)
+        message(FATAL_ERROR
+            "NDS_TITLE_BANK_DIRS (${_title_dirs_len}) and "
+            "NDS_TITLE_ROM_SHA1S (${_title_sha1s_len}) must be parallel "
+            "lists of equal length")
+    endif()
+    list(APPEND TITLE_GROUP_DIRS ${NDS_TITLE_BANK_DIRS})
+    list(APPEND TITLE_GROUP_SHA1S ${NDS_TITLE_ROM_SHA1S})
+endif()
+
 set(TITLE_BANK_BODIES)
 set(TITLE_BANK_DISPATCH)
 set(TITLE_BANK_SOURCES)
-if(NDS_TITLE_BANK_DIR)
-    string(LENGTH "${NDS_TITLE_ROM_SHA1}" NDS_TITLE_ROM_SHA1_LENGTH)
-    if(NOT NDS_TITLE_ROM_SHA1_LENGTH EQUAL 40 OR
-       NDS_TITLE_ROM_SHA1 MATCHES "[^0-9a-f]")
-        message(FATAL_ERROR
-            "NDS_TITLE_ROM_SHA1 must be exactly 40 lowercase hex digits "
-            "when NDS_TITLE_BANK_DIR is set")
-    endif()
-    file(GLOB TITLE_BANK_BODIES CONFIGURE_DEPENDS
-        "${NDS_TITLE_BANK_DIR}/*_[0-9][0-9].c")
-    file(GLOB TITLE_BANK_DISPATCH CONFIGURE_DEPENDS
-        "${NDS_TITLE_BANK_DIR}/*_dispatch.c")
-    list(SORT TITLE_BANK_BODIES)
-    list(SORT TITLE_BANK_DISPATCH)
+set(TITLE_GROUP_COUNT 0)
+list(LENGTH TITLE_GROUP_DIRS TITLE_GROUP_COUNT)
+if(TITLE_GROUP_COUNT GREATER 0)
+    math(EXPR _title_last "${TITLE_GROUP_COUNT} - 1")
+    foreach(_gi RANGE 0 ${_title_last})
+        list(GET TITLE_GROUP_DIRS ${_gi} _group_dir)
+        list(GET TITLE_GROUP_SHA1S ${_gi} _group_sha1)
+        string(LENGTH "${_group_sha1}" _group_sha1_len)
+        if(NOT _group_sha1_len EQUAL 40 OR _group_sha1 MATCHES "[^0-9a-f]")
+            message(FATAL_ERROR
+                "title bank group ${_gi}: ROM SHA-1 must be exactly 40 "
+                "lowercase hex digits (got '${_group_sha1}')")
+        endif()
+        file(GLOB _group_bodies CONFIGURE_DEPENDS
+            "${_group_dir}/*_[0-9][0-9].c")
+        file(GLOB _group_dispatch CONFIGURE_DEPENDS
+            "${_group_dir}/*_dispatch.c")
+        list(SORT _group_bodies)
+        list(SORT _group_dispatch)
+        if(NOT _group_bodies OR NOT _group_dispatch)
+            message(FATAL_ERROR
+                "title bank group ${_gi} (${_group_dir}) must contain "
+                "generated bank body and dispatch sources")
+        endif()
+        set(TITLE_GROUP_${_gi}_SHA1 "${_group_sha1}")
+        set(TITLE_GROUP_${_gi}_DISPATCH ${_group_dispatch})
+        list(APPEND TITLE_BANK_BODIES ${_group_bodies})
+        list(APPEND TITLE_BANK_DISPATCH ${_group_dispatch})
+    endforeach()
     set(TITLE_BANK_SOURCES ${TITLE_BANK_BODIES} ${TITLE_BANK_DISPATCH})
-    if(NOT TITLE_BANK_BODIES OR NOT TITLE_BANK_DISPATCH)
-        message(FATAL_ERROR
-            "NDS_TITLE_BANK_DIR must contain generated bank body and "
-            "dispatch sources")
-    endif()
 endif()
 add_library(nds_banks STATIC
     ${GEN}/arm9_bios.c
@@ -113,7 +155,7 @@ ndsrecomp_limit_link(nds_banks)
 target_include_directories(nds_banks PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
     ${NDS_SM64DS_BANK_DIR}
-    ${NDS_TITLE_BANK_DIR})
+    ${TITLE_GROUP_DIRS})
 set_source_files_properties(
     ${GEN}/arm9_bios.c ${GEN}/arm9_bios_dispatch.c
     ${GEN}/arm7_bios.c ${GEN}/arm7_bios_dispatch.c
@@ -199,27 +241,38 @@ endforeach()
 file(APPEND "${TITLE_BANK_REGISTRY}"
     "\nbool nds_register_configured_title_banks(const char* rom_sha1) {\n")
 if(TITLE_BANK_DISPATCH)
+    # One SHA-1 gate per configured bank group: only the group generated from
+    # the exact inserted cartridge registers, so a multi-title runner never
+    # selects another game's banks by address coincidence.
     file(APPEND "${TITLE_BANK_REGISTRY}"
-        "    if (!rom_sha1 || std::strcmp(rom_sha1, "
-        "\"${NDS_TITLE_ROM_SHA1}\") != 0) return false;\n")
-    foreach(src IN LISTS TITLE_BANK_DISPATCH)
-        get_filename_component(dispatch_stem "${src}" NAME_WE)
-        string(REGEX REPLACE "_dispatch$" "" bank "${dispatch_stem}")
-        if(bank MATCHES "(^|_)arm9($|_)")
-            set(bank_cpu "NDS_ARM9")
-            set(bank_mask "0xFFFF0000u")
-        elseif(bank MATCHES "(^|_)arm7($|_)")
-            set(bank_cpu "NDS_ARM7")
-            set(bank_mask "0x00000000u")
-        else()
-            message(FATAL_ERROR
-                "Cannot infer title-bank CPU from dispatch name: ${bank}")
-        endif()
+        "    if (!rom_sha1) return false;\n")
+    math(EXPR _title_last "${TITLE_GROUP_COUNT} - 1")
+    foreach(_gi RANGE 0 ${_title_last})
         file(APPEND "${TITLE_BANK_REGISTRY}"
-            "    nds_register_dispatch(${bank_cpu}, g_dispatch_${bank}, "
-            "g_dispatch_${bank}_len, ${bank_mask});\n")
+            "    if (std::strcmp(rom_sha1, "
+            "\"${TITLE_GROUP_${_gi}_SHA1}\") == 0) {\n")
+        foreach(src IN LISTS TITLE_GROUP_${_gi}_DISPATCH)
+            get_filename_component(dispatch_stem "${src}" NAME_WE)
+            string(REGEX REPLACE "_dispatch$" "" bank "${dispatch_stem}")
+            if(bank MATCHES "(^|_)arm9($|_)")
+                set(bank_cpu "NDS_ARM9")
+                set(bank_mask "0xFFFF0000u")
+            elseif(bank MATCHES "(^|_)arm7($|_)")
+                set(bank_cpu "NDS_ARM7")
+                set(bank_mask "0x00000000u")
+            else()
+                message(FATAL_ERROR
+                    "Cannot infer title-bank CPU from dispatch name: ${bank}")
+            endif()
+            file(APPEND "${TITLE_BANK_REGISTRY}"
+                "        nds_register_dispatch(${bank_cpu}, "
+                "g_dispatch_${bank}, g_dispatch_${bank}_len, ${bank_mask});\n")
+        endforeach()
+        file(APPEND "${TITLE_BANK_REGISTRY}"
+            "        return true;\n"
+            "    }\n")
     endforeach()
-    file(APPEND "${TITLE_BANK_REGISTRY}" "    return true;\n")
+    file(APPEND "${TITLE_BANK_REGISTRY}" "    return false;\n")
 else()
     file(APPEND "${TITLE_BANK_REGISTRY}"
         "    (void)rom_sha1;\n"
