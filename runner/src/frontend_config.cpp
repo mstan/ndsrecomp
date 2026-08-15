@@ -359,6 +359,13 @@ bool nds_load_frontend_config(const std::string& path,
         if (const auto value = (*system)["freebios"].value<bool>()) {
             options->freebios = *value;
         }
+        // beads-yjp.16: the firmware console nickname. Stored raw here and
+        // validated once in main.cpp, together with NDS_PLAYER_NAME and
+        // --player-name, so one rule set covers all three sources and the
+        // error message can name the value that actually won.
+        if (const auto value = (*system)["player_name"].value<std::string>()) {
+            options->player_name = *value;
+        }
         if (const auto value = (*system)["instance_index"].value<int64_t>()) {
             if (!nds_parse_instance_index(std::to_string(*value),
                                           &options->instance_index)) {

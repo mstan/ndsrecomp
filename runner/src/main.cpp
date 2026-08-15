@@ -20,6 +20,7 @@
 #include "scheduler.h"
 #include "direct_boot.h"
 #include "generated_firmware.h"
+#include "firmware_user_settings.h"
 #include "freebios_images.h"
 
 #include <array>
@@ -143,29 +144,13 @@ bool verify(const std::vector<uint8_t>& data, const char* want,
     return true;
 }
 
-uint16_t firmware_crc16(const uint8_t* data, size_t len, uint32_t start) {
-    static constexpr uint16_t kPoly[8] = {
-        0xC0C1u, 0xC181u, 0xC301u, 0xC601u,
-        0xCC01u, 0xD801u, 0xF001u, 0xA001u,
-    };
-    for (size_t i = 0; i < len; ++i) {
-        start ^= data[i];
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            if (start & 1u)
-                start = (start >> 1u) ^ (uint32_t{kPoly[bit]} << (7u - bit));
-            else
-                start >>= 1u;
-        }
-    }
-    return static_cast<uint16_t>(start);
-}
-
 // Per-install identity for generated firmware (beads-yjp.1.11): a MAC that
 // is generated once, persisted next to the BIOS dumps (the "console"
 // directory), and reused on every boot. melonDS ships one shared
 // DEFAULT_MAC for every single-instance install, so all such consoles look
 // identical to Wiimmfi; we copy its multi-instance perturbation MECHANISM
-// (apply_instance_mac below) but never the shared default.
+// (nds_apply_instance_mac, firmware_user_settings.cpp) but never the shared
+// default.
 bool parse_identity_mac(const std::string& text, std::array<uint8_t, 6>* out) {
     unsigned b[6];
     char extra = 0;
@@ -216,66 +201,6 @@ bool load_or_create_identity_mac(const std::string& path,
     return true;
 }
 
-// melonDS exposes host screen pixels through a deterministic, ideal DS touch
-// calibration. It applies this to both redundant user-settings blocks before
-// the firmware CPU reads them. Mirror that in our private in-memory image so
-// an input coordinate means the same thing on both sides; never alter the dump
-// on disk (the SHA-1 above always verifies the original bytes).
-bool normalize_touch_calibration(std::vector<uint8_t>& fw) {
-    if (fw.size() < 0x22u) return false;
-    const size_t user = size_t{fw[0x20]} << 3u |
-                        size_t{fw[0x21]} << 11u;
-    if (user + 0x200u > fw.size()) return false;
-
-    auto put16 = [&](size_t off, uint16_t value) {
-        fw[off] = static_cast<uint8_t>(value);
-        fw[off + 1u] = static_cast<uint8_t>(value >> 8u);
-    };
-    for (unsigned copy = 0; copy < 2; ++copy) {
-        const size_t base = user + size_t{copy} * 0x100u;
-        put16(base + 0x58u, 0u);          // ADC1 X
-        put16(base + 0x5Au, 0u);          // ADC1 Y
-        fw[base + 0x5Cu] = 0u;            // pixel1 X
-        fw[base + 0x5Du] = 0u;            // pixel1 Y
-        put16(base + 0x5Eu, 255u << 4u);  // ADC2 X
-        put16(base + 0x60u, 191u << 4u);  // ADC2 Y
-        fw[base + 0x62u] = 255u;          // pixel2 X
-        fw[base + 0x63u] = 191u;          // pixel2 Y
-        put16(base + 0x72u,
-              firmware_crc16(fw.data() + base, 0x70u, 0xFFFFu));
-    }
-    return true;
-}
-
-bool apply_startup_mode(std::vector<uint8_t>& fw, NdsStartupMode mode) {
-    if (mode == NdsStartupMode::Preserve) return true;
-    if (fw.size() < 0x22u) return false;
-    const size_t user = size_t{fw[0x20]} << 3u |
-                        size_t{fw[0x21]} << 11u;
-    if (user + 0x200u > fw.size()) return false;
-
-    auto get16 = [&](size_t off) {
-        return static_cast<uint16_t>(
-            uint16_t{fw[off]} | (uint16_t{fw[off + 1u]} << 8u));
-    };
-    auto put16 = [&](size_t off, uint16_t value) {
-        fw[off] = static_cast<uint8_t>(value);
-        fw[off + 1u] = static_cast<uint8_t>(value >> 8u);
-    };
-    for (unsigned copy = 0; copy < 2; ++copy) {
-        const size_t base = user + size_t{copy} * 0x100u;
-        uint16_t language_and_flags = get16(base + 0x64u);
-        if (mode == NdsStartupMode::Automatic)
-            language_and_flags |= 1u << 6u;
-        else
-            language_and_flags &= ~(1u << 6u);
-        put16(base + 0x64u, language_and_flags);
-        put16(base + 0x72u,
-              firmware_crc16(fw.data() + base, 0x70u, 0xFFFFu));
-    }
-    return true;
-}
-
 // Concrete direct-boot machine (beads-yjp.15 increment 1). Guest memory
 // writes go through the device bus path — never raw RAM pokes — so the
 // copied ARM9/ARM7 binaries acquire write provenance (Tier-3 and static
@@ -308,82 +233,6 @@ struct RunnerDirectBootMachine final : NdsDirectBootMachine {
         bus_patch_arm9_bios(0x20, logo, size);
     }
 };
-
-// Wiimmfi (beads-yjp.1.11): two ndsrecomp instances booted from the SAME
-// firmware dump present the SAME console MAC, so Wiimmfi identity and DS
-// friend codes -- both derived from it -- collide: two such clients look
-// like one console appearing twice and cannot match with each other
-// online. This mirrors melonDS's own proven fix for exactly this problem
-// (multi-instance local testing) byte-for-byte -- see
-// ndsref/third_party/melonDS/src/frontend/qt_sdl/EmuInstance.cpp:1739-1752
-// -- rather than inventing a new perturbation scheme: add the instance
-// index into MAC bytes 3/4/5 (melonDS's own wrap-mod-256 u8 arithmetic,
-// reproduced here with explicit truncating casts), then mask byte 0 so
-// the result can never be a broadcast/multicast address.
-//
-// Instance 0 is a deliberate, total no-op (early return): the owner
-// chose LLE-faithful as the default, so the guest reads its REAL MAC off
-// the real firmware dump over its own ordinary SPI path, unperturbed,
-// exactly like a physical console. Only a nonzero --instance-index
-// perturbs anything.
-//
-// This is an in-memory FIRMWARE patch, applied to this process's private
-// copy of `fw` only -- never a ROM patch (no cartridge byte is ever
-// touched) and never guest interception (no HLE, no faking a register
-// read/IPC value the guest "expects"; the guest still reads the MAC the
-// only way real hardware does, via SPI -- see nds_wifi_load_firmware's
-// SPI.SetFirmwareSource binding). Same category of change as
-// normalize_touch_calibration/apply_startup_mode above, and applied at
-// the same call site, for the same reason: the SHA-1 dump verification
-// above already ran against the pristine on-disk bytes before any of
-// these three patches touch `fw`, so patching here can never desync from
-// that check.
-//
-// The MAC lives inside the firmware HEADER's Wi-Fi calibration block
-// (GBATek "DS Firmware Header" / melonDS's SPI_Firmware.h
-// FirmwareHeader::MacAddr), a completely different region with a
-// DIFFERENT checksum than the per-boot user-settings block the other two
-// patches touch (UserData::Checksum, CRC16 start 0xFFFF over 0x70 bytes).
-// The header's own WifiConfigChecksum (offset 0x2A) instead covers
-// WifiConfigLength bytes (a value stored IN the header, read here rather
-// than hardcoded -- default firmware ships 0x138) starting at 0x2C (the
-// length field itself is inside its own checksummed range), CRC16 start
-// 0x0000 -- confirmed against melonDS's own verification call,
-// SPI.cpp:99: `VerifyCRC16(0x0000, 0x2C, *(u16*)&Buffer[0x2C], 0x2A)`.
-// firmware_crc16() above is byte-for-byte the same polynomial table and
-// bit loop as melonDS's SPI.cpp CRC16(), so it is reused here rather than
-// duplicated a third time.
-bool apply_instance_mac(std::vector<uint8_t>& fw, uint32_t instance_index) {
-    if (instance_index == 0) return true;  // instance 0: untouched, LLE-faithful
-    constexpr size_t kMacOffset = 0x36u;
-    constexpr size_t kWifiConfigChecksumOffset = 0x2Au;
-    constexpr size_t kWifiConfigLenOffset = 0x2Cu;
-    if (fw.size() < kWifiConfigLenOffset + 2u) return false;
-    const uint16_t wifi_config_length = static_cast<uint16_t>(
-        uint16_t{fw[kWifiConfigLenOffset]} |
-        (uint16_t{fw[kWifiConfigLenOffset + 1u]} << 8u));
-    if (kWifiConfigLenOffset + wifi_config_length > fw.size()) return false;
-    if (kMacOffset + 6u > kWifiConfigLenOffset + wifi_config_length)
-        return false;  // MacAddr must fall inside the checksummed region
-
-    uint8_t mac[6];
-    std::memcpy(mac, fw.data() + kMacOffset, 6u);
-    // Exact melonDS perturbation (EmuInstance.cpp:1739-1752): u8 arithmetic
-    // wraps mod 256 on both sides, reproduced here with explicit
-    // truncating casts since these are plain uint8_t, not melonDS's
-    // MacAddress element type with the same underlying width.
-    mac[3] = static_cast<uint8_t>(mac[3] + instance_index);
-    mac[4] = static_cast<uint8_t>(mac[4] + instance_index * 0x44u);
-    mac[5] = static_cast<uint8_t>(mac[5] + instance_index * 0x10u);
-    mac[0] &= 0xFCu;  // never a broadcast/multicast address
-    std::memcpy(fw.data() + kMacOffset, mac, 6u);
-
-    const uint16_t crc = firmware_crc16(
-        fw.data() + kWifiConfigLenOffset, wifi_config_length, 0u);
-    fw[kWifiConfigChecksumOffset] = static_cast<uint8_t>(crc);
-    fw[kWifiConfigChecksumOffset + 1u] = static_cast<uint8_t>(crc >> 8u);
-    return true;
-}
 
 bool is_ipv4_loopback(uint32_t ipv4_host_order) {
     return (ipv4_host_order & 0xFF000000u) == 0x7F000000u;
@@ -474,6 +323,7 @@ int main(int argc, char** argv) {
     std::string cli_startup_mode;
     std::string cli_boot_mode;
     std::string cli_identity_mac;
+    std::string cli_player_name;
     bool cli_generated_firmware = false;
     bool cli_freebios = false;
     std::string cli_instance_index;
@@ -577,6 +427,8 @@ int main(int argc, char** argv) {
             cli_freebios = true;
         } else if (a == "--identity-mac" && i + 1 < argc) {
             cli_identity_mac = argv[++i];
+        } else if (a == "--player-name" && i + 1 < argc) {
+            cli_player_name = argv[++i];
         } else if (a == "--instance-index" && i + 1 < argc) {
             cli_instance_index = argv[++i];
         } else if (a == "--net-ring-dump") {
@@ -635,6 +487,7 @@ int main(int argc, char** argv) {
                 "[--startup-mode preserve|manual|automatic] "
                 "[--boot lle|direct] "
                 "[--generated-firmware] [--identity-mac AA:BB:CC:DD:EE:FF] "
+                "[--player-name NAME] "
                 "[--freebios] "
                 "[--instance-index 0..255] "
                 "[--discover-static-misses] [--rtc-host] "
@@ -746,6 +599,23 @@ int main(int argc, char** argv) {
             return 2;
         }
         frontend_options.freebios = enabled;
+    }
+    if (const char* value = std::getenv("NDS_PLAYER_NAME")) {
+        frontend_options.player_name = value;
+    }
+    if (!cli_player_name.empty()) frontend_options.player_name = cli_player_name;
+    // Validate ONCE, here, so a bad name fails before any boot work happens
+    // and the message names the offending value -- never silently truncated.
+    if (!frontend_options.player_name.empty()) {
+        std::string player_name_error;
+        if (!nds_validate_player_name(frontend_options.player_name,
+                                      &player_name_error)) {
+            std::fprintf(stderr,
+                "invalid player name \"%s\": %s\n",
+                frontend_options.player_name.c_str(),
+                player_name_error.c_str());
+            return 2;
+        }
     }
     if (!cli_screen_layout.empty() &&
         !nds_parse_screen_layout(cli_screen_layout,
@@ -1341,18 +1211,35 @@ int main(int argc, char** argv) {
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     nds_title_patches_set_mph_mouse_aim(mph_mouse_aim_policy);
-    if (!normalize_touch_calibration(fw)) {
+    if (!nds_normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
     }
-    if (!apply_startup_mode(fw, frontend_options.startup_mode)) {
+    if (!nds_apply_startup_mode(fw, frontend_options.startup_mode)) {
         std::fprintf(stderr,
                      "refusing to start: cannot apply firmware startup mode\n");
         return 1;
     }
     std::fprintf(stderr, "[firmware] startup mode: %s\n",
                  nds_startup_mode_name(frontend_options.startup_mode));
-    if (!apply_instance_mac(fw, frontend_options.instance_index)) {
+    // Console nickname (beads-yjp.16): the name games surface as the
+    // player's default and that WFC/Wiimmfi shows to peers. Same
+    // in-memory, both-copies, CRC-resealed mechanism as the two patches
+    // above, applied at the same point, so it works identically for a
+    // retail dump and for a generated image. Empty = untouched.
+    if (!nds_apply_player_name(fw, frontend_options.player_name)) {
+        std::fprintf(stderr,
+            "refusing to start: cannot apply player name (malformed "
+            "firmware user-settings layout)\n");
+        return 1;
+    }
+    if (!frontend_options.player_name.empty()) {
+        std::fprintf(stderr,
+            "[firmware] player name: \"%s\" written to both user-settings "
+            "copies (in-memory only; the dump on disk is untouched)\n",
+            frontend_options.player_name.c_str());
+    }
+    if (!nds_apply_instance_mac(fw, frontend_options.instance_index)) {
         std::fprintf(stderr,
             "refusing to start: cannot apply per-instance guest MAC "
             "(malformed firmware Wi-Fi calibration block)\n");
