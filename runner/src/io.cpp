@@ -2252,6 +2252,13 @@ void nds_io_apply_direct_boot_latches() {
     nds_gpu3d_set_power(0x820Fu);
     g_rcnt = 0x8000;
     g_auxspicnt = 0x8000;
+    // SOUNDBIAS must reach the SPU's own latch (g_bias), not just the
+    // io_mem shadow: the mixer recenters every output sample around it, so
+    // a bias the SPU never saw leaves the whole stream pinned to the
+    // negative rail — loud channels clamp into audible crackle. Found by
+    // diffing guest audio against melonDS: our no-dump stream spanned
+    // [-16384,-32] while the oracle spanned the full range.
+    nds_spu_write(0x04000504u, 0x200u, 2);
     io_mem_write(0x04000504u, 0x200u, 2);
     g_wifiwaitcnt = 0x0030;
     // The firmware's boot already walked the card through Raw -> KEY1 ->
