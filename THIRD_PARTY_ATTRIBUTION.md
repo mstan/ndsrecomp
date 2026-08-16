@@ -66,8 +66,7 @@ remains a device model, not HLE).
 - Local scope: `runner/vendor/melonds/`
 - Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
   `FIFO.h`, `types.h`, `Savestate.h`, `Savestate.cpp`,
-  `NonStupidBitfield.h`, `GPU3D_Texcache.cpp`, `GPU3D_Texcache.h`,
-  `GPU3D_TexcacheOpenGL.cpp`, `GPU3D_TexcacheOpenGL.h`,
+  `NonStupidBitfield.h`, `GPU3D_Texcache.cpp`, `GPU3D_TexcacheOpenGL.h`,
   `OpenGLSupport.cpp`, `OpenGLSupport.h`, and `PlatformOGL.h`, plus
   `xxhash/xxhash.c`, `xxhash/xxhash.h`, and
   `frontend/glad/{glad.c,glad.h,khrplatform.h}` stored locally under
@@ -79,7 +78,10 @@ remains a device model, not HLE).
   surface and a soft-renderer thread-restart fix), and
   `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`
   (patch `0010`, adaptive width, polygon-ID attributes in the low
-  resolution surface, and the internal-resolution accessors).
+  resolution surface, and the internal-resolution accessors), and
+  `GPU3D_Texcache.h`, `GPU3D_TexcacheOpenGL.cpp` (patch `0011`, routing
+  decoded textures through the optional upscaler and sizing array storage
+  and the per-array layer budget by its factor).
 
   Correction, 2026-08-16: this section previously listed all seven of
   those files as byte-identical to upstream. They were not — the adaptive
