@@ -65,18 +65,27 @@ remains a device model, not HLE).
 
 - Local scope: `runner/vendor/melonds/`
 - Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
-  `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`, `FIFO.h`,
-  `types.h`, `Savestate.h`, `Savestate.cpp`, `NonStupidBitfield.h`
-- The optional compute-renderer source import is also byte-identical to
-  melonDS tag `1.0rc`, commit
-  `e3fa6f4224e0d706df3ee262ae41cfb0deadc593`:
-  `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`,
-  `GPU3D_Texcache.cpp`, `GPU3D_Texcache.h`,
+  `FIFO.h`, `types.h`, `Savestate.h`, `Savestate.cpp`,
+  `NonStupidBitfield.h`, `GPU3D_Texcache.cpp`, `GPU3D_Texcache.h`,
   `GPU3D_TexcacheOpenGL.cpp`, `GPU3D_TexcacheOpenGL.h`,
-  `OpenGLSupport.cpp`, `OpenGLSupport.h`, `PlatformOGL.h`,
-  `xxhash/xxhash.c`, and `xxhash/xxhash.h`, plus
+  `OpenGLSupport.cpp`, `OpenGLSupport.h`, and `PlatformOGL.h`, plus
+  `xxhash/xxhash.c`, `xxhash/xxhash.h`, and
   `frontend/glad/{glad.c,glad.h,khrplatform.h}` stored locally under
   `runner/vendor/melonds/glad/`.
+- **Modified** from the same tag, per the tracked patches in
+  `runner/vendor/melonds/patches/` (GPLv3 §5(a) "you changed the files"
+  notices): `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`
+  (patch `0009`, host-only adaptive render width plus the attribute
+  surface and a soft-renderer thread-restart fix), and
+  `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`
+  (patch `0010`, adaptive width, polygon-ID attributes in the low
+  resolution surface, and the internal-resolution accessors).
+
+  Correction, 2026-08-16: this section previously listed all seven of
+  those files as byte-identical to upstream. They were not — the adaptive
+  widescreen work modified them without recording a change notice. The
+  patches and this list are the correction; no upstream behaviour claim
+  was affected, but the GPLv3 §5(a) notice was missing and is now present.
 - Project-written shim headers in the same directory (`NDS.h`, `GPU.h`,
   `Platform.h`) replace the melonDS headers of the same names with the
   minimal interface slice the vendored units consume; as derived interfaces

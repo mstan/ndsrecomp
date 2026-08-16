@@ -1,0 +1,203 @@
+--- a/src/GPU3D_Compute.h	2026-06-18 19:34:26.925753500 -0700
++++ b/src/GPU3D_Compute.h	2026-08-16 00:26:35.576790200 -0700
+@@ -44,6 +44,7 @@
+     void Reset(GPU& gpu) override;
+ 
+     void SetRenderSettings(int scale, bool highResolutionCoordinates);
++    void SetRenderWidth(u32 width) override;
+ 
+     void VCount144(GPU& gpu) override;
+ 
+@@ -55,6 +56,23 @@
+     void PrepareCaptureFrame() override;
+ 
+     void BindOutputTexture(int buffer) override;
++    [[nodiscard]] GLuint GetLowResTexture() const noexcept
++    {
++        return LowResFramebuffer;
++    }
++    // ndsrecomp: the internal-resolution (HD) presenter composites directly
++    // from the high-resolution render target instead of reading back the
++    // native LowResFramebuffer. Both are written by the same final pass, so
++    // exposing this costs no extra work and leaves the native readback (and
++    // therefore display capture and the accuracy floor) untouched.
++    [[nodiscard]] GLuint GetHiResTexture() const noexcept
++    {
++        return Framebuffer;
++    }
++    [[nodiscard]] int GetScaleFactor() const noexcept
++    {
++        return ScaleFactor;
++    }
+ 
+     void Blit(const GPU& gpu) override;
+     void Stop(const GPU& gpu) override;
+@@ -216,9 +234,10 @@
+     GLuint LowResFramebuffer;
+     GLuint PixelBuffer;
+ 
+-    u32 FramebufferCPU[256*192];
++    u32 FramebufferCPU[448*192];
+ 
+     int ScreenWidth, ScreenHeight;
++    int RenderWidth = 256;
+     int TilesPerLine, TileLines;
+     int ScaleFactor = -1;
+     int MaxWorkTiles;
+@@ -239,4 +258,4 @@
+ 
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif
+--- a/src/GPU3D_Compute.cpp	2026-06-18 19:34:26.924725900 -0700
++++ b/src/GPU3D_Compute.cpp	2026-08-16 00:26:26.250162100 -0700
+@@ -18,6 +18,7 @@
+ 
+ #include "GPU3D_Compute.h"
+ 
++#include <algorithm>
+ #include <assert.h>
+ 
+ #include "OpenGLSupport.h"
+@@ -48,6 +49,8 @@
+     shaderSource += std::to_string(ScreenWidth);
+     shaderSource += "\n#define ScreenHeight ";
+     shaderSource += std::to_string(ScreenHeight);
++    shaderSource += "\n#define RenderScale ";
++    shaderSource += std::to_string(ScaleFactor);
+     shaderSource += "\n#define MaxWorkTiles ";
+     shaderSource += std::to_string(MaxWorkTiles);
+ 
+@@ -201,8 +204,6 @@
+ 
+     glGenTextures(1, &result->YSpanIndicesTexture);
+     glGenTextures(1, &result->LowResFramebuffer);
+-    glBindTexture(GL_TEXTURE_2D, result->LowResFramebuffer);
+-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8UI, 256, 192);
+ 
+     glGenBuffers(1, &result->MetaUniformMemory);
+     glBindBuffer(GL_UNIFORM_BUFFER, result->MetaUniformMemory);
+@@ -222,8 +223,6 @@
+     }
+ 
+     glGenBuffers(1, &result->PixelBuffer);
+-    glBindBuffer(GL_PIXEL_PACK_BUFFER, result->PixelBuffer);
+-    glBufferData(GL_PIXEL_PACK_BUFFER, 256*192*4, NULL, GL_DYNAMIC_READ);
+ 
+     return result;
+ }
+@@ -242,6 +241,7 @@
+     glDeleteBuffers(1, &YSpanIndicesTextureMemory);
+     glDeleteTextures(1, &YSpanIndicesTexture);
+     glDeleteTextures(1, &Framebuffer);
++    glDeleteTextures(1, &LowResFramebuffer);
+     glDeleteBuffers(1, &MetaUniformMemory);
+ 
+     glDeleteSamplers(9, Samplers);
+@@ -307,7 +307,7 @@
+     ShaderStepIdx = 0;
+ 
+     ScaleFactor = scale;
+-    ScreenWidth = 256 * ScaleFactor;
++    ScreenWidth = RenderWidth * ScaleFactor;
+     ScreenHeight = 192 * ScaleFactor;
+ 
+     TilesPerLine = ScreenWidth/TileSize;
+@@ -342,6 +342,16 @@
+     glBindTexture(GL_TEXTURE_2D, Framebuffer);
+     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, ScreenWidth, ScreenHeight);
+ 
++    if (LowResFramebuffer != 0)
++        glDeleteTextures(1, &LowResFramebuffer);
++    glGenTextures(1, &LowResFramebuffer);
++    glBindTexture(GL_TEXTURE_2D, LowResFramebuffer);
++    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8UI, RenderWidth, 192);
++
++    glBindBuffer(GL_PIXEL_PACK_BUFFER, PixelBuffer);
++    glBufferData(GL_PIXEL_PACK_BUFFER, RenderWidth*192*4, NULL,
++                 GL_DYNAMIC_READ);
++
+     // eh those are pretty bad guesses
+     // though real hw shouldn't be eable to render all 2048 polygons on every line either
+     int maxYSpanIndices = 64*2048 * ScaleFactor;
+@@ -357,6 +367,18 @@
+     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA16UI, YSpanIndicesTextureMemory);
+ }
+ 
++void ComputeRenderer::SetRenderWidth(u32 width)
++{
++    const int newWidth =
++        std::clamp<int>(static_cast<int>(width), 256, 448) & ~1;
++    // ScreenWidth is compiled into the shaders and sizes all result buffers.
++    // The runner configures width before SetRenderSettings; changing it later
++    // requires a complete renderer reconstruction.
++    assert(ScaleFactor == -1 || RenderWidth == newWidth);
++    if (ScaleFactor == -1)
++        RenderWidth = newWidth;
++}
++
+ void ComputeRenderer::VCount144(GPU& gpu)
+ {
+ 
+@@ -1094,14 +1116,17 @@
+ 
+ u32* ComputeRenderer::GetLine(int line)
+ {
+-    int stride = 256;
++    int stride = RenderWidth;
+ 
+     if (line == 0)
+     {
+         glBindBuffer(GL_PIXEL_PACK_BUFFER, PixelBuffer);
+         u8* data = (u8*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+-        if (data) memcpy(&FramebufferCPU[0], data, 4*stride*192);
+-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
++        if (data)
++        {
++            memcpy(&FramebufferCPU[0], data, 4*stride*192);
++            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
++        }
+     }
+ 
+     return &FramebufferCPU[stride * line];
+@@ -1134,4 +1159,4 @@
+     CurGLCompositor.Stop(gpu);
+ }
+ 
+-}
+\ No newline at end of file
++}
+--- a/src/GPU3D_Compute_shaders.h	2026-06-18 19:34:26.925753500 -0700
++++ b/src/GPU3D_Compute_shaders.h	2026-08-16 00:26:26.256162200 -0700
+@@ -1642,7 +1642,7 @@
+     imageStore(FinalFB, ivec2(gl_GlobalInvocationID.xy), result);
+ 
+     // It's a division by constant, so using the builtin division is fine
+-    const int scale = ScreenWidth/256;
++    const int scale = RenderScale;
+     ivec2 lowresCoordinate = ivec2(gl_GlobalInvocationID.xy) / scale;
+     ivec2 lowresCoordinateRest = ivec2(gl_GlobalInvocationID.xy) % scale;
+     if (lowresCoordinateRest == ivec2(0, 0))
+@@ -1652,6 +1652,13 @@
+         color8.y = bitfieldExtract(color.x, 8, 8);
+         color8.z = bitfieldExtract(color.x, 16, 8);
+         color8.w = bitfieldExtract(color.x, 24, 8);
++        // Preserve the six-bit polygon ID for runner-side adaptive sky
++        // repair without another readback surface. Each RGB channel is
++        // six-bit, leaving exactly two unused high bits per byte.
++        uint polygonId = bitfieldExtract(attr.x, 24, 6);
++        color8.x |= (polygonId & 0x03U) << 6;
++        color8.y |= ((polygonId >> 2) & 0x03U) << 6;
++        color8.z |= ((polygonId >> 4) & 0x03U) << 6;
+         imageStore(LowResFB, lowresCoordinate, color8);
+     }
+ }
+@@ -1662,4 +1669,4 @@
+ 
+ }
+ 
+-#endif
+\ No newline at end of file
++#endif

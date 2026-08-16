@@ -1,0 +1,548 @@
+--- a/src/GPU3D.h	2026-06-18 19:34:26.924725900 -0700
++++ b/src/GPU3D.h	2026-08-16 00:26:26.231148400 -0700
+@@ -112,7 +112,10 @@
+ 
+     void SetRenderXPos(u16 xpos) noexcept;
+     [[nodiscard]] u16 GetRenderXPos() const noexcept { return RenderXPos; }
++    void SetRenderWidth(u32 width) noexcept;
++    [[nodiscard]] u32 GetRenderWidth() const noexcept { return RenderWidth; }
+     u32* GetLine(int line) noexcept;
++    const u32* GetAttrLine(int line) noexcept;
+ 
+     void WriteToGXFIFO(u32 val) noexcept;
+ 
+@@ -190,6 +193,9 @@
+     std::unique_ptr<Renderer3D> CurrentRenderer = nullptr;
+ 
+     u16 RenderXPos = 0;
++    // Host-only enhanced output width. The hardware-visible viewport and
++    // registers remain untouched; 256 is the exact native path.
++    u32 RenderWidth = 256;
+ 
+ public:
+     FIFO<CmdFIFOEntry, 256> CmdFIFO {};
+@@ -326,7 +332,8 @@
+ 
+     u32 FlushRequest = 0;
+     u32 FlushAttributes = 0;
+-    u32 ScrolledLine[256]; // not part of the hardware state, don't serialize
++    u32 ScrolledLine[448]; // not part of the hardware state, don't serialize
++    u32 ScrolledAttrLine[448]; // host presentation metadata
+ };
+ 
+ class Renderer3D
+@@ -349,6 +356,8 @@
+     virtual void RenderFrame(GPU& gpu) = 0;
+     virtual void RestartFrame(GPU& gpu) {};
+     virtual u32* GetLine(int line) = 0;
++    virtual const u32* GetAttrLine(int line) { return nullptr; }
++    virtual void SetRenderWidth(u32 width) {}
+     virtual void Blit(const GPU& gpu) {};
+ 
+     virtual void SetupAccelFrame() {}
+--- a/src/GPU3D.cpp	2026-06-18 19:34:26.923725200 -0700
++++ b/src/GPU3D.cpp	2026-08-16 00:26:26.203665400 -0700
+@@ -163,6 +163,7 @@
+ void GPU3D::SetCurrentRenderer(std::unique_ptr<Renderer3D>&& renderer) noexcept
+ {
+     CurrentRenderer = std::move(renderer);
++    CurrentRenderer->SetRenderWidth(RenderWidth);
+     CurrentRenderer->Reset(NDS.GPU);
+ }
+ 
+@@ -999,7 +1000,6 @@
+     dot = ((s64)v1->Position[0] * normalX) + ((s64)v1->Position[1] * normalY) + ((s64)v1->Position[3] * normalZ);
+ 
+     bool facingview = (dot <= 0);
+-
+     if (dot < 0)
+     {
+         if (!(CurPolygonAttr & (1<<7)))
+@@ -1113,6 +1113,12 @@
+         // note: the DS performs these divisions using a 32-bit divider
+         // thus, if W is greater than 0xFFFF, some precision is sacrificed
+         // to make the numbers fit into the divider
++        const bool enhanced_full_viewport =
++            RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256;
++        const u32 viewport_width =
++            enhanced_full_viewport ? RenderWidth : Viewport[4];
++        const u32 viewport_x = enhanced_full_viewport
++            ? 0 : Viewport[0] + (RenderWidth - 256) / 2;
+         u32 posX, posY;
+         u32 w = vtx->Position[3];
+         if (w == 0)
+@@ -1134,7 +1140,7 @@
+             }
+ 
+             den <<= 1;
+-            posX = ((posX * Viewport[4]) / den) + Viewport[0];
++            posX = ((posX * viewport_width) / den) + viewport_x;
+             posY = ((posY * Viewport[5]) / den) + Viewport[3];
+         }
+ 
+@@ -1145,7 +1151,7 @@
+         // to consider: only do this when using the GL renderer? apply the aforementioned quirk to this?
+         if (w != 0)
+         {
+-            posX = ((((s64)(vtx->Position[0] + w) * Viewport[4]) << 4) / (((s64)w) << 1)) + (Viewport[0] << 4);
++            posX = ((((s64)(vtx->Position[0] + w) * viewport_width) << 4) / (((s64)w) << 1)) + (viewport_x << 4);
+             posY = ((((s64)(-vtx->Position[1] + w) * Viewport[5]) << 4) / (((s64)w) << 1)) + (Viewport[3] << 4);
+ 
+             vtx->HiresPosition[0] = posX & 0x1FFF;
+@@ -1274,7 +1280,7 @@
+ 
+     u32 vtop = 0, vbot = 0;
+     s32 ytop = 192, ybot = 0;
+-    s32 xtop = 256, xbot = 0;
++    s32 xtop = static_cast<s32>(RenderWidth), xbot = 0;
+     u32 wsize = 0;
+ 
+     for (int i = 0; i < nverts; i++)
+@@ -1365,6 +1371,14 @@
+     vertextrans->Position[1] = (vertex[0]*ClipMatrix[1] + vertex[1]*ClipMatrix[5] + vertex[2]*ClipMatrix[9] + vertex[3]*ClipMatrix[13]) >> 12;
+     vertextrans->Position[2] = (vertex[0]*ClipMatrix[2] + vertex[1]*ClipMatrix[6] + vertex[2]*ClipMatrix[10] + vertex[3]*ClipMatrix[14]) >> 12;
+     vertextrans->Position[3] = (vertex[0]*ClipMatrix[3] + vertex[1]*ClipMatrix[7] + vertex[2]*ClipMatrix[11] + vertex[3]*ClipMatrix[15]) >> 12;
++    // Preserve the native horizontal pixel scale while expanding the clip
++    // volume and full-width viewport. Scaling clip X by 256/output_width is
++    // equivalent to a wider horizontal projection; the vertical projection,
++    // depth, guest matrices, and hardware registers remain unchanged.
++    if (RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256)
++        vertextrans->Position[0] = static_cast<s32>(
++            (static_cast<s64>(vertextrans->Position[0]) * 256) /
++            RenderWidth);
+ 
+     // this probably shouldn't be.
+     // the way color is handled during clipping needs investigation. TODO
+@@ -2545,6 +2559,14 @@
+     RenderXPos = xpos & 0x01FF;
+ }
+ 
++void GPU3D::SetRenderWidth(u32 width) noexcept
++{
++    if (width < 256) width = 256;
++    if (width > 448) width = 448;
++    if (width & 1) width--;
++    RenderWidth = width;
++    if (CurrentRenderer) CurrentRenderer->SetRenderWidth(width);
++}
+ 
+ u32* GPU3D::GetLine(int line) noexcept
+ {
+@@ -2558,29 +2580,66 @@
+ 
+         if (RenderXPos & 0x100)
+         {
+-            int i = 0, j = RenderXPos;
+-            for (; j < 512; i++, j++)
++            int i = 0;
++            int shift = 512 - RenderXPos;
++            if (shift > static_cast<int>(RenderWidth))
++                shift = static_cast<int>(RenderWidth);
++            for (; i < shift; i++)
+                 ScrolledLine[i] = 0;
+-            for (j = 0; i < 256; i++, j++)
++            for (int j = 0; i < static_cast<int>(RenderWidth); i++, j++)
+                 ScrolledLine[i] = rawline[j];
+         }
+         else
+         {
+             int i = 0, j = RenderXPos;
+-            for (; j < 256; i++, j++)
++            for (; j < static_cast<int>(RenderWidth); i++, j++)
+                 ScrolledLine[i] = rawline[j];
+-            for (; i < 256; i++)
++            for (; i < static_cast<int>(RenderWidth); i++)
+                 ScrolledLine[i] = 0;
+         }
+     }
+     else
+     {
+-        memset(ScrolledLine, 0, 256*4);
++        memset(ScrolledLine, 0, RenderWidth*4);
+     }
+ 
+     return ScrolledLine;
+ }
+ 
++const u32* GPU3D::GetAttrLine(int line) noexcept
++{
++    if (AbortFrame)
++    {
++        memset(ScrolledAttrLine, 0, RenderWidth * sizeof(u32));
++        return ScrolledAttrLine;
++    }
++
++    const u32* rawline = CurrentRenderer->GetAttrLine(line);
++    if (!rawline) return nullptr;
++    if (RenderXPos == 0) return rawline;
++
++    if (RenderXPos & 0x100)
++    {
++        int i = 0;
++        int shift = 512 - RenderXPos;
++        if (shift > static_cast<int>(RenderWidth))
++            shift = static_cast<int>(RenderWidth);
++        for (; i < shift; i++)
++            ScrolledAttrLine[i] = 0;
++        for (int j = 0; i < static_cast<int>(RenderWidth); i++, j++)
++            ScrolledAttrLine[i] = rawline[j];
++    }
++    else
++    {
++        int i = 0, j = RenderXPos;
++        for (; j < static_cast<int>(RenderWidth); i++, j++)
++            ScrolledAttrLine[i] = rawline[j];
++        for (; i < static_cast<int>(RenderWidth); i++)
++            ScrolledAttrLine[i] = 0;
++    }
++    return ScrolledAttrLine;
++}
++
+ bool GPU3D::IsRendererAccelerated() const noexcept
+ {
+     return CurrentRenderer && CurrentRenderer->Accelerated;
+@@ -3006,4 +3065,3 @@
+ { }
+ 
+ }
+-
+--- a/src/GPU3D_Soft.h	2026-06-18 19:34:26.926741700 -0700
++++ b/src/GPU3D_Soft.h	2026-08-16 00:26:26.272418300 -0700
+@@ -40,6 +40,8 @@
+     void RenderFrame(GPU& gpu) override;
+     void RestartFrame(GPU& gpu) override;
+     u32* GetLine(int line) override;
++    const u32* GetAttrLine(int line) override;
++    void SetRenderWidth(u32 width) override;
+ 
+     void SetupRenderThread(GPU& gpu);
+     void EnableRenderThread();
+@@ -461,13 +463,15 @@
+ 
+     void RenderThreadFunc(GPU& gpu);
+ 
+-    // buffer dimensions are 258x194 to add a offscreen 1px border
++    // Buffer capacity is 450x194: up to a 448-pixel 21:9 output plus a
++    // one-pixel offscreen border on each side.
+     // which simplifies edge marking tests
+     // buffer is duplicated to keep track of the two topmost pixels
+     // TODO: check if the hardware can accidentally plot pixels
+     // offscreen in that border
+ 
+-    static constexpr int ScanlineWidth = 258;
++    static constexpr int MaxRenderWidth = 448;
++    static constexpr int ScanlineWidth = MaxRenderWidth + 2;
+     static constexpr int NumScanlines = 194;
+     static constexpr int BufferSize = ScanlineWidth * NumScanlines;
+     static constexpr int FirstPixelOffset = ScanlineWidth + 1;
+@@ -485,12 +489,13 @@
+     // bit22: translucent flag
+     // bit24-29: polygon ID for opaque pixels
+ 
+-    u8 StencilBuffer[256*2];
++    u8 StencilBuffer[MaxRenderWidth*2];
++    int RenderWidth = 256;
+     bool PrevIsShadowMask;
+ 
+     bool Enabled;
+ 
+-    bool FrameIdentical;
++    bool FrameIdentical = false;
+ 
+     // threading
+ 
+@@ -499,6 +504,10 @@
+     std::atomic_bool RenderThreadRunning;
+     std::atomic_bool RenderThreadRendering;
+ 
++    // Number of top-to-bottom scanlines complete in the current threaded
++    // frame. This remains line-specific when 2D skips unused 3D scanlines.
++    std::atomic_int RenderedScanlines {192};
++
+     // Used by the main thread to tell the render thread to start rendering a frame
+     Platform::Semaphore* Sema_RenderStart;
+ 
+--- a/src/GPU3D_Soft.cpp	2026-06-18 19:34:26.926741700 -0700
++++ b/src/GPU3D_Soft.cpp	2026-08-16 00:26:26.272418300 -0700
+@@ -91,6 +91,8 @@
+ {
+     if (Threaded && Sema_RenderStart)
+     {
++        RenderedScanlines.store(0, std::memory_order_release);
++        Platform::Semaphore_Reset(Sema_ScanlineCount);
+         Platform::Semaphore_Post(Sema_RenderStart);
+     }
+ }
+@@ -138,6 +140,13 @@
+     }
+ }
+ 
++void SoftRenderer::SetRenderWidth(u32 width)
++{
++    RenderWidth = std::clamp<int>(static_cast<int>(width),
++                                  256, MaxRenderWidth);
++    FrameIdentical = false;
++}
++
+ void SoftRenderer::TextureLookup(const GPU& gpu, u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const
+ {
+     u32 vramaddr = (texparam & 0xFFFF) << 3;
+@@ -724,7 +733,7 @@
+         fnDepthTest = DepthTest_LessThan;
+ 
+     if (!PrevIsShadowMask)
+-        memset(&StencilBuffer[256 * (y&0x1)], 0, 256);
++        memset(&StencilBuffer[MaxRenderWidth * (y&0x1)], 0, RenderWidth);
+ 
+     PrevIsShadowMask = true;
+ 
+@@ -853,7 +862,7 @@
+     edge = yedge | 0x1;
+     xlimit = xstart+l_edgelen;
+     if (xlimit > xend+1) xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+ 
+     if (!l_filledge) x = xlimit;
+     else
+@@ -867,13 +876,13 @@
+         u32 dstattr = AttrBuffer[pixeladdr];
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0xF)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+@@ -881,7 +890,7 @@
+     edge = yedge;
+     xlimit = xend-r_edgelen+1;
+     if (xlimit > xend+1) xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+     if (wireframe && !edge) x = std::max(x, xlimit);
+     else for (; x < xlimit; x++)
+     {
+@@ -893,20 +902,20 @@
+         u32 dstattr = AttrBuffer[pixeladdr];
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0xF)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+     // part 3: right edge
+     edge = yedge | 0x2;
+     xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+ 
+     if (r_filledge)
+     for (; x < xlimit; x++)
+@@ -919,13 +928,13 @@
+         u32 dstattr = AttrBuffer[pixeladdr];
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            StencilBuffer[MaxRenderWidth*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0xF)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                StencilBuffer[MaxRenderWidth*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+@@ -1102,7 +1111,7 @@
+     edge = yedge | 0x1;
+     xlimit = xstart+l_edgelen;
+     if (xlimit > xend+1) xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+     if (l_edgecov & (1<<31))
+     {
+         xcov = (l_edgecov >> 12) & 0x3FF;
+@@ -1119,7 +1128,7 @@
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1203,7 +1212,7 @@
+     edge = yedge;
+     xlimit = xend-r_edgelen+1;
+     if (xlimit > xend+1) xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+ 
+     if (wireframe && !edge) x = std::max(x, xlimit);
+     else
+@@ -1215,7 +1224,7 @@
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1291,7 +1300,7 @@
+     // part 3: right edge
+     edge = yedge | 0x2;
+     xlimit = xend+1;
+-    if (xlimit > 256) xlimit = 256;
++    if (xlimit > RenderWidth) xlimit = RenderWidth;
+     if (r_edgecov & (1<<31))
+     {
+         xcov = (r_edgecov >> 12) & 0x3FF;
+@@ -1307,7 +1316,7 @@
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = StencilBuffer[MaxRenderWidth*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1458,7 +1467,7 @@
+         // edge marking
+         // only applied to topmost pixels
+ 
+-        for (int x = 0; x < 256; x++)
++        for (int x = 0; x < RenderWidth; x++)
+         {
+             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
+ 
+@@ -1506,7 +1515,7 @@
+         u32 fogB = (gpu3d.RenderFogColor >> 9) & 0x3E; if (fogB) fogB++;
+         u32 fogA = (gpu3d.RenderFogColor >> 16) & 0x1F;
+ 
+-        for (int x = 0; x < 256; x++)
++        for (int x = 0; x < RenderWidth; x++)
+         {
+             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
+             u32 density, srccolor, srcR, srcG, srcB, srcA;
+@@ -1571,7 +1580,7 @@
+         // edges were flagged and their coverages calculated during rendering
+         // this is where such edge pixels are blended with the pixels underneath
+ 
+-        for (int x = 0; x < 256; x++)
++        for (int x = 0; x < RenderWidth; x++)
+         {
+             u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
+ 
+@@ -1636,9 +1645,9 @@
+         ColorBuffer[x] = 0;
+         DepthBuffer[x] = clearz;
+         AttrBuffer[x] = polyid;
+-        ColorBuffer[x+257] = 0;
+-        DepthBuffer[x+257] = clearz;
+-        AttrBuffer[x+257] = polyid;
++        ColorBuffer[x+RenderWidth+1] = 0;
++        DepthBuffer[x+RenderWidth+1] = clearz;
++        AttrBuffer[x+RenderWidth+1] = polyid;
+     }
+ 
+     for (int x = ScanlineWidth*193; x < ScanlineWidth*194; x++)
+@@ -1657,7 +1666,7 @@
+ 
+         for (int y = 0; y < ScanlineWidth*192; y+=ScanlineWidth)
+         {
+-            for (int x = 0; x < 256; x++)
++            for (int x = 0; x < RenderWidth; x++)
+             {
+                 u16 val2 = gpu.ReadVRAMFlat_Texture<u16>(0x40000 + (yoff << 9) + (xoff << 1));
+                 u16 val3 = gpu.ReadVRAMFlat_Texture<u16>(0x60000 + (yoff << 9) + (xoff << 1));
+@@ -1695,7 +1704,7 @@
+ 
+         for (int y = 0; y < ScanlineWidth*192; y+=ScanlineWidth)
+         {
+-            for (int x = 0; x < 256; x++)
++            for (int x = 0; x < RenderWidth; x++)
+             {
+                 u32 pixeladdr = FirstPixelOffset + y + x;
+                 ColorBuffer[pixeladdr] = color;
+@@ -1723,15 +1732,21 @@
+         ScanlineFinalPass(gpu.GPU3D, y-1);
+ 
+         if (threaded)
++        {
+             // Notify the main thread that we're done with a scanline.
++            RenderedScanlines.store(y, std::memory_order_release);
+             Platform::Semaphore_Post(Sema_ScanlineCount);
++        }
+     }
+ 
+     ScanlineFinalPass(gpu.GPU3D, 191);
+ 
+     if (threaded)
++    {
+         // If this renderer is threaded, notify the main thread that we're done with the frame.
++        RenderedScanlines.store(192, std::memory_order_release);
+         Platform::Semaphore_Post(Sema_ScanlineCount);
++    }
+ }
+ 
+ void SoftRenderer::VCount144(GPU& gpu)
+@@ -1753,7 +1768,7 @@
+     if (RenderThreadRunning.load(std::memory_order_relaxed))
+     {
+         // "Render thread, you're up! Get moving."
+-        Platform::Semaphore_Post(Sema_RenderStart);
++        EnableRenderThread();
+     }
+     else if (!FrameIdentical)
+     {
+@@ -1785,6 +1800,7 @@
+         RenderThreadRendering = true;
+         if (FrameIdentical)
+         { // If no rendering is needed, just say we're done.
++            RenderedScanlines.store(192, std::memory_order_release);
+             Platform::Semaphore_Post(Sema_ScanlineCount, 192);
+         }
+         else
+@@ -1806,13 +1822,20 @@
+     if (RenderThreadRunning.load(std::memory_order_relaxed))
+     {
+         if (line < 192)
+-            // We need a scanline, so let's wait for the render thread to finish it.
+-            // (both threads process scanlines from top-to-bottom,
+-            // so we don't need to wait for a specific row)
+-            Platform::Semaphore_Wait(Sema_ScanlineCount);
++        {
++            // Earlier 3D scanlines may be unused by the 2D renderer. Check
++            // actual progress so a stale token cannot release a later row.
++            while (RenderedScanlines.load(std::memory_order_acquire) <= line)
++                Platform::Semaphore_Wait(Sema_ScanlineCount);
++        }
+     }
+ 
+     return &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];
+ }
+ 
++const u32* SoftRenderer::GetAttrLine(int line)
++{
++    return &AttrBuffer[(line * ScanlineWidth) + FirstPixelOffset];
++}
++
+ }

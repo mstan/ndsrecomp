@@ -1,4 +1,4 @@
-# runner/vendor/melonds/patches/ — required Wi-Fi modifications
+# runner/vendor/melonds/patches/ — required vendored-source modifications
 
 `*.patch` files here are **already applied** to the committed sources in
 `runner/vendor/melonds/`; they are retained for provenance and GPLv3 5(a)
@@ -294,3 +294,44 @@ filename, which then resolves against this flattened vendor tree — melonDS
 itself has a `src/` layer this repo does not reproduce for the top-level
 files, though it does for `net/`, which is why `net/`-rooted patches use
 the same `-p2` convention against `a/src/net/...`.)
+
+## 0009-gpu3d-host-adaptive-render-width.patch
+
+`src/GPU3D.{h,cpp}`, `src/GPU3D_Soft.{h,cpp}`: the host-only adaptive
+output width. Upstream fixes the 3D raster at 256 pixels; these files gain
+`SetRenderWidth`/`GetRenderWidth`, widen `ScrolledLine` to 448, add the
+`GetAttrLine` attribute surface the adaptive skybox repair consumes, and
+replace the soft rasterizer's hardcoded 256 spans/stencil strides with the
+configured width. `SoftRenderer::SetupRenderThread` additionally resets
+`RenderedScanlines` and the scanline-count semaphore before posting the
+start semaphore, without which a restarted frame can observe a stale count.
+
+The hardware-visible viewport and every guest-facing register are
+unchanged; 256 remains the exact native path.
+
+**These changes predate this patch file.** They were applied when the
+adaptive widescreen work landed but were never recorded here, and
+`THIRD_PARTY_ATTRIBUTION.md` described these files as byte-identical to
+upstream. Both are corrected as of 2026-08-16.
+
+## 0010-gpu3d-compute-adaptive-width-attributes-and-internal-resolution.patch
+
+`src/GPU3D_Compute.{h,cpp}`, `src/GPU3D_Compute_shaders.h`: three related
+changes to the optional compute renderer.
+
+1. **Adaptive width.** `ScreenWidth` becomes `RenderWidth * ScaleFactor`
+   rather than `256 * ScaleFactor`, and the low-resolution framebuffer plus
+   its pixel-pack buffer are allocated from `RenderWidth` at settings time
+   instead of at a fixed 256 during construction.
+2. **Polygon-ID attributes.** The final pass smuggles the six-bit polygon ID
+   into the two spare high bits of each six-bit colour channel of the
+   low-resolution surface, so the runner's adaptive skybox repair can
+   identify sky draws without a second readback.
+3. **Internal resolution accessors.** `GetHiResTexture()` and
+   `GetScaleFactor()` expose the already-allocated high-resolution render
+   target and the active scale, which the HD presenter composites from. No
+   upstream behaviour changes: the same final pass already wrote both
+   surfaces every frame.
+
+As with 0009, items 1 and 2 predate this file and were previously
+undocumented; item 3 is new in the internal-resolution work.
