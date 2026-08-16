@@ -1959,6 +1959,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         uint16_t top_width = 256;
         uint16_t bottom_width = 256;
         const uint64_t adaptive_start = SDL_GetPerformanceCounter();
+        // Direct-present frames skip the adaptive compositor, so the HD
+        // surfaces must be invalidated here rather than inside it.
+        nds_gpu2d_invalidate_hd_frame();
         if ((options.adaptive_screens & NDS_ADAPTIVE_TOP) &&
             !nds_gpu2d_direct_present_frame_active())
             top_pixels =

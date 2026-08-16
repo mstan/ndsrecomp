@@ -1987,6 +1987,10 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     return adaptive.data();
 }
 
+void nds_gpu2d_invalidate_hd_frame() {
+    g_hd_frame_valid = false;
+}
+
 void nds_gpu2d_set_hd_emit(bool enabled) {
     g_hd_emit_enabled = enabled;
     if (!enabled) g_hd_frame_valid = false;

@@ -86,6 +86,12 @@ void nds_gpu2d_set_hd_emit(bool enabled);
 // Valid only after nds_gpu2d_adaptive_framebuffer() has run for this frame,
 // which is where the surfaces are filled.
 bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out);
+// Must be called by the frontend once per presented frame, before deciding
+// whether to run the adaptive compositor at all. The adaptive path is skipped
+// entirely on direct-present frames, so without this the surfaces from the
+// last non-direct frame stay marked valid and the presenter composites live
+// 3D against a stale 2D stack and stale blend registers.
+void nds_gpu2d_invalidate_hd_frame();
 
 void nds_gpu2d_set_direct_present(bool enabled);
 bool nds_gpu2d_direct_frame_active();
