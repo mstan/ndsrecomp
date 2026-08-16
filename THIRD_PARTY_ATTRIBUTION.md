@@ -201,6 +201,32 @@ DWC/GameSpy/SSL/matchmaking service logic is emulated.
   — `nds_runner` was already a GPL-3.0-or-later combined work; this adds a
   second vendored subsystem inside the same boundary.
 
+## Hyllian xBR-lv2 texture upscaling
+
+The optional texture upscaler adapts the rule set from Hyllian's xBR-lv2
+shader.
+
+- Upstream: https://github.com/libretro/glsl-shaders (`xbr/shaders/xbr-lv2.glsl`)
+- Copyright (C) 2011-2016 Hyllian - sergiogdb@gmail.com
+- License: MIT
+- Local scope: `runner/src/melonds_compute/TextureUpscale.cpp`
+
+The MIT notice is reproduced in that file. It is deliberately placed under
+`runner/src/` rather than `runner/vendor/melonds/` so the permissive source
+does not sit inside the GPL-3.0 vendored tree; the combined `nds_runner`
+executable remains GPL-3.0-or-later, and MIT imposes no additional
+restriction on that.
+
+**xBRZ was rejected on licensing grounds.** DeSmuME's texture upscaling
+vendors Zenju's xBRZ (`desmume/src/filter/xbrz.cpp`), which carries
+`GNU General Public License: http://www.gnu.org/licenses/gpl-3.0` with no
+"or later" clause, plus a MAME-specific linking exception that does not
+apply here. Combining GPL-3.0-only code into this runner would force the
+whole executable to be conveyed as GPL-3.0 exactly, stripping the "or
+later" option from every downstream recipient. xBRZ is "xBR, Zenju
+enhanced", so xBR-lv2 is the same algorithm family without that cost. No
+DeSmuME source is used.
+
 ## mGBA
 
 mGBA is copyright © Jeffrey Pfau and contributors and is distributed under the
