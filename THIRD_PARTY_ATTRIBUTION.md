@@ -67,7 +67,7 @@ remains a device model, not HLE).
 - Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
   `FIFO.h`, `types.h`, `Savestate.h`, `Savestate.cpp`,
   `NonStupidBitfield.h`, `GPU3D_Texcache.cpp`, `GPU3D_TexcacheOpenGL.h`,
-  `OpenGLSupport.cpp`, `OpenGLSupport.h`, and `PlatformOGL.h`, plus
+  `OpenGLSupport.h`, and `PlatformOGL.h`, plus
   `xxhash/xxhash.c`, `xxhash/xxhash.h`, and
   `frontend/glad/{glad.c,glad.h,khrplatform.h}` stored locally under
   `runner/vendor/melonds/glad/`.
@@ -81,7 +81,8 @@ remains a device model, not HLE).
   resolution surface, and the internal-resolution accessors), and
   `GPU3D_Texcache.h`, `GPU3D_TexcacheOpenGL.cpp` (patch `0011`, routing
   decoded textures through the optional upscaler and sizing array storage
-  and the per-array layer budget by its factor).
+  and the per-array layer budget by its factor), and `OpenGLSupport.cpp`
+  (patch `0012`, dropping a spurious shader-cache error log).
 
   Correction, 2026-08-16: this section previously listed all seven of
   those files as byte-identical to upstream. They were not — the adaptive

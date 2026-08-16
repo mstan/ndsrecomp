@@ -1,0 +1,19 @@
+--- a/src/OpenGLSupport.cpp	2026-06-18 19:34:26.931737000 -0700
++++ b/src/OpenGLSupport.cpp	2026-08-16 00:26:26.350421300 -0700
+@@ -277,7 +277,8 @@
+         {
+         }
+     }*/
+-    Log(LogLevel::Error, "Shader %s from cache was rejected\n", name.c_str());
++    // Program-binary caching is disabled in this imported renderer. Do not
++    // report every normal source compilation as a cache error.
+ 
+     GLuint shader;
+     bool linkingSucess = false;
+@@ -360,4 +361,4 @@
+ 
+ }
+ 
+-}
+\ No newline at end of file
++}

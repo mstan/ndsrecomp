@@ -358,3 +358,14 @@ xBR-lv2 derived; deliberately not placed in this vendored tree).
   across up to 64 layers.
 
 Factor 1 restores the exact upstream allocation and upload path.
+
+## 0012-openglsupport-silence-shader-cache-error.patch
+
+`src/OpenGLSupport.cpp`: removes an unconditional
+`Log(LogLevel::Error, "Shader %s from cache was rejected")` on the normal
+source-compilation path. Upstream's program-binary cache lookup is
+commented out in this import, so every shader compiled -- all 33 of the
+compute renderer's -- logged an error while behaving correctly. Also adds
+the missing trailing newline at end of file.
+
+No behaviour change beyond the log line.
