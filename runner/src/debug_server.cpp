@@ -1111,6 +1111,8 @@ std::string handle(const std::string& line) {
                ",\"direct_class_frames\":" + direct_class_frames +
                ",\"direct_class_engine_a_ns\":" +
                direct_class_engine_a_ns +
+               ",\"hd_frames\":" + std::to_string(gpu.hd_frames) +
+               ",\"hd_presented\":" + std::to_string(gpu.hd_presented) +
                ",\"direct_class_transitions\":" +
                std::to_string(gpu.direct_class_transitions) +
                ",\"direct_extra_bg_mask_frames\":" +

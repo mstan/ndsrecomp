@@ -999,11 +999,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const int bottom_content_left =
         (bottom_logical_width - kScreenWidth) / 2;
     std::fprintf(stderr,
-        "[sdl] layout=%s adaptive=%s supersampling=%ux aa=%ux\n",
+        "[sdl] layout=%s adaptive=%s supersampling=%ux aa=%ux "
+        "internal=%ux\n",
         nds_screen_layout_name(options.screen_layout),
         nds_adaptive_screens_name(options.adaptive_screens),
         static_cast<unsigned>(options.supersampling),
-        static_cast<unsigned>(options.antialiasing));
+        static_cast<unsigned>(options.antialiasing),
+        static_cast<unsigned>(options.internal_resolution));
     const uint16_t output_width = static_cast<uint16_t>(std::max(
         presentation.screen_widths[0],
         presentation.screen_widths[1]));
@@ -1015,6 +1017,33 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         SDL_Quit();
         return 1;
     }
+    // Must precede nds_compute_host_start(): the scale is a baked shader
+    // constant, so it has to be known before the renderer compiles anything.
+    //
+    // Deliberately NOT gated on the direct presenter. Rendering at scale and
+    // presenting at scale are separate: the scaled raster still point-samples
+    // the same native surface every faithful consumer reads, so a run without
+    // the GPU presenter is a valid way to prove that invariance holds. Only
+    // the visible benefit needs gl_top, so that is what the notice says.
+    if (!nds_gpu3d_set_internal_scale(options.internal_resolution)) {
+        std::fprintf(stderr,
+                     "[sdl] internal resolution %ux is unavailable\n",
+                     static_cast<unsigned>(options.internal_resolution));
+        destroy_presentation(presentation);
+        SDL_Quit();
+        return 1;
+    }
+    if (options.internal_resolution > 1 && !presentation.gl_top) {
+        std::fprintf(stderr,
+            "[sdl] internal resolution %ux renders but is not presented: "
+            "the extra sample density needs the direct OpenGL top-screen "
+            "presenter\n",
+            static_cast<unsigned>(options.internal_resolution));
+    }
+    // The adaptive compositor only pays for the extra per-pixel stores when
+    // something can consume them.
+    nds_gpu2d_set_hd_emit(options.internal_resolution > 1 &&
+                          presentation.gl_top);
 
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     // Activate only after every fallible visible-frontend allocation. From

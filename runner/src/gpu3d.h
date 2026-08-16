@@ -44,6 +44,26 @@ bool nds_gpu3d_compute_runtime_failed();
 // RGB6/alpha5 surface. Valid only while its OpenGL context is current.
 uint32_t nds_gpu3d_compute_output_texture();
 
+// Opt-in internal-resolution (HD) scaling for the accelerated renderer.
+//
+// This multiplies 3D sample density only. The native RenderWidth x 192
+// surface every faithful consumer reads -- the 2D compositor's scanline
+// fetches, display capture, and the wide_line/wide_attr_line readback -- is
+// still produced by the same render pass, point-sampled at the top-left
+// texel of each scale x scale block, so it is bit-identical to what scale 1
+// produces and no accuracy path observes the change. Only the direct GPU
+// presenter consumes the extra density.
+//
+// Must be set before nds_gpu3d_use_compute_renderer(): the scale is a baked
+// shader constant and sizes every framebuffer allocation. Returns false for
+// an out-of-range scale (valid range 1..4) or after the renderer exists.
+bool nds_gpu3d_set_internal_scale(uint8_t scale);
+uint8_t nds_gpu3d_internal_scale();
+// Presentation handle for the high-resolution RGBA8 surface, whose channels
+// carry the same RGB6/alpha5 values as the integer surface above, normalized
+// by 63 and 31. Zero unless an accelerated renderer is active at scale > 1.
+uint32_t nds_gpu3d_compute_output_texture_hires();
+
 struct NdsGpu3dProfile {
     uint64_t vcount215_ns;
     uint64_t vcount215_calls;

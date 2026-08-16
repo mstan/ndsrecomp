@@ -320,6 +320,7 @@ int main(int argc, char** argv) {
     std::string cli_screen_layout;
     std::string cli_adaptive_screens;
     std::string cli_supersampling;
+    std::string cli_internal_resolution;
     std::string cli_antialiasing;
     std::string cli_relative_mouse_touch;
     std::string cli_relative_mouse_sensitivity;
@@ -402,6 +403,8 @@ int main(int argc, char** argv) {
             cli_adaptive_screens = argv[++i];
         } else if (a == "--supersampling" && i + 1 < argc) {
             cli_supersampling = argv[++i];
+        } else if (a == "--internal-resolution" && i + 1 < argc) {
+            cli_internal_resolution = argv[++i];
         } else if (a == "--antialiasing" && i + 1 < argc) {
             cli_antialiasing = argv[++i];
         } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
@@ -496,6 +499,7 @@ int main(int argc, char** argv) {
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
                 "[--supersampling 1|2|3|4] "
+                "[--internal-resolution 1|2|3|4] "
                 "[--antialiasing 0|2|4|8] "
                 "[--relative-mouse-touch on|off] "
                 "[--relative-mouse-sensitivity 10..400] "
@@ -575,6 +579,15 @@ int main(int argc, char** argv) {
                                      &frontend_options.supersampling)) {
             std::fprintf(stderr,
                          "invalid NDS_SUPERSAMPLING (expected 1..4)\n");
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_INTERNAL_RESOLUTION")) {
+        if (!nds_parse_internal_resolution(
+                value, &frontend_options.internal_resolution)) {
+            std::fprintf(stderr,
+                         "invalid NDS_INTERNAL_RESOLUTION "
+                         "(expected 1..4)\n");
             return 2;
         }
     }
@@ -660,6 +673,14 @@ int main(int argc, char** argv) {
                                  &frontend_options.supersampling)) {
         std::fprintf(stderr,
                      "invalid --supersampling (expected 1..4)\n");
+        return 2;
+    }
+    if (!cli_internal_resolution.empty() &&
+        !nds_parse_internal_resolution(
+            cli_internal_resolution,
+            &frontend_options.internal_resolution)) {
+        std::fprintf(stderr,
+                     "invalid --internal-resolution (expected 1..4)\n");
         return 2;
     }
     if (!cli_antialiasing.empty() &&
@@ -1502,6 +1523,21 @@ int main(int argc, char** argv) {
     // Interactive mode creates the hidden context only after its visible SDL
     // allocations succeed. Headless/serve modes own it here so forced
     // compute selection is observable by the parity and perf harnesses.
+    //
+    // The internal-resolution scale must be established before the renderer
+    // exists in this path too. Headless runs present nothing, so the scale is
+    // pure cost here -- but it is exactly how the parity harness proves that
+    // the native surface is scale-invariant, so it must be honoured, not
+    // quietly dropped.
+    if (!interactive &&
+        !nds_gpu3d_set_internal_scale(
+            frontend_options.internal_resolution)) {
+        std::fprintf(stderr,
+                     "internal resolution %u is unavailable\n",
+                     static_cast<unsigned>(
+                         frontend_options.internal_resolution));
+        return 1;
+    }
     if (!interactive && !nds_compute_host_start()) return 1;
 #endif
 

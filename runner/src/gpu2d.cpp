@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "gpu3d.h"
 #include "io.h"
@@ -76,6 +77,21 @@ NdsGpu2dDirectFrame g_direct_present_frame{};
 unsigned g_direct_object_write = 0;
 bool g_direct_present_enabled = false;
 bool g_direct_frame_active = false;
+
+// Internal-resolution (HD) emit. Two native-width surfaces describing the 2D
+// stack with the 3D layer removed; see NdsGpu2dHdFrame in gpu2d.h.
+bool g_hd_emit_enabled = false;
+bool g_hd_frame_valid = false;
+std::vector<uint32_t> g_hd_top_pixels;
+std::vector<uint32_t> g_hd_below_pixels;
+NdsGpu2dHdFrame g_hd_frame{};
+
+uint32_t hd_meta(const Pixel& p) {
+    return static_cast<uint32_t>(p.target) |
+           (static_cast<uint32_t>(p.alpha) << 8) |
+           (static_cast<uint32_t>(p.priority) << 16) |
+           (static_cast<uint32_t>(p.order) << 24);
+}
 bool g_direct_present_frame_active = false;
 bool g_frame_capture_active = false;
 bool g_present_capture_active = false;
@@ -90,6 +106,8 @@ uint64_t g_text_lines[2][5] = {};
 uint64_t g_no_effect_lines[2] = {};
 uint64_t g_render_scanlines = 0;
 uint64_t g_direct_frames = 0;
+uint64_t g_hd_frames = 0;
+uint64_t g_hd_presented = 0;
 uint64_t g_direct_overlay_ns = 0;
 uint64_t g_direct_class_frames[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
 uint64_t g_direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
@@ -1705,6 +1723,12 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
     const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
     const int engine = engine_a_on_top ? screen : (screen ^ 1);
+    // Cleared so every early return below (native width, unsupported scene)
+    // leaves the presenter on the CPU composite rather than re-reading last
+    // frame's surfaces. Guarded on engine A: this function is called once per
+    // screen, and an unguarded reset here would let the engine-B call wipe
+    // the flag the engine-A call just set, silently disabling HD entirely.
+    if (engine == 0) g_hd_frame_valid = false;
     const int output_width = nds_gpu3d_output_width();
     if (output_width <= 256) {
         if (width) *width = 256;
@@ -1777,6 +1801,24 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     }
     const bool snapshot_matches =
         g_wide_3d_width[g_front] == output_width;
+    // The skybox repair rewrites the native 3D line before compositing. The
+    // presenter samples the raw hi-res surface and cannot see that repair, so
+    // rather than silently dropping it, HD stands down for those frames and
+    // the CPU composite is presented instead.
+    // screen == 0 as well as engine == 0: the direct presenter owns the top
+    // window only, so when POWCNT routes engine A to the bottom screen these
+    // surfaces would be applied to the wrong window. The direct path rejects
+    // that case as SCREEN_ROUTE for the same reason.
+    const bool emit_hd =
+        g_hd_emit_enabled && !g_adaptive_skybox_fill && screen == 0;
+    if (emit_hd) {
+        const size_t needed =
+            static_cast<size_t>(output_width) * 192u * 2u;
+        if (g_hd_top_pixels.size() != needed) {
+            g_hd_top_pixels.resize(needed);
+            g_hd_below_pixels.resize(needed);
+        }
+    }
     for (int y = 0; y < 192; ++y) {
         render_obj_line(0, y, obj.data(), output_width,
                         oam, palette, *vram);
@@ -1875,6 +1917,10 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                     below = pixel;
                 }
             };
+            // Resolve the stack WITHOUT the 3D layer first. Because
+            // (priority, order) is a total order, pushing 3D afterwards
+            // reproduces exactly the pair a single interleaved pass would,
+            // so the CPU result below is unchanged by this reordering.
             int hud_x = -1;
             if (g_adaptive_hud_anchor) {
                 if (x < hud_center_left) {
@@ -1899,6 +1945,15 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                         line.target, 0, line.prio, line.order, true});
                 }
             }
+            if (obj[x].valid) push(obj[x]);
+            if (emit_hd) {
+                const size_t o = (static_cast<size_t>(y) * output_width + x)
+                                 * 2u;
+                g_hd_top_pixels[o] = top.color;
+                g_hd_top_pixels[o + 1] = hd_meta(top);
+                g_hd_below_pixels[o] = below.color;
+                g_hd_below_pixels[o + 1] = hd_meta(below);
+            }
             const uint32_t c3 = composited_3d[x];
             const uint8_t a3 =
                 static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
@@ -1906,7 +1961,6 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                 push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
                            prio3d, 1, true, a3});
             }
-            if (obj[x].valid) push(obj[x]);
             uint32_t color = compose(u, top, below);
             if (mbmode == 1u)
                 color = brighten(color, mb, 0u);
@@ -1915,7 +1969,36 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             dst[x] = to_rgb32(color);
         }
     }
+    if (emit_hd) {
+        g_hd_frame.top_pixels = g_hd_top_pixels.data();
+        g_hd_frame.below_pixels = g_hd_below_pixels.data();
+        g_hd_frame.width = static_cast<uint16_t>(output_width);
+        g_hd_frame.priority_3d = prio3d;
+        g_hd_frame.order_3d = 1u;  // the 3D layer occupies BG0's slot
+        g_hd_frame.bldcnt = u.bldcnt;
+        g_hd_frame.master_bright = u.master_bright;
+        g_hd_frame.eva = static_cast<uint8_t>(u.eva);
+        g_hd_frame.evb = static_cast<uint8_t>(u.evb);
+        g_hd_frame.evy = static_cast<uint8_t>(u.evy);
+        g_hd_frame.render_xpos = nds_gpu3d_render_xpos();
+        g_hd_frame_valid = true;
+        ++g_hd_frames;
+    }
     return adaptive.data();
+}
+
+void nds_gpu2d_set_hd_emit(bool enabled) {
+    g_hd_emit_enabled = enabled;
+    if (!enabled) g_hd_frame_valid = false;
+}
+
+bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out) {
+    if (!out || !g_hd_frame_valid || !g_hd_frame.top_pixels) return false;
+    *out = g_hd_frame;
+    // Counted on consumption, not emission: emitting surfaces nobody reads
+    // looks identical to working HD from an emit-side counter.
+    ++g_hd_presented;
+    return true;
 }
 void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     if (!out) return;
@@ -1928,6 +2011,8 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     out->no_effect_lines[1] = g_no_effect_lines[1];
     out->scanlines = g_render_scanlines;
     out->direct_frames = g_direct_frames;
+    out->hd_frames = g_hd_frames;
+    out->hd_presented = g_hd_presented;
     out->direct_overlay_ns = g_direct_overlay_ns;
     std::copy_n(g_direct_class_frames,
                 NDS_GPU2D_DIRECT_CLASS_COUNT,

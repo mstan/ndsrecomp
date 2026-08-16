@@ -60,6 +60,19 @@ public:
     {
         return LowResFramebuffer;
     }
+    // ndsrecomp: the internal-resolution (HD) presenter composites directly
+    // from the high-resolution render target instead of reading back the
+    // native LowResFramebuffer. Both are written by the same final pass, so
+    // exposing this costs no extra work and leaves the native readback (and
+    // therefore display capture and the accuracy floor) untouched.
+    [[nodiscard]] GLuint GetHiResTexture() const noexcept
+    {
+        return Framebuffer;
+    }
+    [[nodiscard]] int GetScaleFactor() const noexcept
+    {
+        return ScaleFactor;
+    }
 
     void Blit(const GPU& gpu) override;
     void Stop(const GPU& gpu) override;

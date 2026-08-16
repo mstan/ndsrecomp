@@ -54,6 +54,13 @@ NdsGpu3dProfile g_gpu3d_profile{};
 using ProfileClock = std::chrono::steady_clock;
 bool profiling();
 void profile_add(uint64_t& dst, ProfileClock::time_point start);
+
+// Internal-resolution (HD) multiplier for the accelerated renderer. 4x of a
+// 448-wide adaptive raster is 1792x768; the compute renderer's tile and span
+// buffers grow with it, so this is deliberately capped well below what the
+// shader constants would otherwise permit.
+constexpr uint8_t kMaxInternalScale = 4u;
+uint8_t g_internal_scale = 1u;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 bool g_compute_rendered_frame = false;
 bool g_compute_readback_pending = false;
@@ -425,6 +432,44 @@ uint32_t nds_gpu3d_compute_output_texture() {
 #endif
 }
 
+bool nds_gpu3d_set_internal_scale(uint8_t scale) {
+    if (scale < 1u || scale > kMaxInternalScale) return false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    // The scale is baked into every compute shader and sizes every
+    // framebuffer, so it cannot change under a live renderer.
+    if (dynamic_cast<melonDS::ComputeRenderer*>(
+            &g_nds.GPU.GPU3D.GetCurrentRenderer()) != nullptr)
+        return false;
+#endif
+    g_internal_scale = scale;
+    return true;
+}
+
+uint8_t nds_gpu3d_internal_scale() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    // Report what is actually rendering, not what was requested, so a
+    // presenter can never sample a hi-res surface that does not exist.
+    if (renderer)
+        return static_cast<uint8_t>(renderer->GetScaleFactor());
+    return 1u;
+#else
+    return 1u;
+#endif
+}
+
+uint32_t nds_gpu3d_compute_output_texture_hires() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    if (!renderer || renderer->GetScaleFactor() <= 1) return 0u;
+    return renderer->GetHiResTexture();
+#else
+    return 0u;
+#endif
+}
+
 bool nds_gpu3d_use_compute_renderer() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     g_compute_shader_setup_failed = false;
@@ -443,8 +488,20 @@ bool nds_gpu3d_use_compute_renderer() {
     // Width is a shader constant and determines every framebuffer/PBO
     // allocation. Establish it before settings allocate or compile anything.
     renderer->SetRenderWidth(render_width);
-    renderer->SetRenderSettings(1, false);
+    // Internal-resolution scaling multiplies sample density only. The native
+    // readback surface this bridge maps every frame is still RenderWidth x
+    // 192 (the final pass point-samples it out of the scaled raster), so the
+    // faithful 2D compositor and display capture see byte-identical input at
+    // every scale. Hi-res coordinates stay off: they change which samples the
+    // rasterizer produces, which the native readback would then observe.
+    renderer->SetRenderSettings(static_cast<int>(g_internal_scale), false);
     if (compute_gl_stage_failed("render settings")) return false;
+    if (g_internal_scale > 1u)
+        std::fprintf(stderr,
+                     "[gpu3d] internal resolution %ux (%ux%u 3D raster)\n",
+                     static_cast<unsigned>(g_internal_scale),
+                     render_width * g_internal_scale,
+                     192u * g_internal_scale);
     while (renderer->NeedsShaderCompile()) {
         int current = 0;
         int count = 0;

@@ -207,6 +207,13 @@ struct NdsFrontendOptions {
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction
     uint8_t antialiasing = 0;   // 0/2/4/8 sample-quality preset
+    // Internal-resolution (HD) 3D scaling, 1x..4x. Unlike the two knobs
+    // above this one is pre-composition: it raises the 3D engine's sample
+    // density. It still alters no guest-visible bytes, because every
+    // faithful consumer reads the native surface the same render pass
+    // point-samples out of the scaled raster. Requires the accelerated
+    // renderer; ignored by the software floor.
+    uint8_t internal_resolution = 1;
     // Optional host FPS-control transport. This stays default-off and is
     // selected by a title launcher; deterministic/headless routes never
     // synthesize mouse input.
@@ -251,6 +258,7 @@ bool nds_parse_instance_index(const std::string& value, uint32_t* out);
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
+bool nds_parse_internal_resolution(const std::string& value, uint8_t* out);
 bool nds_parse_on_off(const std::string& value, bool* out);
 bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
 bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);

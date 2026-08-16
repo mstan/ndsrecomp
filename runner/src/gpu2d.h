@@ -44,6 +44,49 @@ struct NdsGpu2dDirectFrame {
     uint8_t priority_3d;
     uint16_t render_xpos;
 };
+// Host-only internal-resolution (HD) composite description, emitted by the
+// adaptive wide compositor.
+//
+// The DS resolves its layer stack per pixel to a "top" and a "below", then
+// blends them. Only one layer in that stack -- the 3D layer -- has any extra
+// sample density available. So the compositor resolves the stack with the 3D
+// layer REMOVED and hands the presenter the top two survivors per native
+// pixel; the presenter re-inserts the 3D layer at its own resolution, using
+// the same (priority, order) comparison, and finishes the blend.
+//
+// This is exact rather than an approximation: (priority, order) is a total
+// order over the layers -- OBJ 0, BG0/3D 1, BG1..3 2..4, backdrop 5 -- so
+// selecting the top two is independent of insertion order, and inserting the
+// 3D layer last yields the same pair the CPU path computes.
+//
+// The 2D layers stay at native density, which is what the hardware draws;
+// only the 3D layer gains resolution.
+struct NdsGpu2dHdFrame {
+    // RG32UI pairs, width x 192: [0] = RGB6 colour (channels at bits
+    // 0/8/16), [1] = BLDCNT target | alpha << 8 | priority << 16 |
+    // order << 24. Alpha follows the CPU Pixel convention: 0 = no alpha
+    // blend, 1..16 = OBJ alpha, 0xFF = the BLDCNT EVA/EVB pair.
+    const uint32_t* top_pixels;
+    const uint32_t* below_pixels;
+    uint16_t width;
+    uint8_t priority_3d;
+    uint8_t order_3d;
+    uint16_t bldcnt;
+    uint16_t master_bright;
+    uint8_t eva;
+    uint8_t evb;
+    uint8_t evy;
+    // The hi-res 3D surface is unscrolled, unlike the CPU wide line which has
+    // RenderXPos already applied, so the presenter applies it itself.
+    uint16_t render_xpos;
+};
+// Enabled only while internal resolution > 1. Emission costs an extra pair of
+// stores per pixel in the adaptive loop, so it stays off at 1x.
+void nds_gpu2d_set_hd_emit(bool enabled);
+// Valid only after nds_gpu2d_adaptive_framebuffer() has run for this frame,
+// which is where the surfaces are filled.
+bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out);
+
 void nds_gpu2d_set_direct_present(bool enabled);
 bool nds_gpu2d_direct_frame_active();
 // Presentation trails rasterization by one frame boundary. This reports the
@@ -82,6 +125,10 @@ struct NdsGpu2dProfile {
     uint64_t no_effect_lines[2];
     uint64_t scanlines;
     uint64_t direct_frames;
+    // Frames the adaptive compositor emitted HD layer surfaces for.
+    uint64_t hd_frames;
+    // Frames the presenter actually consumed those surfaces for.
+    uint64_t hd_presented;
     uint64_t direct_overlay_ns;
     uint64_t direct_class_frames[NDS_GPU2D_DIRECT_CLASS_COUNT];
     uint64_t direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT];
