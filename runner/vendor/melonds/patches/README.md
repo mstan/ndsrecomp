@@ -335,3 +335,26 @@ changes to the optional compute renderer.
 
 As with 0009, items 1 and 2 predate this file and were previously
 undocumented; item 3 is new in the internal-resolution work.
+
+## 0011-texcache-optional-texture-upscaling.patch
+
+`src/GPU3D_Texcache.h`, `src/GPU3D_TexcacheOpenGL.cpp`: routes decoded
+textures through the optional upscaler in
+`runner/src/melonds_compute/TextureUpscale.{h,cpp}` (project-owned, MIT
+xBR-lv2 derived; deliberately not placed in this vendored tree).
+
+- `TexcacheOpenGLLoader::GenerateTexture` allocates array storage at the
+  upscale factor. The renderer samples with normalized coordinates
+  (`uvf = ivec2(u,v)/16 * InvTextureSize`, with `InvTextureSize` derived
+  from the DS texture's own dimensions), so a larger backing store changes
+  which texel a coordinate lands on but not the coordinate itself; texel
+  addressing and the DS wrap/flip sampler modes are unaffected.
+- `TexcacheOpenGLLoader::UploadTexture` dispatches the filter into the
+  target layer, falling back to the plain native upload when upscaling is
+  inactive or the dispatch fails.
+- `Texcache::GetTexture`'s layer budget divides by the factor squared. The
+  8 MiB-per-array budget is computed from the native texture size, and
+  without this a 1024x1024 array at 4x would request 64 MiB per layer
+  across up to 64 layers.
+
+Factor 1 restores the exact upstream allocation and upload path.

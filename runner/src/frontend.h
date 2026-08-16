@@ -214,6 +214,10 @@ struct NdsFrontendOptions {
     // point-samples out of the scaled raster. Requires the accelerated
     // renderer; ignored by the software floor.
     uint8_t internal_resolution = 1;
+    // Texture upscaling factor, 1 (off), 2, or 4. Filters each decoded DS
+    // texture once on a cache miss; independent of internal_resolution, but
+    // only worth enabling alongside it.
+    uint8_t texture_upscale = 1;
     // Optional host FPS-control transport. This stays default-off and is
     // selected by a title launcher; deterministic/headless routes never
     // synthesize mouse input.
@@ -259,6 +263,7 @@ bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
 bool nds_parse_internal_resolution(const std::string& value, uint8_t* out);
+bool nds_parse_texture_upscale(const std::string& value, uint8_t* out);
 bool nds_parse_on_off(const std::string& value, bool* out);
 bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
 bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);

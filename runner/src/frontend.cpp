@@ -16,6 +16,7 @@
 #include "debug_server.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "melonds_compute/TextureUpscale.h"
 #include "io.h"
 #include "profile_report.h"
 #include "relative_mouse_touch.h"
@@ -1044,6 +1045,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     // something can consume them.
     nds_gpu2d_set_hd_emit(options.internal_resolution > 1 &&
                           presentation.gl_top);
+    nds_texture_upscale_set_factor(options.texture_upscale);
 
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     // Activate only after every fallible visible-frontend allocation. From

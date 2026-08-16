@@ -76,6 +76,18 @@ bool nds_parse_internal_resolution(const std::string& value, uint8_t* out) {
     return true;
 }
 
+bool nds_parse_texture_upscale(const std::string& value, uint8_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' ||
+        (parsed != 1 && parsed != 2 && parsed != 4)) {
+        return false;
+    }
+    *out = static_cast<uint8_t>(parsed);
+    return true;
+}
+
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out) {
     if (!out || value.empty()) return false;
     char* end = nullptr;
@@ -540,6 +552,14 @@ bool nds_load_frontend_config(const std::string& path,
                 if (error) {
                     *error = "display.antialiasing must be 0, 2, 4, or 8";
                 }
+                return false;
+            }
+        }
+        if (const auto value =
+                (*display)["texture_upscale"].value<int64_t>()) {
+            if (!nds_parse_texture_upscale(std::to_string(*value),
+                                           &options->texture_upscale)) {
+                if (error) *error = "display.texture_upscale must be 1, 2, or 4";
                 return false;
             }
         }

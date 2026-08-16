@@ -31,6 +31,7 @@
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "melonds_compute/TextureUpscale.h"
 #include "net/net_ring.h"
 #include "net/net_capture.h"
 #include "net/wfc_provider.h"
@@ -321,6 +322,7 @@ int main(int argc, char** argv) {
     std::string cli_adaptive_screens;
     std::string cli_supersampling;
     std::string cli_internal_resolution;
+    std::string cli_texture_upscale;
     std::string cli_antialiasing;
     std::string cli_relative_mouse_touch;
     std::string cli_relative_mouse_sensitivity;
@@ -405,6 +407,8 @@ int main(int argc, char** argv) {
             cli_supersampling = argv[++i];
         } else if (a == "--internal-resolution" && i + 1 < argc) {
             cli_internal_resolution = argv[++i];
+        } else if (a == "--texture-upscale" && i + 1 < argc) {
+            cli_texture_upscale = argv[++i];
         } else if (a == "--antialiasing" && i + 1 < argc) {
             cli_antialiasing = argv[++i];
         } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
@@ -500,6 +504,7 @@ int main(int argc, char** argv) {
                 "[--adaptive-widescreen none|top|bottom|both] "
                 "[--supersampling 1|2|3|4] "
                 "[--internal-resolution 1|2|3|4] "
+                "[--texture-upscale 1|2|4] "
                 "[--antialiasing 0|2|4|8] "
                 "[--relative-mouse-touch on|off] "
                 "[--relative-mouse-sensitivity 10..400] "
@@ -579,6 +584,15 @@ int main(int argc, char** argv) {
                                      &frontend_options.supersampling)) {
             std::fprintf(stderr,
                          "invalid NDS_SUPERSAMPLING (expected 1..4)\n");
+            return 2;
+        }
+    }
+    if (const char* value = std::getenv("NDS_TEXTURE_UPSCALE")) {
+        if (!nds_parse_texture_upscale(
+                value, &frontend_options.texture_upscale)) {
+            std::fprintf(stderr,
+                         "invalid NDS_TEXTURE_UPSCALE "
+                         "(expected 1, 2, or 4)\n");
             return 2;
         }
     }
@@ -673,6 +687,14 @@ int main(int argc, char** argv) {
                                  &frontend_options.supersampling)) {
         std::fprintf(stderr,
                      "invalid --supersampling (expected 1..4)\n");
+        return 2;
+    }
+    if (!cli_texture_upscale.empty() &&
+        !nds_parse_texture_upscale(cli_texture_upscale,
+                                   &frontend_options.texture_upscale)) {
+        std::fprintf(stderr,
+                     "invalid --texture-upscale "
+                     "(expected 1, 2, or 4)\n");
         return 2;
     }
     if (!cli_internal_resolution.empty() &&
@@ -1538,6 +1560,8 @@ int main(int argc, char** argv) {
                          frontend_options.internal_resolution));
         return 1;
     }
+    if (!interactive)
+        nds_texture_upscale_set_factor(frontend_options.texture_upscale);
     if (!interactive && !nds_compute_host_start()) return 1;
 #endif
 

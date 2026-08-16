@@ -11,6 +11,7 @@
 #include "glad/glad.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "TextureUpscale.h"
 
 namespace
 {
@@ -410,6 +411,7 @@ void release_host_objects()
         SDL_GL_MakeCurrent(g_window, g_context);
         stop_presenter();
     }
+    if (g_context) nds_texture_upscale_shutdown();
     if (g_context) SDL_GL_DeleteContext(g_context);
     if (g_window && g_owns_window) SDL_DestroyWindow(g_window);
     if (g_owns_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -482,6 +484,11 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
     std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
                  reinterpret_cast<const char*>(glGetString(GL_VERSION)),
                  reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
+    // Must precede the renderer: the factor sizes every texture-array
+    // allocation and the cache's free-list is derived from it. A failure here
+    // resets the factor to 1 rather than aborting, so the renderer still
+    // starts with native textures.
+    nds_texture_upscale_init();
     if (!nds_gpu3d_use_compute_renderer()) {
         std::fprintf(stderr, "[gpu3d] compute renderer init failed\n");
         return fail_or_fallback("compute renderer initialization");
