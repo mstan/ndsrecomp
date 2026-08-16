@@ -1,0 +1,64 @@
+--- a/src/GPU3D_Texcache.h	2026-06-18 19:34:26.927738400 -0700
++++ b/src/GPU3D_Texcache.h	2026-08-16 00:52:33.738815900 -0700
+@@ -4,6 +4,9 @@
+ #include "types.h"
+ #include "GPU.h"
+ 
++// ndsrecomp: optional texture upscaling factor.
++#include "../../src/melonds_compute/TextureUpscale.h"
++
+ #include <assert.h>
+ #include <unordered_map>
+ #include <vector>
+@@ -257,7 +260,13 @@
+             texArrays.resize(texArrays.size()+1);
+             TexHandleT& array = texArrays[texArrays.size()-1];
+ 
+-            u32 layers = std::min<u32>((8*1024*1024) / (width*height*4), 64);
++            // ndsrecomp: the 8 MiB budget is per array, and upscaling makes
++            // each layer factor^2 larger, so the layer count shrinks to match
++            // or a 1024x1024 array at 4x would ask for gigabytes.
++            const u32 upscale = (u32)nds_texture_upscale_factor();
++            u32 layers = std::min<u32>(
++                (8*1024*1024) / (width*height*4*upscale*upscale), 64);
++            if (layers == 0) layers = 1;
+ 
+             // allocate new array texture
+             //printf("allocating new layer set for %d %d %d %d\n", width, height, texArrays.size()-1, array.ImageDescriptor);
+--- a/src/GPU3D_TexcacheOpenGL.cpp	2026-06-18 19:34:26.927738400 -0700
++++ b/src/GPU3D_TexcacheOpenGL.cpp	2026-08-16 00:52:23.136210400 -0700
+@@ -1,19 +1,33 @@
+ #include "GPU3D_TexcacheOpenGL.h"
+ 
++// ndsrecomp: optional texture upscaling. Project-owned, MIT; see
++// runner/src/melonds_compute/TextureUpscale.h.
++#include "../../src/melonds_compute/TextureUpscale.h"
++
+ namespace melonDS
+ {
+ 
+ GLuint TexcacheOpenGLLoader::GenerateTexture(u32 width, u32 height, u32 layers)
+ {
+     GLuint texarray;
++    // ndsrecomp: storage is allocated at the upscale factor; the sampled
++    // coordinates stay normalized, so the renderer's texel addressing and
++    // the DS wrap modes are unaffected by the larger backing store.
++    const u32 factor = (u32)nds_texture_upscale_factor();
+     glGenTextures(1, &texarray);
+     glBindTexture(GL_TEXTURE_2D_ARRAY, texarray);
+-    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8UI, width, height, layers);
++    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8UI,
++        width * factor, height * factor, layers);
+     return texarray;
+ }
+ 
+ void TexcacheOpenGLLoader::UploadTexture(GLuint handle, u32 width, u32 height, u32 layer, void* data)
+ {
++    // ndsrecomp: filter into the layer when upscaling is active. A failed
++    // dispatch falls through to the native upload below, which is correct
++    // only at factor 1 -- so the factor is forced to 1 on any init failure.
++    if (nds_texture_upscale_dispatch(handle, width, height, layer, data))
++        return;
+     glBindTexture(GL_TEXTURE_2D_ARRAY, handle);
+     glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+         0, 0, 0, layer,

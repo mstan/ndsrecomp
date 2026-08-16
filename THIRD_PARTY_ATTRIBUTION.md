@@ -65,18 +65,30 @@ remains a device model, not HLE).
 
 - Local scope: `runner/vendor/melonds/`
 - Vendored unmodified from tag `1.0rc` (`src/` paths, byte-identical):
-  `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`, `FIFO.h`,
-  `types.h`, `Savestate.h`, `Savestate.cpp`, `NonStupidBitfield.h`
-- The optional compute-renderer source import is also byte-identical to
-  melonDS tag `1.0rc`, commit
-  `e3fa6f4224e0d706df3ee262ae41cfb0deadc593`:
-  `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`,
-  `GPU3D_Texcache.cpp`, `GPU3D_Texcache.h`,
-  `GPU3D_TexcacheOpenGL.cpp`, `GPU3D_TexcacheOpenGL.h`,
-  `OpenGLSupport.cpp`, `OpenGLSupport.h`, `PlatformOGL.h`,
-  `xxhash/xxhash.c`, and `xxhash/xxhash.h`, plus
+  `FIFO.h`, `types.h`, `Savestate.h`, `Savestate.cpp`,
+  `NonStupidBitfield.h`, `GPU3D_Texcache.cpp`, `GPU3D_TexcacheOpenGL.h`,
+  `OpenGLSupport.h`, and `PlatformOGL.h`, plus
+  `xxhash/xxhash.c`, `xxhash/xxhash.h`, and
   `frontend/glad/{glad.c,glad.h,khrplatform.h}` stored locally under
   `runner/vendor/melonds/glad/`.
+- **Modified** from the same tag, per the tracked patches in
+  `runner/vendor/melonds/patches/` (GPLv3 §5(a) "you changed the files"
+  notices): `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`
+  (patch `0009`, host-only adaptive render width plus the attribute
+  surface and a soft-renderer thread-restart fix), and
+  `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`
+  (patch `0010`, adaptive width, polygon-ID attributes in the low
+  resolution surface, and the internal-resolution accessors), and
+  `GPU3D_Texcache.h`, `GPU3D_TexcacheOpenGL.cpp` (patch `0011`, routing
+  decoded textures through the optional upscaler and sizing array storage
+  and the per-array layer budget by its factor), and `OpenGLSupport.cpp`
+  (patch `0012`, dropping a spurious shader-cache error log).
+
+  Correction, 2026-08-16: this section previously listed all seven of
+  those files as byte-identical to upstream. They were not — the adaptive
+  widescreen work modified them without recording a change notice. The
+  patches and this list are the correction; no upstream behaviour claim
+  was affected, but the GPLv3 §5(a) notice was missing and is now present.
 - Project-written shim headers in the same directory (`NDS.h`, `GPU.h`,
   `Platform.h`) replace the melonDS headers of the same names with the
   minimal interface slice the vendored units consume; as derived interfaces
@@ -191,6 +203,32 @@ DWC/GameSpy/SSL/matchmaking service logic is emulated.
 - Consequence: no change to the GPU3D section's licensing conclusion above
   — `nds_runner` was already a GPL-3.0-or-later combined work; this adds a
   second vendored subsystem inside the same boundary.
+
+## Hyllian xBR-lv2 texture upscaling
+
+The optional texture upscaler adapts the rule set from Hyllian's xBR-lv2
+shader.
+
+- Upstream: https://github.com/libretro/glsl-shaders (`xbr/shaders/xbr-lv2.glsl`)
+- Copyright (C) 2011-2016 Hyllian - sergiogdb@gmail.com
+- License: MIT
+- Local scope: `runner/src/melonds_compute/TextureUpscale.cpp`
+
+The MIT notice is reproduced in that file. It is deliberately placed under
+`runner/src/` rather than `runner/vendor/melonds/` so the permissive source
+does not sit inside the GPL-3.0 vendored tree; the combined `nds_runner`
+executable remains GPL-3.0-or-later, and MIT imposes no additional
+restriction on that.
+
+**xBRZ was rejected on licensing grounds.** DeSmuME's texture upscaling
+vendors Zenju's xBRZ (`desmume/src/filter/xbrz.cpp`), which carries
+`GNU General Public License: http://www.gnu.org/licenses/gpl-3.0` with no
+"or later" clause, plus a MAME-specific linking exception that does not
+apply here. Combining GPL-3.0-only code into this runner would force the
+whole executable to be conveyed as GPL-3.0 exactly, stripping the "or
+later" option from every downstream recipient. xBRZ is "xBR, Zenju
+enhanced", so xBR-lv2 is the same algorithm family without that cost. No
+DeSmuME source is used.
 
 ## mGBA
 

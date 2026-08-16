@@ -16,10 +16,28 @@ binaries stays clean.
    from GBATEK, is *not* a derivative work of any emulator. This is our
    default for the ARM core and the I/O model.
 3. **Strong-copyleft (GPL/AGPL) emulators are reference-only for the native
-   runtime.** We may inspect them to understand or test a hardware quirk, but
-   the committed native implementation must be independently written from
-   specifications and measured behavior. GPL patch context is confined to the
-   separate optional oracle under `oracle/patches/`.
+   runtime, except where a vendoring decision has been recorded.** We may
+   inspect them to understand or test a hardware quirk, and the committed
+   native implementation is otherwise independently written from
+   specifications and measured behavior.
+
+   Two deliberate exceptions have been taken and are recorded in
+   `THIRD_PARTY_ATTRIBUTION.md`: the melonDS 3D engine (2026-07-16) and the
+   melonDS Wi-Fi device model (2026-08, ADR
+   `docs/adr-melonds-wifi-vendoring.md`). Both are vendored into
+   `runner/vendor/melonds/` and linked, so **`nds_runner` is a combined work
+   that must be distributed under GPL-3.0-or-later**. The recompiler, the
+   generated banks, and all `ndsref`-independent tooling stay outside that
+   boundary and remain MIT.
+
+   Anything vendored under this exception must carry a GPLv3 §5(a) change
+   notice for every file we modify; see
+   `runner/vendor/melonds/patches/README.md`.
+4. **Do not narrow the runner's license.** The runner is GPL-3.0-**or-later**.
+   Adding a GPL-3.0-**only** dependency would strip the "or later" option from
+   every downstream recipient, so it needs an explicit owner decision rather
+   than being an implementation detail. This is why the texture upscaler is
+   Hyllian's MIT xBR-lv2 rather than xBRZ, which is GPL-3.0-only.
 4. **AGPL is last-resort, proof-only.** If an AGPL reference is the only
    way to confirm a behavior, it may be used transiently to *prove* a
    model is correct, but **must be clean-roomed out before any binary is

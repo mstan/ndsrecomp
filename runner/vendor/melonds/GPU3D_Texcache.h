@@ -4,6 +4,9 @@
 #include "types.h"
 #include "GPU.h"
 
+// ndsrecomp: optional texture upscaling factor.
+#include "../../src/melonds_compute/TextureUpscale.h"
+
 #include <assert.h>
 #include <unordered_map>
 #include <vector>
@@ -257,7 +260,13 @@ public:
             texArrays.resize(texArrays.size()+1);
             TexHandleT& array = texArrays[texArrays.size()-1];
 
-            u32 layers = std::min<u32>((8*1024*1024) / (width*height*4), 64);
+            // ndsrecomp: the 8 MiB budget is per array, and upscaling makes
+            // each layer factor^2 larger, so the layer count shrinks to match
+            // or a 1024x1024 array at 4x would ask for gigabytes.
+            const u32 upscale = (u32)nds_texture_upscale_factor();
+            u32 layers = std::min<u32>(
+                (8*1024*1024) / (width*height*4*upscale*upscale), 64);
+            if (layers == 0) layers = 1;
 
             // allocate new array texture
             //printf("allocating new layer set for %d %d %d %d\n", width, height, texArrays.size()-1, array.ImageDescriptor);

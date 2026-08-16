@@ -1,4 +1,4 @@
-# runner/vendor/melonds/patches/ — required Wi-Fi modifications
+# runner/vendor/melonds/patches/ — required vendored-source modifications
 
 `*.patch` files here are **already applied** to the committed sources in
 `runner/vendor/melonds/`; they are retained for provenance and GPLv3 5(a)
@@ -294,3 +294,78 @@ filename, which then resolves against this flattened vendor tree — melonDS
 itself has a `src/` layer this repo does not reproduce for the top-level
 files, though it does for `net/`, which is why `net/`-rooted patches use
 the same `-p2` convention against `a/src/net/...`.)
+
+## 0009-gpu3d-host-adaptive-render-width.patch
+
+`src/GPU3D.{h,cpp}`, `src/GPU3D_Soft.{h,cpp}`: the host-only adaptive
+output width. Upstream fixes the 3D raster at 256 pixels; these files gain
+`SetRenderWidth`/`GetRenderWidth`, widen `ScrolledLine` to 448, add the
+`GetAttrLine` attribute surface the adaptive skybox repair consumes, and
+replace the soft rasterizer's hardcoded 256 spans/stencil strides with the
+configured width. `SoftRenderer::SetupRenderThread` additionally resets
+`RenderedScanlines` and the scanline-count semaphore before posting the
+start semaphore, without which a restarted frame can observe a stale count.
+
+The hardware-visible viewport and every guest-facing register are
+unchanged; 256 remains the exact native path.
+
+**These changes predate this patch file.** They were applied when the
+adaptive widescreen work landed but were never recorded here, and
+`THIRD_PARTY_ATTRIBUTION.md` described these files as byte-identical to
+upstream. Both are corrected as of 2026-08-16.
+
+## 0010-gpu3d-compute-adaptive-width-attributes-and-internal-resolution.patch
+
+`src/GPU3D_Compute.{h,cpp}`, `src/GPU3D_Compute_shaders.h`: three related
+changes to the optional compute renderer.
+
+1. **Adaptive width.** `ScreenWidth` becomes `RenderWidth * ScaleFactor`
+   rather than `256 * ScaleFactor`, and the low-resolution framebuffer plus
+   its pixel-pack buffer are allocated from `RenderWidth` at settings time
+   instead of at a fixed 256 during construction.
+2. **Polygon-ID attributes.** The final pass smuggles the six-bit polygon ID
+   into the two spare high bits of each six-bit colour channel of the
+   low-resolution surface, so the runner's adaptive skybox repair can
+   identify sky draws without a second readback.
+3. **Internal resolution accessors.** `GetHiResTexture()` and
+   `GetScaleFactor()` expose the already-allocated high-resolution render
+   target and the active scale, which the HD presenter composites from. No
+   upstream behaviour changes: the same final pass already wrote both
+   surfaces every frame.
+
+As with 0009, items 1 and 2 predate this file and were previously
+undocumented; item 3 is new in the internal-resolution work.
+
+## 0011-texcache-optional-texture-upscaling.patch
+
+`src/GPU3D_Texcache.h`, `src/GPU3D_TexcacheOpenGL.cpp`: routes decoded
+textures through the optional upscaler in
+`runner/src/melonds_compute/TextureUpscale.{h,cpp}` (project-owned, MIT
+xBR-lv2 derived; deliberately not placed in this vendored tree).
+
+- `TexcacheOpenGLLoader::GenerateTexture` allocates array storage at the
+  upscale factor. The renderer samples with normalized coordinates
+  (`uvf = ivec2(u,v)/16 * InvTextureSize`, with `InvTextureSize` derived
+  from the DS texture's own dimensions), so a larger backing store changes
+  which texel a coordinate lands on but not the coordinate itself; texel
+  addressing and the DS wrap/flip sampler modes are unaffected.
+- `TexcacheOpenGLLoader::UploadTexture` dispatches the filter into the
+  target layer, falling back to the plain native upload when upscaling is
+  inactive or the dispatch fails.
+- `Texcache::GetTexture`'s layer budget divides by the factor squared. The
+  8 MiB-per-array budget is computed from the native texture size, and
+  without this a 1024x1024 array at 4x would request 64 MiB per layer
+  across up to 64 layers.
+
+Factor 1 restores the exact upstream allocation and upload path.
+
+## 0012-openglsupport-silence-shader-cache-error.patch
+
+`src/OpenGLSupport.cpp`: removes an unconditional
+`Log(LogLevel::Error, "Shader %s from cache was rejected")` on the normal
+source-compilation path. Upstream's program-binary cache lookup is
+commented out in this import, so every shader compiled -- all 33 of the
+compute renderer's -- logged an error while behaving correctly. Also adds
+the missing trailing newline at end of file.
+
+No behaviour change beyond the log line.

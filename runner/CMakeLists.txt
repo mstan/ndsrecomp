@@ -404,6 +404,7 @@ endif()
 if(NDS_ENABLE_COMPUTE_RENDERER)
     target_sources(nds_runner PRIVATE
         vendor/melonds/GPU3D_Compute.cpp
+        src/melonds_compute/TextureUpscale.cpp
         vendor/melonds/GPU3D_Texcache.cpp
         vendor/melonds/GPU3D_TexcacheOpenGL.cpp
         src/melonds_compute/GPU_OpenGL.cpp
