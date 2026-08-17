@@ -896,6 +896,8 @@ int main(int argc, char** argv) {
     resolved_network.enabled = frontend_options.network.enabled;
     resolved_network.wfc_enabled = frontend_options.network.wfc_enabled;
     resolved_network.pcap_adapter = frontend_options.network.pcap_adapter;
+    resolved_network.slirp_virtual_network_instance =
+        frontend_options.instance_index;
     resolved_network.local_wireless_enabled =
         frontend_options.local_wireless.enabled;
     resolved_network.local_wireless_instance =

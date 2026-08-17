@@ -102,6 +102,12 @@ struct NdsWifiNetworkConfig {
     // string from LibPCap::GetAdapters().
     std::string pcap_adapter;
 
+    // backend == Slirp only: instance 0 preserves melonDS's default
+    // 10.64.0.0/24 virtual LAN. Nonzero instances use 10.64.N.0/24 so
+    // multiple local runners do not present identical guest LAN endpoints
+    // to DWC/Wiimmfi NAT negotiation.
+    uint32_t slirp_virtual_network_instance = 0;
+
     // Local wireless / Download Play / NiFi transport. Disabled by default;
     // when enabled, each runner process binds localhost UDP port
     // local_wireless_base_port + instance_index and fans MP frames out to

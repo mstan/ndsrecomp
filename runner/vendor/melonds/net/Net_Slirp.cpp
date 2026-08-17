@@ -41,10 +41,10 @@ namespace melonDS
 using Platform::Log;
 using Platform::LogLevel;
 
-const u32 kSubnet   = 0x0A400000;
-const u32 kServerIP = kSubnet | 0x01;
-const u32 kDNSIP    = kSubnet | 0x02;
-const u32 kClientIP = kSubnet | 0x10;
+const u32 kDefaultSubnet = 0x0A400000;
+const u32 kHostOffset = 0x01;
+const u32 kDNSOffset = 0x02;
+const u32 kClientOffset = 0x10;
 
 const u8 kServerMAC[6] = {0x00, 0xAB, 0x33, 0x28, 0x99, 0x44};
 
@@ -143,7 +143,8 @@ const SlirpCb Net_Slirp::cb =
 };
 
 Net_Slirp::Net_Slirp(const Platform::SendPacketCallback& callback,
-                     u32 nameserver_ipv4_host_order) noexcept : Callback(callback)
+                     u32 nameserver_ipv4_host_order,
+                     u32 virtual_subnet_ipv4_host_order) noexcept : Callback(callback)
 {
     SlirpConfig cfg {};
     memset(&cfg, 0, sizeof(cfg));
@@ -156,18 +157,27 @@ Net_Slirp::Net_Slirp(const Platform::SendPacketCallback& callback,
     // a pure additive capability bump, not a behavior change on its own.
     cfg.version = 3;
 
+    const u32 subnet =
+        virtual_subnet_ipv4_host_order
+            ? (virtual_subnet_ipv4_host_order & 0xFFFFFF00u)
+            : kDefaultSubnet;
+    const u32 server_ip = subnet | kHostOffset;
+    const u32 dns_ip = subnet | kDNSOffset;
+    const u32 client_ip = subnet | kClientOffset;
+    InternalDNSIP = dns_ip;
+
     cfg.in_enabled = true;
-    *(u32*)&cfg.vnetwork = htonl(kSubnet);
+    *(u32*)&cfg.vnetwork = htonl(subnet);
     *(u32*)&cfg.vnetmask = htonl(0xFFFFFF00);
-    *(u32*)&cfg.vhost = htonl(kServerIP);
+    *(u32*)&cfg.vhost = htonl(server_ip);
     cfg.vhostname = "melonServer";
-    *(u32*)&cfg.vdhcp_start = htonl(kClientIP);
+    *(u32*)&cfg.vdhcp_start = htonl(client_ip);
     // ndsrecomp: configurable DHCP-advertised nameserver -- see the
     // constructor declaration comment in Net_Slirp.h and
     // patches/0006-net-slirp-configurable-nameserver.patch. 0 preserves
     // upstream's own kDNSIP (local getaddrinfo-backed DNS synthesis).
     *(u32*)&cfg.vnameserver =
-        htonl(nameserver_ipv4_host_order ? nameserver_ipv4_host_order : kDNSIP);
+        htonl(nameserver_ipv4_host_order ? nameserver_ipv4_host_order : dns_ip);
     // ndsrecomp: without this, libslirp's OWN built-in DNS proxy (separate
     // from and in addition to melonDS's HandleDNSFrame() interception
     // above SendPacket()) silently re-intercepts ANY UDP packet destined
@@ -284,7 +294,7 @@ void Net_Slirp::HandleDNSFrame(u8* data, int len) noexcept
     *out++ = 0x80; // TTL
     *out++ = 0x11; // protocol (UDP)
     *(u16*)out = 0; out += 2; // checksum
-    *(u32*)out = htonl(kDNSIP); out += 4; // source IP
+    *(u32*)out = htonl(InternalDNSIP); out += 4; // source IP
     *(u32*)out = htonl(srcip); out += 4; // destination IP
 
     // UDP
@@ -417,7 +427,7 @@ int Net_Slirp::SendPacket(u8* data, int len) noexcept
         if (protocol == 0x11) // UDP
         {
             u16 dstport = ntohs(*(u16*)&data[0x24]);
-            if (dstport == 53 && htonl(*(u32*)&data[0x1E]) == kDNSIP) // DNS
+            if (dstport == 53 && htonl(*(u32*)&data[0x1E]) == InternalDNSIP) // DNS
             {
                 HandleDNSFrame(data, len);
                 return len;
