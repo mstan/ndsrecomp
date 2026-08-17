@@ -308,6 +308,17 @@ constexpr size_t kWifiNetMaxPacketBytes = 2048;
 constexpr size_t kWifiNetTxQueueCapacity = 1024;
 constexpr size_t kWifiNetRxQueueCapacity = 8192;
 
+uint16_t ReadNet16(const uint8_t* p) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) | p[1]);
+}
+
+uint32_t ReadNet32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24u) |
+           (static_cast<uint32_t>(p[1]) << 16u) |
+           (static_cast<uint32_t>(p[2]) << 8u) |
+           static_cast<uint32_t>(p[3]);
+}
+
 #if defined(NDS_ENABLE_PCAP_BACKEND)
 uint16_t ReadBe16(const uint8_t* p) {
     return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8u) | p[1]);
@@ -935,6 +946,189 @@ private:
 #endif
 };
 
+class LocalWfcPeerBridge {
+public:
+    void Configure(uint32_t instance) {
+        enabled_ = instance < kMaxInstances;
+        instance_ = instance;
+    }
+
+    void Begin() {
+        if (!enabled_) return;
+#ifdef _WIN32
+        if (socket_ != INVALID_SOCKET) return;
+
+        socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket_ == INVALID_SOCKET) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[wfc_peer] socket failed: %d\n", WSAGetLastError());
+            return;
+        }
+
+        BOOL reset_enabled = FALSE;
+        DWORD bytes_returned = 0;
+        WSAIoctl(socket_, SIO_UDP_CONNRESET, &reset_enabled,
+                 sizeof(reset_enabled), nullptr, 0, &bytes_returned,
+                 nullptr, nullptr);
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(static_cast<uint16_t>(kBasePort + instance_));
+        if (::bind(socket_, reinterpret_cast<sockaddr*>(&addr),
+                   sizeof(addr)) == SOCKET_ERROR) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[wfc_peer] bind 127.0.0.1:%u failed: %d\n",
+                static_cast<unsigned>(kBasePort + instance_),
+                WSAGetLastError());
+            CloseSocket();
+            return;
+        }
+
+        u_long nonblocking = 1;
+        if (ioctlsocket(socket_, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+            melonDS::Platform::Log(melonDS::Platform::Error,
+                "[wfc_peer] nonblocking setup failed: %d\n", WSAGetLastError());
+            CloseSocket();
+            return;
+        }
+
+        melonDS::Platform::Log(melonDS::Platform::Info,
+            "[wfc_peer] enabled instance=%u port=%u\n",
+            static_cast<unsigned>(instance_),
+            static_cast<unsigned>(kBasePort + instance_));
+#else
+        melonDS::Platform::Log(melonDS::Platform::Warn,
+            "[wfc_peer] localhost UDP transport is currently Windows-only\n");
+#endif
+    }
+
+    void End() {
+#ifdef _WIN32
+        CloseSocket();
+#endif
+    }
+
+    bool ForwardIfPeerFrame(const uint8_t* data, int len) {
+        if (!enabled_ || !data) return false;
+        uint32_t target = 0;
+        if (!IsPeerFrame(data, len, &target)) return false;
+#ifdef _WIN32
+        if (socket_ == INVALID_SOCKET) return false;
+        if (len <= 0 || static_cast<size_t>(len) > kMaxFrameBytes) return true;
+
+        std::vector<uint8_t> datagram;
+        datagram.reserve(kHeaderBytes + static_cast<size_t>(len));
+        WriteLe32(&datagram, kMagic);
+        WriteLe32(&datagram, instance_);
+        WriteLe32(&datagram, static_cast<uint32_t>(len));
+        datagram.insert(datagram.end(), data, data + len);
+        // The sender routed this frame to its local gateway MAC. The receiving
+        // WifiAP filters on Ethernet destination before the IP stack sees the
+        // packet, so make the localhost-carried copy a broadcast Ethernet
+        // frame while leaving the IP/UDP payload untouched.
+        for (size_t i = 0; i < 6u; ++i) datagram[kHeaderBytes + i] = 0xFFu;
+
+        sockaddr_in peer{};
+        peer.sin_family = AF_INET;
+        peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        peer.sin_port = htons(static_cast<uint16_t>(kBasePort + target));
+        if (::sendto(socket_, reinterpret_cast<const char*>(datagram.data()),
+                     static_cast<int>(datagram.size()), 0,
+                     reinterpret_cast<sockaddr*>(&peer),
+                     sizeof(peer)) == SOCKET_ERROR) {
+            if (send_error_log_counter_ < 8u) {
+                ++send_error_log_counter_;
+                melonDS::Platform::Log(melonDS::Platform::Warn,
+                    "[wfc_peer] sendto 127.0.0.1:%u failed: %d\n",
+                    static_cast<unsigned>(kBasePort + target),
+                    WSAGetLastError());
+            }
+        }
+#endif
+        return true;
+    }
+
+    void DrainTo(BoundedPacketQueue* rx_queue,
+                 std::atomic<uint32_t>* rx_drop_counter) {
+#ifdef _WIN32
+        if (!enabled_ || socket_ == INVALID_SOCKET || !rx_queue) return;
+        for (;;) {
+            uint8_t datagram[kHeaderBytes + kMaxFrameBytes];
+            sockaddr_in from{};
+            int from_len = sizeof(from);
+            const int got = ::recvfrom(
+                socket_, reinterpret_cast<char*>(datagram), sizeof(datagram),
+                0, reinterpret_cast<sockaddr*>(&from), &from_len);
+            if (got == SOCKET_ERROR) {
+                const int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK && err != WSAECONNRESET) {
+                    melonDS::Platform::Log(melonDS::Platform::Warn,
+                        "[wfc_peer] recvfrom failed: %d\n", err);
+                }
+                return;
+            }
+            if (got < static_cast<int>(kHeaderBytes)) continue;
+            if (ReadLe32(datagram) != kMagic) continue;
+            const uint32_t sender = ReadLe32(datagram + 4u);
+            const uint32_t len = ReadLe32(datagram + 8u);
+            if (sender == instance_ || sender >= kMaxInstances) continue;
+            if (len > kMaxFrameBytes) continue;
+            if (kHeaderBytes + len != static_cast<uint32_t>(got)) continue;
+
+            std::vector<uint8_t> packet(datagram + kHeaderBytes,
+                                        datagram + kHeaderBytes + len);
+            if (!rx_queue->TryPush(std::move(packet)) && rx_drop_counter) {
+                rx_drop_counter->fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+#else
+        (void)rx_queue;
+        (void)rx_drop_counter;
+#endif
+    }
+
+private:
+    static constexpr uint32_t kMagic = 0x50434657u;
+    static constexpr uint32_t kMaxInstances = 16;
+    static constexpr uint32_t kHeaderBytes = 12;
+    static constexpr size_t kMaxFrameBytes = kWifiNetMaxPacketBytes;
+    static constexpr uint16_t kBasePort = 27610;
+
+    bool IsPeerFrame(const uint8_t* data, int len, uint32_t* target) const {
+        if (len < 14 + 20) return false;
+        if (ReadNet16(data + 12u) != 0x0800u) return false;
+        const size_t ip = 14u;
+        const uint8_t version = static_cast<uint8_t>(data[ip] >> 4u);
+        const size_t ihl = static_cast<size_t>(data[ip] & 0x0Fu) * 4u;
+        if (version != 4u || ihl < 20u ||
+            static_cast<size_t>(len) < ip + ihl) {
+            return false;
+        }
+        const uint32_t dst = ReadNet32(data + ip + 16u);
+        if ((dst & 0xFFFF00FFu) != 0x0A400010u) return false;
+        const uint32_t peer = (dst >> 8u) & 0xFFu;
+        if (peer >= kMaxInstances || peer == instance_) return false;
+        if (target) *target = peer;
+        return true;
+    }
+
+#ifdef _WIN32
+    void CloseSocket() {
+        if (socket_ == INVALID_SOCKET) return;
+        closesocket(socket_);
+        socket_ = INVALID_SOCKET;
+    }
+#endif
+
+    bool enabled_ = false;
+    uint32_t instance_ = 0;
+    uint32_t send_error_log_counter_ = 0;
+#ifdef _WIN32
+    SOCKET socket_ = INVALID_SOCKET;
+#endif
+};
+
 struct WifiBridgeState {
     melonDS::NDS nds;
     std::unique_ptr<melonDS::Wifi> wifi;
@@ -974,6 +1168,7 @@ struct WifiBridgeState {
     // call actually succeeded.
     NdsNetCaptureWriter capture_writer;
     LocalMpTransport local_mp;
+    LocalWfcPeerBridge local_wfc_peer;
 
     NdsWifiNetworkState network_state;
 
@@ -1125,6 +1320,8 @@ void WifiWorkerThreadMain(WifiBridgeState* state) {
             state->slirp_driver->PollHostSockets();
         else if (state->live_driver)
             state->live_driver->RecvCheck();
+        state->local_wfc_peer.DrainTo(&state->rx_queue,
+                                      &state->rx_dropped_since_last_report);
 
         std::unique_lock<std::mutex> lock(state->wake_mutex);
         state->wake_cv.wait_for(
@@ -1179,6 +1376,9 @@ int Net_SendPacket(u8* data, int len, void* userdata) {
                                         kNdsNetCaptureDirTx, data,
                                         static_cast<size_t>(len));
     }
+
+    if (g_bridge->local_wfc_peer.ForwardIfPeerFrame(data, len))
+        return len;
 
     if (g_bridge->replay_driver) {
         // Synchronous, in-memory comparison -- no host I/O, no queue, no
@@ -1403,6 +1603,8 @@ melonDS::Wifi* nds_wifi3d_attach() {
         g_network_config.local_wireless_enabled,
         g_network_config.local_wireless_instance,
         g_network_config.local_wireless_base_port);
+    g_bridge->local_wfc_peer.Configure(
+        g_network_config.slirp_virtual_network_instance);
     if (g_network_config.local_wireless_enabled) {
         melonDS::Platform::Log(melonDS::Platform::Info,
             "[local_mp] configured instance=%u base_port=%u\n",
@@ -1571,6 +1773,10 @@ melonDS::Wifi* nds_wifi3d_attach() {
                 (g_network_config.wfc_enabled && g_network_config.wfc_dns_ipv4)
                     ? static_cast<melonDS::u32>(g_network_config.wfc_dns_ipv4)
                     : 0u;
+            const melonDS::u32 virtual_subnet =
+                0x0A400000u |
+                ((g_network_config.slirp_virtual_network_instance & 0xFFu)
+                 << 8u);
 
             // The libslirp send_packet callback: fires only from inside
             // Net_Slirp::PollHostSockets() or Net_Slirp::SendPacket()'s DNS
@@ -1590,17 +1796,21 @@ melonDS::Wifi* nds_wifi3d_attach() {
                             1, std::memory_order_relaxed);
                     }
                 },
-                nameserver_override);
+                nameserver_override,
+                virtual_subnet);
             g_bridge->slirp_driver = slirp.get();
             g_bridge->live_driver = slirp.get();
             g_bridge->net.SetDriver(std::move(slirp));
             g_bridge->network_state.live_backend_active = true;
+            g_bridge->local_wfc_peer.Begin();
 
             melonDS::Platform::Log(melonDS::Platform::Info,
                 "[wifi_net] network backend attached (wfc_enabled=%d, "
-                "nameserver_override=%s)\n",
+                "nameserver_override=%s, slirp_subnet=10.64.%u.0/24)\n",
                 g_network_config.wfc_enabled ? 1 : 0,
-                nameserver_override ? "yes" : "no (upstream default)");
+                nameserver_override ? "yes" : "no (upstream default)",
+                static_cast<unsigned>(
+                    g_network_config.slirp_virtual_network_instance & 0xFFu));
         }
     } else {
         melonDS::Platform::Log(melonDS::Platform::Info,

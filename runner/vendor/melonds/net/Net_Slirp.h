@@ -57,7 +57,8 @@ public:
     // exactly how a physical DS reaches a configured WFC DNS server. See
     // runner/vendor/melonds/patches/0006-net-slirp-configurable-nameserver.patch.
     explicit Net_Slirp(const Platform::SendPacketCallback& callback,
-                        u32 nameserver_ipv4_host_order = 0) noexcept;
+                        u32 nameserver_ipv4_host_order = 0,
+                        u32 virtual_subnet_ipv4_host_order = 0) noexcept;
     Net_Slirp(const Net_Slirp&) = delete;
     Net_Slirp& operator=(const Net_Slirp&) = delete;
     Net_Slirp(Net_Slirp&& other) noexcept;
@@ -111,6 +112,7 @@ private:
     int PollListSize = 0;
     FIFO<u32, (0x8000 >> 2)> RXBuffer {};
     u32 IPv4ID = 0;
+    u32 InternalDNSIP = 0;
     Slirp* Ctx = nullptr;
     std::atomic<uint32_t> PollErrorCount{0};
     std::atomic<int> LastPollErrorCode{0};

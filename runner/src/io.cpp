@@ -1025,6 +1025,8 @@ void dma_reg_write(int cpu, uint32_t addr, uint32_t value, uint32_t width) {
 // the ARM7 firmware boot reads battery/backlight (power-man) and the RTC and
 // branches on them, so an all-zero stub silently diverges the entire boot.
 std::vector<uint8_t> g_fw;
+std::string g_fw_save_path;
+bool g_fw_dirty = false;
 uint16_t g_spicnt = 0;       // 0x040001C0
 uint8_t  g_spi_resp = 0;     // byte clocked back on the next SPIDATA read
 uint64_t g_spi_deadline = UINT64_MAX;
@@ -1078,7 +1080,13 @@ uint8_t fw_write(uint8_t v) {
                 ++g_fw_data_pos;
                 return 0;
             }
-            if (!g_fw.empty()) g_fw[g_fw_addr & fw_mask()] = v;
+            if (!g_fw.empty()) {
+                uint8_t& target = g_fw[g_fw_addr & fw_mask()];
+                if (target != v) {
+                    target = v;
+                    g_fw_dirty = true;
+                }
+            }
             ++g_fw_addr;
             ++g_fw_data_pos;
             return v;
@@ -1097,8 +1105,11 @@ uint8_t fw_write(uint8_t v) {
     }
 }
 void fw_release() {
+    const bool completed_write = g_fw_hold && g_fw_cmd == 0x0Au;
     g_fw_hold = false;
     g_fw_cmd = 0;
+    if (completed_write && g_fw_dirty)
+        nds_io_flush_firmware_save();
 }
 
 // Power management (device 0): index byte (bit7 = read), then a data byte.
@@ -1851,14 +1862,35 @@ void nds_io_reset() {
 
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     g_fw.assign(p, p + n);
+    g_fw_dirty = false;
     nds_wifi_load_firmware(p, n);
 }
 
 bool nds_io_replace_firmware(const uint8_t* p, uint32_t n) {
-    if (!p || n != 262144u)
+    if (!p || g_fw.empty() || n != g_fw.size())
         return false;
     g_fw.assign(p, p + n);
+    g_fw_dirty = true;
     nds_wifi_rebind_firmware(g_fw.data(), static_cast<uint32_t>(g_fw.size()));
+    return nds_io_flush_firmware_save();
+}
+
+void nds_io_set_firmware_save_path(const char* path) {
+    g_fw_save_path = path ? path : "";
+}
+
+bool nds_io_flush_firmware_save() {
+    if (!g_fw_dirty || g_fw_save_path.empty()) return true;
+    std::string error;
+    if (!nds_battery_save_write_atomic(
+            g_fw_save_path, g_fw.data(), g_fw.size(), &error)) {
+        std::fprintf(stderr, "[firmware] could not persist %s: %s\n",
+                     g_fw_save_path.c_str(), error.c_str());
+        return false;
+    }
+    g_fw_dirty = false;
+    std::fprintf(stderr, "[firmware] persisted %zu bytes to %s\n",
+                 g_fw.size(), g_fw_save_path.c_str());
     return true;
 }
 

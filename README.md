@@ -106,6 +106,11 @@ An opt-in no-dump path also exists (`--freebios --generated-firmware
 persisted per-install identity. The retail dumps remain the default and the
 oracle-diffed source of truth.
 
+Interactive frontends should also pass `--firmware-state-path <file>`. The
+runner seeds that mutable profile from the verified retail or generated image,
+persists guest SPI writes atomically, and flushes it again on every orderly
+exit. The source firmware dump is never modified.
+
 `BIOSGBA.ROM` is reserved for possible future GBA-mode work and is out of
 scope. More detail is in [`bios/README.md`](bios/README.md).
 

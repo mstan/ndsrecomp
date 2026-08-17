@@ -322,6 +322,7 @@ target_include_directories(nds_armv4t PUBLIC
 add_executable(nds_runner
     src/runtime_arm.cpp
     src/battery_save.cpp
+    src/firmware_state.cpp
     src/generated_firmware.cpp
     src/firmware_user_settings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/freebios/freebios_images.cpp
@@ -559,6 +560,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/battery_save.cpp)
   target_include_directories(battery_save_test PRIVATE src)
   add_test(NAME battery_save_test COMMAND battery_save_test)
+
+  add_executable(firmware_state_test
+      tests/firmware_state_test.cpp
+      src/firmware_state.cpp
+      src/battery_save.cpp)
+  target_include_directories(firmware_state_test PRIVATE src)
+  add_test(NAME firmware_state_test COMMAND firmware_state_test)
 
   # AUXSPI backup-chip protocol: pins the write-enable latch's lifetime across
   # chip-select transfers, which is what silently dropped every cartridge save.
