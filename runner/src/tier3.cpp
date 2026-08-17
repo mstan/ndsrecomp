@@ -21,6 +21,7 @@
 #include "runtime_arm.h"
 #include "state.h"
 #include "io.h"
+#include "coverage_manifest.h"
 
 using armv4t::CPUState;
 using armv4t::Interpreter;
@@ -43,7 +44,14 @@ std::vector<Tier3CoverageEntry> g_coverage;
 std::unordered_map<uint64_t, uint32_t> g_coverage_index;
 
 void coverage_note(uint32_t pc, bool thumb, uint8_t kind, uint32_t caller) {
-    if (!g_discover_static_misses) return;
+    // beads-yjp.28: recording is unconditional. This used to be gated behind
+    // g_discover_static_misses, which no shipped launcher passes, so a
+    // player's process kept an empty map for its entire run and their
+    // playthrough taught the project nothing. The map deduplicates on
+    // (cpu, pc, mode, kind) and only counts hits after the first, so the
+    // steady-state cost is one hash lookup on a path that has already run a
+    // full interpreter step. The flag keeps its OTHER meaning below -- the
+    // static-BIOS-miss execution allowance -- which stays opt-in.
     pc &= ~1u;
     const uint8_t cpu = g_nds_active == NDS_ARM7 ? 1u : 0u;
     const uint64_t key = uint64_t{pc} |
@@ -295,6 +303,11 @@ void tier3_run(uint32_t /*entry*/) {
         // instruction, counted as it begins (committed to execute).
         ++g_stats.instructions[g_nds_active == NDS_ARM7 ? 1 : 0];
         nds_note_insn_retired(g_nds_active);
+        // beads-yjp.28: capture the code being interpreted, here rather than
+        // at coverage_note, because straight-line execution that falls through
+        // into the next page produces no coverage entry of its own and would
+        // leave holes in the captured runs.
+        coverage_note_exec(g_nds_active == NDS_ARM7 ? 1 : 0, pc);
         // Current-PC fetch correction.  For a taken branch melonDS JumpTo
         // replaces the source fetch with the target pipeline refill, so this
         // is applied below only when the instruction does not branch.

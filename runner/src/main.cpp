@@ -40,6 +40,7 @@
 #include "profile_report.h"
 #include "sha1.h"
 #include "title_banks.h"
+#include "coverage_manifest.h"
 #include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
@@ -340,6 +341,12 @@ int main(int argc, char** argv) {
     bool cli_freebios = false;
     std::string cli_instance_index;
     std::string cli_save_path;
+    // beads-yjp.28: where the Tier-3 coverage manifest lands. Empty means
+    // "derive it" (next to the save, else next to the ROM). Written on every
+    // exit path, with no flag required, so a player's ordinary session yields
+    // an ingestible file.
+    std::string cli_coverage_manifest;
+    bool coverage_manifest_disabled = false;
     std::string cli_firmware_path;
     std::string cli_firmware_state_path;
     std::string cli_net_ring_filter;
@@ -394,6 +401,10 @@ int main(int argc, char** argv) {
             rom_path = argv[++i];
         } else if (a == "--save-path" && i + 1 < argc) {
             cli_save_path = argv[++i];
+        } else if (a == "--coverage-manifest" && i + 1 < argc) {
+            cli_coverage_manifest = argv[++i];
+        } else if (a == "--no-coverage-manifest") {
+            coverage_manifest_disabled = true;
         } else if (a == "--no-save") {
             save_disabled = true;
         } else if (a == "--firmware-path" && i + 1 < argc) {
@@ -502,6 +513,7 @@ int main(int argc, char** argv) {
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
                 "[--save-path game.sav|--no-save] "
+                "[--coverage-manifest out.json|--no-coverage-manifest] "
                 "[--firmware-path firmware.bin] "
                 "[--firmware-state-path mutable-firmware.bin] "
                 "[--config game.toml] "
@@ -1239,6 +1251,55 @@ int main(int argc, char** argv) {
             save_path = derived.string();
         }
     }
+    // beads-yjp.28: the coverage manifest a player can hand back. Derived
+    // rather than required, because the whole point is that a stock launch
+    // with no flags produces one. Prefer the save's directory (the launcher
+    // keeps it next to the ROM), then the ROM's, then the working directory.
+    std::string coverage_manifest_path;
+    if (!coverage_manifest_disabled) {
+        if (!cli_coverage_manifest.empty()) {
+            coverage_manifest_path = cli_coverage_manifest;
+        } else {
+            std::filesystem::path base;
+            if (!save_path.empty()) base = std::filesystem::path(save_path);
+            else if (!rom_path.empty()) base = std::filesystem::path(rom_path);
+            if (base.empty()) {
+                coverage_manifest_path = "coverage-manifest.json";
+            } else {
+                base.replace_extension();
+                base += "-coverage.json";
+                coverage_manifest_path = base.string();
+            }
+        }
+        const std::string rom_name =
+            rom_path.empty()
+                ? std::string()
+                : std::filesystem::path(rom_path).filename().string();
+        coverage_manifest_set_identity(rom_sha1.c_str(), rom_name.c_str(),
+                                       NDS_RUNNER_BUILD_ID);
+    }
+    // Written from every exit path below. Failure is reported and never
+    // changes the process's exit status: losing a diagnostic dump must not
+    // turn a good run into a failed one for the player.
+    auto write_coverage_manifest = [&]() {
+        if (coverage_manifest_path.empty()) return;
+        char error[256] = {};
+        if (coverage_manifest_write(coverage_manifest_path.c_str(), error,
+                                    sizeof(error))) {
+            const CoveragePageStats pages = coverage_page_stats();
+            std::fprintf(stderr,
+                         "[coverage] wrote %s (%llu code pages, %llu bytes"
+                         "%s)\n",
+                         coverage_manifest_path.c_str(),
+                         (unsigned long long)pages.captured,
+                         (unsigned long long)pages.bytes,
+                         pages.dropped ? ", STORE CAP HIT - manifest is "
+                                         "incomplete" : "");
+        } else {
+            std::fprintf(stderr, "[coverage] could not write %s: %s\n",
+                         coverage_manifest_path.c_str(), error);
+        }
+    };
     nds_io_set_cartridge_save_path(save_path.c_str());
     nds_io_set_firmware_save_path(cli_firmware_state_path.c_str());
     nds_io_configure_cartridge_save(frontend_options.cartridge_save);
@@ -1613,6 +1674,7 @@ int main(int argc, char** argv) {
         debug_pump_stop();
         const bool save_ok = nds_io_flush_cartridge_save();
         const bool firmware_ok = nds_io_flush_firmware_save();
+        write_coverage_manifest();
         return rc != 0 ? rc : (save_ok && firmware_ok) ? 0 : 1;
     }
 
@@ -1637,6 +1699,7 @@ int main(int argc, char** argv) {
 #else
         const bool compute_failed = false;
 #endif
+        write_coverage_manifest();
         return (compute_failed || !save_ok || !firmware_ok) ? 1 : 0;
     }
 
@@ -1673,5 +1736,6 @@ int main(int argc, char** argv) {
 #endif
     const bool save_ok = nds_io_flush_cartridge_save();
     const bool firmware_ok = nds_io_flush_firmware_save();
+    write_coverage_manifest();
     return (compute_failed || !save_ok || !firmware_ok) ? 1 : 0;
 }

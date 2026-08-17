@@ -25,6 +25,7 @@
 #include "tier3.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "coverage_manifest.h"
 
 // ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
 NdsDispatchStats g_nds_dispatch_stats[2] = {};
@@ -517,6 +518,12 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 extern "C" void runtime_request_yield_poll(void) { request_yield_poll(); }
 
 extern "C" void runtime_note_code_write(void) {
+    // beads-yjp.28: every guest RAM write funnels through here -- the slow bus
+    // path (bus.cpp note_ram_write) and the generated-bank inline fast path
+    // (runtime_arm.h nds_busf_note_write) alike -- so this single counter is
+    // what lets the coverage page cache stay trusted between writes instead of
+    // paying a generation lookup per interpreted instruction.
+    ++g_coverage_write_epoch;
     if (g_static_guard && !g_static_guard->invalidated &&
         guard_generation_changed(*g_static_guard)) {
         g_static_guard->invalidated = true;

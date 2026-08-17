@@ -345,6 +345,7 @@ add_executable(nds_runner
     src/gpu3d.cpp
     src/title_patches.cpp
     src/tier3.cpp
+    src/coverage_manifest.cpp
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
@@ -428,6 +429,26 @@ if(NDS_ENABLE_PCAP_BACKEND)
     target_sources(nds_runner PRIVATE vendor/melonds/net/Net_PCap.cpp)
     target_compile_definitions(nds_runner PRIVATE NDS_ENABLE_PCAP_BACKEND=1)
 endif()
+# beads-yjp.28: stamped into the coverage manifest so an ingested playthrough
+# can be tied to the build whose static coverage it was measured against.
+# Resolved at configure time; a source tree without git still builds, it just
+# reports "unknown".
+set(NDS_RUNNER_BUILD_ID "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _nds_runner_git_id
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(_nds_runner_git_id)
+        set(NDS_RUNNER_BUILD_ID "${_nds_runner_git_id}")
+    endif()
+endif()
+target_compile_definitions(nds_runner PRIVATE
+    NDS_RUNNER_BUILD_ID="${NDS_RUNNER_BUILD_ID}")
+
 target_include_directories(nds_runner PRIVATE
     $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
     $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
