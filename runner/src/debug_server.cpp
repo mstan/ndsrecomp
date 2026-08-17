@@ -23,6 +23,7 @@
 #include "gpu3d.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "coverage_manifest.h"
 #include "mem_timing_profile.h"
 #include "net/net_ring.h"
 #include "wifi_net.h"
@@ -495,6 +496,35 @@ std::string handle(const std::string& line) {
         }
         out += "]}";
         return out;
+    }
+    // Dump the Tier-3 coverage manifest on demand. Serve mode never exits its
+    // accept loop (debug_serve only unwinds on a fatal backend failure), so the
+    // exit-path write in main.cpp never runs for a TCP-driven route and every
+    // harness-captured session used to lose its manifest. Querying for it fits
+    // the DEBUG.md model anyway: the capture ring is always on, and a probe asks
+    // for the window it wants rather than arming anything.
+    //
+    // Pass the path with forward slashes. The request parser here is a flat
+    // hand-rolled scanner that does not unescape, so a Windows path sent as
+    // JSON arrives with its backslashes still doubled. Both Windows and POSIX
+    // collapse the duplicate separators so the file lands correctly, but the
+    // echoed path reads oddly -- forward slashes avoid the whole question.
+    if (cmd == "coverage_manifest") {
+        const std::string path = json_str(line, "path");
+        if (path.empty()) return "{\"error\":\"coverage_manifest needs a path\"}";
+        char error[256] = {};
+        if (!coverage_manifest_write(path.c_str(), error, sizeof(error))) {
+            return "{\"ok\":false,\"error\":\"" +
+                   json_escape(error) + "\"}";
+        }
+        const CoveragePageStats pages = coverage_page_stats();
+        std::string out = "{\"ok\":true,\"path\":\"" +
+                          json_escape(path) + "\"";
+        out += ",\"captured\":" + std::to_string(pages.captured);
+        out += ",\"bytes\":" + std::to_string(pages.bytes);
+        out += ",\"dropped\":" + std::to_string(pages.dropped);
+        out += ",\"revisits\":" + std::to_string(pages.revisits);
+        return out + "}";
     }
     if (cmd == "rtc_state") {
         NdsRtcDebugState s{};
