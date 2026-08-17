@@ -889,7 +889,7 @@ std::string handle(const std::string& line) {
             return "{\"error\":\"invalid firmware hex\"}";
         if (!nds_io_replace_firmware(data.data(),
                                      static_cast<uint32_t>(data.size())))
-            return "{\"error\":\"firmware image must be exactly 262144 bytes\"}";
+            return "{\"error\":\"firmware image size/persistence failure\"}";
         return "{\"ok\":true,\"size\":" + std::to_string(data.size()) + "}";
     }
     if (cmd == "io_state") return io_state_json();

@@ -293,6 +293,10 @@ void     nds_tick_rtc(unsigned long long system_cycles);
 void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
 bool     nds_io_replace_firmware(const uint8_t* p, uint32_t n);
+// Optional mutable firmware backing file. Guest SPI writes are committed
+// atomically at transaction boundaries and retried on every orderly exit.
+void     nds_io_set_firmware_save_path(const char* path);
+bool     nds_io_flush_firmware_save();
 // Read-only view over the already-loaded firmware image (empty until
 // nds_io_load_firmware runs). Consumed by the vendored melonDS Wifi device
 // model's Firmware/FirmwareHeader shim (runner/vendor/melonds/SPI_Firmware.h)

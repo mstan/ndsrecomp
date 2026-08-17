@@ -20,6 +20,7 @@
 #include "scheduler.h"
 #include "direct_boot.h"
 #include "generated_firmware.h"
+#include "firmware_state.h"
 #include "firmware_user_settings.h"
 #include "freebios_images.h"
 
@@ -340,6 +341,7 @@ int main(int argc, char** argv) {
     std::string cli_instance_index;
     std::string cli_save_path;
     std::string cli_firmware_path;
+    std::string cli_firmware_state_path;
     std::string cli_net_ring_filter;
     std::string cli_network_enabled;
     std::string cli_network_backend;
@@ -396,6 +398,8 @@ int main(int argc, char** argv) {
             save_disabled = true;
         } else if (a == "--firmware-path" && i + 1 < argc) {
             cli_firmware_path = argv[++i];
+        } else if (a == "--firmware-state-path" && i + 1 < argc) {
+            cli_firmware_state_path = argv[++i];
         } else if (a == "--config" && i + 1 < argc) {
             config_path = argv[++i];
             config_explicit = true;
@@ -499,6 +503,7 @@ int main(int argc, char** argv) {
                 "[--serve|--interactive] [--port 19842] "
                 "[--save-path game.sav|--no-save] "
                 "[--firmware-path firmware.bin] "
+                "[--firmware-state-path mutable-firmware.bin] "
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
                 "[--adaptive-widescreen none|top|bottom|both] "
@@ -1102,6 +1107,12 @@ int main(int argc, char** argv) {
                 "--firmware-path are mutually exclusive\n");
             return 1;
         }
+        if (!cli_identity_mac.empty() && !cli_firmware_state_path.empty()) {
+            std::fprintf(stderr,
+                "refusing to start: --identity-mac cannot be combined with "
+                "--firmware-state-path\n");
+            return 1;
+        }
     } else if (!cli_identity_mac.empty()) {
         std::fprintf(stderr,
             "refusing to start: --identity-mac only applies to "
@@ -1182,6 +1193,22 @@ int main(int argc, char** argv) {
             gba::sha1(fw.data(), fw.size()).hex().c_str());
     }
     if (!ok) { std::fprintf(stderr, "refusing to start: dump verification failed\n"); return 1; }
+    if (!cli_firmware_state_path.empty()) {
+        std::string state_error;
+        const NdsFirmwareStateLoadResult state_result =
+            nds_firmware_state_load_or_seed(
+                cli_firmware_state_path, fw, &fw, &state_error);
+        if (state_result == NdsFirmwareStateLoadResult::Error) {
+            std::fprintf(stderr,
+                "refusing to start: firmware state %s: %s\n",
+                cli_firmware_state_path.c_str(), state_error.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "[firmware] %s mutable state %s (%zu bytes)\n",
+                     state_result == NdsFirmwareStateLoadResult::Loaded
+                         ? "loaded" : "seeded",
+                     cli_firmware_state_path.c_str(), fw.size());
+    }
     if (!rom_path.empty()) {
         if (rom.size() < 0x200u) {
             std::fprintf(stderr, "refusing to start: cartridge image is missing or truncated\n");
@@ -1211,6 +1238,7 @@ int main(int argc, char** argv) {
         }
     }
     nds_io_set_cartridge_save_path(save_path.c_str());
+    nds_io_set_firmware_save_path(cli_firmware_state_path.c_str());
     nds_io_configure_cartridge_save(frontend_options.cartridge_save);
     if (!rom.empty()) {
         const char* type = "none";
@@ -1582,7 +1610,8 @@ int main(int argc, char** argv) {
         const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
         const bool save_ok = nds_io_flush_cartridge_save();
-        return rc != 0 ? rc : save_ok ? 0 : 1;
+        const bool firmware_ok = nds_io_flush_firmware_save();
+        return rc != 0 ? rc : (save_ok && firmware_ok) ? 0 : 1;
     }
 
     if (serve) {
@@ -1599,13 +1628,14 @@ int main(int argc, char** argv) {
         debug_serve(port);
         dump_replay_status();
         const bool save_ok = nds_io_flush_cartridge_save();
+        const bool firmware_ok = nds_io_flush_firmware_save();
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         const bool compute_failed = nds_gpu3d_compute_runtime_failed();
         nds_compute_host_stop();
 #else
         const bool compute_failed = false;
 #endif
-        return (compute_failed || !save_ok) ? 1 : 0;
+        return (compute_failed || !save_ok || !firmware_ok) ? 1 : 0;
     }
 
     std::fprintf(stderr, "[run] dual-CPU from reset, ARM9 budget=%llu cycles\n",
@@ -1640,5 +1670,6 @@ int main(int argc, char** argv) {
     const bool compute_failed = false;
 #endif
     const bool save_ok = nds_io_flush_cartridge_save();
-    return (compute_failed || !save_ok) ? 1 : 0;
+    const bool firmware_ok = nds_io_flush_firmware_save();
+    return (compute_failed || !save_ok || !firmware_ok) ? 1 : 0;
 }

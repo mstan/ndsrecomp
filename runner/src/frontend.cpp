@@ -1919,6 +1919,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                  scheduler_cpu_terminal_halted(1))) {
             scheduler_run_round();
         }
+        // A real DS power-off is an application lifecycle request, not a
+        // debuggable terminal halt. Leave before presenting the powered-down
+        // black framebuffer; main() performs durable state flushes.
+        if (nds_powered_off()) {
+            std::fprintf(stderr,
+                         "[sdl] guest requested power-off; closing\n");
+            running = false;
+            break;
+        }
         {
             const uint64_t emu_ticks = SDL_GetPerformanceCounter() - phase0;
             phase_emu_ticks += emu_ticks;
