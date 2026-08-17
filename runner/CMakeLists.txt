@@ -244,8 +244,17 @@ if(TITLE_BANK_DISPATCH)
     # One SHA-1 gate per configured bank group: only the group generated from
     # the exact inserted cartridge registers, so a multi-title runner never
     # selects another game's banks by address coincidence.
+    # Groups accumulate rather than return on the first match. Several groups
+    # may legitimately carry the SAME ROM SHA-1 -- that is how one cartridge
+    # gets banks from more than one generated directory (e.g. the main image in
+    # one, an ahead-of-time overlay bank in another, without regenerating or
+    # polluting either tree). Returning on the first match silently dropped
+    # every later group: its nds_register_dispatch call was emitted but sat
+    # after an unconditional return, so the banks linked, the registry reported
+    # success, and the rows were simply never in the dispatch list.
     file(APPEND "${TITLE_BANK_REGISTRY}"
-        "    if (!rom_sha1) return false;\n")
+        "    if (!rom_sha1) return false;\n"
+        "    bool registered = false;\n")
     math(EXPR _title_last "${TITLE_GROUP_COUNT} - 1")
     foreach(_gi RANGE 0 ${_title_last})
         file(APPEND "${TITLE_BANK_REGISTRY}"
@@ -269,10 +278,10 @@ if(TITLE_BANK_DISPATCH)
                 "g_dispatch_${bank}, g_dispatch_${bank}_len, ${bank_mask});\n")
         endforeach()
         file(APPEND "${TITLE_BANK_REGISTRY}"
-            "        return true;\n"
+            "        registered = true;\n"
             "    }\n")
     endforeach()
-    file(APPEND "${TITLE_BANK_REGISTRY}" "    return false;\n")
+    file(APPEND "${TITLE_BANK_REGISTRY}" "    return registered;\n")
 else()
     file(APPEND "${TITLE_BANK_REGISTRY}"
         "    (void)rom_sha1;\n"
