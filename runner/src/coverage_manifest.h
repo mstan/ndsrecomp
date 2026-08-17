@@ -73,6 +73,17 @@ inline void coverage_note_exec(int cpu, uint32_t pc) {
 void coverage_manifest_set_identity(const char* rom_sha1, const char* rom_name,
                                     const char* build_id);
 
+// Where automatic dumps go. Parts are written as
+// <base>-coverage-<runstamp>-partNN.json, so a manifest is NEVER overwritten:
+// a second session gets a new runstamp, and a long session that fills the page
+// store rotates to the next part instead of dropping pages on the floor. A
+// player can hand back the whole set and every part ingests independently.
+void coverage_manifest_set_output(const char* base_path);
+
+// Write the current part and start a new one. Called automatically when the
+// page store fills; also called on exit to flush whatever is held.
+bool coverage_manifest_flush_part(char* error, unsigned error_cap);
+
 // Write the manifest. Returns false and fills `error` on failure. Writes via a
 // temporary and renames, so a half-written file is never handed to anyone.
 bool coverage_manifest_write(const char* path, char* error, unsigned error_cap);

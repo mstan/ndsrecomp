@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -71,6 +72,35 @@ CoveragePageStats g_page_stats{};
 std::string g_rom_sha1;
 std::string g_rom_name;
 std::string g_build_id;
+
+// Automatic-dump destination. Empty disables rotation (the explicit-path
+// writer still works, which is what the debug command uses).
+std::string g_out_base;
+std::string g_run_stamp;
+uint32_t g_part_index = 0u;
+uint64_t g_rotations = 0u;
+
+std::string run_stamp() {
+    if (!g_run_stamp.empty()) return g_run_stamp;
+    const std::time_t now = std::time(nullptr);
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm_buf);
+    g_run_stamp = buf;
+    return g_run_stamp;
+}
+
+std::string next_part_path() {
+    if (g_out_base.empty()) return {};
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "-part%02u", g_part_index);
+    return g_out_base + "-coverage-" + run_stamp() + buf + ".json";
+}
 
 void append_json_escaped(std::string& out, const std::string& value) {
     out.push_back('"');
@@ -216,9 +246,15 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
         return;
     }
 
+    // Store full. Rotate to the next part rather than dropping: a long session
+    // used to report dropped=254865, i.e. it silently stopped learning after
+    // the first 8192 pages. Only drop if there is nowhere to rotate to.
     if (g_page_stats.captured >= kMaxPages) {
-        ++g_page_stats.dropped;
-        return;
+        char error[256] = {};
+        if (g_out_base.empty() || !coverage_manifest_flush_part(error, sizeof(error))) {
+            ++g_page_stats.dropped;
+            return;
+        }
     }
 
     g_page_index.emplace(key, static_cast<uint32_t>(g_pages.size()));
@@ -234,6 +270,36 @@ void coverage_manifest_set_identity(const char* rom_sha1, const char* rom_name,
     if (rom_sha1) g_rom_sha1 = rom_sha1;
     if (rom_name) g_rom_name = rom_name;
     if (build_id) g_build_id = build_id;
+}
+
+void coverage_manifest_set_output(const char* base_path) {
+    g_out_base = base_path ? base_path : "";
+}
+
+bool coverage_manifest_flush_part(char* error, unsigned error_cap) {
+    const std::string path = next_part_path();
+    if (path.empty()) {
+        if (error && error_cap) std::snprintf(error, error_cap, "no output base");
+        return false;
+    }
+    // Nothing new since the last part: don't litter the folder with empties.
+    if (g_pages.empty() && g_part_index > 0u) return true;
+    if (!coverage_manifest_write(path.c_str(), error, error_cap)) return false;
+    std::fprintf(stderr, "[coverage] wrote %s (%llu code pages, %llu bytes)\n",
+                 path.c_str(), (unsigned long long)g_page_stats.captured,
+                 (unsigned long long)g_page_stats.bytes);
+    ++g_part_index;
+    ++g_rotations;
+    // Start the next part with an empty store. Entry points keep accumulating
+    // in tier3's own map, so each part carries the full address list and only
+    // the PAGE payload is split -- every part stays independently ingestible.
+    g_pages.clear();
+    g_page_index.clear();
+    g_pages_by_addr.clear();
+    g_page_stats.captured = 0u;
+    g_page_stats.bytes = 0u;
+    for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
+    return true;
 }
 
 CoveragePageStats coverage_page_stats() { return g_page_stats; }

@@ -1263,13 +1263,13 @@ int main(int argc, char** argv) {
             std::filesystem::path base;
             if (!save_path.empty()) base = std::filesystem::path(save_path);
             else if (!rom_path.empty()) base = std::filesystem::path(rom_path);
-            if (base.empty()) {
-                coverage_manifest_path = "coverage-manifest.json";
-            } else {
-                base.replace_extension();
-                base += "-coverage.json";
-                coverage_manifest_path = base.string();
-            }
+            // Parts are named <base>-coverage-<runstamp>-partNN.json. A fixed
+            // filename overwrote the previous session's manifest, so anyone
+            // playing twice silently lost the first run; and once the page
+            // store filled, everything after was dropped. Rotation fixes both.
+            base.replace_extension();
+            coverage_manifest_set_output(
+                base.empty() ? "nds" : base.string().c_str());
         }
         const std::string rom_name =
             rom_path.empty()
@@ -1282,23 +1282,32 @@ int main(int argc, char** argv) {
     // changes the process's exit status: losing a diagnostic dump must not
     // turn a good run into a failed one for the player.
     auto write_coverage_manifest = [&]() {
-        if (coverage_manifest_path.empty()) return;
+        if (coverage_manifest_disabled) return;
         char error[256] = {};
-        if (coverage_manifest_write(coverage_manifest_path.c_str(), error,
-                                    sizeof(error))) {
-            const CoveragePageStats pages = coverage_page_stats();
-            std::fprintf(stderr,
-                         "[coverage] wrote %s (%llu code pages, %llu bytes"
-                         "%s)\n",
-                         coverage_manifest_path.c_str(),
-                         (unsigned long long)pages.captured,
-                         (unsigned long long)pages.bytes,
-                         pages.dropped ? ", STORE CAP HIT - manifest is "
-                                         "incomplete" : "");
-        } else {
-            std::fprintf(stderr, "[coverage] could not write %s: %s\n",
-                         coverage_manifest_path.c_str(), error);
+        // An explicit --coverage-manifest path is honoured verbatim (scripts
+        // depend on knowing the filename). Otherwise flush the final rotating
+        // part; earlier parts were already written when the store filled.
+        if (!coverage_manifest_path.empty()) {
+            if (coverage_manifest_write(coverage_manifest_path.c_str(), error,
+                                        sizeof(error))) {
+                const CoveragePageStats pages = coverage_page_stats();
+                std::fprintf(stderr,
+                             "[coverage] wrote %s (%llu code pages, %llu bytes"
+                             "%s)\n",
+                             coverage_manifest_path.c_str(),
+                             (unsigned long long)pages.captured,
+                             (unsigned long long)pages.bytes,
+                             pages.dropped ? ", STORE CAP HIT - manifest is "
+                                             "incomplete" : "");
+            } else {
+                std::fprintf(stderr, "[coverage] could not write %s: %s\n",
+                             coverage_manifest_path.c_str(), error);
+            }
+            return;
         }
+        if (!coverage_manifest_flush_part(error, sizeof(error)))
+            std::fprintf(stderr, "[coverage] could not write manifest: %s\n",
+                         error);
     };
     nds_io_set_cartridge_save_path(save_path.c_str());
     nds_io_set_firmware_save_path(cli_firmware_state_path.c_str());
