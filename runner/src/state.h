@@ -109,6 +109,9 @@ void bus_fast_refresh();
 // without producing bus events or consuming guest cycles.
 bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,
                           uint32_t size);
+// Bulk diagnostic read: one resolve per aligned page instead of one per byte.
+// Returns false when any part fell back to the per-byte path (VRAM/IO/unmapped).
+bool bus_debug_copy(int cpu, uint32_t addr, uint8_t* dst, uint32_t size);
 struct BusExecProvenance {
     bool writable;
     bool written;

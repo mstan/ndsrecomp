@@ -27,6 +27,11 @@ constexpr uint32_t kPageSize = 4096u;
 // manifest that quietly stopped recording would read as "fully covered".
 constexpr uint64_t kMaxPages = 8192u;
 
+// Distinct code images retained per page address. Genuine overlay generations
+// at one address number in the low single digits; anything beyond that is a
+// code page churning because data shares its 4 KiB.
+constexpr uint32_t kMaxVersionsPerAddress = 8u;
+
 struct StoredPage {
     uint32_t addr;
     uint8_t cpu;
@@ -184,10 +189,23 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
         }
     }
 
+    // A page address may legitimately hold several distinct code images over a
+    // session -- that is exactly what overlay generations are -- but only a
+    // handful. Hundreds means the page shares its 4 KiB with churning data, and
+    // storing every one of those evicts real coverage: a live multiplayer
+    // session reported captured=8192 (the cap) with dropped=26092. Bound the
+    // versions per address so churn cannot crowd out other pages.
+    uint32_t versions = 0;
+    for (auto it = stored_range.first; it != stored_range.second; ++it)
+        ++versions;
+    if (versions >= kMaxVersionsPerAddress) {
+        ++g_page_stats.dropped;
+        return;
+    }
+
     const int bus_cpu = (index == 1) ? 7 : 9;
     std::vector<uint8_t> bytes(kPageSize);
-    for (uint32_t offset = 0; offset < kPageSize; ++offset)
-        bytes[offset] = bus_debug_read8(bus_cpu, base + offset);
+    bus_debug_copy(bus_cpu, base, bytes.data(), kPageSize);
 
     const gba::Sha1Digest digest = gba::sha1(bytes.data(), bytes.size());
     PageKey key{base, digest.bytes};

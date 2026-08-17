@@ -667,6 +667,37 @@ uint32_t bus_exec_page_generation(uint32_t addr) {
         g_nds_active == NDS_ARM7 ? 7 : 9, addr);
 }
 
+// Bulk read of live guest bytes for diagnostics, resolving once per aligned
+// page instead of per byte. The coverage capture used to pull its 4 KiB pages
+// through bus_debug_read8 one byte at a time -- 4096 calls, each swapping the
+// active CPU and re-resolving the address -- which the owner saw in play as a
+// visible hitch the first time new content ran (registering a save file runs
+// fresh flash code, so a burst of never-seen pages all paid it at once).
+bool bus_debug_copy(int cpu, uint32_t addr, uint8_t* dst, uint32_t size) {
+    if (!dst || size == 0u) return false;
+    const NdsCpu old = g_nds_active;
+    g_nds_active = (cpu == 7) ? NDS_ARM7 : NDS_ARM9;
+    bool complete = true;
+    uint32_t offset = 0u;
+    while (offset < size) {
+        const uint32_t at = addr + offset;
+        const uint32_t page_left = kExecPageSize - (at & (kExecPageSize - 1u));
+        const uint32_t chunk = std::min(size - offset, page_left);
+        if (const uint8_t* live = resolve(at, chunk)) {
+            std::memcpy(dst + offset, live, chunk);
+        } else {
+            // Not plain RAM (VRAM window, I/O, unmapped). Fall back per byte so
+            // the caller still gets the guest's view rather than stale bytes.
+            for (uint32_t i = 0; i < chunk; ++i)
+                dst[offset + i] = bus_debug_read8(cpu, at + i);
+            complete = false;
+        }
+        offset += chunk;
+    }
+    g_nds_active = old;
+    return complete;
+}
+
 bool bus_live_bytes_equal(uint32_t addr, const uint8_t* expected,
                           uint32_t size) {
     if (!expected || size == 0u) return false;
