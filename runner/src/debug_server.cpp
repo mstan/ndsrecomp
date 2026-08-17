@@ -1624,18 +1624,44 @@ std::atomic<bool> g_pump_shutdown{false};
 socket_t g_pump_listener = INVALID_SOCKET;
 std::atomic<socket_t> g_pump_client{INVALID_SOCKET};
 
+constexpr long kPumpPollTimeoutMs = 100;
+
+bool socket_readable(socket_t socket, long timeout_ms) {
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(socket, &read_set);
+
+    timeval timeout{};
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+#ifdef _WIN32
+    return select(0, &read_set, nullptr, nullptr, &timeout) > 0;
+#else
+    return select(socket + 1, &read_set, nullptr, nullptr, &timeout) > 0;
+#endif
+}
+
 void pump_io_thread() {
     while (!g_pump_shutdown.load(std::memory_order_relaxed)) {
+        // Poll instead of blocking indefinitely in accept(), so shutdown
+        // never depends on another thread closing the listening socket.
+        if (!socket_readable(g_pump_listener, kPumpPollTimeoutMs)) continue;
+        if (g_pump_shutdown.load(std::memory_order_relaxed)) break;
+
         socket_t client = accept(g_pump_listener, nullptr, nullptr);
-        if (client == INVALID_SOCKET) {
-            if (g_pump_shutdown.load(std::memory_order_relaxed)) break;
-            continue;
-        }
+        if (client == INVALID_SOCKET) continue;
+
         g_pump_client.store(client, std::memory_order_relaxed);
         std::string buf;
         char chunk[65536];
         bool open = true;
         while (open && !g_pump_shutdown.load(std::memory_order_relaxed)) {
+            // recv() needs the same bounded wait so an idle connected
+            // client cannot prevent the pump thread from shutting down.
+            if (!socket_readable(client, kPumpPollTimeoutMs)) continue;
+            if (g_pump_shutdown.load(std::memory_order_relaxed)) break;
+
             int n = recv(client, chunk, sizeof(chunk), 0);
             if (n <= 0) break;
             buf.append(chunk, (size_t)n);
@@ -1669,8 +1695,7 @@ void pump_io_thread() {
                 }
             }
         }
-        // Exchange-then-close so shutdown and this thread never both close
-        // the same handle.
+
         const socket_t mine =
             g_pump_client.exchange(INVALID_SOCKET, std::memory_order_relaxed);
         if (mine != INVALID_SOCKET) CLOSESOCK(mine);
@@ -1732,11 +1757,9 @@ void debug_pump() {
 void debug_pump_stop() {
     if (g_pump_listener == INVALID_SOCKET) return;
     g_pump_shutdown.store(true, std::memory_order_relaxed);
-    CLOSESOCK(g_pump_listener);   // unblocks accept()
-    g_pump_listener = INVALID_SOCKET;
-    const socket_t client =
-        g_pump_client.exchange(INVALID_SOCKET, std::memory_order_relaxed);
-    if (client != INVALID_SOCKET) CLOSESOCK(client);  // unblocks recv()
     if (g_pump_thread.joinable()) g_pump_thread.join();
+    CLOSESOCK(g_pump_listener);
+    g_pump_listener = INVALID_SOCKET;
+    g_pump_client.store(INVALID_SOCKET, std::memory_order_relaxed);
     g_play_mode = false;
 }
