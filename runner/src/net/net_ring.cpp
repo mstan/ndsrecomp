@@ -38,6 +38,8 @@ uint32_t g_net_trace_w = 0;
 uint32_t g_net_trace_retained = 0;
 uint64_t g_net_trace_seq = 0;
 uint16_t g_net_hostname_w = 0;
+uint64_t g_net_kind_counters[NDS_NET_EVENT_KIND_COUNT] = {};
+uint64_t g_net_last_event_sys = 0;
 
 const char* const kNetEventKindNames[NDS_NET_EVENT_KIND_COUNT] = {
     "wifi_reg_read",
@@ -130,6 +132,8 @@ uint64_t net_ring_push(NdsNetEventKind kind, uint8_t direction,
     e.has_hostname = 0;
     e.hostname_ref = 0;
     e.aux = aux;
+    if (kind < NDS_NET_EVENT_KIND_COUNT) ++g_net_kind_counters[static_cast<uint8_t>(kind)];
+    g_net_last_event_sys = e.sys;
     g_net_trace_w = (slot + 1u) % kNetTraceSize;
     if (g_net_trace_retained < kNetTraceSize) ++g_net_trace_retained;
     return e.count;
@@ -211,11 +215,21 @@ void net_ring_debug_state(NdsNetRingState* out) {
     }
 }
 
+void net_ring_progress(NdsNetConnectionProgress* out) {
+    if (!out) return;
+    for (uint8_t kind = 0; kind < NDS_NET_EVENT_KIND_COUNT; ++kind)
+        out->events[kind] = g_net_kind_counters[kind];
+    out->last_event_sys = g_net_last_event_sys;
+}
+
 void net_ring_reset() {
     g_net_trace_w = 0;
     g_net_trace_retained = 0;
     g_net_trace_seq = 0;
     g_net_hostname_w = 0;
+    for (uint8_t kind = 0; kind < NDS_NET_EVENT_KIND_COUNT; ++kind)
+        g_net_kind_counters[kind] = 0;
+    g_net_last_event_sys = 0;
     // Entries/hostnames are left as-is (matching every other ring's reset —
     // e.g. card_trace at io.cpp:1905 only rewinds the cursors); a stale slot
     // is unreachable because net_ring_get's stored.count == count check will

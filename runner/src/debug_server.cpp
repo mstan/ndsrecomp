@@ -837,6 +837,22 @@ std::string handle(const std::string& line) {
         out += "]}";
         return out;
     }
+    if (cmd == "net_progress") {
+        NdsNetConnectionProgress progress{};
+        net_ring_progress(&progress);
+        std::string out = "{\"last_event\":";
+        out += std::to_string(progress.last_event_sys);
+        out += ",\"counts\":{";
+        for (uint8_t kind = 0; kind < NDS_NET_EVENT_KIND_COUNT; ++kind) {
+            if (kind != 0u) out += ",";
+            out += "\"";
+            out += nds_net_event_kind_name(kind);
+            out += "\":";
+            out += std::to_string(progress.events[kind]);
+        }
+        out += "}}";
+        return out;
+    }
     if (cmd == "net_state") {
         NdsNetRingState st{};
         net_ring_debug_state(&st);
