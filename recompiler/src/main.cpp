@@ -384,7 +384,7 @@ void emit_resume_switch(std::FILE* f, const std::vector<Function>& funcs,
                          resume_pc, resume_pc);
     }
     std::fprintf(f,
-        "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
+        "            default: runtime_dispatch_bad_entry(g_cpu.R[15]); return;\n"
         "        }\n"
         "    }\n");
 }
@@ -395,13 +395,15 @@ void emit_function_body(std::FILE* f, const Function& fn,
                         const std::unordered_map<uint64_t, std::string>&
                             func_names_by_key,
                         bool emit_entry_switch,
-                        bool local_fallthrough) {
+                        bool local_fallthrough,
+                        bool trace_live_transfers) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
     ctx.names_by_key = &func_names_by_key;
     ctx.current_function_addr = fn.addr;
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
+    ctx.trace_live_transfers = trace_live_transfers;
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
 
     // Every decoded instruction is a resumable static entry. Normal calls
@@ -420,7 +422,7 @@ void emit_function_body(std::FILE* f, const Function& fn,
                          resume_pc, resume_pc);
         }
         std::fprintf(f,
-            "            default: runtime_dispatch_miss(g_cpu.R[15]); return;\n"
+            "            default: runtime_dispatch_bad_entry(g_cpu.R[15]); return;\n"
             "        }\n"
             "    }\n");
     }
@@ -630,6 +632,7 @@ void write_bank_dispatch(const std::string& dir,
                          const uint8_t* rom, std::size_t rom_size,
                          uint32_t rom_base, const BankNames& names,
                          bool validate_live_bytes,
+                         bool dependency_closure,
                          const SuperblockPlan& superblocks,
                          const std::vector<ResolvedHleRoutine>& hle_routines) {
     std::FILE* f = std::fopen((dir + "/" + names.dispatch).c_str(), "wb");
@@ -643,6 +646,12 @@ void write_bank_dispatch(const std::string& dir,
 
     std::vector<std::string> validation_symbols(funcs.size());
     if (validate_live_bytes) {
+        struct ValidationRecord {
+            std::string symbol;
+            uint32_t addr;
+            uint32_t size;
+        };
+        std::vector<ValidationRecord> records;
         for (std::size_t index = 0; index < funcs.size(); ++index) {
             const std::size_t leader = superblocks.leader[index];
             char symbol[128];
@@ -663,16 +672,87 @@ void write_bank_dispatch(const std::string& dir,
                 std::fclose(f);
                 return;
             }
+            if (dependency_closure && source != fn.addr) {
+                std::fprintf(stderr,
+                    "[emit] dependency closures require identity-mapped "
+                    "runtime bytes: fn=0x%08X source=0x%08X\n",
+                    fn.addr, source);
+                std::fclose(f);
+                return;
+            }
             std::fprintf(f, "static const uint8_t %s_bytes[] = {", symbol);
             const uint32_t offset = source - rom_base;
             for (uint32_t i = 0; i < size; ++i) {
                 if ((i & 15u) == 0u) std::fputs("\n    ", f);
                 std::fprintf(f, "0x%02Xu,", unsigned(rom[offset + i]));
             }
+            std::fprintf(f, "\n};\n\n");
+            records.push_back({symbol, fn.addr, size});
+        }
+
+        std::string closure_symbol;
+        uint32_t closure_count = 0u;
+        if (dependency_closure) {
+            struct Interval { uint32_t begin; uint32_t end; };
+            std::vector<Interval> intervals;
+            intervals.reserve(records.size());
+            for (const ValidationRecord& record : records)
+                intervals.push_back(
+                    {record.addr, record.addr + record.size});
+            std::sort(intervals.begin(), intervals.end(),
+                      [](const Interval& a, const Interval& b) {
+                if (a.begin != b.begin) return a.begin < b.begin;
+                return a.end < b.end;
+            });
+            std::vector<Interval> merged;
+            for (const Interval& interval : intervals) {
+                if (merged.empty() || interval.begin > merged.back().end)
+                    merged.push_back(interval);
+                else
+                    merged.back().end = std::max(
+                        merged.back().end, interval.end);
+            }
+            closure_symbol = "g_validation_closure_" + names.fn_prefix;
+            for (std::size_t index = 0; index < merged.size(); ++index) {
+                const Interval& interval = merged[index];
+                const uint32_t size = interval.end - interval.begin;
+                if (interval.begin < rom_base ||
+                    uint64_t{interval.begin - rom_base} + size > rom_size) {
+                    std::fprintf(stderr,
+                        "[emit] dependency range outside image: "
+                        "addr=0x%08X size=%u\n", interval.begin, size);
+                    std::fclose(f);
+                    return;
+                }
+                std::fprintf(f, "static const uint8_t %s_%zu_bytes[] = {",
+                             closure_symbol.c_str(), index);
+                const uint32_t offset = interval.begin - rom_base;
+                for (uint32_t i = 0; i < size; ++i) {
+                    if ((i & 15u) == 0u) std::fputs("\n    ", f);
+                    std::fprintf(f, "0x%02Xu,", unsigned(rom[offset + i]));
+                }
+                std::fprintf(f, "\n};\n\n");
+            }
             std::fprintf(f,
-                "\n};\nstatic const NdsStaticValidation %s = "
-                "{0x%08Xu, %uu, %s_bytes};\n\n",
-                symbol, fn.addr, size, symbol);
+                "static const NdsStaticValidationRange %s[] = {\n",
+                closure_symbol.c_str());
+            for (std::size_t index = 0; index < merged.size(); ++index) {
+                const Interval& interval = merged[index];
+                std::fprintf(f, "    {0x%08Xu, %uu, %s_%zu_bytes},\n",
+                             interval.begin, interval.end - interval.begin,
+                             closure_symbol.c_str(), index);
+            }
+            std::fprintf(f, "};\n\n");
+            closure_count = static_cast<uint32_t>(merged.size());
+        }
+        for (const ValidationRecord& record : records) {
+            std::fprintf(f,
+                "static const NdsStaticValidation %s = "
+                "{0x%08Xu, %uu, %s_bytes, %s, %uu};\n\n",
+                record.symbol.c_str(), record.addr, record.size,
+                record.symbol.c_str(),
+                dependency_closure ? closure_symbol.c_str() : "0",
+                closure_count);
         }
     }
 
@@ -765,20 +845,25 @@ void write_bank_body(const std::string& dir,
                      const std::string& output_name,
                      std::size_t first, std::size_t last,
                      bool allow_direct_calls,
+                     bool trace_live_transfers,
                      const SuperblockPlan& superblocks,
                      const std::vector<ResolvedHleRoutine>& hle_routines) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     // Direct C calls stay within a body shard. Cross-shard transfers use the
     // normal runtime dispatcher, which keeps shards independently compilable
     // when the corpus grows and avoids an all-bank header dependency.
-    // Content-validated RAM variants must dispatch every inter-function edge:
-    // a direct host call would bypass the callee's live-byte/provenance check.
+    // Dependency-closure banks may call directly within this body shard. A
+    // coalesced member has no standalone host symbol, so enter its leader;
+    // emit_direct_branch has already placed the exact guest target in R15 and
+    // the leader's resume switch transfers to that instruction.
     if (allow_direct_calls) {
         for (std::size_t index = first; index < last; ++index) {
             const auto& fn = funcs[index];
+            const std::size_t leader = superblocks.leader[index];
+            if (leader < first || leader >= last) continue;
             uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
                 (fn.mode == CpuMode::Thumb ? 1u : 0u);
-            name_by_key[key] = names.fn_prefix + fn.name;
+            name_by_key[key] = names.fn_prefix + funcs[leader].name;
         }
     }
     std::FILE* f = std::fopen((dir + "/" + output_name).c_str(), "wb");
@@ -790,9 +875,11 @@ void write_bank_body(const std::string& dir,
         "   is never consulted at runtime — an unlowered op aborts via\n"
         "   runtime_unimplemented_op (PRINCIPLES.md). */\n"
         "#include \"runtime_arm.h\"\n\n");
-    for (std::size_t index = first; index < last; ++index)
+    for (std::size_t index = first; index < last; ++index) {
+        if (superblocks.leader[index] != index) continue;
         std::fprintf(f, "void %s%s(void);\n", names.fn_prefix.c_str(),
                      funcs[index].name.c_str());
+    }
     std::fputs("\n", f);
     for (std::size_t index = first; index < last; ++index) {
         if (superblocks.leader[index] != index) continue;
@@ -829,7 +916,8 @@ void write_bank_body(const std::string& dir,
         for (std::size_t member = index; member < block_end; ++member) {
             emit_function_body(
                 f, funcs[member], rom, rom_size, rom_base, name_by_key,
-                !coalesced, member + 1u < block_end);
+                !coalesced, member + 1u < block_end,
+                trace_live_transfers);
         }
         std::fprintf(f, "}\n\n");
         if (hle) {
@@ -858,6 +946,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> preceding_dispatch_paths;
     bool audit = false;
     bool validate_live_bytes = false;
+    bool unsafe_live_direct_calls = false;
+    bool validated_live_direct_calls = false;
     bool coalesce_fallthroughs = false;
     bool dispatch_only = false;
     bool stable_address_shards = false;
@@ -875,6 +965,10 @@ int main(int argc, char** argv) {
             preceding_dispatch_paths.push_back(next());
         else if (a == "--audit") audit = true;
         else if (a == "--validate-live-bytes") validate_live_bytes = true;
+        else if (a == "--unsafe-live-direct-calls")
+            unsafe_live_direct_calls = true;
+        else if (a == "--validated-live-direct-calls")
+            validated_live_direct_calls = true;
         else if (a == "--coalesce-fallthroughs")
             coalesce_fallthroughs = true;
         else if (a == "--dispatch-only") dispatch_only = true;
@@ -903,6 +997,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "--coalesce-fallthroughs requires --validate-live-bytes and "
             "does not support --hle-manifest\n");
+        return 2;
+    }
+    if (validated_live_direct_calls && !validate_live_bytes) {
+        std::fprintf(stderr,
+            "--validated-live-direct-calls requires --validate-live-bytes\n");
         return 2;
     }
 
@@ -1055,7 +1154,11 @@ int main(int argc, char** argv) {
                 }
                 write_bank_body(out_dir, funcs, bin.data(), bin.size(),
                                 cfg.program.load_address, names, output_name,
-                                first, last, !validate_live_bytes,
+                                first, last,
+                                !validate_live_bytes ||
+                                    unsafe_live_direct_calls ||
+                                    validated_live_direct_calls,
+                                validate_live_bytes,
                                 superblocks,
                                 hle_routines);
                 ++emitted_shards;
@@ -1110,7 +1213,8 @@ int main(int argc, char** argv) {
         }
         write_bank_dispatch(out_dir, funcs, bin.data(), bin.size(),
                             cfg.program.load_address, names,
-                            validate_live_bytes, superblocks, hle_routines);
+                            validate_live_bytes, validated_live_direct_calls,
+                            superblocks, hle_routines);
         std::printf("\n[emit] bank '%s': %zu functions (%u body shard%s%s) -> %s/{%s,%s,%s}\n",
                     bank.c_str(), funcs.size(), emitted_shards,
                     emitted_shards == 1u ? "" : "s",

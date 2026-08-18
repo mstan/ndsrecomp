@@ -55,6 +55,8 @@ using DispatchEntry = NdsDispatchEntry;
 
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base);
+extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
+                                        unsigned len);
 extern "C" void nds_set_cycle_cap(unsigned long long cap);
 extern "C" void nds_reschedule_slice(unsigned long long system_deadline);
 extern "C" void nds_halt(const char* reason);

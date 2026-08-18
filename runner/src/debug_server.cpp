@@ -24,6 +24,7 @@
 #include "hle_profile.h"
 #include "dispatch_stats.h"
 #include "coverage_manifest.h"
+#include "live_overlay.h"
 #include "mem_timing_profile.h"
 #include "net/net_ring.h"
 #include "wifi_net.h"
@@ -523,8 +524,22 @@ std::string handle(const std::string& line) {
         out += ",\"captured\":" + std::to_string(pages.captured);
         out += ",\"bytes\":" + std::to_string(pages.bytes);
         out += ",\"dropped\":" + std::to_string(pages.dropped);
+        out += ",\"replaced\":" + std::to_string(pages.replaced);
         out += ",\"revisits\":" + std::to_string(pages.revisits);
         return out + "}";
+    }
+    if (cmd == "live_overlay_status") {
+        live_overlay_poll();
+        return live_overlay_status_json();
+    }
+    if (cmd == "live_overlay_diagnostics") {
+        return live_overlay_diagnostics_json(
+            static_cast<uint32_t>(json_u64(line, "count", 256)));
+    }
+    if (cmd == "live_overlay_trigger") {
+        const bool ok = live_overlay_trigger_now();
+        return std::string("{\"ok\":") + (ok ? "true" : "false") +
+            ",\"status\":" + live_overlay_status_json() + "}";
     }
     if (cmd == "rtc_state") {
         NdsRtcDebugState s{};
@@ -1732,11 +1747,39 @@ void debug_pump() {
 void debug_pump_stop() {
     if (g_pump_listener == INVALID_SOCKET) return;
     g_pump_shutdown.store(true, std::memory_order_relaxed);
-    CLOSESOCK(g_pump_listener);   // unblocks accept()
+
+    // Closing a listening socket from another thread does not reliably wake a
+    // blocking accept() on Windows. Connect a short-lived loopback client
+    // first so the I/O thread observes the shutdown flag and leaves accept.
+    sockaddr_in listener_addr{};
+    socklen_t listener_addr_len = sizeof(listener_addr);
+    if (getsockname(g_pump_listener,
+                    reinterpret_cast<sockaddr*>(&listener_addr),
+                    &listener_addr_len) == 0) {
+        socket_t wake = socket(AF_INET, SOCK_STREAM, 0);
+        if (wake != INVALID_SOCKET) {
+            connect(wake, reinterpret_cast<sockaddr*>(&listener_addr),
+                    sizeof(listener_addr));
+            CLOSESOCK(wake);
+        }
+    }
+#ifdef _WIN32
+    shutdown(g_pump_listener, SD_BOTH);
+#else
+    shutdown(g_pump_listener, SHUT_RDWR);
+#endif
+    CLOSESOCK(g_pump_listener);
     g_pump_listener = INVALID_SOCKET;
     const socket_t client =
         g_pump_client.exchange(INVALID_SOCKET, std::memory_order_relaxed);
-    if (client != INVALID_SOCKET) CLOSESOCK(client);  // unblocks recv()
+    if (client != INVALID_SOCKET) {
+#ifdef _WIN32
+        shutdown(client, SD_BOTH);
+#else
+        shutdown(client, SHUT_RDWR);
+#endif
+        CLOSESOCK(client);  // unblocks recv()
+    }
     if (g_pump_thread.joinable()) g_pump_thread.join();
     g_play_mode = false;
 }

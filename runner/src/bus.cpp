@@ -802,6 +802,11 @@ extern "C" uint8_t bus_read_u8_slow(uint32_t addr) {
 extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val) {
     ring_push(1, 4, addr, val);
     if (uint8_t* p = resolve(addr, 4)) {
+        if (addr + 4u > 0x027E0000u && addr < 0x027E0040u) {
+            uint32_t old_value;
+            std::memcpy(&old_value, p, 4);
+            runtime_note_live_write(addr, 4u, old_value, val);
+        }
         std::memcpy(p, &val, 4);
         note_ram_write(p, 4u);
     }
@@ -816,6 +821,11 @@ extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val) {
 extern "C" void bus_write_u16_slow(uint32_t addr, uint16_t val) {
     ring_push(1, 2, addr, val);
     if (uint8_t* p = resolve(addr, 2)) {
+        if (addr + 2u > 0x027E0000u && addr < 0x027E0040u) {
+            uint16_t old_value;
+            std::memcpy(&old_value, p, 2);
+            runtime_note_live_write(addr, 2u, old_value, val);
+        }
         std::memcpy(p, &val, 2);
         note_ram_write(p, 2u);
     }
@@ -830,6 +840,8 @@ extern "C" void bus_write_u16_slow(uint32_t addr, uint16_t val) {
 extern "C" void bus_write_u8_slow(uint32_t addr, uint8_t val) {
     ring_push(1, 1, addr, val);
     if (uint8_t* p = resolve(addr, 1)) {
+        if (addr >= 0x027E0000u && addr < 0x027E0040u)
+            runtime_note_live_write(addr, 1u, *p, val);
         *p = val;
         note_ram_write(p, 1u);
     }

@@ -48,6 +48,7 @@ extern uint64_t g_coverage_write_epoch;
 struct CoverageExecCache {
     uint32_t base = 0u;
     uint32_t generation = 0u;
+    uint32_t stored_index = UINT32_MAX;
     uint64_t epoch = 0u;
     bool valid = false;
 };
@@ -56,6 +57,12 @@ extern CoverageExecCache g_coverage_exec_cache[2];
 // Slow path: confirm the generation and, when the contents are new, store the
 // page. Never call directly from the step loop -- go through the inline below.
 void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc);
+
+// Associate a dispatch/resume observation with the exact RAM page generation
+// that was resident when the target was observed. Session-wide entry maps are
+// insufficient for overlays because several generations reuse the same PC.
+void coverage_note_generation_entry(int cpu, uint32_t pc, bool thumb,
+                                    uint8_t kind, uint32_t caller);
 
 // Hot path, once per interpreted instruction.
 inline void coverage_note_exec(int cpu, uint32_t pc) {
@@ -88,11 +95,20 @@ bool coverage_manifest_flush_part(char* error, unsigned error_cap);
 // temporary and renames, so a half-written file is never handed to anyone.
 bool coverage_manifest_write(const char* path, char* error, unsigned error_cap);
 
+// Write a bounded, recency-ordered snapshot for the live compiler. This keeps
+// an automatic promotion from serializing a many-megabyte whole-session dump
+// on the emulation thread; the durable exit/debug manifest remains complete.
+bool coverage_manifest_write_live_snapshot(const char* path,
+                                           uint32_t max_pages,
+                                           char* error,
+                                           unsigned error_cap);
+
 struct CoveragePageStats {
     uint64_t captured;      // distinct (address, contents) pages stored
     uint64_t bytes;         // stored page bytes
     uint64_t dropped;       // pages refused because the store hit its cap
     uint64_t revisits;      // slow-path entries that found nothing new
+    uint64_t replaced;      // stale per-address versions evicted for newer code
 };
 CoveragePageStats coverage_page_stats();
 void coverage_pages_reset();

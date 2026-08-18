@@ -37,15 +37,20 @@ struct StoredPage {
     uint32_t addr;
     uint8_t cpu;
     std::string sha1;
+    std::array<uint8_t, 20> digest;
     std::vector<uint8_t> bytes;
     uint64_t executions;  // distinct capture events that resolved to this page
+    uint64_t last_seen;
+    std::vector<uint32_t> entry_indices;
 };
 
 struct PageKey {
     uint32_t addr;
+    uint8_t cpu;
     std::array<uint8_t, 20> digest;
     bool operator==(const PageKey& other) const {
-        return addr == other.addr && digest == other.digest;
+        return addr == other.addr && cpu == other.cpu &&
+               digest == other.digest;
     }
 };
 
@@ -53,10 +58,42 @@ struct PageKeyHash {
     size_t operator()(const PageKey& key) const {
         // The digest is already uniformly distributed; fold its first 8 bytes
         // together with the address.
-        uint64_t folded = key.addr;
+        uint64_t folded = (uint64_t{key.cpu} << 32u) | key.addr;
         for (int i = 0; i < 8; ++i)
             folded = (folded << 8) ^ key.digest[static_cast<size_t>(i)];
         return static_cast<size_t>(folded);
+    }
+};
+
+struct StoredEntry {
+    uint64_t hits;
+    uint32_t pc;
+    uint32_t caller;
+    uint8_t thumb;
+    uint8_t kind;
+};
+
+struct PageEntryKey {
+    uint32_t page_index;
+    uint32_t pc;
+    uint32_t caller;
+    uint8_t thumb;
+    uint8_t kind;
+    bool operator==(const PageEntryKey& other) const {
+        return page_index == other.page_index && pc == other.pc &&
+               caller == other.caller && thumb == other.thumb &&
+               kind == other.kind;
+    }
+};
+
+struct PageEntryKeyHash {
+    size_t operator()(const PageEntryKey& key) const {
+        uint64_t folded = (uint64_t{key.page_index} << 32u) ^ key.pc;
+        folded ^= uint64_t{key.caller} * 0x9E3779B185EBCA87ull;
+        folded ^= static_cast<uint64_t>(
+            static_cast<uint32_t>(key.thumb) |
+            (static_cast<uint32_t>(key.kind) << 1u)) << 56u;
+        return static_cast<size_t>(folded ^ (folded >> 32u));
     }
 };
 
@@ -66,8 +103,12 @@ std::unordered_map<PageKey, uint32_t, PageKeyHash> g_page_index;
 // resolve + memcmp against what we already hold instead of re-reading and
 // re-hashing the page. Overlay swaps mean one address legitimately accumulates
 // several versions, but only a handful.
-std::unordered_multimap<uint32_t, uint32_t> g_pages_by_addr;
+std::unordered_multimap<uint64_t, uint32_t> g_pages_by_addr;
+std::vector<StoredEntry> g_generation_entries;
+std::unordered_map<PageEntryKey, uint32_t, PageEntryKeyHash>
+    g_generation_entry_index;
 CoveragePageStats g_page_stats{};
+uint64_t g_observation_seq = 0u;
 
 std::string g_rom_sha1;
 std::string g_rom_name;
@@ -193,6 +234,7 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
     // Only RAM-resident code is interesting. Immutable ROM-derived addresses
     // are promotable from the address alone (the ROM SHA-1 pins the bytes), so
     // storing them would bloat the manifest for nothing.
+    cache.stored_index = UINT32_MAX;
     if (!bus_addr_is_writable_ram(base)) return;
 
     // A page's generation is bumped by ANY write to it, and code pages sit
@@ -209,12 +251,16 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
     // two real code pages for 0.11s is not a trade worth making: the manifest
     // exists to raise static coverage, so a page it fails to carry is the
     // exact thing this feature is for.
-    const auto stored_range = g_pages_by_addr.equal_range(base);
+    const uint64_t address_key =
+        (static_cast<uint64_t>(index) << 32u) | base;
+    const auto stored_range = g_pages_by_addr.equal_range(address_key);
     for (auto it = stored_range.first; it != stored_range.second; ++it) {
         StoredPage& candidate = g_pages[it->second];
         if (bus_live_bytes_equal(base, candidate.bytes.data(), kPageSize)) {
             ++candidate.executions;
+            candidate.last_seen = ++g_observation_seq;
             ++g_page_stats.revisits;
+            cache.stored_index = it->second;
             return;
         }
     }
@@ -228,21 +274,61 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
     uint32_t versions = 0;
     for (auto it = stored_range.first; it != stored_range.second; ++it)
         ++versions;
-    if (versions >= kMaxVersionsPerAddress) {
-        ++g_page_stats.dropped;
-        return;
-    }
-
     const int bus_cpu = (index == 1) ? 7 : 9;
     std::vector<uint8_t> bytes(kPageSize);
     bus_debug_copy(bus_cpu, base, bytes.data(), kPageSize);
 
     const gba::Sha1Digest digest = gba::sha1(bytes.data(), bytes.size());
-    PageKey key{base, digest.bytes};
+    PageKey key{base, static_cast<uint8_t>(index), digest.bytes};
     auto found = g_page_index.find(key);
     if (found != g_page_index.end()) {
         ++g_pages[found->second].executions;
+        g_pages[found->second].last_seen = ++g_observation_seq;
         ++g_page_stats.revisits;
+        cache.stored_index = found->second;
+        return;
+    }
+
+    if (versions >= kMaxVersionsPerAddress) {
+        // A page can mix stable instructions with frequently changing data.
+        // Refusing version nine forever made a later real overlay generation
+        // impossible to learn. Keep a rolling recent set instead: exact
+        // native validations remain content-addressed, while capture capacity
+        // cannot be permanently consumed by stale data-bearing snapshots.
+        uint32_t evict_index = UINT32_MAX;
+        uint64_t oldest = UINT64_MAX;
+        for (auto it = stored_range.first; it != stored_range.second; ++it) {
+            const StoredPage& candidate = g_pages[it->second];
+            if (candidate.last_seen < oldest) {
+                oldest = candidate.last_seen;
+                evict_index = it->second;
+            }
+        }
+        if (evict_index == UINT32_MAX) {
+            ++g_page_stats.dropped;
+            return;
+        }
+        for (auto it = g_page_index.begin(); it != g_page_index.end();) {
+            if (it->second == evict_index) it = g_page_index.erase(it);
+            else ++it;
+        }
+        for (auto it = g_generation_entry_index.begin();
+             it != g_generation_entry_index.end();) {
+            if (it->first.page_index == evict_index)
+                it = g_generation_entry_index.erase(it);
+            else
+                ++it;
+        }
+        StoredPage& replacement = g_pages[evict_index];
+        replacement.sha1 = digest.hex();
+        replacement.digest = digest.bytes;
+        replacement.bytes = std::move(bytes);
+        replacement.executions = 1u;
+        replacement.last_seen = ++g_observation_seq;
+        replacement.entry_indices.clear();
+        g_page_index.emplace(key, evict_index);
+        cache.stored_index = evict_index;
+        ++g_page_stats.replaced;
         return;
     }
 
@@ -258,11 +344,50 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
     }
 
     g_page_index.emplace(key, static_cast<uint32_t>(g_pages.size()));
-    g_pages_by_addr.emplace(base, static_cast<uint32_t>(g_pages.size()));
+    const uint32_t stored_index = static_cast<uint32_t>(g_pages.size());
+    g_pages_by_addr.emplace(address_key, stored_index);
     g_pages.push_back(StoredPage{base, static_cast<uint8_t>(index),
-                                 digest.hex(), std::move(bytes), 1u});
+                                 digest.hex(), digest.bytes, std::move(bytes),
+                                 1u, ++g_observation_seq, {}});
+    cache.stored_index = stored_index;
     ++g_page_stats.captured;
     g_page_stats.bytes += kPageSize;
+}
+
+void coverage_note_generation_entry(int cpu, uint32_t pc, bool thumb,
+                                    uint8_t kind, uint32_t caller) {
+    const int index = cpu & 1;
+    const uint32_t aligned_pc = pc & (thumb ? ~1u : ~3u);
+    const uint32_t base = aligned_pc & ~0xFFFu;
+    CoverageExecCache& cache = g_coverage_exec_cache[index];
+    const uint32_t generation = bus_exec_page_generation(base);
+    if (!cache.valid || cache.base != base ||
+        cache.generation != generation ||
+        cache.stored_index == UINT32_MAX) {
+        coverage_capture_exec_page(index, base, aligned_pc);
+    }
+    if (!cache.valid || cache.base != base ||
+        cache.stored_index == UINT32_MAX ||
+        cache.stored_index >= g_pages.size()) {
+        return;
+    }
+
+    const PageEntryKey key{cache.stored_index, aligned_pc, caller,
+                           static_cast<uint8_t>(thumb ? 1u : 0u), kind};
+    const auto found = g_generation_entry_index.find(key);
+    if (found != g_generation_entry_index.end()) {
+        ++g_generation_entries[found->second].hits;
+        g_pages[cache.stored_index].last_seen = ++g_observation_seq;
+        return;
+    }
+    const uint32_t entry_index =
+        static_cast<uint32_t>(g_generation_entries.size());
+    g_generation_entry_index.emplace(key, entry_index);
+    g_generation_entries.push_back(
+        StoredEntry{1u, aligned_pc, caller,
+                    static_cast<uint8_t>(thumb ? 1u : 0u), kind});
+    g_pages[cache.stored_index].entry_indices.push_back(entry_index);
+    g_pages[cache.stored_index].last_seen = ++g_observation_seq;
 }
 
 void coverage_manifest_set_identity(const char* rom_sha1, const char* rom_name,
@@ -296,6 +421,8 @@ bool coverage_manifest_flush_part(char* error, unsigned error_cap) {
     g_pages.clear();
     g_page_index.clear();
     g_pages_by_addr.clear();
+    g_generation_entries.clear();
+    g_generation_entry_index.clear();
     g_page_stats.captured = 0u;
     g_page_stats.bytes = 0u;
     for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
@@ -308,12 +435,15 @@ void coverage_pages_reset() {
     g_pages.clear();
     g_page_index.clear();
     g_pages_by_addr.clear();
+    g_generation_entries.clear();
+    g_generation_entry_index.clear();
     g_page_stats = {};
+    g_observation_seq = 0u;
     for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
 }
 
-bool coverage_manifest_write(const char* path, char* error,
-                             unsigned error_cap) {
+bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
+                                  char* error, unsigned error_cap) {
     auto fail = [&](const char* message) {
         if (error && error_cap) {
             std::snprintf(error, error_cap, "%s", message);
@@ -325,16 +455,39 @@ bool coverage_manifest_write(const char* path, char* error,
     // Pull the Tier-3 address map. The cap matches the debug server's
     // tier3_coverage ceiling so a manifest is never a smaller view than a live
     // probe would have given.
-    std::vector<Tier3CoverageEntry> entries(262144);
-    const uint32_t entry_count =
-        tier3_coverage_copy(entries.data(),
-                            static_cast<uint32_t>(entries.size()));
-    entries.resize(entry_count);
+    std::vector<Tier3CoverageEntry> entries;
+    if (live_max_pages == 0u) {
+        entries.resize(262144);
+        const uint32_t entry_count = tier3_coverage_copy(
+            entries.data(), static_cast<uint32_t>(entries.size()));
+        entries.resize(entry_count);
+    }
     const Tier3Stats stats = tier3_stats();
 
+    std::vector<uint32_t> page_indices;
+    page_indices.reserve(g_pages.size());
+    for (uint32_t i = 0; i < g_pages.size(); ++i) {
+        if (live_max_pages == 0u || !g_pages[i].entry_indices.empty())
+            page_indices.push_back(i);
+    }
+    if (live_max_pages != 0u) {
+        std::sort(page_indices.begin(), page_indices.end(),
+                  [](uint32_t a, uint32_t b) {
+            if (g_pages[a].last_seen != g_pages[b].last_seen)
+                return g_pages[a].last_seen > g_pages[b].last_seen;
+            if (g_pages[a].executions != g_pages[b].executions)
+                return g_pages[a].executions > g_pages[b].executions;
+            if (g_pages[a].cpu != g_pages[b].cpu)
+                return g_pages[a].cpu < g_pages[b].cpu;
+            return g_pages[a].addr < g_pages[b].addr;
+        });
+        if (page_indices.size() > live_max_pages)
+            page_indices.resize(live_max_pages);
+    }
+
     std::string out;
-    out.reserve(g_page_stats.bytes * 2u + entry_count * 96u + 4096u);
-    out += "{\n  \"schema\": 2,\n";
+    out.reserve(page_indices.size() * 6000u + entries.size() * 96u + 4096u);
+    out += "{\n  \"schema\": 3,\n";
     out += "  \"kind\": \"ndsrecomp-tier3-coverage\",\n";
     out += "  \"rom_sha1\": ";
     append_json_escaped(out, g_rom_sha1);
@@ -377,14 +530,17 @@ bool coverage_manifest_write(const char* path, char* error,
     }
 
     out += ",\n  \"pages\": {";
-    out += "\"captured\": " + std::to_string(g_page_stats.captured);
+    out += "\"captured\": " + std::to_string(page_indices.size());
     out += ", \"dropped\": " + std::to_string(g_page_stats.dropped);
-    out += ", \"bytes\": " + std::to_string(g_page_stats.bytes);
+    out += ", \"replaced\": " + std::to_string(g_page_stats.replaced);
+    out += ", \"bytes\": " +
+           std::to_string(page_indices.size() * kPageSize);
     out += ", \"revisits\": " + std::to_string(g_page_stats.revisits);
     out += ", \"page_size\": " + std::to_string(kPageSize);
     out += ", \"entries\": [";
     bool first_page = true;
-    for (const StoredPage& page : g_pages) {
+    for (const uint32_t page_index : page_indices) {
+        const StoredPage& page = g_pages[page_index];
         if (!first_page) out += ",";
         first_page = false;
         out += "\n    {\"addr\": \"" + hex32(page.addr) + "\"";
@@ -392,6 +548,22 @@ bool coverage_manifest_write(const char* path, char* error,
         out += (page.cpu == 1) ? "7" : "9";
         out += ", \"sha1\": \"" + page.sha1 + "\"";
         out += ", \"executions\": " + std::to_string(page.executions);
+        out += ", \"entry_points\": [";
+        bool first_entry = true;
+        for (const uint32_t entry_index : page.entry_indices) {
+            if (entry_index >= g_generation_entries.size()) continue;
+            const StoredEntry& entry = g_generation_entries[entry_index];
+            if (!first_entry) out += ",";
+            first_entry = false;
+            out += "{\"addr\": \"" + hex32(entry.pc) + "\"";
+            out += ", \"mode\": \"";
+            out += entry.thumb ? "thumb" : "arm";
+            out += "\", \"kind\": \"";
+            out += kind_name(entry.kind);
+            out += "\", \"hits\": " + std::to_string(entry.hits);
+            out += ", \"caller\": \"" + hex32(entry.caller) + "\"}";
+        }
+        out += "]";
         out += ", \"data\": \"";
         append_base64(out, page.bytes);
         out += "\"}";
@@ -417,4 +589,17 @@ bool coverage_manifest_write(const char* path, char* error,
         return fail("could not finish the manifest");
     }
     return true;
+}
+
+bool coverage_manifest_write(const char* path, char* error,
+                             unsigned error_cap) {
+    return coverage_manifest_write_impl(path, 0u, error, error_cap);
+}
+
+bool coverage_manifest_write_live_snapshot(const char* path,
+                                           uint32_t max_pages,
+                                           char* error,
+                                           unsigned error_cap) {
+    if (max_pages == 0u) max_pages = 64u;
+    return coverage_manifest_write_impl(path, max_pages, error, error_cap);
 }

@@ -54,7 +54,7 @@ ndsrecomp_link_tomlpp(nds_recompile)
 target_link_libraries(nds_recompile PRIVATE nds_armv4t)
 
 # Pins the interior-entry fail-closed contract: every generated body's resume
-# switch must keep its `default: runtime_dispatch_miss(...); return;` arm.
+# switch must keep its `default: runtime_dispatch_bad_entry(...); return;` arm.
 # Content-validated overlay banks rely on it — losing the arm would turn an
 # interior-PC entry into a silent no-op instead of a Tier-3 fallback.
 add_executable(interior_entry_fail_closed_test
@@ -65,3 +65,12 @@ add_test(NAME interior_entry_fail_closed
     COMMAND interior_entry_fail_closed_test
             $<TARGET_FILE:nds_recompile>
             ${CMAKE_CURRENT_BINARY_DIR}/interior_entry_pin)
+
+add_executable(live_transfer_validation_test
+    tests/live_transfer_validation_test.cpp
+    support/sha1.cpp)
+target_include_directories(live_transfer_validation_test PRIVATE support)
+add_test(NAME live_transfer_validation
+    COMMAND live_transfer_validation_test
+            $<TARGET_FILE:nds_recompile>
+            ${CMAKE_CURRENT_BINARY_DIR}/live_transfer_validation)

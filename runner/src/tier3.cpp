@@ -22,6 +22,7 @@
 #include "state.h"
 #include "io.h"
 #include "coverage_manifest.h"
+#include "live_overlay.h"
 
 using armv4t::CPUState;
 using armv4t::Interpreter;
@@ -236,6 +237,10 @@ void tier3_run(uint32_t /*entry*/) {
     // hits, so retain the complete root surface in one discovery pass.
     coverage_note(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0u,
                   TIER3_COVERAGE_ROOT, g_cpu.R[14]);
+    coverage_note_generation_entry(
+        g_nds_active == NDS_ARM7 ? 1 : 0, g_cpu.R[15],
+        (g_cpu.cpsr & CPSR_T_BIT) != 0u, TIER3_COVERAGE_ROOT,
+        g_cpu.R[14]);
     ++g_stats.entries[cpu_index];
     CPUState ic;
     sync_in(ic);
@@ -308,6 +313,7 @@ void tier3_run(uint32_t /*entry*/) {
         // into the next page produces no coverage entry of its own and would
         // leave holes in the captured runs.
         coverage_note_exec(g_nds_active == NDS_ARM7 ? 1 : 0, pc);
+        live_overlay_note_tier3(g_nds_active, pc);
         // Current-PC fetch correction.  For a taken branch melonDS JumpTo
         // replaces the source fetch with the target pipeline refill, so this
         // is applied below only when the instruction does not branch.
@@ -406,6 +412,9 @@ void tier3_run(uint32_t /*entry*/) {
         if (r == Interpreter::Result::Branched && in.is_call &&
             in.op != armv4t::IrOp::BL_prefix) {
             coverage_note(ic.R[15], ic.cpsr.t, TIER3_COVERAGE_CALL, pc);
+            coverage_note_generation_entry(
+                g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
+                TIER3_COVERAGE_CALL, pc);
             runtime_call_push_return(pc + (thumb ? 2u : 4u));
         } else if (r == Interpreter::Result::Branched && !in.is_call) {
             // A BX/LDM/POP return may interwork.  The call was pushed in the
@@ -419,6 +428,9 @@ void tier3_run(uint32_t /*entry*/) {
             if (!matched_return && in.op != armv4t::IrOp::B) {
                 coverage_note(ic.R[15], ic.cpsr.t,
                               TIER3_COVERAGE_INDIRECT, pc);
+                coverage_note_generation_entry(
+                    g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
+                    TIER3_COVERAGE_INDIRECT, pc);
             }
         }
 
