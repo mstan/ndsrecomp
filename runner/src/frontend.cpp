@@ -885,11 +885,28 @@ struct PresentationTicks {
     bool ok = true;
 };
 
+void draw_virtual_stylus(SDL_Renderer* renderer, const SDL_Rect& destination,
+                         float stylus_x, float stylus_y) {
+    const int x = destination.x + static_cast<int>(
+        std::lround(stylus_x * destination.w / 256.0f));
+    const int y = destination.y + static_cast<int>(
+        std::lround(stylus_y * destination.h / 192.0f));
+
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderDrawLine(renderer, x - 5, y, x - 2, y);
+    SDL_RenderDrawLine(renderer, x + 2, y, x + 5, y);
+    SDL_RenderDrawLine(renderer, x, y - 5, x, y - 2);
+    SDL_RenderDrawLine(renderer, x, y + 2, x, y + 5);
+}
+
 PresentationTicks present_screens(FrontendPresentation& presentation,
                                   const uint32_t* top_pixels,
                                   int top_width,
                                   const uint32_t* bottom_pixels,
-                                  int bottom_width) {
+                                  int bottom_width,
+                                  bool virtual_stylus_visible,
+                                  float virtual_stylus_x,
+                                  float virtual_stylus_y) {
     PresentationTicks ticks{};
     if (presentation.gl_top) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -917,6 +934,9 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
         render_screen(presentation, 1, screen_rect);
+        if (virtual_stylus_visible)
+            draw_virtual_stylus(renderer, screen_rect,
+                                virtual_stylus_x, virtual_stylus_y);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -945,6 +965,9 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
             kScreenHeight, presentation.screen_widths[1], kScreenHeight};
         render_screen(presentation, 0, top_rect);
         render_screen(presentation, 1, bottom_rect);
+        if (virtual_stylus_visible)
+            draw_virtual_stylus(renderer, bottom_rect,
+                                virtual_stylus_x, virtual_stylus_y);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -960,6 +983,9 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
         render_screen(presentation, screen, screen_rect);
+        if (screen == 1 && virtual_stylus_visible)
+            draw_virtual_stylus(renderer, screen_rect,
+                                virtual_stylus_x, virtual_stylus_y);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -1556,11 +1582,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         release_relative_mouse();
                     else
                         running = false;
-                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
-                    turbo_pressed = true;
                 } else if (process_mph_prime_key(
                                event.key.keysym.scancode, true, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
+                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                    turbo_pressed = true;
                 } else if (mph_prime_active()) {
                     // Prime Controls replaces the normal keyboard keypad map;
                     // unbound keys must not leak through as DS buttons.
@@ -1571,11 +1597,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 }
             }
             if (event.type == SDL_KEYUP && !event.key.repeat) {
-                if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
-                    turbo_pressed = false;
-                } else if (process_mph_prime_key(
+                if (process_mph_prime_key(
                         event.key.keysym.scancode, false, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
+                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                    turbo_pressed = false;
                 } else if (mph_prime_active()) {
                     // See keydown path: ignore generic keyboard bindings
                     // while the Prime Controls capture owns the keyboard.
@@ -1985,7 +2011,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         observe_top_black_bands(native_top, shown_frames);
         const PresentationTicks presentation_ticks = present_screens(
             presentation, top_pixels, top_width,
-            bottom_pixels, bottom_width);
+            bottom_pixels, bottom_width,
+            mph_prime_virtual_stylus,
+            mph_virtual_x, mph_virtual_y);
         if (!presentation_ticks.ok) {
             compute_failed = true;
             running = false;
