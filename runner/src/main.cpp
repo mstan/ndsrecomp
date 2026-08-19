@@ -32,6 +32,7 @@
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#include "live_overlay.h"
 #include "melonds_compute/TextureUpscale.h"
 #include "net/net_ring.h"
 #include "net/net_capture.h"
@@ -316,6 +317,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::atexit(nds_net_platform_shutdown);
+    std::atexit(live_overlay_shutdown);
 
     std::string dir = "bios";
     std::string rom_path;
@@ -363,6 +365,16 @@ int main(int argc, char** argv) {
     bool cli_net_capture_raw = false;
     bool cli_net_capture_no_pcap = false;
     std::string cli_net_capture_scenario;
+    bool cli_live_overlay_enable = false;
+    bool cli_live_overlay_auto = false;
+    bool cli_live_overlay_activation_delay_set = false;
+    bool cli_live_overlay_auto_delay_set = false;
+    bool cli_live_overlay_auto_cooldown_set = false;
+    uint32_t cli_live_overlay_activation_delay_ms = 0u;
+    uint32_t cli_live_overlay_auto_delay_ms = 0u;
+    uint32_t cli_live_overlay_auto_cooldown_ms = 60000u;
+    std::string cli_live_overlay_command;
+    std::string cli_live_overlay_cache;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -508,6 +520,26 @@ int main(int argc, char** argv) {
             cli_net_capture_no_pcap = true;
         } else if (a == "--net-capture-scenario" && i + 1 < argc) {
             cli_net_capture_scenario = argv[++i];
+        } else if (a == "--live-overlay-enable") {
+            cli_live_overlay_enable = true;
+        } else if (a == "--live-overlay-auto") {
+            cli_live_overlay_auto = true;
+        } else if (a == "--live-overlay-activation-delay-ms" && i + 1 < argc) {
+            cli_live_overlay_activation_delay_ms =
+                static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+            cli_live_overlay_activation_delay_set = true;
+        } else if (a == "--live-overlay-auto-delay-ms" && i + 1 < argc) {
+            cli_live_overlay_auto_delay_ms =
+                static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+            cli_live_overlay_auto_delay_set = true;
+        } else if (a == "--live-overlay-auto-cooldown-ms" && i + 1 < argc) {
+            cli_live_overlay_auto_cooldown_ms =
+                static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+            cli_live_overlay_auto_cooldown_set = true;
+        } else if (a == "--live-overlay-command" && i + 1 < argc) {
+            cli_live_overlay_command = argv[++i];
+        } else if (a == "--live-overlay-cache" && i + 1 < argc) {
+            cli_live_overlay_cache = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -548,7 +580,12 @@ int main(int argc, char** argv) {
                 "[--local-wireless on|off] [--local-wireless-port 1024..65520] "
                 "[--net-capture-out FILE] [--net-capture-in FILE] "
                 "[--net-capture-raw] [--net-capture-no-pcap] "
-                "[--net-capture-scenario NAME]\n",
+                "[--net-capture-scenario NAME] "
+                "[--live-overlay-enable --live-overlay-command CMD "
+                "--live-overlay-cache DIR] [--live-overlay-auto] "
+                "[--live-overlay-activation-delay-ms N] "
+                "[--live-overlay-auto-delay-ms N] "
+                "[--live-overlay-auto-cooldown-ms N]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
@@ -1332,6 +1369,25 @@ int main(int argc, char** argv) {
     }
     if (!rom.empty() && save_path.empty())
         std::fprintf(stderr, "[save] battery persistence disabled\n");
+    if (interactive && cli_live_overlay_enable &&
+        !cli_live_overlay_activation_delay_set) {
+        cli_live_overlay_activation_delay_ms = 90000u;
+    }
+    if (interactive && cli_live_overlay_auto &&
+        !cli_live_overlay_auto_delay_set) {
+        cli_live_overlay_auto_delay_ms = cli_live_overlay_activation_delay_ms;
+    }
+    if (!cli_live_overlay_auto_cooldown_set &&
+        cli_live_overlay_auto_cooldown_ms == 0u) {
+        cli_live_overlay_auto_cooldown_ms = 60000u;
+    }
+    live_overlay_configure(cli_live_overlay_enable, cli_live_overlay_auto,
+                           cli_live_overlay_activation_delay_ms,
+                           cli_live_overlay_auto_delay_ms,
+                           cli_live_overlay_auto_cooldown_ms,
+                           cli_live_overlay_command.c_str(),
+                           cli_live_overlay_cache.c_str(),
+                           rom_sha1.c_str());
     mph_mouse_aim_policy =
         rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
         frontend_options.relative_mouse_touch;
@@ -1454,6 +1510,7 @@ int main(int argc, char** argv) {
             std::exit(1);
         }
         runtime_init(nullptr);
+        live_overlay_runtime_reset();
         runtime_trace_reset();
         net_ring_reset();
 
@@ -1546,6 +1603,7 @@ int main(int argc, char** argv) {
                          "[dispatch] registered configured title banks for %s\n",
                          rom_sha1.c_str());
         }
+        live_overlay_register_cached_banks();
 #ifdef NDS_HAVE_SM64DS_BANKS
         if (sm64ds_title) {
             nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9,

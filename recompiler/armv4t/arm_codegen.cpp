@@ -573,12 +573,22 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
             // Return to the dispatch loop with PC unchanged so the
             // runtime can observe/stall the guest loop normally.
         } else {
+            if (ctx.trace_live_transfers)
+                s << indent << "runtime_live_transfer(" << fmt_hex32(branch_pc)
+                  << ", " << fmt_hex32(target)
+                  << ", " << (is_link ? "NDS_LIVE_TRANSFER_BL"
+                                      : "NDS_LIVE_TRANSFER_B") << ");\n";
             s << indent << *name << "();\n";
         }
     } else {
         if (!is_link && target == ctx.current_function_addr) {
             // See known-name self-loop case above.
         } else {
+            if (ctx.trace_live_transfers)
+                s << indent << "runtime_live_transfer(" << fmt_hex32(branch_pc)
+                  << ", " << fmt_hex32(target)
+                  << ", " << (is_link ? "NDS_LIVE_TRANSFER_BL"
+                                      : "NDS_LIVE_TRANSFER_B") << ");\n";
             s << indent
               << (is_link ? "runtime_dispatch_literal_call("
                           : "runtime_dispatch_literal_branch(")
@@ -663,7 +673,7 @@ void emit_mem_offset(std::ostringstream& s, const MemAddress& mem,
 // ─────────────────────────────────────────────────────────────────────
 
 bool emit_data_processing(std::ostringstream& body, const Instr& ins,
-                          const char* indent) {
+                          const CodegenCtx& ctx, const char* indent) {
     Op2Code o2 = emit_op2(ins, indent);
     if (!o2.setup.empty()) body << o2.setup;
 
@@ -843,9 +853,17 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
             if (is_lr_return) {
                 body << indent << "if (runtime_call_should_return("
                      << pc_var << ")) return;\n";
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << pc_var
+                         << ", NDS_LIVE_TRANSFER_PC_WRITE);\n";
                 body << indent << "runtime_dispatch(" << pc_var << ");\n";
                 body << indent << "return;\n";
             } else {
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << pc_var
+                         << ", NDS_LIVE_TRANSFER_PC_WRITE);\n";
                 body << indent << "runtime_dispatch(" << pc_var << ");\n";
                 body << indent << "return;\n";
             }
@@ -875,7 +893,8 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             std::string target_var = "_bxt" + sfx;
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
-            body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
+            body << indent << "g_cpu.R[15] = " << target_var
+                 << " & ((" << target_var << " & 1u) ? ~1u : ~3u);\n";
             body << indent << "if (" << target_var
                  << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
             // BX always transfers; tick its cost before either the C-
@@ -900,10 +919,18 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                 // non-caller via BL/BLX from a different source)
                 // is handled by the dispatch path below.
                 body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << target_var
+                         << ", NDS_LIVE_TRANSFER_BX);\n";
                 body << indent << "runtime_dispatch_with_exchange("
                      << target_var << ");\n";
                 body << indent << "return;\n";
             } else {
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << target_var
+                         << ", NDS_LIVE_TRANSFER_BX);\n";
                 body << indent << "runtime_dispatch_with_exchange("
                      << target_var << ");\n";
                 body << indent << "return;\n";
@@ -923,7 +950,8 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[14] = " << fmt_hex32(link) << ";\n";
-            body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
+            body << indent << "g_cpu.R[15] = " << target_var
+                 << " & ((" << target_var << " & 1u) ? ~1u : ~3u);\n";
             body << indent << "runtime_call_push_return("
                  << fmt_hex32(return_pc) << ");\n";
             body << indent << "if (" << target_var
@@ -943,6 +971,10 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << cyc_var_for(ins) << " = 0u; " << code_var_for(ins)
                  << " = 0u; " << data_var_for(ins) << " = 0u; "
                  << int_var_for(ins) << " = 0u;\n";
+            if (ctx.trace_live_transfers)
+                body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                     << ", " << target_var
+                     << ", NDS_LIVE_TRANSFER_BLX_REG);\n";
             body << indent << "runtime_dispatch_with_exchange("
                  << target_var << ");\n";
             body << indent << "if (runtime_unwinding()) return;\n";
@@ -975,6 +1007,10 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << cyc_var_for(ins) << " = 0u; " << code_var_for(ins)
                  << " = 0u; " << data_var_for(ins) << " = 0u; "
                  << int_var_for(ins) << " = 0u;\n";
+            if (ctx.trace_live_transfers)
+                body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                     << ", " << fmt_hex32(tgt)
+                     << ", NDS_LIVE_TRANSFER_BLX_IMM);\n";
             body << indent << "runtime_dispatch_with_exchange("
                  << fmt_hex32(tgt) << ");\n";
             body << indent << "if (runtime_unwinding()) return;\n";
@@ -1031,6 +1067,12 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                  << int_var_for(ins) << " = 0u;\n";
             // BLX switches to ARM (target is even → clears CPSR.T); plain
             // BL stays THUMB.
+            if (ctx.trace_live_transfers)
+                body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                     << ", " << target_var << ", "
+                     << (blx ? "NDS_LIVE_TRANSFER_BLX_REG"
+                             : "NDS_LIVE_TRANSFER_BL")
+                     << ");\n";
             body << indent
                  << (blx ? "runtime_dispatch_with_exchange(" : "runtime_dispatch(")
                  << target_var << ");\n";
@@ -1047,7 +1089,7 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
 }
 
 bool emit_memory(std::ostringstream& body, const Instr& ins,
-                 const char* indent) {
+                 const CodegenCtx& ctx, const char* indent) {
     const auto& mem = ins.mem;
     std::string sfx = uniq_suffix(ins);
     std::string base_var = "_base" + sfx;
@@ -1149,6 +1191,10 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
                  << arm9_tick_expr(ins, true, val_var)
                  << ");\n";
             body << indent << "if (runtime_unwinding()) return;\n";
+            if (ctx.trace_live_transfers)
+                body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                     << ", " << val_var
+                     << ", NDS_LIVE_TRANSFER_LDR_PC);\n";
             body << indent << "runtime_dispatch_with_exchange(" << val_var << ");\n";
             body << indent << "return;\n";
         } else {
@@ -1199,7 +1245,7 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
 }
 
 bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
-                          const char* indent) {
+                         const CodegenCtx& ctx, const char* indent) {
     const auto& blk = ins.block;
     if (blk.reg_list == 0) {
         std::string sfx = uniq_suffix(ins);
@@ -1249,6 +1295,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                  << arm9_tick_expr(ins, true, pcv)
                  << ");\n";
             body << indent << "if (runtime_unwinding()) return;\n";
+            if (ctx.trace_live_transfers)
+                body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                     << ", " << pcv
+                     << ", NDS_LIVE_TRANSFER_LDM_PC);\n";
             body << indent << "runtime_dispatch_with_exchange(" << pcv << ");\n";
             body << indent << "return;\n";
         } else {
@@ -1378,13 +1428,21 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
              << arm9_tick_expr(ins, true, pc_var)
              << ");\n";
         body << indent << "if (runtime_unwinding()) return;\n";
-        if (blk.rn == 13) {
-            body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
-            body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
-            body << indent << "return;\n";
-        } else {
-            body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
-            body << indent << "return;\n";
+            if (blk.rn == 13) {
+                body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << pc_var
+                         << ", NDS_LIVE_TRANSFER_LDM_PC);\n";
+                body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
+                body << indent << "return;\n";
+            } else {
+                if (ctx.trace_live_transfers)
+                    body << indent << "runtime_live_transfer(" << fmt_hex32(ins.pc)
+                         << ", " << pc_var
+                         << ", NDS_LIVE_TRANSFER_LDM_PC);\n";
+                body << indent << "runtime_dispatch_with_exchange(" << pc_var << ");\n";
+                body << indent << "return;\n";
         }
     }
     return true;
@@ -1934,7 +1992,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
         case IrOp::TST: case IrOp::TEQ: case IrOp::CMP: case IrOp::CMN:
         case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
-            ok = emit_data_processing(os, ins, indent);
+            ok = emit_data_processing(os, ins, ctx, indent);
             break;
         case IrOp::B: case IrOp::BL: case IrOp::BX:
         case IrOp::BLX_reg: case IrOp::BLX_imm:
@@ -1945,7 +2003,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         case IrOp::LDRB: case IrOp::STRB:
         case IrOp::LDRH: case IrOp::STRH:
         case IrOp::LDRSB: case IrOp::LDRSH:
-            ok = emit_memory(os, ins, indent);
+            ok = emit_memory(os, ins, ctx, indent);
             break;
         case IrOp::LDRD: case IrOp::STRD:
             ok = emit_doubleword(os, ins, indent);
@@ -1966,7 +2024,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
             ok = true;
             break;
         case IrOp::LDM: case IrOp::STM:
-            ok = emit_block_transfer(os, ins, indent);
+            ok = emit_block_transfer(os, ins, ctx, indent);
             break;
         case IrOp::MUL: case IrOp::MLA:
         case IrOp::UMULL: case IrOp::UMLAL:

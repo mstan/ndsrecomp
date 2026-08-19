@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #if defined(NDS_PROFILE_HLE_HEAT)
 #include <chrono>
 #include <string>
@@ -18,14 +19,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 #include "state.h"
 #include "io.h"
 #include "tier3.h"
+#include "dispatch_lookup.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
 #include "coverage_manifest.h"
+#include "live_overlay.h"
 
 // ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
 NdsDispatchStats g_nds_dispatch_stats[2] = {};
@@ -86,18 +90,27 @@ struct DispatchBank {
 };
 struct CpuCtx {
     std::vector<DispatchBank> banks;
+    // Flat candidate index across all immutable and live banks. Entries with
+    // the same (address,state) remain registration-ordered so lookup can walk
+    // an exact identity chain and choose the newest matching generation
+    // without scanning every unrelated DLL.
+    std::vector<const DispatchEntry*> dispatch_index;
+    // Adding or removing a live candidate invalidates prior positive and
+    // negative cache answers. Bump an epoch instead of zeroing the entire
+    // 8 MiB per-CPU table for every DLL published at a scheduler boundary.
+    uint32_t dispatch_epoch = 1u;
     uint32_t             exc_base = 0;  // exception-vector base for this CPU
 };
 CpuCtx g_ctx[2];
 
-// Generated firmware functions are capped at 512 guest bytes, so a function
-// can overlap at most two 4 KiB executable pages. A larger future validation
-// is rejected safely instead of running without an active-code guard.
+// A live page candidate normally owns one executable page. Keep a small exact
+// union for dependency closures and reject anything larger rather than run
+// without active-code invalidation.
 struct StaticExecutionGuard {
     const NdsStaticValidation* validation = nullptr;
-    uint32_t page_addr[2] = {};
-    uint32_t generation[2] = {};
-    const uint32_t* generation_ptr[2] = {};
+    uint32_t page_addr[4] = {};
+    uint32_t generation[4] = {};
+    const uint32_t* generation_ptr[4] = {};
     uint32_t page_count = 0u;
     bool invalidated = false;
 };
@@ -204,15 +217,18 @@ void append_json_string(std::string& out, const char* text) {
 constexpr uint32_t kDispatchCacheSize = 65536u;
 struct alignas(64) CachedStaticLookup {
     uint32_t pc = 0u;
-    uint32_t generation[2]{};
-    const uint32_t* generation_ptr[2]{};
+    uint32_t page_addr[4]{};
+    uint32_t generation[4]{};
+    const uint32_t* generation_ptr[4]{};
     void (*fn)(void) = nullptr;
     const NdsStaticValidation* validation = nullptr;
+    uint32_t live_bank_serial = 0u;
+    uint32_t dispatch_epoch = 0u;
     uint8_t page_count = 0u;
     uint8_t thumb = 0u;
     uint8_t occupied = 0u;
 };
-static_assert(sizeof(CachedStaticLookup) == 64u);
+static_assert(sizeof(CachedStaticLookup) == 128u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
     g_dispatch_cache{};
 
@@ -267,40 +283,41 @@ bool static_bios_pc(uint32_t pc) {
         : (pc < 0x00004000u);
 }
 
-const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
-                               uint32_t pc, bool thumb,
-                               uint32_t* candidate_count,
-                               const DispatchEntry** inactive_candidate) {
-    if (!table) return nullptr;
-    unsigned lo = 0, hi = len;
-    while (lo < hi) {
-        unsigned mid = (lo + hi) >> 1u;
-        if (table[mid].addr < pc) lo = mid + 1u;
-        else                       hi = mid;
-    }
-    for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
-        if ((table[i].thumb != 0) != thumb) continue;
-        if (candidate_count) ++*candidate_count;
-        const NdsStaticValidation* validation = table[i].validation;
-        if (validation) {
-            // Captured firmware variants are executable only after the LLE
-            // guest or one of its hardware bus masters has actually
-            // installed every backing page. Byte equality alone is not
-            // provenance: pristine zero-filled RAM can otherwise select a
-            // late all-zero variant before firmware boot has materialized it.
-            if (!bus_range_has_write_provenance(validation->addr,
-                                                validation->size) ||
-                !bus_live_bytes_equal(validation->addr,
-                                      validation->expected,
-                                      validation->size)) {
-                if (inactive_candidate)
-                    *inactive_candidate = &table[i];
-                continue;
-            }
+template <typename Fn>
+bool for_each_validation_range(const NdsStaticValidation* validation,
+                               Fn&& fn) {
+    if (!validation) return true;
+    if (validation->dependency_count != 0u) {
+        if (!validation->dependencies) return false;
+        for (uint32_t i = 0u; i < validation->dependency_count; ++i) {
+            if (!fn(validation->dependencies[i])) return false;
         }
-        return &table[i];
+        return true;
     }
-    return nullptr;
+    const NdsStaticValidationRange owner{
+        validation->addr, validation->size, validation->expected};
+    return fn(owner);
+}
+
+bool validation_identity_live(const NdsStaticValidation* validation) {
+    return for_each_validation_range(
+        validation, [](const NdsStaticValidationRange& range) {
+            return range.expected && range.size != 0u &&
+                uint64_t{range.addr} + range.size <= 0x1'0000'0000ull &&
+                bus_range_has_write_provenance(range.addr, range.size) &&
+                bus_live_bytes_equal(range.addr, range.expected, range.size);
+        });
+}
+
+bool dispatch_validation_live(const NdsStaticValidation* validation,
+                              uint32_t pc, bool thumb, void*) {
+    // Captured firmware variants are executable only after the LLE guest or
+    // one of its hardware bus masters has actually installed every backing
+    // page. Byte equality alone is not provenance: pristine zero-filled RAM
+    // can otherwise select a late all-zero variant before firmware boot has
+    // materialized it.
+    return nds_dispatch_validation_owns_entry(validation, pc, thumb) &&
+        validation_identity_live(validation);
 }
 
 const DispatchEntry* lookup_static(
@@ -309,13 +326,11 @@ const DispatchEntry* lookup_static(
         const DispatchEntry** inactive_candidate) {
     if (candidate_count) *candidate_count = 0u;
     if (inactive_candidate) *inactive_candidate = nullptr;
-    for (const DispatchBank& bank : c.banks) {
-        const DispatchEntry* hit = lookup_in(
-            bank.table, bank.len, pc, thumb, candidate_count,
-            inactive_candidate);
-        if (hit) return hit;
-    }
-    return nullptr;
+    const NdsDispatchLookupResult result = nds_dispatch_lookup_index(
+        c.dispatch_index, pc, thumb, dispatch_validation_live, nullptr);
+    if (candidate_count) *candidate_count = result.candidate_count;
+    if (inactive_candidate) *inactive_candidate = result.inactive;
+    return result.selected;
 }
 
 bool cached_lookup_live(const CachedStaticLookup& cached) {
@@ -323,15 +338,67 @@ bool cached_lookup_live(const CachedStaticLookup& cached) {
     // writable-RAM validation. Keep the common immutable-bank hit entirely
     // inside the cache line instead of chasing entry->validation.
     if (cached.page_count == 0u) return true;
-    const uint32_t first_page = cached.validation->addr & ~0xFFFu;
     for (uint32_t i = 0; i < cached.page_count; ++i) {
         const uint32_t live_generation = cached.generation_ptr[i]
             ? *cached.generation_ptr[i]
-            : bus_exec_page_generation(first_page + (i << 12u));
+            : bus_exec_page_generation(cached.page_addr[i]);
         if (live_generation != cached.generation[i])
             return false;
     }
     return true;
+}
+
+bool cache_page_generation(CachedStaticLookup& slot, uint32_t page) {
+    for (uint32_t i = 0; i < slot.page_count; ++i) {
+        if (slot.page_addr[i] == page) return true;
+    }
+    if (slot.page_count >= 4u) return false;
+    const uint32_t index = slot.page_count++;
+    slot.page_addr[index] = page;
+    if (page - 0x02000000u < 0x01000000u && g_busf_main.gen) {
+        const uint32_t offset = page & g_busf_main.mask;
+        slot.generation_ptr[index] =
+            g_busf_main.gen + (offset >> 12u);
+        slot.generation[index] = *slot.generation_ptr[index];
+    } else {
+        slot.generation[index] = bus_exec_page_generation(page);
+    }
+    return true;
+}
+
+bool cache_validation_pages(CachedStaticLookup& slot,
+                            const NdsStaticValidation* validation) {
+    return for_each_validation_range(
+        validation, [&](const NdsStaticValidationRange& range) {
+            if (!range.expected || range.size == 0u) return false;
+            const uint64_t end = uint64_t{range.addr} + range.size;
+            if (end > 0x1'0000'0000ull) return false;
+            const uint32_t first_page = range.addr & ~0xFFFu;
+            const uint32_t last_page =
+                static_cast<uint32_t>(end - 1u) & ~0xFFFu;
+            for (uint32_t page = first_page;; page += 4096u) {
+                if (!cache_page_generation(slot, page)) return false;
+                if (page == last_page) break;
+            }
+            return true;
+        });
+}
+
+bool cache_rejected_candidate_chain(const CpuCtx& c, uint32_t pc, bool thumb,
+                                    CachedStaticLookup& slot) {
+    const uint64_t wanted = (uint64_t{pc} << 1u) | uint64_t{thumb};
+    auto it = std::lower_bound(
+        c.dispatch_index.begin(), c.dispatch_index.end(), wanted,
+        [](const DispatchEntry* entry, uint64_t value) {
+            return nds_dispatch_entry_key(entry) < value;
+        });
+    for (; it != c.dispatch_index.end() &&
+           nds_dispatch_entry_key(*it) == wanted; ++it) {
+        const NdsStaticValidation* validation = (*it)->validation;
+        if (!validation || validation->size == 0u) continue;
+        if (!cache_validation_pages(slot, validation)) return false;
+    }
+    return slot.page_count != 0u;
 }
 
 const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
@@ -340,10 +407,15 @@ const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
     CachedStaticLookup& slot =
         cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
               (kDispatchCacheSize - 1u)];
-    if (slot.occupied && slot.pc == pc && slot.thumb == uint8_t{thumb} &&
+    if (slot.occupied && slot.dispatch_epoch == c.dispatch_epoch &&
+        slot.pc == pc && slot.thumb == uint8_t{thumb} &&
         cached_lookup_live(slot)) {
         auto& stats = g_nds_dispatch_stats[g_nds_active];
-        if (slot.fn) { ++stats.cache_hit; return &slot; }
+        if (slot.fn) {
+            ++stats.cache_hit;
+            live_overlay_note_cached_hit(slot.live_bank_serial);
+            return &slot;
+        }
         ++stats.cache_hit_absent;
         return nullptr;
     }
@@ -353,49 +425,42 @@ const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
     const DispatchEntry* inactive_candidate = nullptr;
     const DispatchEntry* hit = lookup_static(
         c, pc, thumb, &candidate_count, &inactive_candidate);
+    if ((hit && hit->validation) || inactive_candidate) {
+        live_overlay_note_lookup(g_nds_active, pc, pc, g_cpu.R[14],
+                                 g_cpu.cpsr, hit, inactive_candidate,
+                                 candidate_count,
+                                 hit ? "native_candidate"
+                                     : "candidate_reject");
+    }
     // Copied RAM code has no static entry and is handled by Tier 3. Remember
     // that definitive miss so every interpreted block does not binary-search
     // every static bank again. A single inactive validation candidate is also
     // safe to cache: its backing-page generations invalidate the entry after
     // a guest write. Multiple variants are left uncached because any one of
-    // their distinct backing ranges could become live.
-    if (!hit && candidate_count > 1u) return nullptr;
+    // their distinct backing ranges could become live. Cache the complete
+    // rejected chain against the union of its backing-page generations; this
+    // prevents an FMV/current overlay generation from re-hashing every stale
+    // cached candidate on every interpreted instruction.
     slot = {};
     slot.pc = pc;
     slot.thumb = static_cast<uint8_t>(thumb);
+    slot.dispatch_epoch = c.dispatch_epoch;
     const DispatchEntry* const candidate = hit ? hit : inactive_candidate;
     slot.fn = hit ? hit->fn : nullptr;
     slot.validation = candidate ? candidate->validation : nullptr;
+    slot.live_bank_serial = hit
+        ? live_overlay_candidate_serial(g_nds_active, hit)
+        : 0u;
     slot.occupied = 1u;
-    if (slot.validation) {
-        const uint64_t end =
-            uint64_t{slot.validation->addr} + slot.validation->size;
-        const uint32_t first_page = slot.validation->addr & ~0xFFFu;
-        const uint32_t last_page =
-            static_cast<uint32_t>(end - 1u) & ~0xFFFu;
-        slot.page_count = static_cast<uint8_t>(
-            ((last_page - first_page) >> 12u) + 1u);
-        if (slot.page_count > 2u) {
+    if (!hit && candidate_count > 1u) {
+        if (!cache_rejected_candidate_chain(c, pc, thumb, slot)) {
             slot = {};
             return nullptr;
         }
-        for (uint32_t i = 0; i < slot.page_count; ++i)
-        {
-            const uint32_t page = first_page + (i << 12u);
-            // Main RAM's generation backing is stable for the lifetime of a
-            // runtime instance. Cache its exact page counter so the dispatch
-            // hot path does not resolve the same address on every hit.
-            if (page - 0x02000000u < 0x01000000u &&
-                g_busf_main.gen) {
-                const uint32_t offset = page & g_busf_main.mask;
-                slot.generation_ptr[i] =
-                    g_busf_main.gen + (offset >> 12u);
-                slot.generation[i] = *slot.generation_ptr[i];
-            } else {
-                slot.generation[i] =
-                    bus_exec_page_generation(page);
-            }
-        }
+    } else if (slot.validation &&
+               !cache_validation_pages(slot, slot.validation)) {
+        slot = {};
+        return nullptr;
     }
     return hit ? &slot : nullptr;
 }
@@ -404,18 +469,13 @@ bool arm_static_guard(const NdsStaticValidation* validation,
                       StaticExecutionGuard& guard) {
     guard = {};
     if (!validation) return true;
-    const uint64_t begin = validation->addr;
-    const uint64_t end = begin + validation->size;
-    if (validation->size == 0u || end > 0x1'0000'0000ull) return false;
-    const uint32_t first_page = validation->addr & ~0xFFFu;
-    const uint32_t last_page =
-        static_cast<uint32_t>(end - 1u) & ~0xFFFu;
-    const uint32_t page_count = ((last_page - first_page) >> 12u) + 1u;
-    if (page_count > 2u) return false;
     guard.validation = validation;
-    guard.page_count = page_count;
-    for (uint32_t i = 0; i < page_count; ++i) {
-        const uint32_t page = first_page + (i << 12u);
+    auto add_page = [&](uint32_t page) {
+        for (uint32_t i = 0u; i < guard.page_count; ++i) {
+            if (guard.page_addr[i] == page) return true;
+        }
+        if (guard.page_count >= 4u) return false;
+        const uint32_t i = guard.page_count++;
         guard.page_addr[i] = page;
         // Main RAM's generation storage is stable for a runtime instance.
         // Keep the exact counter used by the dispatch cache so every nested
@@ -428,8 +488,22 @@ bool arm_static_guard(const NdsStaticValidation* validation,
         } else {
             guard.generation[i] = bus_exec_page_generation(page);
         }
-    }
-    return true;
+        return true;
+    };
+    return for_each_validation_range(
+        validation, [&](const NdsStaticValidationRange& range) {
+            if (!range.expected || range.size == 0u) return false;
+            const uint64_t end = uint64_t{range.addr} + range.size;
+            if (end > 0x1'0000'0000ull) return false;
+            const uint32_t first_page = range.addr & ~0xFFFu;
+            const uint32_t last_page =
+                static_cast<uint32_t>(end - 1u) & ~0xFFFu;
+            for (uint32_t page = first_page;; page += 4096u) {
+                if (!add_page(page)) return false;
+                if (page == last_page) break;
+            }
+            return true;
+        });
 }
 
 bool cached_static_guard(const CachedStaticLookup& cached,
@@ -441,14 +515,13 @@ bool cached_static_guard(const CachedStaticLookup& cached,
     // instead of resolving and rereading the same pages a second time.
     // Fall back to the reference builder if a future cache representation
     // does not carry the complete guard snapshot.
-    if (cached.page_count == 0u || cached.page_count > 2u)
+    if (cached.page_count == 0u || cached.page_count > 4u)
         return arm_static_guard(cached.validation, guard);
 
     guard.validation = cached.validation;
     guard.page_count = cached.page_count;
-    const uint32_t first_page = cached.validation->addr & ~0xFFFu;
     for (uint32_t i = 0; i < cached.page_count; ++i) {
-        guard.page_addr[i] = first_page + (i << 12u);
+        guard.page_addr[i] = cached.page_addr[i];
         guard.generation[i] = cached.generation[i];
         guard.generation_ptr[i] = cached.generation_ptr[i];
     }
@@ -467,6 +540,17 @@ bool guard_generation_changed(const StaticExecutionGuard& guard) {
     return false;
 }
 
+bool refresh_guard_after_generation_change(StaticExecutionGuard& guard) {
+    if (!guard.validation) return true;
+    if (!validation_identity_live(guard.validation)) return false;
+    for (uint32_t i = 0; i < guard.page_count; ++i) {
+        guard.generation[i] = guard.generation_ptr[i]
+            ? *guard.generation_ptr[i]
+            : bus_exec_page_generation(guard.page_addr[i]);
+    }
+    return true;
+}
+
 bool active_static_code_changed() {
     return g_static_guard && g_static_guard->invalidated;
 }
@@ -479,8 +563,10 @@ struct StaticGuardScope {
         // A nested static call may write through an alias of its caller's
         // backing page. Revalidate the saved guard once on unwind so that
         // write cannot be lost when the outer guard becomes active again.
-        if (saved && !saved->invalidated && guard_generation_changed(*saved))
+        if (saved && !saved->invalidated && guard_generation_changed(*saved) &&
+            !refresh_guard_after_generation_change(*saved)) {
             saved->invalidated = true;
+        }
         g_static_guard = saved;
         if (saved && saved->invalidated) request_yield_poll();
     }
@@ -526,18 +612,55 @@ extern "C" void runtime_note_code_write(void) {
     ++g_coverage_write_epoch;
     if (g_static_guard && !g_static_guard->invalidated &&
         guard_generation_changed(*g_static_guard)) {
-        g_static_guard->invalidated = true;
-        request_yield_poll();
+        if (!refresh_guard_after_generation_change(*g_static_guard)) {
+            g_static_guard->invalidated = true;
+            request_yield_poll();
+        }
     }
+}
+
+extern "C" void runtime_note_live_write(uint32_t addr, uint32_t width,
+                                        uint32_t old_value,
+                                        uint32_t new_value) {
+    live_overlay_note_write(g_nds_active, g_cpu.R[15], addr, width,
+                            old_value, new_value);
 }
 
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base) {
     CpuCtx& ctx = g_ctx[cpu & 1];
     ctx.banks.push_back({t, len});
+    nds_dispatch_index_add(ctx.dispatch_index, t, len);
     ctx.exc_base = exc_base;
     // A PC cached as absent before a newly registered bank may now resolve.
-    g_dispatch_cache[cpu & 1] = {};
+    if (++ctx.dispatch_epoch == 0u) {
+        g_dispatch_cache[cpu & 1] = {};
+        ctx.dispatch_epoch = 1u;
+    }
+}
+
+extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
+                                         unsigned len) {
+    CpuCtx& ctx = g_ctx[cpu & 1];
+    ctx.banks.erase(
+        std::remove_if(ctx.banks.begin(), ctx.banks.end(),
+                       [&](const DispatchBank& bank) {
+                           return bank.table == t && bank.len == len;
+                       }),
+        ctx.banks.end());
+    std::unordered_set<const DispatchEntry*> removed;
+    removed.reserve(len);
+    for (unsigned i = 0u; i < len; ++i) removed.insert(&t[i]);
+    ctx.dispatch_index.erase(
+        std::remove_if(ctx.dispatch_index.begin(), ctx.dispatch_index.end(),
+                       [&](const DispatchEntry* entry) {
+                           return removed.count(entry) != 0u;
+                       }),
+        ctx.dispatch_index.end());
+    if (++ctx.dispatch_epoch == 0u) {
+        g_dispatch_cache[cpu & 1] = {};
+        ctx.dispatch_epoch = 1u;
+    }
 }
 
 extern "C" void nds_register_hle_profile_descriptors(
@@ -1004,7 +1127,11 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     TailDispatchScope tail;
     for (;;) {
         tail.state.pending = false;
-        uint32_t pc = target_pc & ~1u;
+        const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+        // CPSR.T, not stale low bits left by the producer, owns the current
+        // instruction set. ARM-state BX/BLX targets are word aligned;
+        // preserving bit 1 manufactures impossible entries such as BIOS 0x2.
+        uint32_t pc = target_pc & (thumb ? ~1u : ~3u);
         ++g_nds_dispatch_stats[g_nds_active].dispatch_total;
         // Slice-preemption point. `pc` is a dispatch entry, so this is a safe
         // place to yield to the scheduler — including for loops whose back-edge
@@ -1021,7 +1148,6 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         // prologues and the architectural register view require aligned R15.
         g_cpu.R[15] = pc;
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
-        bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
         const CpuCtx& c = g_ctx[g_nds_active];
         StaticGuardScope guard_scope;
         if (guard_scope.call(lookup_static_cached(c, pc, thumb))) {
@@ -1038,11 +1164,21 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         // ITCM-resident IRQ handler) has no static bank — run the guest's OWN
         // bytes through the interpreter (PRINCIPLES.md "the one exception"),
         // never an HLE model. The bus owns the memory map (covers ITCM mirror).
-        if (bus_range_has_write_provenance(pc, thumb ? 2u : 4u)) {
+        const bool mapped_writable = bus_addr_is_writable_ram(pc);
+        const bool has_provenance = mapped_writable &&
+            bus_range_has_write_provenance(pc, thumb ? 2u : 4u);
+        if (nds_dispatch_miss_decision(mapped_writable, has_provenance) ==
+            NdsDispatchMissDecision::Tier3) {
+            live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                                     g_cpu.cpsr, nullptr, nullptr, 0u,
+                                     "tier3");
             tier3_run(pc);
             return;
         }
-        if (bus_addr_is_writable_ram(pc)) tier3_note_clean_ram_reject();
+        if (mapped_writable) tier3_note_clean_ram_reject();
+        live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                                 g_cpu.cpsr, nullptr, nullptr, 0u,
+                                 "fatal");
         runtime_dispatch_miss(target_pc);
         return;
     }
@@ -1074,7 +1210,8 @@ extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].dispatch_exchange;
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;
-    runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc, 0, 0);
+    const uint32_t pc = target_pc & ((target_pc & 1u) ? ~1u : ~3u);
+    runtime_trace_event(RUNTIME_TRACE_EXCHANGE, pc, target_pc, 0, 0);
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
@@ -1096,11 +1233,38 @@ extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
     runtime_dispatch(target_pc);
 }
 
+extern "C" void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
+                                      uint32_t transfer_type) {
+    live_overlay_note_transfer(g_nds_active, source_pc, target_pc, g_cpu.R[14],
+                               g_cpu.cpsr, transfer_type);
+}
+
+extern "C" void runtime_dispatch_bad_entry(uint32_t target_pc) {
+    const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    const uint32_t pc = target_pc & (thumb ? ~1u : ~3u);
+    g_cpu.R[15] = pc;
+    const bool mapped_writable = bus_addr_is_writable_ram(pc);
+    const bool has_provenance = mapped_writable &&
+        bus_range_has_write_provenance(pc, thumb ? 2u : 4u);
+    if (nds_dispatch_miss_decision(mapped_writable, has_provenance) ==
+        NdsDispatchMissDecision::Tier3) {
+        live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                                 g_cpu.cpsr, nullptr, nullptr, 0u,
+                                 "bad-entry-tier3");
+        tier3_run(pc);
+        return;
+    }
+    live_overlay_note_lookup(g_nds_active, pc, target_pc, g_cpu.R[14],
+                             g_cpu.cpsr, nullptr, nullptr, 0u,
+                             "bad-entry-fatal");
+    runtime_dispatch_miss(target_pc);
+}
+
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const char* cpu = (g_nds_active == NDS_ARM9) ? "arm9" : "arm7";
     const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     const char* mode = thumb ? "thumb" : "arm";
-    const uint32_t t = target_pc & ~1u;
+    const uint32_t t = target_pc & (thumb ? ~1u : ~3u);
     std::fprintf(stderr,
         "[dispatch-miss] cpu=%s pc=0x%08X %s (lr=0x%08X)\n",
         cpu, t, mode, g_cpu.R[14]);
@@ -1373,6 +1537,8 @@ extern "C" void runtime_init(void*) {
     g_discovery_seen.clear();
     for (CpuCtx& ctx : g_ctx) {
         ctx.banks.clear();
+        ctx.dispatch_index.clear();
+        ctx.dispatch_epoch = 1u;
         ctx.exc_base = 0u;
     }
     g_static_guard = nullptr;

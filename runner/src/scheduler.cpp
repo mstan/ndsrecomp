@@ -13,6 +13,7 @@
 #include "dispatch_stats.h"
 #include "io.h"
 #include "gpu3d.h"
+#include "live_overlay.h"
 #include "spu.h"
 #include "wifi.h"
 
@@ -403,6 +404,7 @@ void scheduler_run_round() {
     // ARM7 catch-up, then RunSystem(target) advances SysTimestamp to that
     // ACTUAL normalized rendezvous (including one-instruction overshoot).
     g_sys_timestamp = rendezvous;
+    live_overlay_poll();
     // run_due_system_events(rendezvous);  // Commit B+
 }
 

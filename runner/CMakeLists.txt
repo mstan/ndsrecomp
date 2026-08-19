@@ -330,6 +330,7 @@ target_include_directories(nds_armv4t PUBLIC
 
 add_executable(nds_runner
     src/runtime_arm.cpp
+    src/live_overlay.cpp
     src/battery_save.cpp
     src/firmware_state.cpp
     src/generated_firmware.cpp
@@ -362,6 +363,7 @@ add_executable(nds_runner
     src/relative_mouse_touch.cpp
     src/frontend.cpp
     src/main.cpp
+    src/runtime_exports.def
     "${TITLE_BANK_REGISTRY}"
     vendor/melonds/GPU3D.cpp
     vendor/melonds/GPU3D_Soft.cpp
@@ -378,6 +380,7 @@ add_executable(nds_runner
     vendor/melonds/net/Net.cpp
     vendor/melonds/net/PacketDispatcher.cpp
     vendor/melonds/net/Net_Slirp.cpp)
+set_target_properties(nds_runner PROPERTIES ENABLE_EXPORTS ON)
 ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
@@ -646,6 +649,22 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/net/net_sanitize.cpp)
   target_include_directories(net_capture_test PRIVATE src)
   add_test(NAME net_capture_test COMMAND net_capture_test)
+
+  add_executable(live_overlay_preflight_test
+      tests/live_overlay_preflight_test.cpp
+      src/live_overlay.cpp)
+  target_include_directories(live_overlay_preflight_test PRIVATE
+      src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+  add_test(NAME live_overlay_preflight_test
+           COMMAND live_overlay_preflight_test)
+
+  add_executable(dispatch_lookup_test
+      tests/dispatch_lookup_test.cpp)
+  target_include_directories(dispatch_lookup_test PRIVATE
+      src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+  add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
   if(Python3_Interpreter_FOUND)
     add_test(

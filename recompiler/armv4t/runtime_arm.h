@@ -88,10 +88,21 @@ extern NdsCpu g_nds_active;
 // the same virtual address for different code generations, so generated rows
 // may carry an exact byte validation for the function they enter.  Immutable
 // BIOS/game banks leave validation null.
+typedef struct NdsStaticValidationRange {
+    uint32_t addr;
+    uint32_t size;
+    const uint8_t* expected;
+} NdsStaticValidationRange;
+
 typedef struct NdsStaticValidation {
     uint32_t addr;
     uint32_t size;
     const uint8_t* expected;
+    // Optional complete native dependency closure. A dispatch row still owns
+    // a concrete [addr,size) resume body, while the runtime atomically proves
+    // every exact range here before allowing direct transfers within it.
+    const NdsStaticValidationRange* dependencies;
+    uint32_t dependency_count;
 } NdsStaticValidation;
 
 typedef struct NdsDispatchEntry {
@@ -100,6 +111,27 @@ typedef struct NdsDispatchEntry {
     void (*fn)(void);
     const NdsStaticValidation* validation;
 } NdsDispatchEntry;
+
+#define NDS_LIVE_BANK_ABI_VERSION 4u
+#define NDS_LIVE_BANK_FLAG_DEPENDENCY_CLOSURE 0x00000001u
+
+typedef struct NdsBusFastWin NdsBusFastWin;
+
+typedef struct NdsLiveBankInfo {
+    uint32_t abi_version;
+    uint32_t flags;
+    const char* bank_id;
+    const char* candidate_id;
+    const char* title_sha1;
+    int cpu;
+    uint32_t exc_base;
+    const NdsDispatchEntry* dispatch;
+    unsigned dispatch_len;
+    const ArmCpuState* linked_g_cpu;
+    const NdsBusFastWin* linked_busf_main;
+    const NdsBusFastWin* linked_busf_itcm;
+    const unsigned long long* linked_runtime_cycles;
+} NdsLiveBankInfo;
 
 // Candidate-only, compile-time-gated observation ABI for modular performance
 // HLE work. Generated LLE bodies call none of this unless
@@ -188,6 +220,8 @@ void     bus_write_u8_slow (uint32_t addr, uint8_t  val);
 // The static runtime uses this to invalidate the currently executing
 // provenance-validated bank without polling page vectors per instruction.
 void runtime_note_code_write(void);
+void runtime_note_live_write(uint32_t addr, uint32_t width,
+                             uint32_t old_value, uint32_t new_value);
 
 // Deep-trace policy flag — full declaration/comment further down; the
 // inline fast paths and Tier 3 need it in scope here.
@@ -305,6 +339,11 @@ static inline void bus_write_u32(uint32_t addr, uint32_t val) {
         uint32_t off;
         const NdsBusFastWin* w = nds_busf_classify(addr, &off);
         if (w && w->data && off + 4u <= w->mask + 1u) {
+            if (addr + 4u > 0x027E0000u && addr < 0x027E0040u) {
+                uint32_t old_value;
+                memcpy(&old_value, w->data + off, 4);
+                runtime_note_live_write(addr, 4u, old_value, val);
+            }
             memcpy(w->data + off, &val, 4);
             nds_busf_note_write(w, off, 4u);
             return;
@@ -318,6 +357,11 @@ static inline void bus_write_u16(uint32_t addr, uint16_t val) {
         uint32_t off;
         const NdsBusFastWin* w = nds_busf_classify(addr, &off);
         if (w && w->data && off + 2u <= w->mask + 1u) {
+            if (addr + 2u > 0x027E0000u && addr < 0x027E0040u) {
+                uint16_t old_value;
+                memcpy(&old_value, w->data + off, 2);
+                runtime_note_live_write(addr, 2u, old_value, val);
+            }
             memcpy(w->data + off, &val, 2);
             nds_busf_note_write(w, off, 2u);
             return;
@@ -331,6 +375,8 @@ static inline void bus_write_u8(uint32_t addr, uint8_t val) {
         uint32_t off;
         const NdsBusFastWin* w = nds_busf_classify(addr, &off);
         if (w && w->data) {
+            if (addr >= 0x027E0000u && addr < 0x027E0040u)
+                runtime_note_live_write(addr, 1u, w->data[off], val);
             w->data[off] = val;
             nds_busf_note_write(w, off, 1u);
             return;
@@ -441,6 +487,22 @@ void runtime_dispatch_literal_fallthrough(uint32_t target_pc);
 void runtime_discovery_note_static(uint32_t pc, uint32_t thumb);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
+// A generated owner received a PC for which it has no real resume label.
+// Written executable RAM may fall back to Tier 3; clean, MMIO, and unmapped
+// targets remain fatal. This deliberately bypasses candidate lookup to avoid
+// recursively selecting the same malformed owner row.
+void runtime_dispatch_bad_entry(uint32_t target_pc);
+void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
+                           uint32_t transfer_type);
+
+#define NDS_LIVE_TRANSFER_B         1u
+#define NDS_LIVE_TRANSFER_BL        2u
+#define NDS_LIVE_TRANSFER_BX        3u
+#define NDS_LIVE_TRANSFER_BLX_REG   4u
+#define NDS_LIVE_TRANSFER_BLX_IMM   5u
+#define NDS_LIVE_TRANSFER_PC_WRITE  6u
+#define NDS_LIVE_TRANSFER_LDR_PC    7u
+#define NDS_LIVE_TRANSFER_LDM_PC    8u
 
 // Direct generated BL calls use the host C stack for speed and clarity.
 // Return idioms (`bx lr`, `mov pc, lr`, `pop {..., pc}`) are only C

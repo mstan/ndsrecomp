@@ -279,6 +279,15 @@ struct NdsNetRingState {
 };
 void net_ring_debug_state(NdsNetRingState* out);
 
+// Summary counters for connection-progress diagnostics. Indexed one-to-one with
+// NdsNetEventKind so callers can reason about network sequence progression
+// without rescanning the full ring.
+struct NdsNetConnectionProgress {
+    uint64_t events[NDS_NET_EVENT_KIND_COUNT];
+    uint64_t last_event_sys; // scheduler_system_timestamp() of most recent push
+};
+void net_ring_progress(NdsNetConnectionProgress* out);
+
 // Reset all ring/pool state to empty (called from the same full power-on
 // re-init path as every other ring — see the `reset` debug-server command
 // and card_trace's reset block at io.cpp:1905).

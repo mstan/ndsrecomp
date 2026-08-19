@@ -1,7 +1,7 @@
 // Pins the interior-entry fail-closed emission.
 //
 // Every generated function body opens with a resume switch over its interior
-// PCs whose default arm calls runtime_dispatch_miss() and returns. That arm
+// PCs whose default arm calls runtime_dispatch_bad_entry() and returns. That arm
 // is what makes entering a compiled function at an untranslated interior PC
 // degrade safely to Tier 3 instead of silently no-oping — the property the
 // overlay pipeline's content-validated banks rely on (psxrecomp models the
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
 
     const std::string resume_guard = "if (g_cpu.R[15] != 0x02000000u)";
     const std::string fail_closed =
-        "default: runtime_dispatch_miss(g_cpu.R[15]); return;";
+        "default: runtime_dispatch_bad_entry(g_cpu.R[15]); return;";
     if (generated.find(resume_guard) == std::string::npos) {
         std::fprintf(stderr,
             "FAIL: generated body lost its interior-PC resume switch\n");
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
     if (generated.find(fail_closed) == std::string::npos) {
         std::fprintf(stderr,
             "FAIL: resume switch no longer fails closed to "
-            "runtime_dispatch_miss -- overlay banks would silently no-op "
+            "runtime_dispatch_bad_entry -- overlay banks would silently no-op "
             "on interior entries\n");
         return 1;
     }
