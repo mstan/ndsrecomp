@@ -78,7 +78,8 @@ remains a device model, not HLE).
   surface and a soft-renderer thread-restart fix), and
   `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`
   (patch `0010`, adaptive width, polygon-ID attributes in the low
-  resolution surface, and the internal-resolution accessors), and
+  resolution surface, and the internal-resolution accessors; patch `0013`,
+  correcting the compute memory-barrier bitfields), and
   `GPU3D_Texcache.h`, `GPU3D_TexcacheOpenGL.cpp` (patch `0011`, routing
   decoded textures through the optional upscaler and sizing array storage
   and the per-array layer budget by its factor), and `OpenGLSupport.cpp`
