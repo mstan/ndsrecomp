@@ -384,3 +384,13 @@ send numeric login fields that overflow the guest's 32-bit strtol, leaving
 errno = ERANGE for the rest of the boot (beads-lqa.8; same bug is visible
 in stock melonDS 0.9.5 -- kuribo64 board thread 1399). No behavior change
 when the knob is unset.
+
+## 0014-gpu3d-compute-memory-barriers.patch
+
+`src/GPU3D_Compute.cpp`: corrects the four compute-renderer
+`glMemoryBarrier()` calls to use
+`GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT`. The old
+`GL_SHADER_STORAGE_BUFFER` argument is a buffer binding target, not a
+memory-barrier bitfield. The command barrier makes shader-written indirect
+dispatch parameters visible to `glDispatchComputeIndirect`; the correction
+matches upstream melonDS commit `77774538e56b118dcb5d64f08d784542ba77c72b`.
