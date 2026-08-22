@@ -1,0 +1,30 @@
+Subject: WifiAP: call runner association hook when the station associates
+
+ndsrecomp modification to vendored melonDS src/WifiAP.cpp (GPLv3 5(a)
+notice; see patches/README.md for the convention).
+
+Adds a single runner-owned hook call, ::nds_wifi_on_client_associated()
+(runner/src/wifi_net.{h,cpp}), at the exact point the virtual AP accepts an
+association request (ClientStatus -> 2). The runner uses it to apply
+NdsWifiNetworkConfig::wfc_clear_crt_errno_addr -- the title-configured
+stale-CRT-errno clear that fixes in-game error 52200 on the second and
+later Nintendo WFC connects within one boot (beads-lqa.8; reproduces in
+stock melonDS 0.9.5 too, kuribo64 board thread 1399). The hook runs on the
+emulation thread (WifiAP::SendPacket TX path), which the bus write inside
+the hook requires. No behavior change when the knob is unset (hook is a
+no-op with wfc_clear_crt_errno_addr == 0).
+
+--- a/src/WifiAP.cpp
++++ b/src/WifiAP.cpp
+@@ (after #include "net/net_ring.h")
++// ndsrecomp: association-time guest-state workaround hook (beads-lqa.8,
++// stale-CRT-errno 52200 on WFC reconnect). See
++// runner/vendor/melonds/patches/0013-wifiap-cpp-association-hook.patch and
++// NdsWifiNetworkConfig::wfc_clear_crt_errno_addr in runner/src/wifi_net.h.
++void nds_wifi_on_client_associated();
+@@ (case 0x0 assoc request, after the NDS_NET_EVENT_WIFI_ASSOCIATION push)
++            // ndsrecomp: stale-CRT-errno 52200 reconnect workaround
++            // (beads-lqa.8) -- runs on the emulation thread (this whole TX
++            // path does), which the hook requires. See
++            // patches/0013-wifiap-cpp-association-hook.patch.
++            ::nds_wifi_on_client_associated();

@@ -108,6 +108,23 @@ struct NdsWifiNetworkConfig {
     // to DWC/Wiimmfi NAT negotiation.
     uint32_t slirp_virtual_network_instance = 0;
 
+    // Guest CRT errno word to zero every time the station associates with
+    // the virtual AP (0 = disabled). Works around a Nintendo DWC SDK bug
+    // (beads-lqa.8): the library's connection-test thread ("DWCnetcheck")
+    // checks `errno == ERANGE` after atoi() WITHOUT clearing errno first,
+    // and modern WFC replacement services (Wiimmfi/Kaeru/...) send numeric
+    // login fields large enough to overflow the guest CRT's 32-bit strtol,
+    // which sets errno = ERANGE (34) and leaves it set for the rest of the
+    // boot. The first connect per boot passes (errno starts 0); every
+    // reconnect then fails the stale check and the game shows error 52200
+    // until relaunch. Reproduces identically in stock melonDS 0.9.5
+    // (https://melonds.kuribo64.net/board/thread.php?id=1399). Clearing the
+    // title's errno word at association time -- before the netcheck can
+    // run -- restores the boot-fresh state the SDK code assumes. The
+    // address is title-specific (MPH AMHE rev0: 0x021021EC) and comes from
+    // game.toml [network.wfc] clear_crt_errno_addr.
+    uint32_t wfc_clear_crt_errno_addr = 0;
+
     // Local wireless / Download Play / NiFi transport. Disabled by default;
     // when enabled, each runner process binds localhost UDP port
     // local_wireless_base_port + instance_index and fans MP frames out to
@@ -219,6 +236,13 @@ bool nds_net_platform_init();
 // std::exit() call in boot()'s cartridge-init-failure branch, still
 // balances the WSAStartup call above.
 void nds_net_platform_shutdown();
+
+// Called by the vendored WifiAP (runner emulation thread, TX path) each
+// time the station completes 802.11 association with the virtual AP. Applies
+// NdsWifiNetworkConfig::wfc_clear_crt_errno_addr (see that field's comment);
+// a no-op when the knob is 0. Safe on the emulation thread only -- it
+// writes guest RAM through the bus.
+void nds_wifi_on_client_associated();
 
 // Stores the resolved network configuration for the next nds_wifi3d_attach()
 // call to consume. Safe to call at any time before that first attach;

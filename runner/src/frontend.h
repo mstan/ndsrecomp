@@ -100,6 +100,11 @@ struct NdsNetworkOptions {
     std::string pcap_adapter;       // backend == "pcap": empty = auto-select
     bool wfc_enabled = false;
     NdsWfcProvider wfc_provider{};
+    // [network.wfc] clear_crt_errno_addr: guest CRT errno word zeroed on
+    // every AP association (0 = off). Title-specific stale-ERANGE 52200
+    // reconnect workaround -- see NdsWifiNetworkConfig::
+    // wfc_clear_crt_errno_addr (wifi_net.h) for the full story.
+    uint32_t wfc_clear_crt_errno_addr = 0;
 
     // ---- Wiimmfi M8: capture/replay at the Ethernet backend boundary ----
     std::string capture_out;       // --net-capture-out; empty = no live

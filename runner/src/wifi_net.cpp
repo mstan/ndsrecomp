@@ -2009,6 +2009,31 @@ void nds_wifi_configure_network(const NdsWifiNetworkConfig& config) {
     g_network_config = config;
 }
 
+// Guest bus write, declared in recompiler/armv4t/runtime_arm.h (defined in
+// bus.cpp); declared locally so this bridge file does not need the whole
+// recompiler runtime header for one call.
+extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val);
+
+void nds_wifi_on_client_associated() {
+    const uint32_t addr = g_network_config.wfc_clear_crt_errno_addr;
+    if (!addr) return;
+    // See NdsWifiNetworkConfig::wfc_clear_crt_errno_addr (wifi_net.h) for
+    // the full rationale: the DWC connection-test thread reads a stale
+    // CRT errno left at ERANGE by an earlier overflowing strtol and fails
+    // every reconnect with in-game error 52200 (beads-lqa.8). Association
+    // time is strictly before any of that session's parses, so clearing
+    // here restores the boot-fresh state the SDK code assumes.
+    uint32_t prev = 0;
+    for (int i = 0; i < 4; ++i)
+        prev |= static_cast<uint32_t>(bus_debug_read8(9, addr + i)) << (i * 8);
+    if (prev == 0) return;
+    bus_write_u32_slow(addr, 0);
+    melonDS::Platform::Log(melonDS::Platform::Info,
+        "[wifi_net] cleared guest CRT errno at %08X on association "
+        "(was %u; stale-ERANGE 52200 workaround, beads-lqa.8)\n",
+        addr, prev);
+}
+
 bool nds_wifi_local_mp_stats(NdsLocalMpStats* out) {
     if (!g_bridge) return false;
     g_bridge->local_mp.SnapshotStats(out);

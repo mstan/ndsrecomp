@@ -369,3 +369,18 @@ compute renderer's -- logged an error while behaving correctly. Also adds
 the missing trailing newline at end of file.
 
 No behaviour change beyond the log line.
+
+## 0013-wifiap-cpp-association-hook.patch
+
+`src/WifiAP.cpp`: adds one runner-owned hook call,
+`::nds_wifi_on_client_associated()` (runner/src/wifi_net.{h,cpp}), at the
+point the virtual AP accepts an association request (ClientStatus -> 2).
+The runner uses it to zero a title-configured guest CRT `errno` word
+(game.toml `[network.wfc] clear_crt_errno_addr`), fixing in-game error
+52200 on every Nintendo WFC reconnect after the first within one boot:
+Nintendo's DWC connection-test thread checks `errno == ERANGE` after
+`atoi()` without clearing errno first, and modern WFC replacement services
+send numeric login fields that overflow the guest's 32-bit strtol, leaving
+errno = ERANGE for the rest of the boot (beads-lqa.8; same bug is visible
+in stock melonDS 0.9.5 -- kuribo64 board thread 1399). No behavior change
+when the knob is unset.

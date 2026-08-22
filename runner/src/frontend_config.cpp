@@ -664,6 +664,18 @@ bool nds_load_frontend_config(const std::string& path,
             if (const auto value = (*wfc)["provider"].value<std::string>()) {
                 options->network.wfc_provider.name = *value;
             }
+            if (const auto value =
+                    (*wfc)["clear_crt_errno_addr"].value<int64_t>()) {
+                if (*value < 0 || *value > 0xFFFFFFFFll) {
+                    if (error) {
+                        *error = "network.wfc.clear_crt_errno_addr must be "
+                                 "a 32-bit guest address";
+                    }
+                    return false;
+                }
+                options->network.wfc_clear_crt_errno_addr =
+                    static_cast<uint32_t>(*value);
+            }
             if (const auto value = (*wfc)["dns_server"].value<std::string>()) {
                 uint32_t probe = 0;
                 if (!nds_parse_ipv4(*value, &probe)) {

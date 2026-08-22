@@ -944,6 +944,8 @@ int main(int argc, char** argv) {
     NdsWifiNetworkConfig resolved_network{};
     resolved_network.enabled = frontend_options.network.enabled;
     resolved_network.wfc_enabled = frontend_options.network.wfc_enabled;
+    resolved_network.wfc_clear_crt_errno_addr =
+        frontend_options.network.wfc_clear_crt_errno_addr;
     resolved_network.pcap_adapter = frontend_options.network.pcap_adapter;
     resolved_network.slirp_virtual_network_instance =
         frontend_options.instance_index;

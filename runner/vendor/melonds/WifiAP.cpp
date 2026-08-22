@@ -27,6 +27,11 @@
 // THIRD_PARTY_ATTRIBUTION.md. Project-written, dependency-free header,
 // resolved via the runner's own -Isrc include path.
 #include "net/net_ring.h"
+// ndsrecomp: association-time guest-state workaround hook (beads-lqa.8,
+// stale-CRT-errno 52200 on WFC reconnect). See
+// runner/vendor/melonds/patches/0013-wifiap-cpp-association-hook.patch and
+// NdsWifiNetworkConfig::wfc_clear_crt_errno_addr in runner/src/wifi_net.h.
+void nds_wifi_on_client_associated();
 
 #ifndef __WIN32__
 #include <stddef.h>
@@ -162,6 +167,11 @@ int WifiAP::HandleManagementFrame(const u8* data, int len)
             net_ring_push(NDS_NET_EVENT_WIFI_ASSOCIATION, /*direction*/1,
                           0, 0, &data[10], (const u8*)APMac,
                           0, 0, 0, 0, 0, /*aux=*/(u32)ClientStatus);
+            // ndsrecomp: stale-CRT-errno 52200 reconnect workaround
+            // (beads-lqa.8) -- runs on the emulation thread (this whole TX
+            // path does), which the hook requires. See
+            // patches/0013-wifiap-cpp-association-hook.patch.
+            ::nds_wifi_on_client_associated();
 
             PWRITE_16(p, 0x0010);
             PWRITE_16(p, 0x0000); // duration??
