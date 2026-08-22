@@ -33,6 +33,65 @@ constexpr uint64_t kMaxPages = 8192u;
 // code page churning because data shares its 4 KiB.
 constexpr uint32_t kMaxVersionsPerAddress = 8u;
 
+// Distinct callers retained per (page, entry PC, mode, kind). The caller is
+// diagnostic -- it says which site reached an entry -- while the (page, PC,
+// mode, kind) tuple is the part an ingest actually needs. Keying the stored
+// record on the caller as well made both the resident map and the manifest
+// scale with the CALL GRAPH rather than with the code: a real MPH story
+// session produced 2,185,955 records for 61,036 distinct tuples, a 36x blowup
+// that made the dump 202 MB, of which 196.5 MB was the entry lists. One page
+// alone held 1,012,605 records for 274 distinct PCs because 71,610 sites
+// branched into it. Measured over that session the fanout is median 1, p99
+// 275 and max 51,884, so a small cap loses nothing diagnostically: keep the
+// first few callers verbatim, then fold every later one into a single
+// kCallerMany record whose hit count stays exact. Capping at 4 keeps 4.35% of
+// the records and bounds the resident map, which previously grew without
+// limit for the whole session.
+constexpr uint32_t kMaxCallersPerEntry = 4u;
+
+// Caller value on the folded record. 0xFFFFFFFF is neither 2- nor 4-byte
+// aligned, so it is never a real ARM or Thumb branch source, and an ingest can
+// tell "many further sites, not recorded individually" from a real address.
+constexpr uint32_t kCallerMany = 0xFFFFFFFFu;
+
+// Roots -- the PCs where native code fell into the interpreter -- are dense,
+// not sparse. The interpreter re-enters at whatever instruction an IRQ or a DMA
+// stall interrupted, so over a session they converge on the set of ALL
+// interpreted instructions: on the first real MPH submission 92% of root
+// addresses had another root exactly one instruction away and the longest
+// unbroken run was 415. Storing one ~96-byte JSON record per address made 94%
+// of the manifest's entries roots. A bitmap over the page stores the same
+// address set for a fixed 384 bytes.
+//
+// Two bitmaps, because mode is load-bearing: tools/seed_overlay_from_coverage.py
+// feeds roots to the recompiler's interior-entry switch and must know whether a
+// landing pad is ARM or Thumb. ARM roots are word aligned (1024 bits), Thumb
+// roots halfword aligned (2048 bits).
+constexpr uint32_t kRootArmBytes = 128u;    // 4096 / 4 / 8
+constexpr uint32_t kRootThumbBytes = 256u;  // 4096 / 2 / 8
+// Hit counts per 256-byte block. A single per-page total would have collapsed
+// the interpreted-span ranking, which is the whole point of keeping roots; 16
+// counters keep cost attribution at 256-byte resolution for 128 bytes.
+constexpr uint32_t kRootBlocks = 16u;
+
+struct RootBits {
+    std::array<uint8_t, kRootArmBytes> arm{};
+    std::array<uint8_t, kRootThumbBytes> thumb{};
+    std::array<uint64_t, kRootBlocks> hits{};
+
+    void note(uint32_t offset, bool thumb_mode) {
+        if (thumb_mode) {
+            const uint32_t bit = offset >> 1u;
+            thumb[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
+        } else {
+            const uint32_t bit = offset >> 2u;
+            arm[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
+        }
+        ++hits[(offset * kRootBlocks) / kPageSize];
+    }
+    void clear() { arm = {}; thumb = {}; hits = {}; }
+};
+
 struct StoredPage {
     uint32_t addr;
     uint8_t cpu;
@@ -42,6 +101,9 @@ struct StoredPage {
     uint64_t executions;  // distinct capture events that resolved to this page
     uint64_t last_seen;
     std::vector<uint32_t> entry_indices;
+    // Generation-bound: these roots executed while THIS image was resident, so
+    // an overlay seeder can attribute them to one overlay generation.
+    RootBits roots;
 };
 
 struct PageKey {
@@ -107,6 +169,23 @@ std::unordered_multimap<uint64_t, uint32_t> g_pages_by_addr;
 std::vector<StoredEntry> g_generation_entries;
 std::unordered_map<PageEntryKey, uint32_t, PageEntryKeyHash>
     g_generation_entry_index;
+// (page, PC, mode, kind) -> how many distinct callers we have kept, plus the
+// folded record once the cap is reached. Separate from the map above because
+// that one is keyed WITH the caller; this is what bounds it.
+struct PageFanout {
+    uint32_t kept;
+    uint32_t folded_index;
+};
+std::unordered_map<PageEntryKey, PageFanout, PageEntryKeyHash>
+    g_generation_entry_fanout;
+// Session-wide roots, keyed by (cpu, page base) and NEVER evicted. The
+// per-page-version bitmaps above are bound to a generation, which is what an
+// overlay seeder needs, but they die with their page when the version cap
+// evicts one -- and eviction is common: one 9000-vblank MPH scenario reported
+// captured=166 with replaced=87263. Before this, the session-wide picture was
+// preserved only because tier3's own map kept every root address forever at
+// ~96 bytes each. This keeps the same guarantee for 512 bytes per page base.
+std::unordered_map<uint64_t, RootBits> g_root_map;
 CoveragePageStats g_page_stats{};
 uint64_t g_observation_seq = 0u;
 
@@ -176,9 +255,52 @@ std::string hex32(uint32_t value) {
 const char kBase64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+void append_base64(std::string& out, const uint8_t* data, size_t size);
+
+template <size_t N>
+void append_base64(std::string& out, const std::array<uint8_t, N>& data) {
+    append_base64(out, data.data(), N);
+}
+
 void append_base64(std::string& out, const std::vector<uint8_t>& data) {
+    append_base64(out, data.data(), data.size());
+}
+
+// True when a bitmap holds nothing, so an all-zero map can be omitted from the
+// manifest instead of costing its base64 on every page that never ran in that
+// mode -- which is most pages, since a page is normally all ARM or all Thumb.
+template <size_t N>
+bool any_bits(const std::array<uint8_t, N>& data) {
+    for (uint8_t byte : data)
+        if (byte != 0u) return true;
+    return false;
+}
+
+void append_root_bits(std::string& out, const RootBits& roots) {
+    if (any_bits(roots.arm)) {
+        out += ", \"root_arm\": \"";
+        append_base64(out, roots.arm);
+        out += "\"";
+    }
+    if (any_bits(roots.thumb)) {
+        out += ", \"root_thumb\": \"";
+        append_base64(out, roots.thumb);
+        out += "\"";
+    }
+    uint64_t total = 0u;
+    for (uint64_t block : roots.hits) total += block;
+    if (total == 0u) return;
+    out += ", \"root_hits\": [";
+    for (uint32_t i = 0; i < kRootBlocks; ++i) {
+        if (i) out += ",";
+        out += std::to_string(roots.hits[i]);
+    }
+    out += "]";
+}
+
+void append_base64(std::string& out, const uint8_t* data, size_t size) {
     size_t i = 0;
-    for (; i + 2 < data.size(); i += 3) {
+    for (; i + 2 < size; i += 3) {
         const uint32_t triple = (uint32_t{data[i]} << 16) |
                                 (uint32_t{data[i + 1]} << 8) |
                                 uint32_t{data[i + 2]};
@@ -187,12 +309,12 @@ void append_base64(std::string& out, const std::vector<uint8_t>& data) {
         out.push_back(kBase64[(triple >> 6) & 0x3Fu]);
         out.push_back(kBase64[triple & 0x3Fu]);
     }
-    if (i + 1 == data.size()) {
+    if (i + 1 == size) {
         const uint32_t triple = uint32_t{data[i]} << 16;
         out.push_back(kBase64[(triple >> 18) & 0x3Fu]);
         out.push_back(kBase64[(triple >> 12) & 0x3Fu]);
         out += "==";
-    } else if (i + 2 == data.size()) {
+    } else if (i + 2 == size) {
         const uint32_t triple =
             (uint32_t{data[i]} << 16) | (uint32_t{data[i + 1]} << 8);
         out.push_back(kBase64[(triple >> 18) & 0x3Fu]);
@@ -319,6 +441,16 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
             else
                 ++it;
         }
+        // The slot is about to hold different code. Its fanout counters must
+        // go too, or the new generation inherits a full caller budget and
+        // records nothing.
+        for (auto it = g_generation_entry_fanout.begin();
+             it != g_generation_entry_fanout.end();) {
+            if (it->first.page_index == evict_index)
+                it = g_generation_entry_fanout.erase(it);
+            else
+                ++it;
+        }
         StoredPage& replacement = g_pages[evict_index];
         replacement.sha1 = digest.hex();
         replacement.digest = digest.bytes;
@@ -326,6 +458,9 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
         replacement.executions = 1u;
         replacement.last_seen = ++g_observation_seq;
         replacement.entry_indices.clear();
+        // Generation-bound roots belong to the image being evicted, not to the
+        // one replacing it. The session-wide g_root_map keeps them.
+        replacement.roots.clear();
         g_page_index.emplace(key, evict_index);
         cache.stored_index = evict_index;
         ++g_page_stats.replaced;
@@ -348,7 +483,7 @@ void coverage_capture_exec_page(int cpu, uint32_t base, uint32_t pc) {
     g_pages_by_addr.emplace(address_key, stored_index);
     g_pages.push_back(StoredPage{base, static_cast<uint8_t>(index),
                                  digest.hex(), digest.bytes, std::move(bytes),
-                                 1u, ++g_observation_seq, {}});
+                                 1u, ++g_observation_seq, {}, {}});
     cache.stored_index = stored_index;
     ++g_page_stats.captured;
     g_page_stats.bytes += kPageSize;
@@ -372,20 +507,56 @@ void coverage_note_generation_entry(int cpu, uint32_t pc, bool thumb,
         return;
     }
 
-    const PageEntryKey key{cache.stored_index, aligned_pc, caller,
-                           static_cast<uint8_t>(thumb ? 1u : 0u), kind};
+    const uint8_t mode = static_cast<uint8_t>(thumb ? 1u : 0u);
+
+    // Roots are recorded as bits, not records. Same address set, same mode,
+    // cost attribution kept per 256-byte block; see RootBits above for why the
+    // per-address record shape was the wrong encoding for this data.
+    if (kind == TIER3_COVERAGE_ROOT) {
+        const uint32_t offset = aligned_pc - base;
+        g_pages[cache.stored_index].roots.note(offset, thumb);
+        g_root_map[(static_cast<uint64_t>(index) << 32u) | base]
+            .note(offset, thumb);
+        g_pages[cache.stored_index].last_seen = ++g_observation_seq;
+        return;
+    }
+
+    const PageEntryKey key{cache.stored_index, aligned_pc, caller, mode, kind};
     const auto found = g_generation_entry_index.find(key);
     if (found != g_generation_entry_index.end()) {
         ++g_generation_entries[found->second].hits;
         g_pages[cache.stored_index].last_seen = ++g_observation_seq;
         return;
     }
+
+    // New caller for this entry. Past the cap, fold it into the single
+    // kCallerMany record instead of storing another one; the hit count stays
+    // exact and neither the map nor the manifest grows with the call graph.
+    const PageEntryKey fanout_key{cache.stored_index, aligned_pc,
+                                  kCallerMany, mode, kind};
+    PageFanout& fanout = g_generation_entry_fanout[fanout_key];
+    if (fanout.kept >= kMaxCallersPerEntry) {
+        if (fanout.folded_index < g_generation_entries.size()) {
+            ++g_generation_entries[fanout.folded_index].hits;
+        } else {
+            fanout.folded_index =
+                static_cast<uint32_t>(g_generation_entries.size());
+            g_generation_entries.push_back(
+                StoredEntry{1u, aligned_pc, kCallerMany, mode, kind});
+            g_pages[cache.stored_index].entry_indices.push_back(
+                fanout.folded_index);
+        }
+        g_pages[cache.stored_index].last_seen = ++g_observation_seq;
+        return;
+    }
+
     const uint32_t entry_index =
         static_cast<uint32_t>(g_generation_entries.size());
     g_generation_entry_index.emplace(key, entry_index);
+    ++fanout.kept;
+    if (fanout.kept == 1u) fanout.folded_index = UINT32_MAX;
     g_generation_entries.push_back(
-        StoredEntry{1u, aligned_pc, caller,
-                    static_cast<uint8_t>(thumb ? 1u : 0u), kind});
+        StoredEntry{1u, aligned_pc, caller, mode, kind});
     g_pages[cache.stored_index].entry_indices.push_back(entry_index);
     g_pages[cache.stored_index].last_seen = ++g_observation_seq;
 }
@@ -423,6 +594,10 @@ bool coverage_manifest_flush_part(char* error, unsigned error_cap) {
     g_pages_by_addr.clear();
     g_generation_entries.clear();
     g_generation_entry_index.clear();
+    g_generation_entry_fanout.clear();
+    // g_root_map is deliberately NOT cleared: it is the session-wide execution
+    // map and every part carries the whole of it, exactly as the entry-point
+    // list already did, so each part stays independently ingestible.
     g_page_stats.captured = 0u;
     g_page_stats.bytes = 0u;
     for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
@@ -437,6 +612,8 @@ void coverage_pages_reset() {
     g_pages_by_addr.clear();
     g_generation_entries.clear();
     g_generation_entry_index.clear();
+    g_generation_entry_fanout.clear();
+    g_root_map.clear();
     g_page_stats = {};
     g_observation_seq = 0u;
     for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
@@ -487,7 +664,7 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
 
     std::string out;
     out.reserve(page_indices.size() * 6000u + entries.size() * 96u + 4096u);
-    out += "{\n  \"schema\": 3,\n";
+    out += "{\n  \"schema\": 4,\n";
     out += "  \"kind\": \"ndsrecomp-tier3-coverage\",\n";
     out += "  \"rom_sha1\": ";
     append_json_escaped(out, g_rom_sha1);
@@ -516,6 +693,11 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
         bool first = true;
         for (const Tier3CoverageEntry& entry : entries) {
             if (entry.cpu != cpu) continue;
+            // Roots are carried by root_map / the per-page bitmaps now. They
+            // were 94% of this array and every address in it is still present,
+            // at 1/40th the bytes. tier3's own map is untouched, so the debug
+            // server's tier3_coverage command still reports them per address.
+            if (entry.kind == TIER3_COVERAGE_ROOT) continue;
             if (!first) out += ",";
             first = false;
             out += "\n    {\"addr\": \"" + hex32(entry.pc) + "\"";
@@ -529,6 +711,30 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
         out += first ? "]" : "\n  ]";
     }
 
+    // Session-wide execution map: every page base a root was ever seen in,
+    // independent of whether that page's code is still in the store. This is
+    // what replaces the per-address root list, and unlike the per-page bitmaps
+    // it survives version eviction and part rotation.
+    out += ",\n  \"root_map\": [";
+    {
+        std::vector<uint64_t> keys;
+        keys.reserve(g_root_map.size());
+        for (const auto& item : g_root_map) keys.push_back(item.first);
+        std::sort(keys.begin(), keys.end());
+        bool first_root = true;
+        for (const uint64_t key : keys) {
+            if (!first_root) out += ",";
+            first_root = false;
+            out += "\n    {\"addr\": \"" +
+                   hex32(static_cast<uint32_t>(key)) + "\"";
+            out += ", \"cpu\": ";
+            out += ((key >> 32u) == 1u) ? "7" : "9";
+            append_root_bits(out, g_root_map.at(key));
+            out += "}";
+        }
+        out += first_root ? "]" : "\n  ]";
+    }
+
     out += ",\n  \"pages\": {";
     out += "\"captured\": " + std::to_string(page_indices.size());
     out += ", \"dropped\": " + std::to_string(g_page_stats.dropped);
@@ -537,6 +743,10 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
            std::to_string(page_indices.size() * kPageSize);
     out += ", \"revisits\": " + std::to_string(g_page_stats.revisits);
     out += ", \"page_size\": " + std::to_string(kPageSize);
+    // Declared so an ingest can read a per-page entry whose caller is
+    // 0xFFFFFFFF as "this many further sites, folded" rather than as an
+    // address. Additive: a reader that ignores it still sees exact hits.
+    out += ", \"caller_cap\": " + std::to_string(kMaxCallersPerEntry);
     out += ", \"entries\": [";
     bool first_page = true;
     for (const uint32_t page_index : page_indices) {
@@ -564,6 +774,7 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
             out += ", \"caller\": \"" + hex32(entry.caller) + "\"}";
         }
         out += "]";
+        append_root_bits(out, page.roots);
         out += ", \"data\": \"";
         append_base64(out, page.bytes);
         out += "\"}";

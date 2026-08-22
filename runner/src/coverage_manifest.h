@@ -29,6 +29,33 @@
 //     touched. These files are meant to be handed between people, so that is a
 //     structural property here rather than a scrubbing step applied afterwards.
 //
+// What the manifest records is shaped by how each kind of observation is
+// actually distributed, because the first real player submission was 202 MB
+// carrying 1.27 MB of code:
+//
+//   * ROOTS -- where native code fell into the interpreter -- are DENSE. The
+//     interpreter also re-enters wherever an IRQ or DMA stall interrupted it,
+//     so over a session roots converge on every interpreted instruction: 92% of
+//     the addresses in that submission had another root one instruction away,
+//     in runs up to 415 long. They are stored as per-page bitmaps (ARM at word
+//     stride, Thumb at halfword stride) plus per-256-byte-block hit counters,
+//     both per code generation and in a never-evicted session-wide map. Every
+//     address and mode is preserved; only per-address hit counts become a block
+//     share, and no consumer used those.
+//   * CALL and INDIRECT targets are SPARSE and individually meaningful, so they
+//     stay one record each -- there are only a few thousand.
+//   * The CALLER on a record is diagnostic, not identifying, and keying storage
+//     on it made both the manifest and the resident map scale with the call
+//     graph instead of the code (2,185,955 records for 61,036 tuples). Only a
+//     few distinct callers per entry are kept; the rest fold into one record.
+//
+// Together those took the same session from 202 MB to ~2.6 MB with nothing
+// dropped. Deliberately NOT done: omitting page bytes that are verbatim ROM
+// content. 93.5% of captured pages are, which makes it the tempting cut, but
+// all the page bytes together are under 1% of the original file, and they are
+// the only part that cannot be reconstructed and the only thing that lets an
+// ingest verify a stranger's manifest against the ROM.
+//
 // The hot path is one compare per interpreted instruction. bus.cpp already
 // keeps a write generation per 4 KB exec page and every guest write -- slow bus
 // path and generated-bank inline fast path alike -- funnels through

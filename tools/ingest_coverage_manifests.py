@@ -5,11 +5,19 @@ beads-yjp.28. The runner writes one manifest per session (see
 runner/src/coverage_manifest.cpp). This turns any number of them -- from any
 number of people, across any number of sessions -- into:
 
-  * a merged entry-point TOML for addresses that live in immutable
-    ROM-derived ranges, where the address plus the ROM SHA-1 is enough, and
-  * one content-validated bank per contiguous run of captured code pages,
-    with the run's bytes written alongside it, for the runtime-resident code
-    (ITCM, overlays, ARM7 WRAM) where an address alone identifies nothing.
+  * ROM-ALIAS FINDINGS: captured pages whose bytes are verbatim ROM content
+    resident at a load address no bank declares. These are the highest-value
+    output by a wide margin and need no dumped bytes at all, only the base.
+    The first real submission was 93.5% this: the whole ARM7 module runs from
+    two runtime aliases (0x037F7E50, 0x027CFBC4) while the only ARM7 bank is
+    compiled at the header address 0x02380000, so all of it was interpreted.
+  * a merged entry-point TOML for the call and indirect-branch targets, which
+    are the addresses that behave like function entries, and
+  * one content-validated bank per captured code generation, with the bytes
+    written alongside it, for genuinely runtime-materialized code (patched
+    pages, decompressed-in-place regions) that exists nowhere in the ROM.
+  * a ranked report of the interpreted spans that carry the most execution, so
+    "what should be recompiled next" is answered by the data, not guessed.
 
 Merging is monotonic: run it again with more manifests and the corpus only
 grows. Nothing is silently dropped -- every address this tool refuses to
@@ -18,7 +26,8 @@ promote is counted and reported by reason.
 Manifests arrive from other people's machines, so everything in them is
 verified before use: each page's SHA-1 is recomputed from its own bytes, and
 manifests whose ROM SHA-1 disagrees with the target are rejected outright
-rather than blended into the corpus.
+rather than blended into the corpus. They are also large -- the first was
+202 MB -- so they are read incrementally, never json.load'ed whole.
 """
 
 from __future__ import annotations
@@ -31,40 +40,144 @@ import json
 import sys
 from pathlib import Path
 
-# Addresses that are not backed by writable RAM never appear as captured
-# pages; they are promotable from the address alone because the ROM SHA-1
-# pins their bytes. Everything else needs its resident image.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from coverage_stream import stream_manifest          # noqa: E402
+from rom_alias import RomImages, resolve, undeclared  # noqa: E402
+
+# Kinds that behave like function entries. A `root` is where native code fell
+# into the interpreter, which sounds like the same thing but is not: the
+# interpreter also re-enters at whatever instruction an IRQ or DMA stall
+# interrupted, so over a long session roots accumulate at nearly every
+# instruction of every hot interpreted function. Measured on the first real
+# submission, 92% of root addresses have another root exactly one instruction
+# away and the longest unbroken run is 415 instructions. They are an execution
+# map, not a seed list, and are reported as ranges below instead of promoted.
 PROMOTABLE_KINDS = ("call", "indirect")
+
+ARRAY_KEYS = ("entry_points_arm9", "entry_points_arm7", "pages.entries",
+              "root_map")
+
+SUPPORTED_SCHEMAS = (2, 3, 4)
+
+
+def root_addresses(record, base):
+    """Yield (addr, mode, hits) from a schema-4 root bitmap record.
+
+    Schema 4 stores roots as two bitmaps over the page -- ARM at word stride,
+    Thumb at halfword stride -- plus 16 per-256-byte-block hit counters, rather
+    than one JSON record per address. The address set and the mode survive
+    exactly; what is approximated is the per-address hit count, which is
+    reported at block resolution. Nothing consumed per-address root hits: the
+    range report sums them and the overlay seeder only annotates with them.
+    """
+    blocks = record.get("root_hits") or []
+    per_block = len(blocks)
+    found: list[tuple[int, str]] = []
+    for key, stride in (("root_arm", 4), ("root_thumb", 2)):
+        blob = record.get(key)
+        if not blob:
+            continue
+        raw = base64.b64decode(blob)
+        mode = "arm" if stride == 4 else "thumb"
+        for byte_index, byte in enumerate(raw):
+            if not byte:
+                continue
+            for bit in range(8):
+                if byte & (1 << bit):
+                    found.append(
+                        (base + ((byte_index * 8 + bit) * stride), mode))
+
+    if not per_block:
+        for addr, mode in found:
+            yield addr, mode, 0
+        return
+
+    # Spread each block's count across the addresses set inside it, so that
+    # summing any set of addresses stays proportional and summing a whole block
+    # reproduces its count exactly. Handing every address the full block total
+    # instead would inflate a span's cost by its own length.
+    def block_of(addr):
+        return min(((addr - base) * per_block) // 4096, per_block - 1)
+
+    per = collections.Counter(block_of(addr) for addr, _ in found)
+    remainder = {b: blocks[b] % n for b, n in per.items()}
+    for addr, mode in sorted(found):
+        b = block_of(addr)
+        share = blocks[b] // per[b]
+        if remainder.get(b):
+            share += 1
+            remainder[b] -= 1
+        yield addr, mode, share
 
 
 def load_manifest(path: Path, rom_sha1: str | None, problems: list[str]):
+    """Stream one manifest, returning (header, entries, pages) or None.
+
+    The header scalars arrive before the arrays, so the ROM-SHA-1 and schema
+    gates are applied as soon as they are known: a mismatched manifest costs a
+    few hundred bytes of reading rather than a full parse of someone else's
+    two-hundred-megabyte dump.
+    """
+    header: dict = {}
+    entries: list[tuple[int, dict]] = []
+    pages: list[dict] = []
+    root_map: list[dict] = []
+    checked = False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        for kind, key, value in stream_manifest(path, ARRAY_KEYS):
+            if kind == "scalar":
+                header[key] = value
+                continue
+            if not checked:
+                reason = _reject_reason(header, rom_sha1)
+                if reason:
+                    problems.append(f"{path.name}: {reason}")
+                    return None
+                checked = True
+            if key == "entry_points_arm9":
+                entries.append((9, value))
+            elif key == "entry_points_arm7":
+                entries.append((7, value))
+            elif key == "root_map":
+                root_map.append(value)
+            else:
+                pages.append(value)
+    except (OSError, ValueError) as error:
         problems.append(f"{path.name}: unreadable ({error})")
         return None
-    if data.get("kind") != "ndsrecomp-tier3-coverage":
-        problems.append(f"{path.name}: not an ndsrecomp coverage manifest")
-        return None
-    if data.get("schema") != 2:
-        problems.append(
-            f"{path.name}: schema {data.get('schema')!r}, expected 2")
-        return None
-    got_rom = str(data.get("rom_sha1", "")).lower()
-    if rom_sha1 and got_rom != rom_sha1:
-        problems.append(
-            f"{path.name}: ROM SHA-1 {got_rom or '(none)'} does not match "
-            f"the target {rom_sha1}; refusing to merge a different dump")
-        return None
-    return data
+    if not checked:
+        reason = _reject_reason(header, rom_sha1)
+        if reason:
+            problems.append(f"{path.name}: {reason}")
+            return None
+    return header, entries, pages, root_map
+
+
+def _reject_reason(header: dict, rom_sha1: str | None) -> str | None:
+    if header.get("kind") != "ndsrecomp-tier3-coverage":
+        return "not an ndsrecomp coverage manifest"
+    if header.get("schema") not in SUPPORTED_SCHEMAS:
+        return (f"schema {header.get('schema')!r}, expected one of "
+                f"{', '.join(str(s) for s in SUPPORTED_SCHEMAS)}")
+    got = str(header.get("rom_sha1", "")).lower()
+    if rom_sha1 and got != rom_sha1:
+        return (f"ROM SHA-1 {got or '(none)'} does not match the target "
+                f"{rom_sha1}; refusing to merge a different dump")
+    return None
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("manifests", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, required=True,
                         help="output directory for the seeds and images")
+    parser.add_argument("--images", type=Path, default=None,
+                        help="prepared ROM image directory (arm9.bin, "
+                             "arm7.bin, overlays/, overlays.json). Supplying "
+                             "it enables ROM-alias resolution, which is where "
+                             "most of the value in a manifest actually is")
     parser.add_argument("--rom-sha1", default=None,
                         help="required ROM SHA-1; manifests that disagree are "
                              "rejected (defaults to the first manifest's)")
@@ -80,32 +193,44 @@ def main() -> int:
     problems: list[str] = []
     rom_sha1 = args.rom_sha1.lower() if args.rom_sha1 else None
 
-    # (cpu, addr, mode) -> {hits, kinds, sources}
     entries: dict[tuple[int, int, str], dict] = {}
-    # (cpu, addr) -> {sha1: bytes}
-    pages: dict[tuple[int, int], dict[str, bytes]] = {}
-    rejected = collections.Counter()
-    accepted_manifests = 0
+    # (cpu, addr, sha1) -> {"bytes", "entries": {(pc, mode): slot}, "executions"}
+    versions: dict[tuple[int, int, str], dict] = {}
+    roots: dict[int, dict[int, int]] = {9: {}, 7: {}}
+    rejected: collections.Counter = collections.Counter()
+    accepted = 0
     build_ids: set[str] = set()
+    truncated = False
 
     for path in args.manifests:
-        data = load_manifest(path, rom_sha1, problems)
-        if data is None:
+        loaded = load_manifest(path, rom_sha1, problems)
+        if loaded is None:
             continue
+        header, manifest_entries, manifest_pages, manifest_roots = loaded
         if rom_sha1 is None:
-            rom_sha1 = str(data.get("rom_sha1", "")).lower()
-        accepted_manifests += 1
-        if data.get("build_id"):
-            build_ids.add(str(data["build_id"]))
+            rom_sha1 = str(header.get("rom_sha1", "")).lower()
+        accepted += 1
+        if header.get("build_id"):
+            build_ids.add(str(header["build_id"]))
 
-        if int(data.get("pages", {}).get("dropped", 0)) > 0:
+        dropped = int(header.get("pages.dropped", 0))
+        if dropped > 0:
+            truncated = True
             problems.append(
                 f"{path.name}: the runner hit its page-store cap, so this "
-                f"manifest is INCOMPLETE ({data['pages']['dropped']} pages "
-                f"were refused)")
+                f"manifest is INCOMPLETE ({dropped} pages were refused)")
 
-        page_size = int(data.get("pages", {}).get("page_size", 4096))
-        for page in data.get("pages", {}).get("entries", []):
+        # schema 4 carries roots as bitmaps. The session-wide map survives
+        # page eviction and part rotation, which the per-address list only did
+        # because tier3's own map never forgot an address.
+        for record in manifest_roots:
+            cpu = int(record["cpu"])
+            base = int(record["addr"], 16)
+            for addr, _mode, hits in root_addresses(record, base):
+                roots[cpu][addr] = roots[cpu].get(addr, 0) + hits
+
+        page_size = int(header.get("pages.page_size", 4096))
+        for page in manifest_pages:
             raw = base64.b64decode(page["data"])
             if len(raw) != page_size:
                 rejected["page: wrong length"] += 1
@@ -117,23 +242,47 @@ def main() -> int:
                 continue
             cpu = int(page["cpu"])
             addr = int(page["addr"], 16)
-            pages.setdefault((cpu, addr), {})[actual] = raw
-
-        for cpu, key in ((9, "entry_points_arm9"), (7, "entry_points_arm7")):
-            for entry in data.get(key, []):
+            slot = versions.setdefault(
+                (cpu, addr, actual),
+                {"bytes": raw, "entries": {}, "executions": 0})
+            slot["executions"] += int(page.get("executions", 0))
+            # schema 3 associates each entry with the exact page generation it
+            # was observed under. schema 2 carried no such association, which
+            # is why the old assembler had to guess by pairing equal version
+            # indices across addresses; with schema 3 there is nothing to guess.
+            for entry in page.get("entry_points", []):
                 kind = entry.get("kind")
-                if kind not in PROMOTABLE_KINDS:
-                    # Roots are scheduler resume points, which usually land
-                    # mid-function and make poor seeds.
-                    rejected[f"entry: kind={kind}"] += 1
+                pc = int(entry["addr"], 16)
+                hits = int(entry.get("hits", 0))
+                if kind == "root":
+                    roots[cpu][pc] = roots[cpu].get(pc, 0) + hits
                     continue
-                slot = entries.setdefault(
-                    (cpu, int(entry["addr"], 16), entry["mode"]),
-                    {"hits": 0, "kinds": set()})
-                slot["hits"] += int(entry.get("hits", 0))
-                slot["kinds"].add(kind)
+                if kind not in PROMOTABLE_KINDS:
+                    rejected[f"page entry: kind={kind}"] += 1
+                    continue
+                key = (pc, entry["mode"])
+                held = slot["entries"].setdefault(
+                    key, {"hits": 0, "kinds": set()})
+                held["hits"] += hits
+                held["kinds"].add(kind)
 
-    if not accepted_manifests:
+        for cpu, entry in manifest_entries:
+            kind = entry.get("kind")
+            pc = int(entry["addr"], 16)
+            hits = int(entry.get("hits", 0))
+            if kind == "root":
+                roots[cpu][pc] = max(roots[cpu].get(pc, 0), hits)
+                rejected["entry: kind=root (reported as a range instead)"] += 1
+                continue
+            if kind not in PROMOTABLE_KINDS:
+                rejected[f"entry: kind={kind}"] += 1
+                continue
+            slot = entries.setdefault(
+                (cpu, pc, entry["mode"]), {"hits": 0, "kinds": set()})
+            slot["hits"] += hits
+            slot["kinds"].add(kind)
+
+    if not accepted:
         for problem in problems:
             print(f"  ! {problem}", file=sys.stderr)
         print("no usable manifests", file=sys.stderr)
@@ -146,77 +295,95 @@ def main() -> int:
             dropped_low_hits += 1
 
     args.out.mkdir(parents=True, exist_ok=True)
+
+    # ---- ROM-alias resolution --------------------------------------------
+    alias_findings: list[dict] = []
+    aliased_pages = 0
+    page_target: dict[tuple[int, int], tuple[str, int]] = {}
+    if args.images:
+        images = RomImages(args.images)
+        aliases, unresolved = resolve(
+            ((cpu, addr, slot["bytes"])
+             for (cpu, addr, _sha), slot in versions.items()), images)
+        aliased_pages = sum(len(v["addrs"]) for v in aliases.values())
+        alias_findings = undeclared(aliases, images)
+        for (cpu, module, base), slot in aliases.items():
+            for addr in slot["addrs"]:
+                page_target[(cpu, addr)] = (module, base)
+        unresolved_keys = [
+            key for key, slot in versions.items()
+            if images.locate(slot["bytes"]) is None]
+    else:
+        problems.append(
+            "--images was not supplied, so no ROM-alias resolution ran; on the "
+            "first real submission that would have hidden 93.5% of the finding")
+        unresolved_keys = list(versions)
+
+    # ---- banks for genuinely runtime-materialized code --------------------
     images_dir = args.out / "images"
-
-    # Assemble contiguous runs of captured pages per (cpu, content choice).
-    # A page address can hold several distinct contents across a playthrough
-    # (overlay generations); each becomes its own bank, exactly as the
-    # existing SM64DS gameplay/boot RAM banks do.
-    page_size = 4096
-    by_cpu: dict[int, dict[int, dict[str, bytes]]] = collections.defaultdict(dict)
-    for (cpu, addr), versions in pages.items():
-        by_cpu[cpu][addr] = versions
-
     banks_written = 0
-    covered_by_image = 0
-    if pages:
+    entries_in_banks = 0
+    runs = assemble_runs(versions, unresolved_keys, entries)
+    if runs:
         images_dir.mkdir(parents=True, exist_ok=True)
-    for cpu, addr_map in sorted(by_cpu.items()):
-        # Generation index: version 0 of every address forms bank 0, version 1
-        # forms bank 1, and so on. Addresses with fewer versions simply do not
-        # appear in the later banks.
-        max_versions = max(len(v) for v in addr_map.values())
-        for generation in range(max_versions):
-            selected: dict[int, bytes] = {}
-            for addr, versions in addr_map.items():
-                ordered = [versions[k] for k in sorted(versions)]
-                if generation < len(ordered):
-                    selected[addr] = ordered[generation]
-            if not selected:
-                continue
-            for run_start, run_bytes in contiguous_runs(selected, page_size):
-                run_end = run_start + len(run_bytes)
-                run_entries = [
-                    (addr, mode, slot)
-                    for (ecpu, addr, mode), slot in sorted(entries.items())
-                    if ecpu == cpu and run_start <= addr < run_end
-                ]
-                if not run_entries:
-                    continue
-                covered_by_image += len(run_entries)
-                identity = hashlib.sha1(run_bytes).hexdigest()
-                stem = (f"{args.bank_prefix}_arm{cpu}_"
-                        f"{run_start:08x}_g{generation}")
-                (images_dir / f"{stem}.bin").write_bytes(run_bytes)
-                write_bank_toml(
-                    images_dir / f"{stem}.toml", stem, cpu,
-                    args.isa9 if cpu == 9 else args.isa7,
-                    run_start, len(run_bytes), identity, run_entries,
-                    rom_sha1)
-                banks_written += 1
+    for cpu, start, blob, run_entries in runs:
+        if not run_entries:
+            continue
+        entries_in_banks += len(run_entries)
+        identity = hashlib.sha1(blob).hexdigest()
+        stem = f"{args.bank_prefix}_arm{cpu}_{start:08x}_{identity[:8]}"
+        (images_dir / f"{stem}.bin").write_bytes(blob)
+        write_bank_toml(images_dir / f"{stem}.toml", stem, cpu,
+                        args.isa9 if cpu == 9 else args.isa7,
+                        start, len(blob), identity, run_entries, rom_sha1)
+        banks_written += 1
 
-    # Everything not inside a captured image is promotable by address alone
-    # only if it is genuinely immutable; we cannot tell from here, so emit it
-    # separately and label it honestly.
-    addressed = [
-        (cpu, addr, mode, slot)
-        for (cpu, addr, mode), slot in sorted(entries.items())
-    ]
-    write_entry_toml(args.out / "entry_points.toml", addressed, rom_sha1,
-                     accepted_manifests, sorted(build_ids))
+    write_entry_toml(args.out / "entry_points.toml",
+                     sorted(entries.items()), rom_sha1, accepted,
+                     sorted(build_ids))
+
+    # A flat seed list is not actionable on its own: an address is only a seed
+    # for the bank whose image holds those bytes at that address. Split the
+    # merged list by the module and base each seed's page resolved to, so each
+    # file drops straight into the matching bank config.
+    seeds_dir = args.out / "seeds"
+    by_target: dict[str, list] = collections.defaultdict(list)
+    for key, slot in sorted(entries.items()):
+        cpu, addr, _mode = key
+        target = page_target.get((cpu, addr & ~0xFFF))
+        name = (f"arm{cpu}_{Path(target[0]).stem}_{target[1]:08x}"
+                if target else f"arm{cpu}_unresolved")
+        by_target[name].append((key, slot))
+    if by_target:
+        seeds_dir.mkdir(parents=True, exist_ok=True)
+    for name, items in sorted(by_target.items()):
+        write_entry_toml(seeds_dir / f"{name}.toml", items, rom_sha1,
+                         accepted, sorted(build_ids))
+
+    hot = hot_ranges(roots)
+    (args.out / "interpreted-ranges.json").write_text(
+        json.dumps(hot, indent=2), encoding="utf-8", newline="\n")
 
     report = {
-        "manifests_accepted": accepted_manifests,
+        "manifests_accepted": accepted,
         "manifests_rejected": len(problems),
+        "manifests_incomplete": truncated,
         "rom_sha1": rom_sha1,
         "build_ids": sorted(build_ids),
+        "rom_alias_findings": [describe_alias(f) for f in alias_findings],
+        "pages_resolved_to_rom": aliased_pages,
+        "page_versions_total": len(versions),
+        "page_versions_not_in_rom": len(unresolved_keys),
         "entry_points_merged": len(entries),
-        "entry_points_inside_captured_images": covered_by_image,
-        "entry_points_address_only": len(entries) - covered_by_image,
         "entry_points_dropped_below_min_hits": dropped_low_hits,
-        "distinct_page_addresses": len(pages),
-        "distinct_page_versions": sum(len(v) for v in pages.values()),
+        "entry_points_placed_in_banks": entries_in_banks,
+        "entry_points_by_target": {name: len(items)
+                                   for name, items in sorted(by_target.items())},
         "banks_written": banks_written,
+        "interpreted_ranges": {
+            "arm9": len(hot.get("arm9", [])),
+            "arm7": len(hot.get("arm7", [])),
+        },
         "rejected": dict(rejected),
         "problems": problems,
     }
@@ -226,22 +393,129 @@ def main() -> int:
     return 0
 
 
-def contiguous_runs(selected: dict[int, bytes], page_size: int):
-    """Yield (start_addr, joined_bytes) for each maximal contiguous run."""
-    run_start = None
-    previous = None
-    chunks: list[bytes] = []
-    for addr in sorted(selected):
-        if previous is not None and addr == previous + page_size:
-            chunks.append(selected[addr])
-        else:
+def describe_alias(finding: dict) -> dict:
+    declared = finding["declared_base"]
+    return {
+        "cpu": f"arm{finding['cpu']}",
+        "module": finding["module"],
+        "resident_base": f"0x{finding['base']:08X}",
+        "declared_base": (f"0x{declared:08X}" if declared is not None
+                          else None),
+        "pages": finding["pages"],
+        "guest_span": (f"0x{finding['guest_span'][0]:08X}.."
+                       f"0x{finding['guest_span'][1]:08X}"),
+        "module_span": (f"0x{finding['module_span'][0]:X}.."
+                        f"0x{finding['module_span'][1]:X}"),
+        "note": "resident at a base no bank declares; recompile the module "
+                "at this base, no dumped bytes required",
+    }
+
+
+def assemble_runs(versions, unresolved_keys, session_entries=None):
+    """Group unresolved page versions into contiguous, unambiguous runs.
+
+    A run may only be extended across a page boundary when the next address has
+    exactly ONE captured version. With several versions at an address there is
+    nothing in the manifest that says which one was resident alongside the
+    previous page, and the old assembler's answer -- pair equal indices in
+    SHA-1 sort order -- concatenates unrelated overlay generations into one
+    image. That is fail-safe at runtime, because dispatch validates each
+    function against live bytes, but it silently wastes the coverage. Stopping
+    at the ambiguity costs a shorter run and loses nothing.
+
+    A schema-2 manifest has no page-scoped entries at all, so a run assembled
+    from one would carry no seeds and be dropped. For those, fall back to the
+    session-wide entries that fall inside the run's address range -- which is
+    all schema 2 ever supported, and the only reason the old assembler had to
+    attribute by address in the first place.
+    """
+    version_count: collections.Counter = collections.Counter()
+    for cpu, addr, _sha in versions:
+        version_count[(cpu, addr)] += 1
+
+    by_cpu: dict[int, list] = collections.defaultdict(list)
+    for key in unresolved_keys:
+        cpu, addr, sha = key
+        by_cpu[cpu].append((addr, sha, versions[key]))
+
+    runs = []
+    for cpu, items in sorted(by_cpu.items()):
+        items.sort(key=lambda item: (item[0], item[1]))
+        index = 0
+        while index < len(items):
+            addr, _sha, slot = items[index]
+            page_size = len(slot["bytes"])
+            chunks = [slot["bytes"]]
+            run_entries = {key: dict(held, kinds=set(held["kinds"]))
+                           for key, held in slot["entries"].items()}
+            start = addr
+            previous = addr
+            index += 1
+            # Only an address with a single captured version can be appended:
+            # anything else would be a guess about what was resident with it.
+            while (index < len(items)
+                   and version_count[(cpu, previous)] == 1):
+                next_addr, _next_sha, next_slot = items[index]
+                if next_addr != previous + page_size:
+                    break
+                if version_count[(cpu, next_addr)] != 1:
+                    break
+                chunks.append(next_slot["bytes"])
+                for key, held in next_slot["entries"].items():
+                    merged = run_entries.setdefault(
+                        key, {"hits": 0, "kinds": set()})
+                    merged["hits"] += held["hits"]
+                    merged["kinds"] |= held["kinds"]
+                previous = next_addr
+                index += 1
+            blob = b"".join(chunks)
+            if not run_entries and session_entries:
+                run_entries = {
+                    (pc, mode): held
+                    for (ecpu, pc, mode), held in session_entries.items()
+                    if ecpu == cpu and start <= pc < start + len(blob)}
+            ordered = sorted(
+                (pc, mode, held) for (pc, mode), held in run_entries.items()
+                if start <= pc < start + len(blob))
+            runs.append((cpu, start, blob, ordered))
+    return runs
+
+
+def hot_ranges(roots):
+    """Merge root addresses into contiguous interpreted spans, hottest first.
+
+    Roots are where the interpreter was entered. Individually they are poor
+    seeds, but merged they are the honest answer to "which code is still being
+    interpreted, and how much does it cost", which is the question a coverage
+    submission exists to answer. Nothing here is thrown away silently: what the
+    seed path refuses shows up in this file instead.
+    """
+    out: dict[str, list] = {}
+    for cpu, hits in roots.items():
+        spans = []
+        run_start = None
+        previous = None
+        total = 0
+        for addr in sorted(hits):
+            if previous is not None and addr - previous <= 4:
+                total += hits[addr]
+                previous = addr
+                continue
             if run_start is not None:
-                yield run_start, b"".join(chunks)
+                spans.append(_span(run_start, previous, total))
             run_start = addr
-            chunks = [selected[addr]]
-        previous = addr
-    if run_start is not None:
-        yield run_start, b"".join(chunks)
+            previous = addr
+            total = hits[addr]
+        if run_start is not None:
+            spans.append(_span(run_start, previous, total))
+        spans.sort(key=lambda span: -span["entries"])
+        out[f"arm{cpu}"] = spans
+    return out
+
+
+def _span(start: int, last: int, entries: int) -> dict:
+    return {"start": f"0x{start:08X}", "end": f"0x{last + 4:08X}",
+            "bytes": last + 4 - start, "entries": entries}
 
 
 def write_bank_toml(path: Path, bank_id: str, cpu: int, isa: str,
@@ -252,6 +526,8 @@ def write_bank_toml(path: Path, bank_id: str, cpu: int, isa: str,
         "# Assembled from player-submitted Tier-3 coverage manifests; every",
         "# page was SHA-1 verified against its own bytes before assembly, and",
         "# the bank is content-validated against live guest bytes at dispatch.",
+        "# These bytes exist nowhere in the ROM -- code that does is reported",
+        "# as a load-base finding instead, which needs no dumped bytes.",
         "",
         "[program]",
         f'name         = "coverage bank arm{cpu} @ 0x{load_address:08X}"',
@@ -289,12 +565,13 @@ def write_entry_toml(path: Path, addressed, rom_sha1, manifest_count,
         f"# ROM SHA-1: {rom_sha1}",
         f"# Runner build(s): {', '.join(build_ids) if build_ids else 'unknown'}",
         "#",
-        "# Every Tier-3 call/indirect target observed. Addresses inside an",
-        "# immutable ROM-derived range are usable as seeds directly; addresses",
-        "# in runtime-materialized memory need the matching bank in images/.",
+        "# Every Tier-3 call and indirect-branch target observed. An address",
+        "# here is a seed only for the bank whose image actually holds these",
+        "# bytes at this address; see ingest-report.json for which module and",
+        "# load base each captured page resolved to.",
         "",
     ]
-    for cpu, addr, mode, slot in addressed:
+    for (cpu, addr, mode), slot in addressed:
         lines += [
             "[[entry_point]]",
             f"addr = 0x{addr:08X}",
