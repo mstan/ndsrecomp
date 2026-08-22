@@ -784,17 +784,33 @@ public:
 
     uint16_t RecvReplies(uint8_t* data, uint64_t timestamp, uint16_t aidmask) {
         uint16_t received = 0;
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(25);
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + std::chrono::milliseconds(25);
+        stats_recv_replies_calls_.fetch_add(1, std::memory_order_relaxed);
         for (;;) {
             DrainSocket();
             LocalMpFrame frame;
             if (!reply_queue_.TryPop(&frame)) {
-                if (std::chrono::steady_clock::now() >= deadline) break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // Wait on the socket itself: a datagram arrival wakes this
+                // thread immediately. Sleeping a fixed tick here instead
+                // costs every MP cmd/reply exchange a millisecond-scale
+                // round trip on BOTH peers (the client is symmetrically
+                // sleep-polling in RecvPacketGeneric), and a video frame
+                // runs many MP exchanges -- that is what capped local
+                // wireless at ~20 FPS while infrastructure-mode Wiimmfi
+                // (which never blocks here) held 60.
+                if (!WaitForData(deadline)) {
+                    stats_recv_replies_timeouts_.fetch_add(
+                        1, std::memory_order_relaxed);
+                    break;
+                }
                 continue;
             }
-            if (frame.timestamp + 32u < timestamp) continue;
+            if (frame.timestamp + 32u < timestamp) {
+                stats_stale_reply_drops_.fetch_add(1,
+                                                   std::memory_order_relaxed);
+                continue;
+            }
             const uint16_t aid = static_cast<uint16_t>(frame.type >> 16u);
             if (aid == 0 || aid > 15) continue;
             if ((aidmask & (1u << aid)) == 0) continue;
@@ -805,7 +821,34 @@ public:
             received |= static_cast<uint16_t>(1u << aid);
             if ((received & aidmask) == aidmask) break;
         }
+        stats_recv_replies_wait_us_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count()),
+            std::memory_order_relaxed);
         return received;
+    }
+
+    void SnapshotStats(NdsLocalMpStats* out) const {
+        out->enabled = enabled_;
+        out->frames_sent =
+            stats_frames_sent_.load(std::memory_order_relaxed);
+        out->frames_received =
+            stats_frames_received_.load(std::memory_order_relaxed);
+        out->recv_replies_calls =
+            stats_recv_replies_calls_.load(std::memory_order_relaxed);
+        out->recv_replies_timeouts =
+            stats_recv_replies_timeouts_.load(std::memory_order_relaxed);
+        out->recv_replies_wait_us =
+            stats_recv_replies_wait_us_.load(std::memory_order_relaxed);
+        out->recv_host_calls =
+            stats_recv_host_calls_.load(std::memory_order_relaxed);
+        out->recv_host_timeouts =
+            stats_recv_host_timeouts_.load(std::memory_order_relaxed);
+        out->recv_host_wait_us =
+            stats_recv_host_wait_us_.load(std::memory_order_relaxed);
+        out->stale_reply_drops =
+            stats_stale_reply_drops_.load(std::memory_order_relaxed);
     }
 
 private:
@@ -816,23 +859,65 @@ private:
     static constexpr size_t kQueueCapacity = 1024;
 
     int RecvPacketGeneric(uint8_t* data, uint64_t* timestamp, bool block) {
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(25);
+        const auto start = std::chrono::steady_clock::now();
+        const auto deadline = start + std::chrono::milliseconds(25);
+        if (block)
+            stats_recv_host_calls_.fetch_add(1, std::memory_order_relaxed);
         for (;;) {
             DrainSocket();
             LocalMpFrame frame;
             if (!packet_queue_.TryPop(&frame)) {
-                if (!block || std::chrono::steady_clock::now() >= deadline)
-                    return 0;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
+                if (!block) return 0;
+                // See RecvReplies: wake on datagram arrival, never on a
+                // sleep tick. The client sits here at every NextSync point
+                // waiting for the host's next MP frame, so this wait's
+                // latency directly paces BOTH instances.
+                if (WaitForData(deadline)) continue;
+                stats_recv_host_timeouts_.fetch_add(
+                    1, std::memory_order_relaxed);
+                RecordHostWait(start);
+                return 0;
             }
             if (timestamp) *timestamp = frame.timestamp;
             if (frame.type == 1u) last_host_id_ = static_cast<int>(frame.sender);
             if (!frame.payload.empty())
                 std::memcpy(data, frame.payload.data(), frame.payload.size());
+            if (block) RecordHostWait(start);
             return static_cast<int>(frame.payload.size());
         }
+    }
+
+    void RecordHostWait(std::chrono::steady_clock::time_point start) {
+        stats_recv_host_wait_us_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count()),
+            std::memory_order_relaxed);
+    }
+
+    // Blocks until the transport socket is readable or `deadline` passes.
+    // True = readable (caller should DrainSocket and re-check its queue),
+    // false = deadline reached. select() wakes on arrival with microsecond
+    // latency; the timeout only bites when the peer is genuinely absent.
+    bool WaitForData(std::chrono::steady_clock::time_point deadline) {
+#ifdef _WIN32
+        if (socket_ == INVALID_SOCKET) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return false;
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::microseconds>(deadline -
+                                                                  now);
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(socket_, &readable);
+        timeval tv{};
+        tv.tv_sec = static_cast<long>(remaining.count() / 1000000);
+        tv.tv_usec = static_cast<long>(remaining.count() % 1000000);
+        return ::select(0, &readable, nullptr, nullptr, &tv) > 0;
+#else
+        (void)deadline;
+        return false;
+#endif
     }
 
     int SendGeneric(uint32_t type, uint8_t* data, int len,
@@ -866,6 +951,7 @@ private:
                          reinterpret_cast<sockaddr*>(&target),
                          sizeof(target)) != SOCKET_ERROR) {
                 sent = len;
+                stats_frames_sent_.fetch_add(1, std::memory_order_relaxed);
             } else if (send_error_log_counter_ < 8u) {
                 ++send_error_log_counter_;
                 melonDS::Platform::Log(melonDS::Platform::Warn,
@@ -917,6 +1003,7 @@ private:
             frame.payload.assign(datagram + kHeaderBytes,
                                  datagram + kHeaderBytes + len);
 
+            stats_frames_received_.fetch_add(1, std::memory_order_relaxed);
             const uint32_t low_type = frame.type & 0xFFFFu;
             if (low_type == 2u)
                 reply_queue_.TryPush(std::move(frame));
@@ -941,6 +1028,18 @@ private:
     LocalMpFrameQueue reply_queue_{kQueueCapacity};
     int last_host_id_ = -1;
     uint32_t send_error_log_counter_ = 0;
+    // Always-on wait/traffic counters (see NdsLocalMpStats in wifi_net.h).
+    // Relaxed atomics: written on the emulation thread, snapshotted from
+    // the debug-server thread.
+    std::atomic<uint64_t> stats_frames_sent_{0};
+    std::atomic<uint64_t> stats_frames_received_{0};
+    std::atomic<uint64_t> stats_recv_replies_calls_{0};
+    std::atomic<uint64_t> stats_recv_replies_timeouts_{0};
+    std::atomic<uint64_t> stats_recv_replies_wait_us_{0};
+    std::atomic<uint64_t> stats_recv_host_calls_{0};
+    std::atomic<uint64_t> stats_recv_host_timeouts_{0};
+    std::atomic<uint64_t> stats_recv_host_wait_us_{0};
+    std::atomic<uint64_t> stats_stale_reply_drops_{0};
 #ifdef _WIN32
     SOCKET socket_ = INVALID_SOCKET;
 #endif
@@ -1868,6 +1967,12 @@ bool nds_wifi_replay_status(NdsNetReplayStatus* out) {
 
 void nds_wifi_configure_network(const NdsWifiNetworkConfig& config) {
     g_network_config = config;
+}
+
+bool nds_wifi_local_mp_stats(NdsLocalMpStats* out) {
+    if (!g_bridge) return false;
+    g_bridge->local_mp.SnapshotStats(out);
+    return true;
 }
 
 void nds_wifi3d_detach() {

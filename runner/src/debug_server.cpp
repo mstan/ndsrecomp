@@ -853,6 +853,30 @@ std::string handle(const std::string& line) {
         out += "}}";
         return out;
     }
+    if (cmd == "local_mp_stats") {
+        NdsLocalMpStats mp{};
+        const bool has = nds_wifi_local_mp_stats(&mp);
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "{\"attached\":%s,\"enabled\":%s,"
+            "\"frames_sent\":%llu,\"frames_received\":%llu,"
+            "\"recv_replies_calls\":%llu,\"recv_replies_timeouts\":%llu,"
+            "\"recv_replies_wait_us\":%llu,"
+            "\"recv_host_calls\":%llu,\"recv_host_timeouts\":%llu,"
+            "\"recv_host_wait_us\":%llu,\"stale_reply_drops\":%llu}",
+            has ? "true" : "false",
+            has && mp.enabled ? "true" : "false",
+            (unsigned long long)mp.frames_sent,
+            (unsigned long long)mp.frames_received,
+            (unsigned long long)mp.recv_replies_calls,
+            (unsigned long long)mp.recv_replies_timeouts,
+            (unsigned long long)mp.recv_replies_wait_us,
+            (unsigned long long)mp.recv_host_calls,
+            (unsigned long long)mp.recv_host_timeouts,
+            (unsigned long long)mp.recv_host_wait_us,
+            (unsigned long long)mp.stale_reply_drops);
+        return std::string(buf);
+    }
     if (cmd == "net_state") {
         NdsNetRingState st{};
         net_ring_debug_state(&st);

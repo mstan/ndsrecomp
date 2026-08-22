@@ -165,6 +165,30 @@ bool nds_wifi_replay_status(NdsNetReplayStatus* out);
 // query through the debug server while the guest is running.
 bool nds_wifi_network_state(NdsWifiNetworkState* out);
 
+// Always-on counters for the local-wireless (NiFi) localhost UDP transport
+// (LocalMpTransport in wifi_net.cpp). The MP_RecvHostPacket/MP_RecvReplies
+// hooks block the emulation thread while the peer instance produces the
+// frame they need, so wall-clock spent inside them is emulation time the
+// frame budget loses -- these counters are how a probe attributes a local
+// multiplayer FPS drop to transport waits without arming anything.
+// Written from the emulation thread, snapshotted from the debug-server
+// thread (relaxed atomics; monotonic counters, no cross-field invariant).
+struct NdsLocalMpStats {
+    bool enabled = false;
+    uint64_t frames_sent = 0;        // datagrams handed to sendto (per call)
+    uint64_t frames_received = 0;    // datagrams accepted into a queue
+    uint64_t recv_replies_calls = 0;    // host: MP_RecvReplies invocations
+    uint64_t recv_replies_timeouts = 0; // host: hit the 25 ms deadline
+    uint64_t recv_replies_wait_us = 0;  // host: total wall-clock inside calls
+    uint64_t recv_host_calls = 0;       // client: blocking MP_RecvHostPacket
+    uint64_t recv_host_timeouts = 0;    // client: hit the 25 ms deadline
+    uint64_t recv_host_wait_us = 0;     // client: total wall-clock inside calls
+    uint64_t stale_reply_drops = 0;  // replies older than the freshness window
+};
+
+// False if no bridge is attached yet. Read-only; never advances execution.
+bool nds_wifi_local_mp_stats(NdsLocalMpStats* out);
+
 // ── Process-wide Winsock lifecycle (Windows only) ───────────────────────
 // MUST be called exactly once, successfully, before ANY Winsock API call
 // anywhere in this process -- including WSAPoll inside
