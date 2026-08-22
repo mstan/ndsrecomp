@@ -849,6 +849,12 @@ public:
             stats_recv_host_wait_us_.load(std::memory_order_relaxed);
         out->stale_reply_drops =
             stats_stale_reply_drops_.load(std::memory_order_relaxed);
+        for (int i = 0; i < 7; ++i) {
+            out->reply_latency_ms[i] =
+                stats_reply_latency_[i].load(std::memory_order_relaxed);
+            out->turnaround_ms[i] =
+                stats_turnaround_[i].load(std::memory_order_relaxed);
+        }
     }
 
 private:
@@ -920,6 +926,18 @@ private:
 #endif
     }
 
+    static int LatencyBucket(std::chrono::steady_clock::duration d) {
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+        if (ms < 1) return 0;
+        if (ms < 2) return 1;
+        if (ms < 4) return 2;
+        if (ms < 8) return 3;
+        if (ms < 16) return 4;
+        if (ms < 32) return 5;
+        return 6;
+    }
+
     int SendGeneric(uint32_t type, uint8_t* data, int len,
                     uint64_t timestamp) {
         if (!enabled_) return 0;
@@ -927,6 +945,16 @@ private:
         if (socket_ == INVALID_SOCKET) return 0;
         if (len < 0 || static_cast<size_t>(len) > kMaxFrameBytes) return 0;
         if (len > 0 && !data) return 0;
+
+        const auto now = std::chrono::steady_clock::now();
+        const uint32_t low_type = type & 0xFFFFu;
+        if (low_type == 1u) {
+            last_cmd_send_wall_ = now;
+        } else if (low_type == 2u &&
+                   last_cmd_recv_wall_.time_since_epoch().count() != 0) {
+            stats_turnaround_[LatencyBucket(now - last_cmd_recv_wall_)]
+                .fetch_add(1, std::memory_order_relaxed);
+        }
 
         std::vector<uint8_t> datagram;
         datagram.reserve(kHeaderBytes + static_cast<size_t>(len));
@@ -1005,6 +1033,14 @@ private:
 
             stats_frames_received_.fetch_add(1, std::memory_order_relaxed);
             const uint32_t low_type = frame.type & 0xFFFFu;
+            if (low_type == 1u) {
+                last_cmd_recv_wall_ = std::chrono::steady_clock::now();
+            } else if (low_type == 2u &&
+                       last_cmd_send_wall_.time_since_epoch().count() != 0) {
+                stats_reply_latency_[LatencyBucket(
+                    std::chrono::steady_clock::now() - last_cmd_send_wall_)]
+                    .fetch_add(1, std::memory_order_relaxed);
+            }
             if (low_type == 2u)
                 reply_queue_.TryPush(std::move(frame));
             else
@@ -1040,6 +1076,10 @@ private:
     std::atomic<uint64_t> stats_recv_host_timeouts_{0};
     std::atomic<uint64_t> stats_recv_host_wait_us_{0};
     std::atomic<uint64_t> stats_stale_reply_drops_{0};
+    std::atomic<uint64_t> stats_reply_latency_[7] = {};
+    std::atomic<uint64_t> stats_turnaround_[7] = {};
+    std::chrono::steady_clock::time_point last_cmd_send_wall_{};
+    std::chrono::steady_clock::time_point last_cmd_recv_wall_{};
 #ifdef _WIN32
     SOCKET socket_ = INVALID_SOCKET;
 #endif

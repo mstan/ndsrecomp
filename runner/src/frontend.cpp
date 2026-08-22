@@ -1844,8 +1844,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             mph_prime_held[static_cast<size_t>(
                 MphPrimeAction::VirtualStylus)];
 
-        if (turbo_pressed != turbo_active) {
-            turbo_active = turbo_pressed;
+        const bool turbo_want = turbo_pressed || nds_debug_turbo();
+        if (turbo_want != turbo_active) {
+            turbo_active = turbo_want;
             if (audio) {
                 SDL_PauseAudioDevice(audio, 1);
                 clear_audio_queue(audio, audio_queue);

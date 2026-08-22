@@ -4,6 +4,7 @@
 #include "wifi.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -2016,6 +2017,20 @@ void nds_set_key_mask(uint32_t mask) {
     g_keyinput |= key_lo | (key_hi << 16);
     check_key_irq(0, oldkey, g_keyinput);
     check_key_irq(1, oldkey, g_keyinput);
+}
+
+// Debug-server-driven throttle override (the `turbo` command). Same role as
+// the frontend's hold-Tab turbo, but reachable from a probe that has no
+// window focus. Read once per frontend loop iteration; atomic because the
+// debug server writes it from its own thread.
+static std::atomic<bool> g_debug_turbo{false};
+
+void nds_set_debug_turbo(bool enabled) {
+    g_debug_turbo.store(enabled, std::memory_order_relaxed);
+}
+
+bool nds_debug_turbo() {
+    return g_debug_turbo.load(std::memory_order_relaxed);
 }
 
 const NdsEventCounts& nds_event_counts() { return g_counts; }

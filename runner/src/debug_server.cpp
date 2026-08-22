@@ -875,7 +875,22 @@ std::string handle(const std::string& line) {
             (unsigned long long)mp.recv_host_timeouts,
             (unsigned long long)mp.recv_host_wait_us,
             (unsigned long long)mp.stale_reply_drops);
-        return std::string(buf);
+        std::string out(buf);
+        out.pop_back();  // strip closing brace to append the histograms
+        auto append_hist = [&out](const char* name, const uint64_t* v) {
+            out += ",\"";
+            out += name;
+            out += "\":[";
+            for (int i = 0; i < 7; ++i) {
+                if (i) out += ",";
+                out += std::to_string(v[i]);
+            }
+            out += "]";
+        };
+        append_hist("reply_latency_ms", mp.reply_latency_ms);
+        append_hist("turnaround_ms", mp.turnaround_ms);
+        out += "}";
+        return out;
     }
     if (cmd == "net_state") {
         NdsNetRingState st{};
@@ -1565,6 +1580,10 @@ std::string handle(const std::string& line) {
     }
     if (cmd == "keys") {
         nds_set_key_mask(static_cast<uint32_t>(json_u64(line, "mask", 0x3FFu)));
+        return "{\"ok\":true}";
+    }
+    if (cmd == "turbo") {
+        nds_set_debug_turbo(json_bool(line, "on", true));
         return "{\"ok\":true}";
     }
 

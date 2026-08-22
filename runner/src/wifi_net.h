@@ -184,6 +184,13 @@ struct NdsLocalMpStats {
     uint64_t recv_host_timeouts = 0;    // client: hit the 25 ms deadline
     uint64_t recv_host_wait_us = 0;     // client: total wall-clock inside calls
     uint64_t stale_reply_drops = 0;  // replies older than the freshness window
+    // Wall-clock latency histograms, bucket edges 1/2/4/8/16/32 ms (last
+    // bucket = >=32 ms). reply_latency: host side, MP-cmd datagram sent ->
+    // reply datagram received. turnaround: client side, MP-cmd datagram
+    // received -> reply datagram sent. Together they attribute a slow
+    // exchange to the peer's response path vs. the local consume path.
+    uint64_t reply_latency_ms[7] = {};
+    uint64_t turnaround_ms[7] = {};
 };
 
 // False if no bridge is attached yet. Read-only; never advances execution.

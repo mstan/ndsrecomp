@@ -36,10 +36,27 @@ int     g_cur = -1;           // currently-loaded CPU (-1 = none)
 NdsSchedulerProfile g_profile{};
 uint64_t g_profile_rounds = 0;
 
-bool profiling() {
-    static const bool enabled = std::getenv("NDS_PROFILE_SCHED") != nullptr;
-    return enabled;
+// NDS_PROFILE_SCHED: unset = off; "1" or any non-numeric value = the
+// established 1-in-1009 round sampler; a number >= 2 = sample 1 round in
+// that many. "exact" (or NDS_PROFILE_SCHED=every) = time EVERY round --
+// ~3-4% overhead, but heavy-tailed phases (a frame's 3D render burst, a
+// blocking local-MP wait) stop being sampling-noise lottery tickets.
+uint64_t profile_modulus() {
+    static const uint64_t modulus = [] {
+        const char* v = std::getenv("NDS_PROFILE_SCHED");
+        if (!v) return uint64_t{0};
+        if (std::strcmp(v, "exact") == 0 || std::strcmp(v, "every") == 0)
+            return uint64_t{1};
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(v, &end, 10);
+        if (end != v && *end == '\0' && parsed >= 2)
+            return static_cast<uint64_t>(parsed);
+        return uint64_t{1009};
+    }();
+    return modulus;
 }
+
+bool profiling() { return profile_modulus() != 0; }
 
 using ProfileClock = std::chrono::steady_clock;
 
@@ -79,9 +96,31 @@ uint64_t next_scheduled_event_time() {
         ++rtc_n;
         rtc = (rtc_n * kRtcNumerator) / kRtcDenominator;
     }
+    // NDS_SYNTH_EVENT_US (diagnostic, env-gated, default off): an extra
+    // no-op deadline every N microseconds. It exists to measure the pure
+    // cost of round fragmentation -- the Wi-Fi US timer schedules a real
+    // deadline every 8 us while powered on, and each such deadline splits
+    // a ~64-cycle round into a runt. This knob reproduces exactly that
+    // fragmentation in any scenario (e.g. an offline bot match) without
+    // touching Wi-Fi semantics, so the fragmentation cost can be isolated
+    // from the Wi-Fi work itself. Do NOT quantize or drop the real Wi-Fi
+    // deadline instead: delaying eventful ticks by even <2 us breaks the
+    // local-MP cmd/reply pacing (measured 2026-08-22: 46 -> 19 FPS with
+    // half the host's reply waits expiring).
+    static const long synth_us = [] {
+        const char* v = std::getenv("NDS_SYNTH_EVENT_US");
+        return v ? std::strtol(v, nullptr, 10) : 0;
+    }();
+    uint64_t synth = UINT64_MAX;
+    if (synth_us > 0) {
+        const uint64_t interval =
+            static_cast<uint64_t>(synth_us) * 33513982u / 1000000u;
+        synth = ((g_sys_timestamp / interval) + 1u) * interval;
+    }
     return std::min(nds_next_system_event_time(),
                     std::min(nds_wifi_next_event_time(),
-                             std::min(rtc, std::min(spu, lcd))));
+                             std::min(synth,
+                                      std::min(rtc, std::min(spu, lcd)))));
 }
 
 bool g_sample_active = false;
@@ -270,7 +309,8 @@ void scheduler_run_round() {
     // cyc/insn) the ARM9 still retires too many instructions per iteration, so
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
-    const bool sample = profiling() && ((g_profile_rounds++ % 1009u) == 0u);
+    const uint64_t modulus = profile_modulus();
+    const bool sample = modulus && ((g_profile_rounds++ % modulus) == 0u);
     g_sample_active = sample;
     const auto round_start = sample ? ProfileClock::now()
                                     : ProfileClock::time_point{};
