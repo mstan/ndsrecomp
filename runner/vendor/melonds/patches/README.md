@@ -369,3 +369,13 @@ compute renderer's -- logged an error while behaving correctly. Also adds
 the missing trailing newline at end of file.
 
 No behaviour change beyond the log line.
+
+## 0013-gpu3d-compute-memory-barriers.patch
+
+`src/GPU3D_Compute.cpp`: corrects the four compute-renderer
+`glMemoryBarrier()` calls to use
+`GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT`. The old
+`GL_SHADER_STORAGE_BUFFER` argument is a buffer binding target, not a
+memory-barrier bitfield. The command barrier makes shader-written indirect
+dispatch parameters visible to `glDispatchComputeIndirect`; the correction
+matches upstream melonDS commit `77774538e56b118dcb5d64f08d784542ba77c72b`.
