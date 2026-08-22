@@ -200,8 +200,8 @@ NdsMphPrimeControlBindings nds_default_mph_pad_bindings() {
     pad.weapon4 = "None";
     pad.weapon5 = "None";
     pad.weapon6 = "None";
-    // The virtual stylus has no on-screen cursor yet; binding it to a pad
-    // button would strand the player with an invisible pointer.
+    // Keep the virtual stylus on a keyboard binding by default; reserving a
+    // controller button for it would reduce the already limited pad bindings.
     pad.virtual_stylus = "None";
     pad.menu = "Pad Start";
     return pad;
