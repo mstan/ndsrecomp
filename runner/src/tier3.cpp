@@ -1,6 +1,6 @@
 // tier3.cpp — see tier3.h.
 //
-// The reference interpreter (recompiler/armv4t/interpreter.cpp) is the
+// The reference interpreter (external/arm-recomp-core/common/interpreter.cpp) is the
 // always-correct execution floor. It operates on armv4t::CPUState +
 // armv4t::Bus; this file bridges those to the runner's g_cpu and C bus ABI,
 // and drives the fetch→decode→step loop with cross-tier exits.

@@ -4,6 +4,7 @@ project(nds_recompile VERSION 0.0.1 LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsTomlPlusPlus.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../external/arm-recomp-core/cmake/ArmRecompCore.cmake")
 
 enable_testing()
 
@@ -13,14 +14,11 @@ if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
-# Portable ARM core (decoder + IR + codegen). Ported from gbarecomp
-# src/armv4t; ARMv5TE + CP15 extensions land here through Phase 1.
-add_library(nds_armv4t STATIC
-    armv4t/arm_decode.cpp
-    armv4t/thumb_decode.cpp
-    armv4t/arm_ir.cpp
-    armv4t/arm_codegen.cpp)
-target_include_directories(nds_armv4t PUBLIC armv4t)
+# Shared ARM core (decoder + IR + interpreter + NDS ARMv5TE codegen profile).
+arm_recomp_core_sources(NDS_ARM_RECOMP_SOURCES armv5te_nds)
+arm_recomp_core_include_dirs(NDS_ARM_RECOMP_INCLUDE_DIRS armv5te_nds)
+add_library(nds_armv4t STATIC ${NDS_ARM_RECOMP_SOURCES})
+target_include_directories(nds_armv4t PUBLIC ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 
 # Decode + codegen coverage for the ARMv5TE extensions (not exercised by
 # the BIOS audits). Build with `cmake --build <dir> --target armv5te_decode_test`
@@ -29,8 +27,7 @@ add_executable(armv5te_decode_test tests/armv5te_decode_test.cpp)
 target_link_libraries(armv5te_decode_test PRIVATE nds_armv4t)
 
 add_executable(interpreter_cycle_test
-    tests/interpreter_cycle_test.cpp
-    armv4t/interpreter.cpp)
+    tests/interpreter_cycle_test.cpp)
 target_link_libraries(interpreter_cycle_test PRIVATE nds_armv4t)
 
 add_executable(hle_manifest_test
@@ -38,7 +35,7 @@ add_executable(hle_manifest_test
     finder/config.cpp
     support/sha1.cpp)
 target_include_directories(hle_manifest_test PRIVATE
-    finder support armv4t)
+    finder support ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 ndsrecomp_link_tomlpp(hle_manifest_test)
 add_test(NAME hle_manifest_test COMMAND hle_manifest_test)
 
@@ -48,10 +45,9 @@ add_executable(nds_recompile
     finder/config.cpp
     finder/function_finder.cpp
     finder/reloc_scan.cpp
-    armv4t/interpreter.cpp
     support/sha1.cpp)
 target_include_directories(nds_recompile PRIVATE
-    finder support armv4t)
+    finder support armv4t ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 ndsrecomp_link_tomlpp(nds_recompile)
 target_link_libraries(nds_recompile PRIVATE nds_armv4t)
 

@@ -1,3 +1,6 @@
 [submodule "third_party/freebios"]
 	path = third_party/freebios
 	url = https://github.com/mstan/freebios.git
+[submodule "external/arm-recomp-core"]
+	path = external/arm-recomp-core
+	url = ../arm-recomp-core.git
