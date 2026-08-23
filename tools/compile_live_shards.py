@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -72,10 +73,60 @@ def excluded(addr: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= addr < end for start, end in ranges)
 
 
-def canonical_entries(page: dict, ranges: list[tuple[int, int]]) -> list[dict]:
+def root_entries(page: dict) -> list[dict]:
+    base = int(page["addr"], 16)
+    blocks = page.get("root_hits") or []
+    per_block = len(blocks)
+    found: list[tuple[int, str]] = []
+    for key, stride in (("root_arm", 4), ("root_thumb", 2)):
+        blob = page.get(key)
+        if not blob:
+            continue
+        raw = base64.b64decode(blob)
+        mode = "arm" if stride == 4 else "thumb"
+        for byte_index, byte in enumerate(raw):
+            if not byte:
+                continue
+            for bit in range(8):
+                if byte & (1 << bit):
+                    found.append(
+                        (base + ((byte_index * 8 + bit) * stride), mode))
+    if not found:
+        return []
+
+    if not per_block:
+        return [
+            {"addr": addr, "mode": mode, "hits": 0, "kind": "root"}
+            for addr, mode in found
+        ]
+
+    def block_of(addr: int) -> int:
+        return min(((addr - base) * per_block) // PAGE_SIZE, per_block - 1)
+
+    per = collections.Counter(block_of(addr) for addr, _mode in found)
+    remainder = {block: blocks[block] % count for block, count in per.items()}
+    entries = []
+    for addr, mode in sorted(found):
+        block = block_of(addr)
+        hits = blocks[block] // per[block]
+        if remainder.get(block):
+            hits += 1
+            remainder[block] -= 1
+        entries.append(
+            {"addr": addr, "mode": mode, "hits": hits, "kind": "root"})
+    return entries
+
+
+def canonical_entries(
+        page: dict, ranges: list[tuple[int, int]], include_roots: bool
+) -> list[dict]:
     merged: dict[tuple[int, str], dict] = {}
-    for entry in page.get("entry_points", []):
-        addr = int(entry["addr"], 16)
+    source_entries = list(page.get("entry_points", []))
+    if include_roots:
+        source_entries.extend(root_entries(page))
+    for entry in source_entries:
+        raw_addr = entry["addr"]
+        addr = int(raw_addr, 16) if isinstance(raw_addr, str) else int(raw_addr)
         mode = entry.get("mode", "arm")
         if mode not in ("arm", "thumb") or excluded(addr, ranges):
             continue
@@ -97,6 +148,92 @@ def canonical_entries(page: dict, ranges: list[tuple[int, int]]) -> list[dict]:
             "kinds": sorted(current["kinds"]),
         })
     return sorted(result, key=lambda item: (item["addr"], item["mode"]))
+
+
+def page_key(page: dict) -> tuple[int, int, str]:
+    return (
+        int(page["cpu"]),
+        int(page["addr"], 16),
+        str(page["sha1"]).lower(),
+    )
+
+
+def merge_entries(left: list[dict], right: list[dict]) -> list[dict]:
+    merged: dict[tuple[int, str], dict] = {}
+    for entry in [*left, *right]:
+        addr = int(entry["addr"])
+        mode = str(entry["mode"])
+        key = (addr, mode)
+        current = merged.setdefault(key, {
+            "addr": addr,
+            "mode": mode,
+            "hits": 0,
+            "kinds": set(),
+        })
+        current["hits"] += int(entry.get("hits", 0))
+        current["kinds"].update(str(kind) for kind in entry.get("kinds", []))
+    return sorted(({
+        "addr": item["addr"],
+        "mode": item["mode"],
+        "hits": item["hits"],
+        "kinds": sorted(item["kinds"]),
+    } for item in merged.values()), key=lambda item: (item["addr"], item["mode"]))
+
+
+def collect_candidates(
+        args: argparse.Namespace, manifests: list[dict],
+        allowed_cpus: set[int]
+) -> list[tuple[int, int, dict, list[dict]]]:
+    by_page: dict[tuple[int, int, str], dict] = {}
+    for manifest in manifests:
+        if str(manifest.get("rom_sha1", "")).lower() != args.rom_sha1.lower():
+            continue
+        for page in manifest.get("pages", {}).get("entries", []):
+            cpu = int(page["cpu"])
+            if cpu not in allowed_cpus:
+                continue
+            entries = canonical_entries(
+                page, args.exclude_range, args.include_roots)
+            if not entries:
+                continue
+            key = page_key(page)
+            current = by_page.setdefault(key, {
+                "page": page,
+                "entries": [],
+                "executions": 0,
+            })
+            current["entries"] = merge_entries(current["entries"], entries)
+            current["executions"] += int(page.get("executions", 0))
+
+    candidates = []
+    for current in by_page.values():
+        entries = current["entries"]
+        hits = sum(entry["hits"] for entry in entries)
+        if hits >= args.min_hits:
+            candidates.append((hits, current["executions"],
+                               current["page"], entries))
+    candidates.sort(
+        key=lambda item: (-item[0], -item[1], int(item[2]["addr"], 16),
+                          item[2]["sha1"]))
+    return candidates
+
+
+def cache_manifests(cache: Path, current: Path) -> list[dict]:
+    snapshots = cache / "snapshots"
+    if not snapshots.is_dir():
+        return []
+    current_resolved = current.resolve()
+    manifests = []
+    for path in sorted(snapshots.glob("manifest-*.json")):
+        try:
+            if path.resolve() == current_resolved:
+                continue
+            manifest = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict):
+            manifests.append(manifest)
+    return manifests
 
 
 def file_sha256(path: Path) -> str:
@@ -131,6 +268,8 @@ def provider_identity(args: argparse.Namespace) -> str:
         "gcc_version": gcc_version,
         "generated_opt": args.generated_opt,
         "max_function_bytes": args.max_function_bytes,
+        "include_roots": args.include_roots,
+        "merge_cache_snapshots": args.merge_cache_snapshots,
     }
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -394,6 +533,16 @@ def main() -> int:
                         help="maximum new page candidates compiled per run")
     parser.add_argument("--min-hits", type=int, default=1)
     parser.add_argument("--cpu", type=int, choices=(7, 9), action="append")
+    parser.add_argument("--include-roots", action="store_true",
+                        help="also compile root-map PCs from interpreted "
+                             "spans, not only call/indirect entry points")
+    parser.add_argument("--merge-cache-snapshots", action="store_true",
+                        help="merge entry/root observations from cached live "
+                             "snapshot manifests for the same page bytes")
+    parser.add_argument("--merge-manifest", type=Path, action="append",
+                        default=[],
+                        help="additional coverage manifest to merge before "
+                             "candidate selection")
     parser.add_argument("--exclude-range", type=parse_range, action="append",
                         default=[])
     args = parser.parse_args()
@@ -428,18 +577,15 @@ def main() -> int:
     index["schema"] = 2
 
     allowed_cpus = set(args.cpu or (7, 9))
-    candidates = []
-    for page in manifest.get("pages", {}).get("entries", []):
-        cpu = int(page["cpu"])
-        if cpu not in allowed_cpus:
-            continue
-        entries = canonical_entries(page, args.exclude_range)
-        hits = sum(entry["hits"] for entry in entries)
-        if entries and hits >= args.min_hits:
-            candidates.append((hits, int(page["executions"]), page, entries))
-    candidates.sort(
-        key=lambda item: (-item[0], -item[1], int(item[2]["addr"], 16),
-                          item[2]["sha1"]))
+    manifests = [manifest]
+    for path in args.merge_manifest:
+        loaded = load_json(path)
+        if not isinstance(loaded, dict):
+            raise SystemExit(f"merge manifest is not an object: {path}")
+        manifests.append(loaded)
+    if args.merge_cache_snapshots:
+        manifests.extend(cache_manifests(args.cache, args.manifest))
+    candidates = collect_candidates(args, manifests, allowed_cpus)
 
     ok = failed = skipped = attempted = 0
     for _hits, _executions, page, entries in candidates:
