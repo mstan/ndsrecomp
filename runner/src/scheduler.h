@@ -60,6 +60,20 @@ struct NdsSchedulerProfile {
 void scheduler_profile_reset();
 void scheduler_profile(NdsSchedulerProfile* out);
 
+struct NdsSchedulerDebugState {
+    uint8_t started[2];
+    uint8_t terminal_halted[2];
+    uint8_t guest_halted[2];
+    uint8_t halt_wake_pending[2];
+    uint8_t dma_stalled[2];
+    uint64_t cycles[2];
+    uint64_t system_timestamp;
+    uint64_t next_event_timestamp;
+    uint64_t next_timer_overflow;
+    const char* halt_reason[2];
+};
+void scheduler_debug_state(NdsSchedulerDebugState* out);
+
 // Interleave both CPUs until ARM9 reaches `arm9_cycle_budget` or both CPUs
 // have terminally halted. ARM9 runs ~2× the cycles per round (clock ratio).
 SchedResult scheduler_run(uint64_t arm9_cycle_budget);

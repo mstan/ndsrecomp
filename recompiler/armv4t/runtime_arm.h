@@ -17,6 +17,8 @@
 #include <stdbool.h>  // generated banks are C; `bool` returns need this
 #include <string.h>   // the inline bus fast path does aligned-safe memcpy
 
+#define NDS_RUNTIME_CALL_STACK_CAPACITY 16384u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -22,7 +22,7 @@ namespace {
 struct CpuSlot {
     uint32_t    deferred_cycles = 0; // uncommitted ARM::Cycles HALT debt
     ArmCpuState state;        // saved register file when not active
-    uint32_t    crs[1024];   // saved call-return stack (preserved across
+    uint32_t    crs[NDS_RUNTIME_CALL_STACK_CAPACITY]; // saved call-return stack
     uint32_t    crs_depth = 0;//   preemption — a spin may be mid-call)
     uint64_t    cycles = 0;   // this CPU's accumulated cycles
     bool        halted = false;
@@ -390,7 +390,22 @@ void scheduler_run_round() {
     while (g_slot[1].started && !g_slot[1].halted &&
            !nds_event_break_hit() && g_slot[1].cycles < rendezvous) {
         const uint64_t before = g_slot[1].cycles;
-        run_slice(1, static_cast<uint32_t>(rendezvous - g_slot[1].cycles));
+        if (nds_cpu_halted(1) && !nds_halt_wake_pending(1)) {
+            uint64_t target = rendezvous;
+            const uint64_t timer_wake = nds_next_timer_overflow_time_for_cpu(1);
+            if (timer_wake > g_slot[1].cycles && timer_wake < target)
+                target = timer_wake;
+            g_slot[1].cycles = target;
+            nds_tick_timers(1, g_slot[1].cycles);
+            if (g_slot[1].cycles == before && !nds_halt_wake_pending(1))
+                break;
+            continue;
+        }
+        const uint64_t remaining = rendezvous - g_slot[1].cycles;
+        const uint32_t quantum = remaining > UINT32_MAX
+            ? UINT32_MAX
+            : static_cast<uint32_t>(remaining);
+        run_slice(1, quantum);
         nds_tick_timers(1, g_slot[1].cycles);
         if (g_slot[1].cycles == before) break;
     }
@@ -464,6 +479,23 @@ void scheduler_profile(NdsSchedulerProfile* out) {
     if (!out) return;
     *out = g_profile;
     out->rounds = g_profile_rounds;
+}
+
+void scheduler_debug_state(NdsSchedulerDebugState* out) {
+    if (!out) return;
+    *out = NdsSchedulerDebugState{};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out->started[cpu] = g_slot[cpu].started ? 1 : 0;
+        out->terminal_halted[cpu] = g_slot[cpu].halted ? 1 : 0;
+        out->guest_halted[cpu] = nds_cpu_halted(cpu) ? 1 : 0;
+        out->halt_wake_pending[cpu] = nds_halt_wake_pending(cpu) ? 1 : 0;
+        out->dma_stalled[cpu] = nds_dma_cpu_stalled(cpu) ? 1 : 0;
+        out->cycles[cpu] = g_slot[cpu].cycles;
+        out->halt_reason[cpu] = g_slot[cpu].reason ? g_slot[cpu].reason : "";
+    }
+    out->system_timestamp = g_sys_timestamp;
+    out->next_event_timestamp = next_scheduled_event_time();
+    out->next_timer_overflow = nds_next_timer_overflow_time();
 }
 
 SchedResult scheduler_run(uint64_t budget) {

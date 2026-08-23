@@ -28,6 +28,7 @@ void     nds_set_debug_turbo(bool enabled);
 bool     nds_debug_turbo();
 uint64_t nds_next_system_event_time();
 uint64_t nds_next_timer_overflow_time();
+uint64_t nds_next_timer_overflow_time_for_cpu(int cpu);
 uint64_t nds_debug_spi_deadline();
 uint64_t nds_debug_card_deadline();
 void     nds_run_system_events(uint64_t timestamp);
@@ -99,6 +100,16 @@ struct NdsIrqTraceEntry {
 };
 void nds_note_irq_accept(int cpu, uint32_t return_address);
 bool nds_irq_trace_get(int cpu, uint64_t count, NdsIrqTraceEntry* out);
+
+struct NdsTimerDebugState {
+    uint16_t reload;
+    uint16_t counter;
+    uint16_t ctrl;
+    uint64_t accum;
+    uint64_t last;
+    uint64_t next_overflow;
+};
+void nds_timer_debug_state(int cpu, NdsTimerDebugState out[4]);
 
 // Always-on trace of DMA channel completions (every completion, IRQ-raising
 // or not — unlike NdsEventCounts::dma_done, which mirrors the oracle's

@@ -1342,14 +1342,22 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 
 // ── Call-return stack (verbatim) ────────────────────────────────────────
 namespace {
-constexpr uint32_t kCRS = 1024;
+constexpr uint32_t kCRS = NDS_RUNTIME_CALL_STACK_CAPACITY;
 uint32_t g_crs[kCRS] = {};
 uint32_t g_crs_depth = 0;
 }  // namespace
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
     uint32_t key = pc | ((g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u);
-    if (g_crs_depth >= kCRS) { nds_halt("call-return overflow"); return; }
+    if (g_crs_depth >= kCRS) {
+        const uint32_t keep = kCRS / 2u;
+        runtime_trace_event(RUNTIME_TRACE_CALL, pc,
+                            g_crs[g_crs_depth - 1u] & ~1u,
+                            g_crs_depth, 6u);
+        std::memmove(g_crs, g_crs + (g_crs_depth - keep),
+                     keep * sizeof(g_crs[0]));
+        g_crs_depth = keep;
+    }
     ++g_nds_dispatch_stats[g_nds_active].crs_push;
     g_crs[g_crs_depth++] = key;
     runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_crs_depth, 1u);

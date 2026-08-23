@@ -2167,6 +2167,42 @@ uint64_t nds_next_timer_overflow_time() {
     }
     return best;
 }
+
+uint64_t nds_next_timer_overflow_time_for_cpu(int cpu) {
+    cpu &= 1;
+    uint64_t best = UINT64_MAX;
+    for (int t = 0; t < 4; ++t) {
+        const Timer& T = g_timer[cpu][t];
+        if (!(T.ctrl & 0x80u)) continue;
+        if (T.ctrl & 0x4u) continue;
+        const unsigned long long pre = kPrescaler[T.ctrl & 3u];
+        const unsigned long long span = 0x10000ull - T.counter;
+        const uint64_t when = g_timer_last[cpu] + (span * pre - T.accum);
+        best = std::min(best, when);
+    }
+    return best;
+}
+
+void nds_timer_debug_state(int cpu, NdsTimerDebugState out[4]) {
+    if (!out) return;
+    cpu &= 1;
+    for (int t = 0; t < 4; ++t) {
+        const Timer& T = g_timer[cpu][t];
+        out[t].reload = T.reload;
+        out[t].counter = T.counter;
+        out[t].ctrl = T.ctrl;
+        out[t].accum = T.accum;
+        out[t].last = g_timer_last[cpu];
+        out[t].next_overflow = UINT64_MAX;
+        if ((T.ctrl & 0x80u) && !(T.ctrl & 0x4u)) {
+            const unsigned long long pre = kPrescaler[T.ctrl & 3u];
+            const unsigned long long span = 0x10000ull - T.counter;
+            out[t].next_overflow =
+                g_timer_last[cpu] + (span * pre - T.accum);
+        }
+    }
+}
+
 uint64_t nds_debug_spi_deadline() { return g_spi_deadline; }
 uint64_t nds_debug_card_deadline() { return g_card_deadline; }
 

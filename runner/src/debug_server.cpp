@@ -296,6 +296,54 @@ std::string io_state_json() {
     return buf;
 }
 
+std::string scheduler_state_json() {
+    NdsSchedulerDebugState s{};
+    scheduler_debug_state(&s);
+    std::string out = "{\"system_timestamp\":" +
+        std::to_string(s.system_timestamp) +
+        ",\"next_event_timestamp\":" +
+        std::to_string(s.next_event_timestamp) +
+        ",\"next_timer_overflow\":" +
+        std::to_string(s.next_timer_overflow) +
+        ",\"cpu\":[";
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (cpu) out += ",";
+        NdsTimerDebugState timers[4]{};
+        nds_timer_debug_state(cpu, timers);
+        out += "{\"id\":" + std::to_string(cpu == 0 ? 9 : 7) +
+               ",\"started\":" + std::to_string(s.started[cpu]) +
+               ",\"terminal_halted\":" +
+                   std::to_string(s.terminal_halted[cpu]) +
+               ",\"guest_halted\":" +
+                   std::to_string(s.guest_halted[cpu]) +
+               ",\"halt_wake_pending\":" +
+                   std::to_string(s.halt_wake_pending[cpu]) +
+               ",\"dma_stalled\":" +
+                   std::to_string(s.dma_stalled[cpu]) +
+               ",\"cycles\":" + std::to_string(s.cycles[cpu]) +
+               ",\"halt_reason\":\"" +
+                   json_escape(s.halt_reason[cpu] ? s.halt_reason[cpu] : "") +
+               "\",\"irq_pending\":" +
+                   std::to_string(nds_irq_pending(cpu)) +
+               ",\"timers\":[";
+        for (int t = 0; t < 4; ++t) {
+            if (t) out += ",";
+            out += "{\"index\":" + std::to_string(t) +
+                   ",\"reload\":" + std::to_string(timers[t].reload) +
+                   ",\"counter\":" + std::to_string(timers[t].counter) +
+                   ",\"ctrl\":" + std::to_string(timers[t].ctrl) +
+                   ",\"accum\":" + std::to_string(timers[t].accum) +
+                   ",\"last\":" + std::to_string(timers[t].last) +
+                   ",\"next_overflow\":" +
+                       std::to_string(timers[t].next_overflow) +
+                   "}";
+        }
+        out += "]}";
+    }
+    out += "]}";
+    return out;
+}
+
 const char* card_event_name(uint8_t kind) {
     switch (kind) {
         case NDS_CARD_TRACE_ROMCTRL: return "romctrl";
@@ -993,6 +1041,7 @@ std::string handle(const std::string& line) {
         return "{\"ok\":true,\"size\":" + std::to_string(data.size()) + "}";
     }
     if (cmd == "io_state") return io_state_json();
+    if (cmd == "scheduler_state") return scheduler_state_json();
     if (cmd == "frontend_stats") {
         // Cumulative frontend counters; sample twice and diff for fps /
         // phase shares over the window. active=0 → headless (all zeros).
