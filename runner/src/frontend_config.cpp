@@ -36,6 +36,44 @@ bool nds_parse_screen_layout(const std::string& value,
     return false;
 }
 
+bool nds_parse_fullscreen_mode(const std::string& value,
+                               NdsFullscreenMode* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "off") {
+        *out = NdsFullscreenMode::Off;
+        return true;
+    }
+    if (normalized == "borderless") {
+        *out = NdsFullscreenMode::Borderless;
+        return true;
+    }
+    if (normalized == "exclusive") {
+        *out = NdsFullscreenMode::Exclusive;
+        return true;
+    }
+    return false;
+}
+
+bool nds_apply_fullscreen_overrides(
+    NdsFrontendOptions* options, const std::string& cli_fullscreen,
+    NdsFullscreenOverrideError* error) {
+    if (error) *error = NdsFullscreenOverrideError::None;
+    if (!options) return false;
+    if (const char* value = std::getenv("NDS_FULLSCREEN")) {
+        if (!nds_parse_fullscreen_mode(value, &options->fullscreen)) {
+            if (error) *error = NdsFullscreenOverrideError::Environment;
+            return false;
+        }
+    }
+    if (!cli_fullscreen.empty() &&
+        !nds_parse_fullscreen_mode(cli_fullscreen, &options->fullscreen)) {
+        if (error) *error = NdsFullscreenOverrideError::CommandLine;
+        return false;
+    }
+    return true;
+}
+
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out) {
     if (!out) return false;
     const std::string normalized = lower_ascii(value);
@@ -350,6 +388,14 @@ const char* nds_screen_layout_name(NdsScreenLayout value) {
     return value == NdsScreenLayout::Separate ? "separate" : "stacked";
 }
 
+const char* nds_fullscreen_mode_name(NdsFullscreenMode value) {
+    switch (value) {
+        case NdsFullscreenMode::Borderless: return "borderless";
+        case NdsFullscreenMode::Exclusive: return "exclusive";
+        default: return "off";
+    }
+}
+
 const char* nds_startup_mode_name(NdsStartupMode value) {
     switch (value) {
         case NdsStartupMode::Manual: return "manual";
@@ -452,6 +498,15 @@ bool nds_load_frontend_config(const std::string& path,
     }
 
     if (const toml::table* display = root["display"].as_table()) {
+        if (const auto value = (*display)["fullscreen"].value<std::string>()) {
+            if (!nds_parse_fullscreen_mode(*value, &options->fullscreen)) {
+                if (error) {
+                    *error =
+                        "display.fullscreen must be off, borderless, or exclusive";
+                }
+                return false;
+            }
+        }
         if (const auto value =
                 (*display)["screen_layout"].value<std::string>()) {
             if (!nds_parse_screen_layout(*value,

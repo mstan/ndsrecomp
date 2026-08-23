@@ -13,6 +13,12 @@ enum class NdsScreenLayout : uint8_t {
     Separate,
 };
 
+enum class NdsFullscreenMode : uint8_t {
+    Off,
+    Borderless,
+    Exclusive,
+};
+
 // How the authentic firmware handles an inserted Slot-1 cartridge. Preserve
 // leaves the dumped user setting untouched; Manual and Automatic override the
 // corresponding retail firmware flag in the runner's private in-memory copy.
@@ -162,6 +168,7 @@ struct NdsFrontendOptions {
     // title-owned setting in this config is rejected for any other ROM.
     std::string expected_rom_sha1;
     NdsScreenLayout screen_layout = NdsScreenLayout::Stacked;
+    NdsFullscreenMode fullscreen = NdsFullscreenMode::Off;
     NdsStartupMode startup_mode = NdsStartupMode::Preserve;
     NdsBootMode boot_mode = NdsBootMode::Lle;
     // Opt-in synthesized firmware image (no firmware dump). Forces direct
@@ -256,6 +263,18 @@ bool nds_load_frontend_config(const std::string& path,
                               std::string* error);
 bool nds_parse_screen_layout(const std::string& value,
                              NdsScreenLayout* out);
+bool nds_parse_fullscreen_mode(const std::string& value,
+                               NdsFullscreenMode* out);
+enum class NdsFullscreenOverrideError : uint8_t {
+    None,
+    Environment,
+    CommandLine,
+};
+// Apply the two process-level fullscreen sources after TOML has populated
+// `options`. Environment wins over TOML and CLI wins over environment.
+bool nds_apply_fullscreen_overrides(
+    NdsFrontendOptions* options, const std::string& cli_fullscreen,
+    NdsFullscreenOverrideError* error);
 bool nds_parse_startup_mode(const std::string& value,
                             NdsStartupMode* out);
 bool nds_parse_boot_mode(const std::string& value, NdsBootMode* out);
@@ -289,6 +308,7 @@ bool nds_parse_network_backend(const std::string& value, std::string* out);
 bool nds_parse_local_wireless_base_port(const std::string& value,
                                         uint16_t* out);
 const char* nds_screen_layout_name(NdsScreenLayout value);
+const char* nds_fullscreen_mode_name(NdsFullscreenMode value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_boot_mode_name(NdsBootMode value);
 const char* nds_adaptive_screens_name(uint8_t value);
