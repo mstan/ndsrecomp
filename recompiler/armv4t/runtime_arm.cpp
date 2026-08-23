@@ -5,7 +5,7 @@
 // file is the parallel surface for recompiled code. Helpers here
 // must produce the SAME bit-level result as the interpreter would
 // for the same inputs — verify any new helper against the
-// interpreter's case in src/armv4t/interpreter.cpp.
+// interpreter's case in external/arm-recomp-core/common/interpreter.cpp.
 
 #include "runtime_arm.h"
 #include "symbol_lookup.h"

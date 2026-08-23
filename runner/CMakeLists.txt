@@ -4,6 +4,7 @@ project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsTomlPlusPlus.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../external/arm-recomp-core/cmake/ArmRecompCore.cmake")
 enable_testing()
 
 set(CMAKE_C_STANDARD 11)
@@ -15,6 +16,9 @@ endif()
 if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
+
+arm_recomp_core_sources(NDS_ARM_RECOMP_SOURCES armv4t)
+arm_recomp_core_include_dirs(NDS_ARM_RECOMP_INCLUDE_DIRS armv4t)
 
 option(NDS_BOOTSTRAP_FIRMWARE
     "Build with BIOS banks only so guest-produced firmware RAM can be captured"
@@ -154,6 +158,7 @@ ndsrecomp_limit_generated_compiles(nds_banks)
 ndsrecomp_limit_link(nds_banks)
 target_include_directories(nds_banks PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+    ${NDS_ARM_RECOMP_INCLUDE_DIRS}
     ${NDS_SM64DS_BANK_DIR}
     ${TITLE_GROUP_DIRS})
 set_source_files_properties(
@@ -320,13 +325,9 @@ endif()
 
 # The runner: runtime ABI + DS bus + CP15 + driver.
 # The portable ARMv4T/v5TE core (decoders + IR + the Tier-3 interpreter).
-add_library(nds_armv4t STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/arm_decode.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/thumb_decode.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/arm_ir.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t/interpreter.cpp)
+add_library(nds_armv4t STATIC ${NDS_ARM_RECOMP_SOURCES})
 target_include_directories(nds_armv4t PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+    ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 
 add_executable(nds_runner
     src/runtime_arm.cpp
@@ -430,6 +431,9 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
     target_compile_definitions(nds_runner PRIVATE
         NDS_HAVE_COMPUTE_RENDERER=1
         MELONDS_GL_HEADER="glad/glad.h")
+else()
+    target_sources(nds_runner PRIVATE
+        src/melonds_compute/TextureUpscaleStub.cpp)
 endif()
 if(NDS_ENABLE_PCAP_BACKEND)
     # Net_PCap.cpp only needs <pcap/pcap.h> (the freely-distributable libpcap
@@ -466,7 +470,8 @@ target_include_directories(nds_runner PRIVATE
     $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
     src
     vendor/melonds                                     # vendored melonDS GPU3D + Wifi + shims (GPL-3.0-or-later)
-    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h, interpreter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t   # runtime_arm.h
+    ${NDS_ARM_RECOMP_INCLUDE_DIRS}                     # shared ARM core headers
     ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support   # sha1.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/freebios)     # embedded FreeBIOS (BSD-2-Clause)
 ndsrecomp_link_tomlpp(nds_runner)
@@ -587,7 +592,8 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/net/net_ring.cpp)
   target_include_directories(net_ring_test PRIVATE
       src
-      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME net_ring_test COMMAND net_ring_test)
 
   add_executable(relative_mouse_touch_test
@@ -663,7 +669,8 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/live_overlay.cpp)
   target_include_directories(live_overlay_preflight_test PRIVATE
       src
-      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME live_overlay_preflight_test
            COMMAND live_overlay_preflight_test)
 
@@ -671,7 +678,8 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       tests/dispatch_lookup_test.cpp)
   target_include_directories(dispatch_lookup_test PRIVATE
       src
-      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
   add_executable(gpu2d_window_test

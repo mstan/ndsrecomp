@@ -1162,7 +1162,7 @@ std::string nds_mem_timing_profile_json() {
 // Code-FETCH memory timing (Commit B for the ARM9 â€” see docs/scheduler_design.md
 // â€” Commit D for the ARM7). Charged per retired instruction on the active CPU,
 // on TOP of the static per-instruction base baked into the recompiler's ARMv4T
-// cost table (recompiler/armv4t/arm_ir.cpp instr_cycle_base), which already
+// cost table (external/arm-recomp-core/common/arm_ir.cpp instr_cycle_base), which already
 // assumes a 1-cycle sequential code fetch ("1S") for every op.
 //
 // ARM9: returns the RAW numC (this instruction's own code-fetch cost, or a
