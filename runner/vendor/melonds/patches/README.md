@@ -394,3 +394,12 @@ when the knob is unset.
 memory-barrier bitfield. The command barrier makes shader-written indirect
 dispatch parameters visible to `glDispatchComputeIndirect`; the correction
 matches upstream melonDS commit `77774538e56b118dcb5d64f08d784542ba77c72b`.
+
+## 0015-gpu3d-compute-texture-uniform-guard.patch
+
+`src/GPU3D_Compute.cpp`: updates `InvTextureSize` only for raster variants
+that actually bind a texture. On affected Intel OpenGL drivers, updating this
+uniform while the no-texture raster program is current can produce
+`GL_INVALID_OPERATION`, closing the runner after the first rendered frames.
+The shader only reads `InvTextureSize` inside `#ifdef UseTexture`, so this
+does not change textured variant sampling or no-texture rendering semantics.
