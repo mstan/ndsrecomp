@@ -2065,8 +2065,8 @@ void nds_note_irq_accept(int cpu, uint32_t return_address) {
         g_insn_count[cpu],
         return_address,
         g_ie[cpu] & g_if[cpu],
-        cpu == 1 ? nds_wifi_debug_if() : 0u,
-        cpu == 1 ? nds_wifi_debug_ie() : 0u,
+        static_cast<uint16_t>(cpu == 1 ? nds_wifi_debug_if() : 0u),
+        static_cast<uint16_t>(cpu == 1 ? nds_wifi_debug_ie() : 0u),
     };
 }
 
