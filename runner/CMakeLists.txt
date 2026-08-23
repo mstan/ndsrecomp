@@ -666,6 +666,11 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t)
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
+  add_executable(gpu2d_window_test
+      tests/gpu2d_window_test.cpp)
+  target_include_directories(gpu2d_window_test PRIVATE src)
+  add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
+
   if(Python3_Interpreter_FOUND)
     add_test(
         NAME m7_collect_two_instance_evidence_test
