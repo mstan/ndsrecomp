@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -26,6 +27,7 @@
 
 #include "config.h"
 #include "function_finder.h"
+#include "reloc_scan.h"
 #include "arm_decode.h"
 #include "thumb_decode.h"
 #include "arm_codegen.h"
@@ -1035,6 +1037,44 @@ int main(int argc, char** argv) {
         finder.add_data_range(dr.start, dr.end, dr.note);
     for (const auto& cc : cfg.code_copies)
         finder.add_code_copy(cc.runtime_start, cc.source_start, cc.size, cc.name);
+    // Static relocation discovery (beads-yjp.35 item 2): execute the
+    // module's own startup code in a sealed sandbox and content-match its
+    // writes back against the image. Every proven copy becomes a
+    // code_copy range, so the CFG walk follows the startup path straight
+    // into relocated code (ITCM mirrors, the ARM7 WRAM/main-RAM driver)
+    // with no captured image required. Declared [[code_copy]] entries are
+    // added first above, so they win overlap resolution in
+    // map_addr_to_source; scanner copies overlapping a declared range are
+    // dropped entirely to keep the mapping unambiguous.
+    // NDSRECOMP_NO_RELOC_SCAN=1 disables the scan for A/B measurement.
+    if (std::getenv("NDSRECOMP_NO_RELOC_SCAN") == nullptr) {
+        RelocScanStats rs;
+        const auto reloc = scan_relocations(
+            bin.data(), bin.size(), cfg.program.load_address,
+            cfg.program.entry_pc, &rs);
+        std::printf("\n[reloc-scan] steps=%zu stop=%s unmapped-reads=%zu "
+                    "shadow-bytes=%zu regions=%zu matched=%zu "
+                    "ambiguous=%zu unmatched=%zu\n",
+                    rs.steps, rs.stop_reason.c_str(), rs.unmapped_reads,
+                    rs.shadow_bytes, rs.regions_total, rs.regions_matched,
+                    rs.regions_ambiguous, rs.regions_unmatched);
+        for (const auto& rc : reloc) {
+            bool overlaps_declared = false;
+            for (const auto& cc : cfg.code_copies) {
+                const uint64_t a0 = rc.runtime_start;
+                const uint64_t a1 = a0 + rc.size;
+                const uint64_t b0 = cc.runtime_start;
+                const uint64_t b1 = b0 + cc.size;
+                if (a0 < b1 && b0 < a1) { overlaps_declared = true; break; }
+            }
+            std::printf("[reloc-scan]   0x%08X -> 0x%08X size 0x%X%s\n",
+                        rc.source_start, rc.runtime_start, rc.size,
+                        overlaps_declared ? "  (declared; skipped)" : "");
+            if (overlaps_declared) continue;
+            finder.add_code_copy(rc.runtime_start, rc.source_start,
+                                 rc.size, "reloc_scan");
+        }
+    }
     for (const auto& ex : cfg.exclude_funcs)
         finder.add_exclude(ex.addr, ex.reason);
     // Expand each declared jump table into per-target seeds (bit0 = mode
@@ -1063,6 +1103,26 @@ int main(int argc, char** argv) {
                 st.functions_total, st.functions_arm, st.functions_thumb,
                 st.indirect_transfer_count, st.undefined_instr_count,
                 st.auto_jump_tables, st.landing_pads_discovered);
+    std::printf("[finder] indirect outcomes (non-return): resolved=%zu "
+                "known-unreachable=%zu unknown=%zu stored_ptr_seeds=%zu\n",
+                st.indirect_resolved_count,
+                st.indirect_known_unreachable_count,
+                st.indirect_unknown_count,
+                st.stored_ptr_seeds);
+    // Cluster the proven-but-unreadable targets by 64 KiB region. A
+    // cluster is the static signature of code relocated to a base no
+    // bank declares (the copy-loop alias class, beads-yjp.35 item 2):
+    // the fix is a code_copy / alias bank at that base, not analysis.
+    if (!finder.unreachable_targets().empty()) {
+        std::map<uint32_t, std::size_t> clusters;
+        for (const auto& ut : finder.unreachable_targets())
+            ++clusters[ut.target & ~uint32_t{0xFFFF}];
+        std::printf("[finder] unreachable indirect targets by 64K region "
+                    "(undeclared alias candidates):\n");
+        for (const auto& [region, n] : clusters)
+            std::printf("    0x%08X..0x%08X  %zu site(s)\n",
+                        region, region + 0x10000u, n);
+    }
     if (!finder.collisions().empty()) {
         std::printf("[finder] %zu data-range collisions (flow into data):\n",
                     finder.collisions().size());

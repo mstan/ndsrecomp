@@ -82,7 +82,21 @@ struct FinderStats {
     std::size_t functions_arm = 0;
     std::size_t functions_thumb = 0;
     std::size_t indirect_transfer_count = 0;
+    // Outcome breakdown of every indirect transfer the walk reached.
+    // resolved: target value proven and seeded. known_unreachable: target
+    // value proven but outside the readable image — the signature of code
+    // relocated to an undeclared base (a copy-loop alias), which is a
+    // config gap, not an analysis gap. unknown: the tracker had nothing.
+    std::size_t indirect_resolved_count = 0;
+    std::size_t indirect_known_unreachable_count = 0;
+    std::size_t indirect_unknown_count = 0;
     std::size_t branch_targets_discovered = 0;
+    // Stored code-pointer constants promoted to seeds: a STR of a
+    // statically-known value that points into readable code space and
+    // decodes cleanly (e.g. the IRQ handler installed into the vector
+    // slot, callback registration). Nothing ever branches to such an
+    // address, so without this it is invisible to the CFG walk.
+    std::size_t stored_ptr_seeds = 0;
     // LR landing pads auto-discovered (Tier 2): an executable-ROM constant
     // live in LR at an UNRESOLVED indirect PC-write — the return-pad idiom
     // (adr lr,X; ldr pc,[handler]). Seeded as a dispatch entry.
@@ -179,6 +193,21 @@ public:
         return auto_jump_tables_;
     }
 
+    // Every statically-proven indirect target that fell outside the
+    // readable image (module span + code_copy ranges), with the site that
+    // computed it. Clusters at one page-aligned base are the static
+    // signature of code relocated to an undeclared address — the same
+    // aliases tools/rom_alias.py finds from player coverage, available
+    // here without a capture.
+    struct UnreachableTarget {
+        uint32_t site_pc;
+        uint32_t target;
+        CpuMode  site_mode;
+    };
+    const std::vector<UnreachableTarget>& unreachable_targets() const {
+        return unreachable_targets_;
+    }
+
     // Non-empty when the recompile must abort. See
     // docs/TOML_SCHEMA.md "[[data_range]]" — control flow into
     // a data_range is a hard error.
@@ -213,6 +242,9 @@ private:
     // re-seeded into reg_bound[reg] when that seed is walked.
     struct SeedBound { uint8_t reg; uint32_t max_index; };
     std::unordered_map<uint32_t, SeedBound> branch_target_bounds_;
+    // (addr<<1)|mode keys already promoted as stored-code-pointer seeds,
+    // so the same pointer stored from many walks is seeded once.
+    std::unordered_set<uint64_t> stored_ptr_seen_;
     FinderStats stats_{};
     bool authoritative_seeds_ = false;
 
@@ -221,6 +253,8 @@ private:
     std::vector<DataRangeCollision>  collisions_;
     std::unordered_set<uint32_t>     excluded_;
     std::unordered_map<uint32_t, std::string> exclude_reasons_;
+
+    std::vector<UnreachableTarget> unreachable_targets_;
 
     // Mode-switching seeds discovered DURING a walk (e.g. BX Rm
     // where the constant tracker resolved Rm to a THUMB target

@@ -67,6 +67,18 @@ bool jt_report_enabled() {
     return enabled;
 }
 
+// Diagnostic toggle: NDSRECOMP_INDIRECT_REPORT=1 prints, to stderr, every
+// non-return indirect transfer the walk reached and its resolution outcome
+// (seeded / known-but-unreachable / unknown, with the tracked value when
+// one exists). This is the measurement surface for the reachability work
+// (beads-yjp.35): the unknown sites are the analysis gap, the unreachable
+// sites are the config gap. Read once.
+bool indirect_report_enabled() {
+    static const bool enabled =
+        (std::getenv("NDSRECOMP_INDIRECT_REPORT") != nullptr);
+    return enabled;
+}
+
 }  // namespace
 
 FunctionFinder::FunctionFinder(const uint8_t* rom_bytes,
@@ -468,15 +480,19 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         return true;
     };
 
+    // Returns true when the target was handled (seeded, or recorded as a
+    // data_range collision); false when it points outside the readable
+    // image — the caller may want to log that, since a statically-proven
+    // target we cannot read is the signature of an undeclared code alias.
     auto enqueue_resolved_target = [&](uint32_t raw, CpuMode target_mode,
-                                       const char* kind) {
+                                       const char* kind) -> bool {
         uint32_t target = raw & ~uint32_t{1};
         const uint32_t target_step =
             (target_mode == CpuMode::Thumb) ? 2u : 4u;
-        if (target == 0 || !can_read_at(target, target_step)) return;
+        if (target == 0 || !can_read_at(target, target_step)) return false;
         if (addr_in_data_range(target)) {
             record_collision(target, fn.addr, fn.name, kind);
-            return;
+            return true;
         }
         if (target_mode == entry_mode) {
             fn.direct_branch_targets.push_back(target);
@@ -485,6 +501,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 FunctionSeed{target, target_mode, ""});
         }
         ++stats_.branch_targets_discovered;
+        return true;
     };
 
     // Code-vs-data discriminator for a jump-table entry target. Accepts
@@ -507,7 +524,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         } else if (tgt & 3u) {
             return false;
         }
-        if (!addr_in_rom(tgt) || addr_in_data_range(tgt)) return false;
+        if (addr_in_data_range(tgt)) return false;
+        // map_addr_to_source covers both the module span and code_copy
+        // ranges — an address inside a declared or scanner-proven copy is
+        // as decodable as one in the image proper.
         uint32_t src = 0;
         if (!map_addr_to_source(tgt, &src)) return false;
         const uint32_t k = strict ? 6u : 1u;
@@ -869,6 +889,15 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             fn.has_indirect_transfer = true;
             ++stats_.indirect_transfer_count;
 
+            // Per-site outcome bookkeeping, tallied at the end of this
+            // block: seeded (target proven and reachable), known but
+            // UNREACHABLE (target proven, outside the readable image —
+            // the static signature of code relocated to an undeclared
+            // base), or unknown (the tracker had nothing).
+            bool ind_have_value = false;
+            bool ind_seeded = false;
+            uint32_t ind_value = 0;
+
             // Some PC-writing instructions look "indirect" to the
             // decoder but still have a fully-known target. Keep this
             // intentionally narrow so misses stay loud and false
@@ -877,23 +906,32 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             uint32_t resolved = 0;
             if (eval_dp_imm_pc_write(ins, &resolved)) {
                 indirect_resolved = true;
+                ind_have_value = true;
+                ind_value = resolved;
                 CpuMode target_mode = entry_mode;
                 if (ins.rn != 15 && (resolved & 1u)) {
                     target_mode = CpuMode::Thumb;
                 }
-                enqueue_resolved_target(resolved, target_mode, "branch");
+                ind_seeded |= enqueue_resolved_target(
+                    resolved, target_mode, "branch");
             } else if (eval_dp_reg_pc_write(ins, &resolved)) {
                 indirect_resolved = true;
-                enqueue_resolved_target(resolved, entry_mode, "branch");
+                ind_have_value = true;
+                ind_value = resolved;
+                ind_seeded |= enqueue_resolved_target(
+                    resolved, entry_mode, "branch");
             } else if (ins.op == armv4t::IrOp::LDR && ins.rd == 15) {
                 uint32_t ea = 0;
                 if (eval_mem_imm_addr(ins, &ea) && can_read_at(ea, 4)) {
                     indirect_resolved = true;
                     uint32_t raw = read_u32(ea & ~uint32_t{3});
                     raw = ror32(raw, (ea & 3u) * 8u);
+                    ind_have_value = true;
+                    ind_value = raw;
                     CpuMode target_mode = (raw & 1u)
                         ? CpuMode::Thumb : entry_mode;
-                    enqueue_resolved_target(raw, target_mode, "branch");
+                    ind_seeded |= enqueue_resolved_target(
+                        raw, target_mode, "branch");
                 } else {
                     uint8_t rn = 0;
                     int32_t offset = 0;
@@ -901,9 +939,12 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     if (eval_symbolic_mem_addr(ins, &rn, &offset) &&
                         lookup_mem_const(rn, offset, &raw)) {
                         indirect_resolved = true;
+                        ind_have_value = true;
+                        ind_value = raw;
                         CpuMode target_mode = (raw & 1u)
                             ? CpuMode::Thumb : entry_mode;
-                        enqueue_resolved_target(raw, target_mode, "branch");
+                        ind_seeded |= enqueue_resolved_target(
+                            raw, target_mode, "branch");
                     }
                 }
             } else if (ins.op == armv4t::IrOp::LDM &&
@@ -921,7 +962,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                                           &rn, &resolved_offset) &&
                     lookup_mem_const(rn, resolved_offset, &raw)) {
                     indirect_resolved = true;
-                    enqueue_resolved_target(raw, entry_mode, "branch");
+                    ind_have_value = true;
+                    ind_value = raw;
+                    ind_seeded |= enqueue_resolved_target(
+                        raw, entry_mode, "branch");
                 }
             }
 
@@ -963,6 +1007,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 }
                 if (raw_known) {
                     indirect_resolved = true;
+                    ind_have_value = true;
+                    ind_value = raw;
                     uint32_t tgt = raw & ~uint32_t{1};
                     CpuMode tgt_mode = entry_mode;
                     if (src_is_bx) {
@@ -974,6 +1020,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                         mode_switch_seeds_.push_back(
                             FunctionSeed{tgt, tgt_mode, ""});
                         ++stats_.branch_targets_discovered;
+                        ind_seeded = true;
                     }
                 }
             }
@@ -1024,13 +1071,52 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 CpuMode pad_mode = (pad_raw & 1u) ? CpuMode::Thumb
                                                   : CpuMode::Arm;
                 if (!is_return_shape && pad != 0 &&
-                    addr_in_rom(pad) && !addr_in_data_range(pad) &&
+                    can_read_at(pad, pad_mode == CpuMode::Thumb ? 2u : 4u) &&
+                    !addr_in_data_range(pad) &&
                     looks_like_code(pad, pad_mode, /*strict=*/false)) {
                     char nm[64];
-                    std::snprintf(nm, sizeof nm, "lpad_%08X", pad);
+                    std::snprintf(nm, sizeof nm, "lpad%c_%08X",
+                                  pad_mode == CpuMode::Thumb ? 't' : 'a',
+                                  pad);
                     mode_switch_seeds_.push_back(
                         FunctionSeed{pad, pad_mode, nm});
                     ++stats_.landing_pads_discovered;
+                }
+            }
+
+            // Outcome tally. Returns are benign (the callee's caller is
+            // already discovered); everything else is either followed,
+            // proven-but-unreadable (an undeclared alias — a config gap,
+            // recorded for the discovery summary), or a genuine analysis
+            // gap.
+            if (!ins.is_return) {
+                if (ind_seeded) {
+                    ++stats_.indirect_resolved_count;
+                } else if (ind_have_value) {
+                    ++stats_.indirect_known_unreachable_count;
+                    unreachable_targets_.push_back(UnreachableTarget{
+                        ins.pc, ind_value & ~uint32_t{1}, entry_mode});
+                    if (indirect_report_enabled()) {
+                        std::fprintf(stderr,
+                            "[indirect] pc=0x%08X %s op=%d UNREACHABLE "
+                            "target=0x%08X\n",
+                            ins.pc,
+                            entry_mode == CpuMode::Thumb ? "thumb" : "arm",
+                            static_cast<int>(ins.op), ind_value);
+                    }
+                } else {
+                    ++stats_.indirect_unknown_count;
+                    if (indirect_report_enabled()) {
+                        std::fprintf(stderr,
+                            "[indirect] pc=0x%08X %s op=%d UNKNOWN "
+                            "rd=%d rn=%d rm=%d\n",
+                            ins.pc,
+                            entry_mode == CpuMode::Thumb ? "thumb" : "arm",
+                            static_cast<int>(ins.op),
+                            static_cast<int>(ins.rd),
+                            static_cast<int>(ins.rn),
+                            static_cast<int>(ins.rm));
+                    }
                 }
             }
         }
@@ -1223,6 +1309,39 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 remember_mem_const(rn, offset, stored);
             } else {
                 clear_mem_const();
+            }
+
+            // Stored code-pointer promotion (beads-yjp.35). A known
+            // constant written to memory that lands in readable code
+            // space is a candidate entry: the IRQ handler installed into
+            // the vector slot, a registered callback — addresses nothing
+            // ever branches to, reached only through hardware or a
+            // far-later indirect load. Fail-closed: bit0 selects the
+            // mode (the stored-pointer interworking convention), and the
+            // target must pass the strict multi-instruction decode gate.
+            // A false accept costs bloat, never correctness — dispatch
+            // is content-validated with a fail-closed interior default.
+            if (known_value && ins.rd != 15) {
+                uint32_t ptr = stored & ~uint32_t{1};
+                CpuMode ptr_mode = (stored & 1u) ? CpuMode::Thumb
+                                                 : CpuMode::Arm;
+                if (ptr != 0 &&
+                    (ptr & (ptr_mode == CpuMode::Thumb ? 1u : 3u)) == 0 &&
+                    can_read_at(ptr, ptr_mode == CpuMode::Thumb ? 2u : 4u) &&
+                    !addr_in_data_range(ptr) &&
+                    stored_ptr_seen_.insert(visit_key(ptr, ptr_mode)).second &&
+                    looks_like_code(ptr, ptr_mode, /*strict=*/true)) {
+                    char nm[64];
+                    // Mode is part of the identity: the same address can
+                    // be stored as both an ARM and a THUMB pointer, and
+                    // two Functions must not share one emitted name.
+                    std::snprintf(nm, sizeof nm, "sptr%c_%08X",
+                                  ptr_mode == CpuMode::Thumb ? 't' : 'a',
+                                  ptr);
+                    mode_switch_seeds_.push_back(
+                        FunctionSeed{ptr, ptr_mode, nm});
+                    ++stats_.stored_ptr_seeds;
+                }
             }
         } else if (ins.op == armv4t::IrOp::STRB ||
                    ins.op == armv4t::IrOp::STRH) {

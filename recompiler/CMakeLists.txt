@@ -47,6 +47,8 @@ add_executable(nds_recompile
     src/main.cpp
     finder/config.cpp
     finder/function_finder.cpp
+    finder/reloc_scan.cpp
+    armv4t/interpreter.cpp
     support/sha1.cpp)
 target_include_directories(nds_recompile PRIVATE
     finder support armv4t)
