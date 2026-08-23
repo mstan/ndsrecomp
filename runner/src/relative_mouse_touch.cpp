@@ -11,7 +11,25 @@ int32_t clamp_i32(int64_t value) {
         std::numeric_limits<int32_t>::max()));
 }
 
+bool point_in_rect(const NdsLogicalRect& rect, int x, int y) {
+    return x >= rect.x && x < rect.x + rect.width &&
+           y >= rect.y && y < rect.y + rect.height;
+}
+
 }  // namespace
+
+NdsStackedRelativeMouseRoute nds_route_stacked_relative_mouse_button(
+    bool relative_mouse_enabled, bool relative_mouse_captured,
+    const NdsLogicalRect& top_screen, const NdsLogicalRect& bottom_touch,
+    int x, int y) {
+    if (relative_mouse_captured)
+        return NdsStackedRelativeMouseRoute::CapturedButton;
+    if (relative_mouse_enabled && point_in_rect(top_screen, x, y))
+        return NdsStackedRelativeMouseRoute::AcquireRelative;
+    if (point_in_rect(bottom_touch, x, y))
+        return NdsStackedRelativeMouseRoute::Touchscreen;
+    return NdsStackedRelativeMouseRoute::None;
+}
 
 NdsRelativeMouseDelta nds_scale_relative_mouse_delta(
     int64_t dx, int64_t dy, uint16_t sensitivity_percent, bool invert_y,

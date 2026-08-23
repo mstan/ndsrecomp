@@ -47,5 +47,29 @@ int main() {
     if (!require(delta.x == 2147483647) ||
         !require(delta.y == static_cast<int32_t>(0x80000000u)))
         return 12;
+
+    const NdsLogicalRect adaptive_top{0, 0, 448, 192};
+    const NdsLogicalRect centered_bottom{96, 192, 256, 192};
+    if (!require(nds_route_stacked_relative_mouse_button(
+            true, false, adaptive_top, centered_bottom, 20, 100) ==
+                 NdsStackedRelativeMouseRoute::AcquireRelative))
+        return 13;
+    if (!require(nds_route_stacked_relative_mouse_button(
+            true, false, adaptive_top, centered_bottom, 223, 300) ==
+                 NdsStackedRelativeMouseRoute::Touchscreen) ||
+        !require(nds_route_stacked_relative_mouse_button(
+            true, false, adaptive_top, centered_bottom, 223, 192) ==
+                 NdsStackedRelativeMouseRoute::Touchscreen) ||
+        !require(nds_route_stacked_relative_mouse_button(
+            true, false, adaptive_top, centered_bottom, 20, 192) ==
+                 NdsStackedRelativeMouseRoute::None))
+        return 14;
+    if (!require(nds_route_stacked_relative_mouse_button(
+            true, true, adaptive_top, centered_bottom, -20, 500) ==
+                 NdsStackedRelativeMouseRoute::CapturedButton) ||
+        !require(nds_route_stacked_relative_mouse_button(
+            true, true, adaptive_top, centered_bottom, 223, 300) ==
+                 NdsStackedRelativeMouseRoute::CapturedButton))
+        return 15;
     return 0;
 }

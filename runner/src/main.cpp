@@ -323,6 +323,7 @@ int main(int argc, char** argv) {
     std::string rom_path;
     std::string config_path = "game.toml";
     std::string cli_screen_layout;
+    std::string cli_fullscreen;
     std::string cli_adaptive_screens;
     std::string cli_supersampling;
     std::string cli_internal_resolution;
@@ -428,6 +429,8 @@ int main(int argc, char** argv) {
             config_explicit = true;
         } else if (a == "--screen-layout" && i + 1 < argc) {
             cli_screen_layout = argv[++i];
+        } else if (a == "--fullscreen" && i + 1 < argc) {
+            cli_fullscreen = argv[++i];
         } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
             cli_adaptive_screens = argv[++i];
         } else if (a == "--supersampling" && i + 1 < argc) {
@@ -550,6 +553,7 @@ int main(int argc, char** argv) {
                 "[--firmware-state-path mutable-firmware.bin] "
                 "[--config game.toml] "
                 "[--screen-layout stacked|separate] "
+                "[--fullscreen off|borderless|exclusive] "
                 "[--adaptive-widescreen none|top|bottom|both] "
                 "[--supersampling 1|2|3|4] "
                 "[--internal-resolution 1|2|3|4] "
@@ -614,6 +618,21 @@ int main(int argc, char** argv) {
                          config_path.c_str(), config_error.c_str());
             return 2;
         }
+    }
+    NdsFullscreenOverrideError fullscreen_error =
+        NdsFullscreenOverrideError::None;
+    if (!nds_apply_fullscreen_overrides(
+            &frontend_options, cli_fullscreen, &fullscreen_error)) {
+        if (fullscreen_error == NdsFullscreenOverrideError::Environment) {
+            std::fprintf(stderr,
+                         "invalid NDS_FULLSCREEN "
+                         "(expected off, borderless, or exclusive)\n");
+        } else {
+            std::fprintf(stderr,
+                         "invalid --fullscreen "
+                         "(expected off, borderless, or exclusive)\n");
+        }
+        return 2;
     }
     if (const char* value = std::getenv("NDS_SCREEN_LAYOUT")) {
         if (!nds_parse_screen_layout(value,
@@ -856,12 +875,6 @@ int main(int argc, char** argv) {
                      "of the NdsNetEventKind names, e.g. wifi_reg_write, "
                      "dns_query, tcp_packet)\n",
                      cli_net_ring_filter.c_str());
-        return 2;
-    }
-    if (frontend_options.relative_mouse_touch &&
-        frontend_options.screen_layout != NdsScreenLayout::Separate) {
-        std::fprintf(stderr,
-                     "relative mouse touch requires --screen-layout separate\n");
         return 2;
     }
     if (!cli_network_enabled.empty() &&

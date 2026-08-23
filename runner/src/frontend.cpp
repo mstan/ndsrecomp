@@ -692,6 +692,17 @@ struct FrontendPresentation {
     int sample_scale = 1;
 };
 
+uint32_t fullscreen_flags(NdsFullscreenMode mode) {
+    switch (mode) {
+        case NdsFullscreenMode::Borderless:
+            return SDL_WINDOW_FULLSCREEN_DESKTOP;
+        case NdsFullscreenMode::Exclusive:
+            return SDL_WINDOW_FULLSCREEN;
+        default:
+            return 0;
+    }
+}
+
 void destroy_presentation(FrontendPresentation& presentation) {
     for (SDL_Texture*& texture : presentation.sample_targets) {
         if (texture) SDL_DestroyTexture(texture);
@@ -812,6 +823,18 @@ bool create_presentation(const NdsFrontendOptions& options,
     } else {
         presentation.windows[1] = presentation.windows[0];
         presentation.renderers[1] = presentation.renderers[0];
+    }
+
+    // Fullscreen is applied only after both separate-layout windows have their
+    // final placement. The primary combined/top window is deliberately the
+    // sole target so the separate touch window remains usable.
+    if (SDL_SetWindowFullscreen(presentation.windows[0],
+                                fullscreen_flags(options.fullscreen)) != 0) {
+        std::fprintf(stderr, "[sdl] fullscreen (%s) failed: %s\n",
+                     nds_fullscreen_mode_name(options.fullscreen),
+                     SDL_GetError());
+        destroy_presentation(presentation);
+        return false;
     }
 
     for (int screen = 0; screen < 2; ++screen) {
@@ -999,10 +1022,17 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         : presentation.canvas_width;
     const int bottom_content_left =
         (bottom_logical_width - kScreenWidth) / 2;
+    const int top_content_left = presentation.separate
+        ? 0 : (presentation.canvas_width - presentation.screen_widths[0]) / 2;
+    const NdsLogicalRect stacked_top_screen{
+        top_content_left, 0, presentation.screen_widths[0], kScreenHeight};
+    const NdsLogicalRect stacked_bottom_touch{
+        bottom_content_left, kScreenHeight, kScreenWidth, kScreenHeight};
     std::fprintf(stderr,
-        "[sdl] layout=%s adaptive=%s supersampling=%ux aa=%ux "
+        "[sdl] layout=%s fullscreen=%s adaptive=%s supersampling=%ux aa=%ux "
         "internal=%ux\n",
         nds_screen_layout_name(options.screen_layout),
+        nds_fullscreen_mode_name(options.fullscreen),
         nds_adaptive_screens_name(options.adaptive_screens),
         static_cast<unsigned>(options.supersampling),
         static_cast<unsigned>(options.antialiasing),
@@ -1477,25 +1507,67 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     static_cast<unsigned long long>(
                         nds_event_counts().vblank9));
                 relative_mouse_selftest_error |=
-                    !options.relative_mouse_touch || !presentation.separate ||
+                    !options.relative_mouse_touch ||
                     options.relative_mouse_fire_mask == 0;
                 SDL_RaiseWindow(presentation.windows[0]);
                 injected.type = SDL_MOUSEBUTTONDOWN;
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
+                // Stacked first verifies that the bottom logical screen
+                // remains touch-only. Separate preserves its top-window
+                // capture path exactly.
+                injected.button.x = presentation.separate
+                    ? 127 * kWindowScale
+                    : (bottom_content_left + 127) * kWindowScale;
+                injected.button.y = presentation.separate
+                    ? 96 * kWindowScale
+                    : (kScreenHeight + 96) * kWindowScale;
                 relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
                 relative_mouse_selftest_stage = 1;
             } else if (relative_mouse_selftest_stage == 1 &&
                        shown_frames >= 3) {
+                if (presentation.separate) {
+                    relative_mouse_selftest_error |= !relative_mouse.captured();
+                    injected.type = SDL_MOUSEMOTION;
+                    injected.motion.windowID = presentation.window_ids[0];
+                    injected.motion.xrel = 20;
+                    injected.motion.yrel = -10;
+                    relative_mouse_selftest_stage = 3;
+                } else {
+                    relative_mouse_selftest_error |= relative_mouse.captured() ||
+                        !mouse_down;
+                    injected.type = SDL_MOUSEBUTTONUP;
+                    injected.button.windowID = presentation.window_ids[0];
+                    injected.button.button = SDL_BUTTON_LEFT;
+                    injected.button.x =
+                        (bottom_content_left + 127) * kWindowScale;
+                    injected.button.y =
+                        (kScreenHeight + 96) * kWindowScale;
+                    relative_mouse_selftest_stage = 2;
+                }
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+            } else if (relative_mouse_selftest_stage == 2 &&
+                       shown_frames >= 4) {
+                relative_mouse_selftest_error |= mouse_down;
+                injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.windowID = presentation.window_ids[0];
+                injected.button.button = SDL_BUTTON_LEFT;
+                injected.button.x =
+                    (top_content_left + 127) * kWindowScale;
+                injected.button.y = 96 * kWindowScale;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 3;
+            } else if (relative_mouse_selftest_stage == 3 &&
+                       shown_frames >= 5) {
                 relative_mouse_selftest_error |= !relative_mouse.captured();
                 injected.type = SDL_MOUSEMOTION;
                 injected.motion.windowID = presentation.window_ids[0];
                 injected.motion.xrel = 20;
                 injected.motion.yrel = -10;
                 relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
-                relative_mouse_selftest_stage = 2;
-            } else if (relative_mouse_selftest_stage == 2 &&
-                       shown_frames >= 4) {
+                relative_mouse_selftest_stage = 4;
+            } else if (relative_mouse_selftest_stage == 4 &&
+                       shown_frames >= 6) {
                 relative_mouse_selftest_error |=
                     options.relative_mouse_direct_aim
                         ? relative_direct_writes == 0
@@ -1505,9 +1577,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
                 relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
-                relative_mouse_selftest_stage = 3;
-            } else if (relative_mouse_selftest_stage == 3 &&
-                       shown_frames >= 5) {
+                relative_mouse_selftest_stage = 5;
+            } else if (relative_mouse_selftest_stage == 5 &&
+                       shown_frames >= 7) {
                 relative_mouse_selftest_error |=
                     mouse_pressed != options.relative_mouse_fire_mask;
                 std::fprintf(stderr,
@@ -1518,20 +1590,39 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
                 relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
-                relative_mouse_selftest_stage = 4;
-            } else if (relative_mouse_selftest_stage == 4 &&
-                       shown_frames >= 6) {
+                relative_mouse_selftest_stage = 6;
+            } else if (relative_mouse_selftest_stage == 6 &&
+                       shown_frames >= 8) {
                 relative_mouse_selftest_error |= mouse_pressed != 0;
+                injected.type = SDL_KEYDOWN;
+                injected.key.keysym.scancode = SDL_SCANCODE_ESCAPE;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 7;
+            } else if (relative_mouse_selftest_stage == 7 &&
+                       shown_frames >= 9) {
+                relative_mouse_selftest_error |=
+                    relative_mouse.captured() || mouse_pressed != 0;
+                injected.type = SDL_MOUSEBUTTONDOWN;
+                injected.button.windowID = presentation.window_ids[0];
+                injected.button.button = SDL_BUTTON_LEFT;
+                injected.button.x =
+                    (top_content_left + 127) * kWindowScale;
+                injected.button.y = 96 * kWindowScale;
+                relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
+                relative_mouse_selftest_stage = 8;
+            } else if (relative_mouse_selftest_stage == 8 &&
+                       shown_frames >= 10) {
+                relative_mouse_selftest_error |= !relative_mouse.captured();
                 injected.type = SDL_WINDOWEVENT;
                 injected.window.windowID = presentation.window_ids[0];
                 injected.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
                 relative_mouse_selftest_error |= SDL_PushEvent(&injected) < 0;
-                relative_mouse_selftest_stage = 5;
-            } else if (relative_mouse_selftest_stage == 5 &&
-                       shown_frames >= 7) {
+                relative_mouse_selftest_stage = 9;
+            } else if (relative_mouse_selftest_stage == 9 &&
+                       shown_frames >= 11) {
                 relative_mouse_selftest_error |=
                     relative_mouse.captured() || mouse_pressed != 0;
-                relative_mouse_selftest_stage = 6;
+                relative_mouse_selftest_stage = 10;
             }
         }
         SDL_Event event{};
@@ -1628,10 +1719,23 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     publish_keys();
                 }
             }
-            if (event.type == SDL_MOUSEBUTTONDOWN &&
+            const bool primary_left_down =
+                event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
-                event.button.windowID == presentation.window_ids[0] &&
-                options.relative_mouse_touch) {
+                event.button.windowID == presentation.window_ids[0];
+            const NdsStackedRelativeMouseRoute stacked_left_route =
+                primary_left_down && !presentation.separate
+                    ? nds_route_stacked_relative_mouse_button(
+                        options.relative_mouse_touch,
+                        relative_mouse.captured(), stacked_top_screen,
+                        stacked_bottom_touch, event.button.x, event.button.y)
+                    : NdsStackedRelativeMouseRoute::None;
+            if (primary_left_down && options.relative_mouse_touch &&
+                (presentation.separate ||
+                 stacked_left_route ==
+                     NdsStackedRelativeMouseRoute::AcquireRelative ||
+                 stacked_left_route ==
+                     NdsStackedRelativeMouseRoute::CapturedButton)) {
                 if (!relative_mouse.captured()) {
                     // The acquisition click only captures; the next click is
                     // the first guest fire press, avoiding an accidental shot.
@@ -1666,10 +1770,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
-                event.button.x >= bottom_content_left &&
-                event.button.x < bottom_content_left + kScreenWidth &&
-                (presentation.separate ||
-                 event.button.y >= kScreenHeight)) {
+                (presentation.separate
+                    ? event.button.x >= bottom_content_left &&
+                          event.button.x < bottom_content_left + kScreenWidth
+                    : stacked_left_route ==
+                          NdsStackedRelativeMouseRoute::Touchscreen)) {
                 mouse_down = true;
                 ++host_touch_presses;
                 last_touch_event_x = event.button.x;
@@ -2070,7 +2175,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         if (selftest_menu && selftest_touch_up &&
             nds_event_counts().vblank9 >= 600)
             running = false;
-        if (selftest_relative_mouse && relative_mouse_selftest_stage == 6)
+        if (selftest_relative_mouse && relative_mouse_selftest_stage == 10)
             running = false;
 
         if (scheduler_cpu_terminal_halted(0) &&
@@ -2155,7 +2260,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
          top_hash != 0xa0f41b93e4eefa55ull ||
          bottom_hash != 0x6c43b370e9cda730ull);
     const bool relative_mouse_selftest_failed = selftest_relative_mouse &&
-        (relative_mouse_selftest_error || relative_mouse_selftest_stage != 6);
+        (relative_mouse_selftest_error || relative_mouse_selftest_stage != 10);
     if (selftest_menu)
         std::fprintf(stderr, "[sdl] menu self-test: %s\n",
                      menu_selftest_failed ? "FAIL" : "PASS");

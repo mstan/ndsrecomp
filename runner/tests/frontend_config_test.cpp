@@ -1,5 +1,6 @@
 #include "frontend.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -8,6 +9,15 @@ namespace {
 
 bool require(bool condition) {
     return condition;
+}
+
+bool set_fullscreen_environment(const char* value) {
+#if defined(_WIN32)
+    return _putenv_s("NDS_FULLSCREEN", value ? value : "") == 0;
+#else
+    return value ? setenv("NDS_FULLSCREEN", value, 1) == 0
+                 : unsetenv("NDS_FULLSCREEN") == 0;
+#endif
 }
 
 }  // namespace
@@ -20,6 +30,16 @@ int main() {
         !require(layout == NdsScreenLayout::Stacked) ||
         !require(!nds_parse_screen_layout("sideways", &layout)))
         return 1;
+
+    NdsFullscreenMode fullscreen = NdsFullscreenMode::Off;
+    if (!require(nds_parse_fullscreen_mode("off", &fullscreen)) ||
+        !require(fullscreen == NdsFullscreenMode::Off) ||
+        !require(nds_parse_fullscreen_mode("Borderless", &fullscreen)) ||
+        !require(fullscreen == NdsFullscreenMode::Borderless) ||
+        !require(nds_parse_fullscreen_mode("exclusive", &fullscreen)) ||
+        !require(fullscreen == NdsFullscreenMode::Exclusive) ||
+        !require(!nds_parse_fullscreen_mode("windowed", &fullscreen)))
+        return 18;
 
     uint8_t adaptive = NDS_ADAPTIVE_NONE;
     if (!require(nds_parse_adaptive_screens("top", &adaptive)) ||
@@ -74,7 +94,8 @@ int main() {
 
     {
         NdsFrontendOptions defaults{};
-        if (!require(defaults.mph_virtual_stylus_sensitivity == 20))
+        if (!require(defaults.mph_virtual_stylus_sensitivity == 20) ||
+            !require(defaults.fullscreen == NdsFullscreenMode::Off))
             return 17;
     }
 
@@ -97,6 +118,7 @@ int main() {
                 "startup_mode = \"automatic\"\n"
                 "[display]\n"
                 "screen_layout = \"separate\"\n"
+                "fullscreen = \"borderless\"\n"
                 "adaptive_widescreen = \"top\"\n"
                 "adaptive_capability = \"top\"\n"
                 "adaptive_width = 448\n"
@@ -124,6 +146,7 @@ int main() {
         !require(options.expected_rom_sha1 ==
                  "90164d1ac127ee5f9815ea4ae7de798c7b5fc629") ||
         !require(options.screen_layout == NdsScreenLayout::Separate) ||
+        !require(options.fullscreen == NdsFullscreenMode::Borderless) ||
         !require(options.startup_mode == NdsStartupMode::Automatic) ||
         !require(options.adaptive_screens == NDS_ADAPTIVE_TOP) ||
         !require(options.adaptive_supported == NDS_ADAPTIVE_TOP) ||
@@ -167,6 +190,57 @@ int main() {
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
         return 7;
+
+    {
+        std::ofstream file(path);
+        file << "[display]\n"
+                "fullscreen = \"invalid\"\n";
+    }
+    options = {};
+    if (!require(!nds_load_frontend_config(path.string(), &options, &error)))
+        return 19;
+
+    // Exercise the production source-application helper: TOML has already
+    // populated options, then NDS_FULLSCREEN, then --fullscreen.
+    {
+        std::ofstream file(path);
+        file << "[display]\n"
+                "fullscreen = \"borderless\"\n";
+    }
+    options = {};
+    NdsFullscreenOverrideError fullscreen_error =
+        NdsFullscreenOverrideError::None;
+    if (!require(nds_load_frontend_config(path.string(), &options, &error)) ||
+        !require(options.fullscreen == NdsFullscreenMode::Borderless) ||
+        !require(set_fullscreen_environment("exclusive")) ||
+        !require(nds_apply_fullscreen_overrides(
+            &options, "off", &fullscreen_error)) ||
+        !require(fullscreen_error == NdsFullscreenOverrideError::None) ||
+        !require(options.fullscreen == NdsFullscreenMode::Off))
+        return 20;
+    if (!require(set_fullscreen_environment(nullptr))) return 21;
+
+    options = {};
+    fullscreen_error = NdsFullscreenOverrideError::None;
+    if (!require(nds_apply_fullscreen_overrides(
+            &options, "", &fullscreen_error)) ||
+        !require(options.fullscreen == NdsFullscreenMode::Off) ||
+        !require(fullscreen_error == NdsFullscreenOverrideError::None))
+        return 22;
+
+    options = {};
+    if (!require(set_fullscreen_environment("invalid")) ||
+        !require(!nds_apply_fullscreen_overrides(
+            &options, "", &fullscreen_error)) ||
+        !require(fullscreen_error == NdsFullscreenOverrideError::Environment) ||
+        !require(set_fullscreen_environment(nullptr)))
+        return 23;
+
+    options = {};
+    if (!require(!nds_apply_fullscreen_overrides(
+            &options, "invalid", &fullscreen_error)) ||
+        !require(fullscreen_error == NdsFullscreenOverrideError::CommandLine))
+        return 24;
 
     {
         std::ofstream file(path);
