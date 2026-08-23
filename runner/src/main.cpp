@@ -330,6 +330,7 @@ int main(int argc, char** argv) {
     std::string cli_texture_upscale;
     std::string cli_antialiasing;
     std::string cli_relative_mouse_touch;
+    std::string cli_tab_turbo;
     std::string cli_relative_mouse_sensitivity;
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
@@ -443,6 +444,8 @@ int main(int argc, char** argv) {
             cli_antialiasing = argv[++i];
         } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
             cli_relative_mouse_touch = argv[++i];
+        } else if (a == "--tab-turbo" && i + 1 < argc) {
+            cli_tab_turbo = argv[++i];
         } else if (a == "--relative-mouse-sensitivity" && i + 1 < argc) {
             cli_relative_mouse_sensitivity = argv[++i];
         } else if (a == "--relative-mouse-invert-y" && i + 1 < argc) {
@@ -560,6 +563,7 @@ int main(int argc, char** argv) {
                 "[--texture-upscale 1|2|4] "
                 "[--antialiasing 0|2|4|8] "
                 "[--relative-mouse-touch on|off] "
+                "[--tab-turbo on|off] "
                 "[--relative-mouse-sensitivity 10..400] "
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
@@ -791,6 +795,12 @@ int main(int argc, char** argv) {
                           &frontend_options.relative_mouse_touch)) {
         std::fprintf(stderr,
                      "invalid --relative-mouse-touch (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_tab_turbo.empty() &&
+        !nds_parse_on_off(cli_tab_turbo, &frontend_options.tab_turbo)) {
+        std::fprintf(stderr,
+                     "invalid --tab-turbo (expected on or off)\n");
         return 2;
     }
     if (!cli_relative_mouse_sensitivity.empty() &&

@@ -22,7 +22,8 @@ extern bool g_nds_rtc_host;
 void     nds_set_touch(uint16_t x, uint16_t y, bool down);
 void     nds_set_key_mask(uint32_t mask);
 // Debug-server throttle override (`turbo` command): frontend treats it like
-// the hold-Tab turbo. Written from the debug-server thread.
+// an explicit developer speed-control request. Written from the debug-server
+// thread.
 void     nds_set_debug_turbo(bool enabled);
 bool     nds_debug_turbo();
 uint64_t nds_next_system_event_time();

@@ -234,6 +234,10 @@ struct NdsFrontendOptions {
     // selected by a title launcher; deterministic/headless routes never
     // synthesize mouse input.
     bool relative_mouse_touch = false;
+    // Developer-only speed control. Public title launchers leave this off so
+    // Tab can be safely used by game-specific bindings such as MPH's virtual
+    // stylus.
+    bool tab_turbo = false;
     uint16_t relative_mouse_sensitivity = 100;  // 10%..400%
     bool relative_mouse_invert_y = false;
     // Active-high frontend pressed-bit mask (same layout as key_bit()).

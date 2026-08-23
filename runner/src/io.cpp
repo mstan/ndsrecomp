@@ -2020,7 +2020,7 @@ void nds_set_key_mask(uint32_t mask) {
 }
 
 // Debug-server-driven throttle override (the `turbo` command). Same role as
-// the frontend's hold-Tab turbo, but reachable from a probe that has no
+// the frontend's opt-in Tab turbo, but reachable from a probe that has no
 // window focus. Read once per frontend loop iteration; atomic because the
 // debug server writes it from its own thread.
 static std::atomic<bool> g_debug_turbo{false};

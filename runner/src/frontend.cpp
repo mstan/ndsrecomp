@@ -1164,7 +1164,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     std::fprintf(stderr,
         "[sdl] controls: gamepad=Player 1 | bottom mouse=touch | "
         "arrows=D-pad | Z=A X=B | A=Y S=X | Q=L W=R | "
-        "Enter=Start Backspace=Select | hold Tab=turbo | Esc=quit\n");
+        "Enter=Start Backspace=Select | Esc=quit%s\n",
+        options.tab_turbo ? " | hold Tab=turbo" : "");
     if (options.relative_mouse_touch) {
         std::fprintf(stderr,
             "[sdl] relative mouse: click top screen to capture; "
@@ -1398,6 +1399,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool audio_queue_error = false;
     bool turbo_pressed = false;
     bool turbo_active = false;
+    auto clear_tab_turbo = [&]() {
+        if (options.tab_turbo) turbo_pressed = false;
+    };
     uint32_t audio_pace_floor = kAudioQueueFrames;
     uint32_t audio_min_queue = std::numeric_limits<uint32_t>::max();
     uint32_t audio_max_queue = 0;
@@ -1664,8 +1668,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_FOCUS_LOST &&
-                event.window.windowID == presentation.window_ids[0]) {
+                (event.window.windowID == presentation.window_ids[0] ||
+                 event.window.windowID == presentation.window_ids[1])) {
                 release_relative_mouse();
+                clear_tab_turbo();
             }
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
@@ -1676,7 +1682,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 } else if (process_mph_prime_key(
                                event.key.keysym.scancode, true, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
-                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                } else if (options.tab_turbo &&
+                           event.key.keysym.scancode == SDL_SCANCODE_TAB) {
                     turbo_pressed = true;
                 } else if (mph_prime_active()) {
                     // Prime Controls replaces the normal keyboard keypad map;
@@ -1691,7 +1698,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 if (process_mph_prime_key(
                         event.key.keysym.scancode, false, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
-                } else if (event.key.keysym.scancode == SDL_SCANCODE_TAB) {
+                } else if (options.tab_turbo &&
+                           event.key.keysym.scancode == SDL_SCANCODE_TAB) {
                     turbo_pressed = false;
                 } else if (mph_prime_active()) {
                     // See keydown path: ignore generic keyboard bindings
