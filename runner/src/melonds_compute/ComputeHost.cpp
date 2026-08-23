@@ -576,7 +576,23 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
     int drawable_width = 0;
     int drawable_height = 0;
     SDL_GL_GetDrawableSize(g_window, &drawable_width, &drawable_height);
-    glViewport(0, 0, drawable_width, drawable_height);
+    int viewport_x = 0;
+    int viewport_y = 0;
+    int viewport_width = drawable_width;
+    int viewport_height = drawable_height;
+    if (width == 256 && drawable_width > 0 && drawable_height > 0) {
+        const int target_width = drawable_height * 4 / 3;
+        if (target_width < drawable_width) {
+            viewport_width = target_width;
+            viewport_x = (drawable_width - viewport_width) / 2;
+        } else {
+            viewport_height = drawable_width * 3 / 4;
+            viewport_y = (drawable_height - viewport_height) / 2;
+        }
+    }
+    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
     glUseProgram(g_present_program);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, g_object_texture[buffer]);

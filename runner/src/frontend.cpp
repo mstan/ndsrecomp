@@ -745,9 +745,12 @@ bool create_presentation(const NdsFrontendOptions& options,
     const bool direct_enabled =
         !direct_selection || !*direct_selection ||
         std::strcmp(direct_selection, "1") == 0;
+    const bool direct_top_requested =
+        (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u ||
+        options.internal_resolution > 1u;
     presentation.gl_top = presentation.separate &&
         allow_gl_top &&
-        (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u &&
+        direct_top_requested &&
         nds_gpu3d_renderer_prefers_compute() &&
         direct_enabled;
 #endif

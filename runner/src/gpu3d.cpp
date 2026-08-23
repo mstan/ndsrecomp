@@ -492,9 +492,11 @@ bool nds_gpu3d_use_compute_renderer() {
     // readback surface this bridge maps every frame is still RenderWidth x
     // 192 (the final pass point-samples it out of the scaled raster), so the
     // faithful 2D compositor and display capture see byte-identical input at
-    // every scale. Hi-res coordinates stay off: they change which samples the
-    // rasterizer produces, which the native readback would then observe.
-    renderer->SetRenderSettings(static_cast<int>(g_internal_scale), false);
+    // scale 1. Higher internal-resolution modes use melonDS's sub-native
+    // vertex coordinates so the extra samples reduce polygon/texture wobble
+    // rather than merely magnifying the native integer grid.
+    renderer->SetRenderSettings(
+        static_cast<int>(g_internal_scale), g_internal_scale > 1u);
     if (compute_gl_stage_failed("render settings")) return false;
     if (g_internal_scale > 1u)
         std::fprintf(stderr,
