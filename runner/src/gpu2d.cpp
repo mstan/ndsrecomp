@@ -1,4 +1,5 @@
 #include "gpu2d.h"
+#include "gpu2d_window.h"
 
 #include <algorithm>
 #include <array>
@@ -148,6 +149,10 @@ NdsGpu2dDirectClass direct_scene_class() {
     const bool bg0_3d = (u.dispcnt & 0x8u) != 0 &&
                         (u.dispcnt & 0x100u) != 0;
     if (!bg0_3d) return NDS_GPU2D_DIRECT_NO_BG0_3D;
+    // The direct OBJ presenter has no DS window mask or OBJ-window coverage.
+    // Route every windowed scene through the adaptive compositor instead.
+    if (u.dispcnt & NDS_GPU2D_DISPCNT_WINDOW_ENABLE_MASK)
+        return NDS_GPU2D_DIRECT_WINDOWS;
     const uint32_t extra_bg_mask = (u.dispcnt >> 9u) & 7u;
     if (extra_bg_mask != 0u) return NDS_GPU2D_DIRECT_EXTRA_BG;
     if (nds_gpu3d_output_width() <= 256u) return NDS_GPU2D_DIRECT_WIDTH;
@@ -747,8 +752,10 @@ void put_obj(Pixel* line, int width, int x, const Pixel& p) {
 
 void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
                      const uint8_t* oam, const uint8_t* palette,
-                     const NdsVramRendererView& vram) {
+                     const NdsVramRendererView& vram,
+                     uint8_t* obj_window = nullptr) {
     std::fill_n(out, out_width, Pixel{});
+    if (obj_window) std::fill_n(obj_window, out_width, 0u);
     const Unit& u=g_unit[engine];
     if (!(u.dispcnt&0x1000u)) return;
     static constexpr int widths[16]={8,16,8,8,16,32,8,8,32,32,16,8,64,64,32,8};
@@ -792,7 +799,7 @@ void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
             }
             if (output_sx<=-bw || output_sx>=out_width) continue;
             const int mode=(a0>>10)&3;
-            if (mode==2) continue; // OBJ-window is handled when window modes land.
+            if (mode==2 && !obj_window) continue;
             const bool color256=a0&0x2000u;
             const uint32_t tile=a2&0x3FFu;
             const uint8_t alpha=mode==1?0xFFu:0u;
@@ -804,14 +811,14 @@ void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
                 pc=static_cast<int16_t>(view16(oam,oam_base+group*32+22));
                 pd=static_cast<int16_t>(view16(oam,oam_base+group*32+30));
             }
-            if(!affine && mode!=3){
+            if(!affine && mode!=3 && mode!=2){
                 // Per-tile fast path (the decode_text_line treatment): for a
                 // regular tile-mode OBJ, py and therefore the tile row are
                 // per-line constants and px walks monotonically, so one
                 // 32/64-bit row fetch feeds up to 8 pixels. Byte-identical to
                 // the per-pixel loop below: same index-0 skip, same palette
                 // lookups, one put_obj per pixel. Affine (non-monotonic px),
-                // bitmap (different addressing), and the OBJ-window stub keep
+                // bitmap (different addressing) and OBJ-window coverage keep
                 // the generic path.
                 const int py=(a1&0x2000u)?h-1-row:row;
                 uint32_t tile_index=tile;
@@ -908,6 +915,13 @@ void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
                         color=view16(palette,pal_base+(((a2>>12)&0xFu)<<5)+(index<<1));
                     }
                 }
+                if (mode == 2) {
+                    // OBJ-window sprites are invisible. Their nonzero tile
+                    // indices define coverage; palette values and OBJ
+                    // priority do not participate.
+                    obj_window[screen_x] = 1u;
+                    continue;
+                }
                 Pixel p{rgb6(color), 0x10u, alpha,
                         static_cast<uint8_t>(priority), 0, true};
                 if(mode==3)p.alpha=static_cast<uint8_t>(std::min(16u,((a2>>12)&0xFu)+1u));
@@ -916,7 +930,8 @@ void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
     }
 }
 
-uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
+uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below,
+                 bool effects_enabled = true) {
     uint32_t c=top.color;
     const uint16_t target2=static_cast<uint16_t>(below.target)<<8;
     if (top.alpha5) {
@@ -926,7 +941,7 @@ uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
         if (u.bldcnt & target2) return blend5(c, below.color, top.alpha5);
         // Otherwise the 3D layer acts as BG0 (first-target bit 0x01) for
         // brightness effects only; alpha blend never applies here.
-        if (u.bldcnt & top.target) {
+        if (effects_enabled && (u.bldcnt & top.target)) {
             switch ((u.bldcnt >> 6) & 3u) {
                 case 2: return brighten(c, u.evy);
                 case 3: return darken(c, u.evy);
@@ -937,7 +952,7 @@ uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below) {
     if(top.alpha && (u.bldcnt&target2)){
         const uint32_t eva=top.alpha==0xFFu?u.eva:top.alpha;
         c=blend(c,below.color,eva,top.alpha==0xFFu?u.evb:16u-eva);
-    }else if(u.bldcnt&top.target){
+    }else if(effects_enabled && (u.bldcnt&top.target)){
         switch((u.bldcnt>>6)&3u){
             case 1:if(u.bldcnt&target2)c=blend(c,below.color,u.eva,u.evb);break;
             case 2:c=brighten(c,u.evy);break;
@@ -956,9 +971,11 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
                    const uint8_t* oam, const NdsVramRendererView& vram,
                    const uint32_t* line3d, bool bg0_3d, uint32_t* out) {
     std::array<Pixel,256> obj{};
+    std::array<uint8_t,256> obj_window{};
     const auto obj_start = profiling() ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
-    render_obj_line(engine, y, obj.data(), 256, oam, palette, vram);
+    render_obj_line(engine, y, obj.data(), 256, oam, palette, vram,
+                    obj_window.data());
     if (profiling()) {
         g_obj_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -982,7 +999,11 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
         return a.priority < b.priority ||
                (a.priority == b.priority && a.order < b.order);
     };
+    const NdsGpu2dWindowState window_state{u.dispcnt, u.win};
     for (int x = 0; x < 256; ++x) {
+        const uint8_t window_mask = nds_gpu2d_window_mask(
+            window_state, static_cast<uint8_t>(x), static_cast<uint8_t>(y),
+            obj_window[x] != 0u);
         Pixel top = backdrop, below = backdrop;
         auto push = [&](const Pixel& p) {
             if (ahead(p, top)) { below = top; top = p; }
@@ -990,12 +1011,13 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
         };
         for (size_t i = 0; i < bg_count; ++i) {
             const uint16_t c = bg_lines[i].color[x];
-            if (!(c & 0x8000u)) continue;
+            if (!(c & 0x8000u) || !(window_mask & (1u << active_bgs[i])))
+                continue;
             const BgLine& l = bg_lines[i];
             push(Pixel{rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
                        l.target, 0, l.prio, l.order, true});
         }
-        if (bg0_3d && line3d) {
+        if (bg0_3d && line3d && (window_mask & 0x01u)) {
             const uint32_t c3 = line3d[x];
             const uint8_t a3 = static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
             // alpha 0 = fully transparent; the layer competes at BG0's
@@ -1003,8 +1025,8 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
             if (a3)
                 push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0, prio3d, 1, true, a3});
         }
-        if (obj[x].valid) push(obj[x]);
-        out[x] = compose(u, top, below);
+        if (obj[x].valid && (window_mask & 0x10u)) push(obj[x]);
+        out[x] = compose(u, top, below, (window_mask & 0x20u) != 0u);
     }
 }
 
@@ -1146,7 +1168,8 @@ void render_engine_line(int engine, int y) {
     const bool bg0_3d = engine == 0 && (u.dispcnt & 0x8u) != 0 &&
                         (u.dispcnt & 0x100u) != 0;
 
-    if (bg0_3d || cap || mode != 1u) {
+    if (bg0_3d || cap || mode != 1u ||
+        (u.dispcnt & NDS_GPU2D_DISPCNT_WINDOW_ENABLE_MASK)) {
         // General path: mirror melonDS DrawScanline ordering — composite
         // (when the display or capture consumes it), display-mode mux,
         // capture, master brightness on every mode except screen-off.
@@ -1757,8 +1780,9 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                         (u.dispcnt & 0x100u) != 0;
     // Known-safe adaptive scenes use main-engine 3D plus OBJ. Text BG planes
     // can either be title-anchored into left/center/right bands or kept as a
-    // native-width centered overlay. Affine/bitmap backgrounds and windowed
-    // composites still retain a centered native image.
+    // native-width centered overlay. Affine/bitmap backgrounds still retain a
+    // centered native image; windowed text scenes use the same native stack
+    // filtering as the regular compositor below.
     bool supported_hud_bgs = true;
     for (int bg = 1; bg < 4; ++bg) {
         if ((u.dispcnt & (0x100u << bg)) &&
@@ -1767,10 +1791,11 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             break;
         }
     }
-    const bool windows_enabled = (u.dispcnt & 0xE000u) != 0u;
+    const NdsGpu2dWindowState window_state{u.dispcnt, u.win};
+    const bool windows_supported = nds_gpu2d_windows_support_hd(window_state);
     const bool supported_scene =
         palette && oam && vram && !(u.dispcnt & 0x80u) &&
-        mode == 1u && bg0_3d && supported_hud_bgs && !windows_enabled &&
+        mode == 1u && bg0_3d && supported_hud_bgs && windows_supported &&
         !g_present_capture_active;
     if (!supported_scene) {
         for (int y = 0; y < 192; ++y)
@@ -1787,6 +1812,7 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t mb =
         std::min<uint32_t>(16, u.master_bright & 0x1Fu);
     std::array<Pixel, kMaxAdaptiveWidth> obj{};
+    std::array<uint8_t, kMaxAdaptiveWidth> obj_window{};
     std::array<int16_t, kMaxAdaptiveWidth> sky_left{};
     std::array<int16_t, kMaxAdaptiveWidth> sky_indices{};
     std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
@@ -1821,7 +1847,7 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     }
     for (int y = 0; y < 192; ++y) {
         render_obj_line(0, y, obj.data(), output_width,
-                        oam, palette, *vram);
+                        oam, palette, *vram, obj_window.data());
         for (size_t i = 0; i < hud_bg_count; ++i)
             decode_bg_line(0, hud_bgs[i], y, palette, *vram,
                            hud_bg_lines[i]);
@@ -1935,17 +1961,28 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             } else if (x >= extra && x < extra + 256) {
                 hud_x = x - extra;
             }
+            // Rectangular windows use the same native coordinate as the HUD
+            // source. In the 3D-only widened margins there is no native 2D
+            // source; selection still supplies the correct OBJ-window/outside
+            // mask, and HD eligibility guarantees BG0/effects remain enabled.
+            const uint8_t window_x = static_cast<uint8_t>(
+                hud_x >= 0 ? hud_x : x);
+            const uint8_t window_mask = nds_gpu2d_window_mask(
+                window_state, window_x, static_cast<uint8_t>(y),
+                obj_window[x] != 0u);
             if (hud_x >= 0) {
                 for (size_t i = 0; i < hud_bg_count; ++i) {
                     const uint16_t c = hud_bg_lines[i].color[hud_x];
-                    if (!(c & 0x8000u)) continue;
+                    if (!(c & 0x8000u) ||
+                        !(window_mask & (1u << hud_bgs[i])))
+                        continue;
                     const BgLine& line = hud_bg_lines[i];
                     push(Pixel{
                         rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
                         line.target, 0, line.prio, line.order, true});
                 }
             }
-            if (obj[x].valid) push(obj[x]);
+            if (obj[x].valid && (window_mask & 0x10u)) push(obj[x]);
             if (emit_hd) {
                 const size_t o = (static_cast<size_t>(y) * output_width + x)
                                  * 2u;
@@ -1957,11 +1994,12 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             const uint32_t c3 = composited_3d[x];
             const uint8_t a3 =
                 static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
-            if (a3) {
+            if (a3 && (window_mask & 0x01u)) {
                 push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
                            prio3d, 1, true, a3});
             }
-            uint32_t color = compose(u, top, below);
+            uint32_t color = compose(u, top, below,
+                                     (window_mask & 0x20u) != 0u);
             if (mbmode == 1u)
                 color = brighten(color, mb, 0u);
             else if (mbmode == 2u)
@@ -2054,6 +2092,7 @@ const char* nds_gpu2d_direct_class_name(uint32_t index) {
         "force_blank",
         "display_mode",
         "no_bg0_3d",
+        "windows",
         "extra_bg",
         "width",
     };
