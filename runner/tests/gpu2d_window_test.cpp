@@ -150,8 +150,10 @@ bool test_window_empty_and_scanner_eligibility() {
         return false;
     win[11] = 0x32;  // BG0 disabled in potentially reachable OBJ window.
     if (!require(!nds_gpu2d_windows_support_hd(state))) return false;
-    win[11] = 0x13;  // Effects disabled in potentially reachable OBJ window.
-    return require(!nds_gpu2d_windows_support_hd(state));
+    win[11] = 0x13;  // Effects disabled but BG0 remains visible.
+    if (!require(nds_gpu2d_windows_support_hd(state))) return false;
+    win[11] = 0x17;  // MPH tutorial/transmission OBJ window mask.
+    return require(nds_gpu2d_windows_support_hd(state));
 }
 
 bool test_direct_scene_rejects_windows() {

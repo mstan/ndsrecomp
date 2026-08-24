@@ -87,8 +87,9 @@ std::vector<uint32_t> g_hd_top_pixels;
 std::vector<uint32_t> g_hd_below_pixels;
 NdsGpu2dHdFrame g_hd_frame{};
 
-uint32_t hd_meta(const Pixel& p) {
-    return static_cast<uint32_t>(p.target) |
+uint32_t hd_meta(const Pixel& p, bool effects_enabled) {
+    return static_cast<uint32_t>(p.target & 0x3Fu) |
+           (effects_enabled ? 0x80u : 0u) |
            (static_cast<uint32_t>(p.alpha) << 8) |
            (static_cast<uint32_t>(p.priority) << 16) |
            (static_cast<uint32_t>(p.order) << 24);
@@ -1986,10 +1987,11 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             if (emit_hd) {
                 const size_t o = (static_cast<size_t>(y) * output_width + x)
                                  * 2u;
+                const bool effects_enabled = (window_mask & 0x20u) != 0u;
                 g_hd_top_pixels[o] = top.color;
-                g_hd_top_pixels[o + 1] = hd_meta(top);
+                g_hd_top_pixels[o + 1] = hd_meta(top, effects_enabled);
                 g_hd_below_pixels[o] = below.color;
-                g_hd_below_pixels[o + 1] = hd_meta(below);
+                g_hd_below_pixels[o + 1] = hd_meta(below, effects_enabled);
             }
             const uint32_t c3 = composited_3d[x];
             const uint8_t a3 =

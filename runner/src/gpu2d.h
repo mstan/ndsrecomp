@@ -63,9 +63,10 @@ struct NdsGpu2dDirectFrame {
 // only the 3D layer gains resolution.
 struct NdsGpu2dHdFrame {
     // RG32UI pairs, width x 192: [0] = RGB6 colour (channels at bits
-    // 0/8/16), [1] = BLDCNT target | alpha << 8 | priority << 16 |
-    // order << 24. Alpha follows the CPU Pixel convention: 0 = no alpha
-    // blend, 1..16 = OBJ alpha, 0xFF = the BLDCNT EVA/EVB pair.
+    // 0/8/16), [1] = BLDCNT target in bits 0..5 | effects enable bit 7 |
+    // alpha << 8 | priority << 16 | order << 24. Alpha follows the CPU Pixel
+    // convention: 0 = no alpha blend, 1..16 = OBJ alpha, 0xFF = the BLDCNT
+    // EVA/EVB pair.
     const uint32_t* top_pixels;
     const uint32_t* below_pixels;
     uint16_t width;

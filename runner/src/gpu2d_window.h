@@ -52,10 +52,10 @@ constexpr uint8_t nds_gpu2d_window_mask(const NdsGpu2dWindowState& state,
 }
 
 constexpr bool nds_gpu2d_window_mask_supports_hd(uint8_t mask) {
-    // The HD descriptor removes BG0/3D and the shader reinserts it under one
-    // global BLDCNT. It can represent a region only when BG0 and normal color
-    // effects both remain enabled there.
-    return (mask & 0x21u) == 0x21u;
+    // The HD descriptor removes BG0/3D and the shader reinserts it. It can
+    // represent a region only when BG0 remains enabled there. The per-pixel
+    // effects enable bit is carried in the descriptor metadata.
+    return (mask & 0x01u) != 0u;
 }
 
 constexpr bool nds_gpu2d_window_rect_reachable(uint8_t left, uint8_t right,

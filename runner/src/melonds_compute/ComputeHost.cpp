@@ -128,6 +128,7 @@ uvec3 effect(uvec3 top, uvec3 below, uint topTarget,
 struct Layer {
     uvec3 color;
     uint target;
+    bool effects;
     uint alpha;    // 0 = no alpha blend, 1..16 = OBJ alpha, 255 = EVA/EVB
     uint alpha5;   // non-zero only on the 3D layer: its own 5-bit coverage
     uint priority;
@@ -141,7 +142,8 @@ Layer unpackLayer(uvec2 texel)
     Layer l;
     l.color = uvec3(texel.x & 63u, (texel.x >> 8) & 63u,
                     (texel.x >> 16) & 63u);
-    l.target = texel.y & 255u;
+    l.target = texel.y & 63u;
+    l.effects = (texel.y & 128u) != 0u;
     l.alpha = (texel.y >> 8) & 255u;
     l.alpha5 = 0u;
     l.priority = (texel.y >> 16) & 255u;
@@ -165,7 +167,7 @@ uvec3 composeLayers(Layer top, Layer below)
         // per-pixel 5-bit blend is forced regardless of the colour effect.
         if ((bldcnt & target2) != 0u)
             return blend5(top.color, below.color, top.alpha5);
-        if ((bldcnt & top.target) != 0u) {
+        if (top.effects && (bldcnt & top.target) != 0u) {
             uint mode = (bldcnt >> 6) & 3u;
             if (mode == 2u) return brighten(top.color, evy, 8u);
             if (mode == 3u) return darken(top.color, evy, 7u);
@@ -177,7 +179,7 @@ uvec3 composeLayers(Layer top, Layer below)
         uint evb1 = top.alpha == 255u ? evb : 16u - eva1;
         return blend16(top.color, below.color, eva1, evb1);
     }
-    if ((bldcnt & top.target) != 0u) {
+    if (top.effects && (bldcnt & top.target) != 0u) {
         uint mode = (bldcnt >> 6) & 3u;
         if (mode == 1u && (bldcnt & target2) != 0u)
             return blend16(top.color, below.color, eva, evb);
@@ -222,6 +224,7 @@ void main()
                 // the DS channel order the rest of this shader uses.
                 l3.color = uvec3(round(hi.bgr * 63.0));
                 l3.target = 1u;       // the 3D layer is BLDCNT first target 0
+                l3.effects = top.effects;
                 l3.alpha = 0u;
                 l3.alpha5 = a3;
                 l3.priority = priority3d;
