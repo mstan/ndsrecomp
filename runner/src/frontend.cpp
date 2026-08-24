@@ -1171,7 +1171,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         options.tab_turbo ? " | hold Tab=turbo" : "");
     if (options.relative_mouse_touch) {
         std::fprintf(stderr,
-            "[sdl] relative mouse: click top screen to capture; "
+            "[sdl] relative mouse: click game screen to capture; "
             "Esc or focus loss releases; sensitivity=%u%% invert-y=%s "
             "aim=%s\n",
             static_cast<unsigned>(options.relative_mouse_sensitivity),
@@ -1273,6 +1273,18 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         mph_prime_held.fill(false);
         mph_prime_pressed = 0;
         mph_touch_sequence = {};
+    };
+    auto is_presentation_window = [&](uint32_t window_id) {
+        return window_id == presentation.window_ids[0] ||
+               window_id == presentation.window_ids[1];
+    };
+    auto presentation_window_focus_index = [&](uint32_t window_id) {
+        if (window_id == presentation.window_ids[0]) return 0;
+        if (presentation.separate &&
+            window_id == presentation.window_ids[1]) {
+            return 1;
+        }
+        return -1;
     };
     auto set_mph_prime_action = [&](MphPrimeAction action, bool down,
                                     bool repeat) {
@@ -1402,6 +1414,18 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool audio_queue_error = false;
     bool turbo_pressed = false;
     bool turbo_active = false;
+    bool focus_release_pending = false;
+    bool presentation_window_focused[2] = {
+        (SDL_GetWindowFlags(presentation.windows[0]) &
+         SDL_WINDOW_INPUT_FOCUS) != 0,
+        presentation.separate &&
+            (SDL_GetWindowFlags(presentation.windows[1]) &
+             SDL_WINDOW_INPUT_FOCUS) != 0,
+    };
+    auto any_presentation_window_focused = [&]() {
+        return presentation_window_focused[0] ||
+               (presentation.separate && presentation_window_focused[1]);
+    };
     auto clear_tab_turbo = [&]() {
         if (options.tab_turbo) turbo_pressed = false;
     };
@@ -1547,8 +1571,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 injected.button.windowID = presentation.window_ids[0];
                 injected.button.button = SDL_BUTTON_LEFT;
                 // Stacked first verifies that the bottom logical screen
-                // remains touch-only. Separate preserves its top-window
-                // capture path exactly.
+                // remains touch-only. Separate verifies the traditional
+                // top-window capture path.
                 injected.button.x = presentation.separate
                     ? 127 * kWindowScale
                     : (bottom_content_left + 127) * kWindowScale;
@@ -1671,10 +1695,21 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_FOCUS_LOST &&
-                (event.window.windowID == presentation.window_ids[0] ||
-                 event.window.windowID == presentation.window_ids[1])) {
-                release_relative_mouse();
-                clear_tab_turbo();
+                is_presentation_window(event.window.windowID)) {
+                const int index =
+                    presentation_window_focus_index(event.window.windowID);
+                if (index >= 0)
+                    presentation_window_focused[index] = false;
+                focus_release_pending = true;
+            }
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED &&
+                is_presentation_window(event.window.windowID)) {
+                const int index =
+                    presentation_window_focus_index(event.window.windowID);
+                if (index >= 0)
+                    presentation_window_focused[index] = true;
+                focus_release_pending = false;
             }
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
@@ -1760,6 +1795,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[0];
+            const bool bottom_left_down =
+                event.type == SDL_MOUSEBUTTONDOWN &&
+                event.button.button == SDL_BUTTON_LEFT &&
+                presentation.separate &&
+                event.button.windowID == presentation.window_ids[1];
+            const bool relative_left_down =
+                primary_left_down ||
+                (bottom_left_down && mph_prime_controls_available);
             const NdsStackedRelativeMouseRoute stacked_left_route =
                 primary_left_down && !presentation.separate
                     ? nds_route_stacked_relative_mouse_button(
@@ -1767,7 +1810,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         relative_mouse.captured(), stacked_top_screen,
                         stacked_bottom_touch, event.button.x, event.button.y)
                     : NdsStackedRelativeMouseRoute::None;
-            if (primary_left_down && options.relative_mouse_touch &&
+            if (relative_left_down && options.relative_mouse_touch &&
                 (presentation.separate ||
                  stacked_left_route ==
                      NdsStackedRelativeMouseRoute::AcquireRelative ||
@@ -1787,12 +1830,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button != SDL_BUTTON_LEFT &&
-                event.button.windowID == presentation.window_ids[0] &&
+                is_presentation_window(event.button.windowID) &&
                 process_mph_prime_mouse(event.button.button, true, false)) {
                 // Consumed by Prime Controls.
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
-                event.button.windowID == presentation.window_ids[0] &&
+                is_presentation_window(event.button.windowID) &&
                 relative_mouse.captured()) {
                 if (process_mph_prime_mouse(
                         event.button.button, false, false)) {
@@ -1807,6 +1850,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
+                !(mph_prime_controls_available &&
+                  relative_mouse.captured()) &&
                 (presentation.separate
                     ? event.button.x >= bottom_content_left &&
                           event.button.x < bottom_content_left + kScreenWidth
@@ -1844,7 +1889,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                                      bottom_logical_width);
             if (event.type == SDL_MOUSEMOTION &&
                 relative_mouse.captured() &&
-                (event.motion.windowID == presentation.window_ids[0] ||
+                (is_presentation_window(event.motion.windowID) ||
                  event.motion.windowID == 0)) {
                 const bool prime_virtual_stylus = mph_prime_active() &&
                     mph_prime_held[static_cast<size_t>(
@@ -1876,6 +1921,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 else
                     nds_set_touch(0, 0, false);
             }
+        }
+        if (focus_release_pending) {
+            if (!any_presentation_window_focused()) {
+                release_relative_mouse();
+                clear_tab_turbo();
+            }
+            focus_release_pending = false;
         }
 
         // ── Gamepad dual-stick poll (once per shown frame) ───────────────
