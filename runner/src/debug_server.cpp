@@ -31,6 +31,7 @@
 #include "runtime_arm.h"
 #include "spu.h"
 #include "tier3.h"
+#include "title_patches.h"
 
 extern "C" uint32_t g_runtime_break_pc;
 
@@ -1059,6 +1060,25 @@ std::string handle(const std::string& line) {
                ",\"now_ticks\":" + std::to_string(s.now_ticks) +
                ",\"freq\":" + std::to_string(s.freq) +
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
+    }
+    if (cmd == "title_patches") {
+        const NdsTitlePatchDebugState s = nds_title_patches_debug_state();
+        return "{\"mph_adaptive_room_culling\":" +
+               std::to_string(s.mph_adaptive_room_culling ? 1 : 0) +
+               ",\"mph_portal_clip_calls\":" +
+               std::to_string(s.mph_portal_clip_calls) +
+               ",\"mph_portal_min_x_relaxed\":" +
+               std::to_string(s.mph_portal_min_x_relaxed) +
+               ",\"mph_viewport_patches\":" +
+               std::to_string(s.mph_viewport_patches) +
+               ",\"mph_last_viewport_min_x\":" +
+               std::to_string(s.mph_last_viewport_min_x) +
+               ",\"mph_last_viewport_max_x\":" +
+               std::to_string(s.mph_last_viewport_max_x) +
+               ",\"mph_last_viewport_min_y\":" +
+               std::to_string(s.mph_last_viewport_min_y) +
+               ",\"mph_last_viewport_max_y\":" +
+               std::to_string(s.mph_last_viewport_max_y) + "}";
     }
     if (cmd == "frontend_input_stats") {
         NdsFrontendInputDebugState s{};
