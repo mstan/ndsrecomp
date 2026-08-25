@@ -73,6 +73,7 @@ std::array<AdaptiveFrame, 2> g_wide_3d_attr_frame{};
 std::array<uint16_t, 2> g_wide_3d_width{};
 bool g_adaptive_skybox_fill = false;
 bool g_adaptive_center_native = false;
+uint32_t g_adaptive_center_max_polygons = 0;
 std::array<AdaptiveFrame, 2> g_direct_object_frame{};
 NdsGpu2dDirectFrame g_direct_current_frame{};
 NdsGpu2dDirectFrame g_direct_present_frame{};
@@ -161,6 +162,9 @@ NdsGpu2dDirectClass direct_scene_class() {
     if (nds_gpu3d_render_xpos() != 0u)
         return NDS_GPU2D_DIRECT_RENDER_XPOS;
     if (g_adaptive_center_native)
+        return NDS_GPU2D_DIRECT_CENTER_NATIVE;
+    if (g_adaptive_center_max_polygons != 0u &&
+        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons)
         return NDS_GPU2D_DIRECT_CENTER_NATIVE;
     // The direct presenter currently owns the physical top window only.
     if ((nds_powercontrol9() & 0x8000u) == 0u)
@@ -1752,6 +1756,10 @@ void nds_gpu2d_set_adaptive_center_native(bool enabled) {
     g_adaptive_center_native = enabled;
 }
 
+void nds_gpu2d_set_adaptive_center_max_polygons(uint32_t max_polygons) {
+    g_adaptive_center_max_polygons = max_polygons;
+}
+
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
     const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
@@ -1781,6 +1789,13 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
         return adaptive.data();
     }
     if (g_adaptive_center_native) {
+        for (int y = 0; y < 192; ++y)
+            std::copy_n(native + y * 256, 256,
+                        adaptive.data() + y * output_width + extra);
+        return adaptive.data();
+    }
+    if (g_adaptive_center_max_polygons != 0u &&
+        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons) {
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
                         adaptive.data() + y * output_width + extra);

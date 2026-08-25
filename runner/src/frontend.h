@@ -219,6 +219,10 @@ struct NdsFrontendOptions {
     // the native composite. Intended for titles with unaudited widened 3D
     // projection/culling edge cases.
     bool adaptive_center_native = false;
+    // Center only simple low-polygon 3D frames. This lets title configs
+    // contain menu/cinematic projection edge cases without disabling adaptive
+    // wide gameplay.
+    uint32_t adaptive_center_max_polygons = 0;
     // Host presentation quality. These are deliberately post-composition:
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction

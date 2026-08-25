@@ -17,6 +17,7 @@ std::array<uint32_t, 448> g_3d_line{};
 std::array<uint8_t, 0x20000> g_capture_bank{};
 uint16_t g_3d_output_width = 256;
 uint16_t g_3d_render_xpos = 0;
+uint32_t g_3d_render_polygon_count = 0;
 
 bool require(bool value) { return value; }
 
@@ -213,6 +214,29 @@ bool test_direct_scene_rejects_center_native() {
     return require(rejected);
 }
 
+bool test_direct_scene_centers_low_polygon_frames() {
+    g_unit = {};
+    g_direct_present_enabled = true;
+    g_adaptive_center_max_polygons = 64;
+    g_3d_output_width = 448;
+    g_3d_render_xpos = 0;
+    g_unit[0].dispcnt = 0x00011108u;  // mode 1, BG0/3D, OBJ.
+
+    g_3d_render_polygon_count = 31;
+    const bool low_polygon_centered =
+        direct_scene_class() == NDS_GPU2D_DIRECT_CENTER_NATIVE;
+
+    g_3d_render_polygon_count = 65;
+    const bool gameplay_allowed =
+        direct_scene_class() == NDS_GPU2D_DIRECT_SUPPORTED;
+
+    g_direct_present_enabled = false;
+    g_adaptive_center_max_polygons = 0;
+    g_3d_render_polygon_count = 0;
+    g_3d_output_width = 256;
+    return require(low_polygon_centered && gameplay_allowed);
+}
+
 bool test_compose_window_effects() {
     Unit unit{};
     unit.evy = 16;
@@ -347,6 +371,7 @@ uint16_t nds_gpu3d_output_width() { return g_3d_output_width; }
 const uint32_t* nds_gpu3d_wide_line(int) { return g_3d_line.data(); }
 const uint32_t* nds_gpu3d_wide_attr_line(int) { return g_3d_line.data(); }
 uint16_t nds_gpu3d_render_xpos() { return g_3d_render_xpos; }
+uint32_t nds_gpu3d_render_polygon_count() { return g_3d_render_polygon_count; }
 void nds_gpu3d_set_render_xpos(uint16_t) {}
 
 int main() {
@@ -356,7 +381,8 @@ int main() {
     if (!test_direct_scene_rejects_windows()) return 4;
     if (!test_direct_scene_rejects_render_xpos()) return 5;
     if (!test_direct_scene_rejects_center_native()) return 6;
-    if (!test_compose_window_effects()) return 7;
-    if (!test_obj_window_coverage()) return 8;
+    if (!test_direct_scene_centers_low_polygon_frames()) return 7;
+    if (!test_compose_window_effects()) return 8;
+    if (!test_obj_window_coverage()) return 9;
     return 0;
 }

@@ -1527,6 +1527,10 @@ int main(int argc, char** argv) {
     nds_gpu2d_set_adaptive_center_native(
         frontend_options.adaptive_center_native &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
+    nds_gpu2d_set_adaptive_center_max_polygons(
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u
+            ? frontend_options.adaptive_center_max_polygons
+            : 0u);
     nds_title_patches_set_sm64ds_adaptive(
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);

@@ -576,6 +576,19 @@ bool nds_load_frontend_config(const std::string& path,
             options->adaptive_center_native = *value;
         }
         if (const auto value =
+                (*display)["adaptive_center_max_polygons"].value<int64_t>()) {
+            if (*value < 0 || *value > 2048) {
+                if (error) {
+                    *error =
+                        "display.adaptive_center_max_polygons must be from "
+                        "0 through 2048";
+                }
+                return false;
+            }
+            options->adaptive_center_max_polygons =
+                static_cast<uint32_t>(*value);
+        }
+        if (const auto value =
                 (*display)["adaptive_hud_center_width"].value<int64_t>()) {
             if (*value < 8 || *value > 256 || (*value & 7) != 0) {
                 if (error) {

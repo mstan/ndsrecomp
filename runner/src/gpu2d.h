@@ -30,6 +30,7 @@ void nds_gpu2d_set_adaptive_hud_anchor(bool enabled,
 // not been audited yet. The presenter still uses the adaptive window width,
 // but the source pixels remain a centered native-width composite.
 void nds_gpu2d_set_adaptive_center_native(bool enabled);
+void nds_gpu2d_set_adaptive_center_max_polygons(uint32_t max_polygons);
 
 // Narrow host-only seam used by the accelerated separate-window presenter.
 // The eligibility decision is latched at frame start. While active, engine A

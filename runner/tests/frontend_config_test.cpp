@@ -125,6 +125,7 @@ int main() {
                 "adaptive_skybox_fill = true\n"
                 "adaptive_hud_anchor = true\n"
                 "adaptive_center_native = true\n"
+                "adaptive_center_max_polygons = 64\n"
                 "adaptive_hud_center_width = 128\n"
                 "supersampling = 3\n"
                 "antialiasing = 4\n"
@@ -157,6 +158,7 @@ int main() {
         !require(options.adaptive_skybox_fill) ||
         !require(options.adaptive_hud_anchor) ||
         !require(options.adaptive_center_native) ||
+        !require(options.adaptive_center_max_polygons == 64) ||
         !require(options.adaptive_hud_center_width == 128) ||
         !require(options.supersampling == 3) ||
         !require(options.antialiasing == 4) ||
@@ -297,6 +299,15 @@ int main() {
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
         return 12;
+    {
+        std::ofstream file(path);
+        file << "[display]\n"
+                "adaptive_center_max_polygons = 2049\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 13;
     {
         std::ofstream file(path);
         file << "[controls.prime]\n"
