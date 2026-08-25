@@ -572,6 +572,10 @@ bool nds_load_frontend_config(const std::string& path,
             options->adaptive_hud_anchor = *value;
         }
         if (const auto value =
+                (*display)["adaptive_center_native"].value<bool>()) {
+            options->adaptive_center_native = *value;
+        }
+        if (const auto value =
                 (*display)["adaptive_hud_center_width"].value<int64_t>()) {
             if (*value < 8 || *value > 256 || (*value & 7) != 0) {
                 if (error) {

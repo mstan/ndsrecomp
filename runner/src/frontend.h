@@ -215,6 +215,10 @@ struct NdsFrontendOptions {
     // Width of the authored center HUD band that stays centered. Pixels on
     // either side are anchored to the corresponding wide edge.
     uint16_t adaptive_hud_center_width = 64;
+    // Keep adaptive-capable output at the requested host width while centering
+    // the native composite. Intended for titles with unaudited widened 3D
+    // projection/culling edge cases.
+    bool adaptive_center_native = false;
     // Host presentation quality. These are deliberately post-composition:
     // they never alter guest-visible DS rasterization or framebuffer bytes.
     uint8_t supersampling = 1;  // 1x..4x presentation reconstruction

@@ -72,6 +72,7 @@ std::array<AdaptiveFrame, 2> g_wide_3d_frame{};
 std::array<AdaptiveFrame, 2> g_wide_3d_attr_frame{};
 std::array<uint16_t, 2> g_wide_3d_width{};
 bool g_adaptive_skybox_fill = false;
+bool g_adaptive_center_native = false;
 std::array<AdaptiveFrame, 2> g_direct_object_frame{};
 NdsGpu2dDirectFrame g_direct_current_frame{};
 NdsGpu2dDirectFrame g_direct_present_frame{};
@@ -157,6 +158,10 @@ NdsGpu2dDirectClass direct_scene_class() {
     const uint32_t extra_bg_mask = (u.dispcnt >> 9u) & 7u;
     if (extra_bg_mask != 0u) return NDS_GPU2D_DIRECT_EXTRA_BG;
     if (nds_gpu3d_output_width() <= 256u) return NDS_GPU2D_DIRECT_WIDTH;
+    if (nds_gpu3d_render_xpos() != 0u)
+        return NDS_GPU2D_DIRECT_RENDER_XPOS;
+    if (g_adaptive_center_native)
+        return NDS_GPU2D_DIRECT_CENTER_NATIVE;
     // The direct presenter currently owns the physical top window only.
     if ((nds_powercontrol9() & 0x8000u) == 0u)
         return NDS_GPU2D_DIRECT_SCREEN_ROUTE;
@@ -1743,6 +1748,10 @@ void nds_gpu2d_set_adaptive_hud_anchor(bool enabled,
         std::clamp<int>(center_width, 8, 256);
 }
 
+void nds_gpu2d_set_adaptive_center_native(bool enabled) {
+    g_adaptive_center_native = enabled;
+}
+
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
     const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
@@ -1766,6 +1775,12 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                 0xFF000000u);
     const int extra = (output_width - 256) / 2;
     if (engine != 0) {
+        for (int y = 0; y < 192; ++y)
+            std::copy_n(native + y * 256, 256,
+                        adaptive.data() + y * output_width + extra);
+        return adaptive.data();
+    }
+    if (g_adaptive_center_native) {
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
                         adaptive.data() + y * output_width + extra);
@@ -1797,7 +1812,7 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const bool supported_scene =
         palette && oam && vram && !(u.dispcnt & 0x80u) &&
         mode == 1u && bg0_3d && supported_hud_bgs && windows_supported &&
-        !g_present_capture_active;
+        nds_gpu3d_render_xpos() == 0u && !g_present_capture_active;
     if (!supported_scene) {
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
@@ -2097,6 +2112,8 @@ const char* nds_gpu2d_direct_class_name(uint32_t index) {
         "windows",
         "extra_bg",
         "width",
+        "render_xpos",
+        "center_native",
     };
     return index < NDS_GPU2D_DIRECT_CLASS_COUNT ? kNames[index] : "unknown";
 }

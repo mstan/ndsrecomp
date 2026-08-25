@@ -26,6 +26,10 @@ void nds_gpu2d_set_adaptive_skybox_fill(bool enabled);
 // Title-audited transparent text HUD composition for wide 3D scenes.
 void nds_gpu2d_set_adaptive_hud_anchor(bool enabled,
                                        uint16_t center_width);
+// Title-owned escape hatch for adaptive scenes whose widened 3D projection has
+// not been audited yet. The presenter still uses the adaptive window width,
+// but the source pixels remain a centered native-width composite.
+void nds_gpu2d_set_adaptive_center_native(bool enabled);
 
 // Narrow host-only seam used by the accelerated separate-window presenter.
 // The eligibility decision is latched at frame start. While active, engine A
@@ -118,6 +122,8 @@ enum NdsGpu2dDirectClass : uint8_t {
     NDS_GPU2D_DIRECT_WINDOWS,
     NDS_GPU2D_DIRECT_EXTRA_BG,
     NDS_GPU2D_DIRECT_WIDTH,
+    NDS_GPU2D_DIRECT_RENDER_XPOS,
+    NDS_GPU2D_DIRECT_CENTER_NATIVE,
     NDS_GPU2D_DIRECT_CLASS_COUNT,
 };
 const char* nds_gpu2d_direct_class_name(uint32_t index);

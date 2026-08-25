@@ -124,6 +124,7 @@ int main() {
                 "adaptive_width = 448\n"
                 "adaptive_skybox_fill = true\n"
                 "adaptive_hud_anchor = true\n"
+                "adaptive_center_native = true\n"
                 "adaptive_hud_center_width = 128\n"
                 "supersampling = 3\n"
                 "antialiasing = 4\n"
@@ -155,6 +156,7 @@ int main() {
         !require(options.adaptive_max_width[1] == 256) ||
         !require(options.adaptive_skybox_fill) ||
         !require(options.adaptive_hud_anchor) ||
+        !require(options.adaptive_center_native) ||
         !require(options.adaptive_hud_center_width == 128) ||
         !require(options.supersampling == 3) ||
         !require(options.antialiasing == 4) ||

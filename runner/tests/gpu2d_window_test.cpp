@@ -16,6 +16,7 @@ NdsVramRendererView g_view{};
 std::array<uint32_t, 448> g_3d_line{};
 std::array<uint8_t, 0x20000> g_capture_bank{};
 uint16_t g_3d_output_width = 256;
+uint16_t g_3d_render_xpos = 0;
 
 bool require(bool value) { return value; }
 
@@ -160,6 +161,7 @@ bool test_direct_scene_rejects_windows() {
     g_unit = {};
     g_direct_present_enabled = true;
     g_3d_output_width = 448;
+    g_3d_render_xpos = 0;
     g_unit[0].dispcnt = 0x00011108u;  // mode 1, BG0/3D, OBJ.
     if (!require(direct_scene_class() == NDS_GPU2D_DIRECT_SUPPORTED))
         return false;
@@ -178,7 +180,37 @@ bool test_direct_scene_rejects_windows() {
         direct_scene_class() == NDS_GPU2D_DIRECT_WINDOWS;
     g_direct_present_enabled = false;
     g_3d_output_width = 256;
+    g_3d_render_xpos = 0;
     return require(scanner_rejected);
+}
+
+bool test_direct_scene_rejects_render_xpos() {
+    g_unit = {};
+    g_direct_present_enabled = true;
+    g_3d_output_width = 448;
+    g_3d_render_xpos = 1;
+    g_unit[0].dispcnt = 0x00011108u;  // mode 1, BG0/3D, OBJ.
+    const bool rejected =
+        direct_scene_class() == NDS_GPU2D_DIRECT_RENDER_XPOS;
+    g_direct_present_enabled = false;
+    g_3d_output_width = 256;
+    g_3d_render_xpos = 0;
+    return require(rejected);
+}
+
+bool test_direct_scene_rejects_center_native() {
+    g_unit = {};
+    g_direct_present_enabled = true;
+    g_adaptive_center_native = true;
+    g_3d_output_width = 448;
+    g_3d_render_xpos = 0;
+    g_unit[0].dispcnt = 0x00011108u;  // mode 1, BG0/3D, OBJ.
+    const bool rejected =
+        direct_scene_class() == NDS_GPU2D_DIRECT_CENTER_NATIVE;
+    g_direct_present_enabled = false;
+    g_adaptive_center_native = false;
+    g_3d_output_width = 256;
+    return require(rejected);
 }
 
 bool test_compose_window_effects() {
@@ -314,7 +346,7 @@ const uint32_t* nds_gpu3d_line(int) { return g_3d_line.data(); }
 uint16_t nds_gpu3d_output_width() { return g_3d_output_width; }
 const uint32_t* nds_gpu3d_wide_line(int) { return g_3d_line.data(); }
 const uint32_t* nds_gpu3d_wide_attr_line(int) { return g_3d_line.data(); }
-uint16_t nds_gpu3d_render_xpos() { return 0; }
+uint16_t nds_gpu3d_render_xpos() { return g_3d_render_xpos; }
 void nds_gpu3d_set_render_xpos(uint16_t) {}
 
 int main() {
@@ -322,7 +354,9 @@ int main() {
     if (!test_window_enable_and_precedence()) return 2;
     if (!test_window_empty_and_scanner_eligibility()) return 3;
     if (!test_direct_scene_rejects_windows()) return 4;
-    if (!test_compose_window_effects()) return 5;
-    if (!test_obj_window_coverage()) return 6;
+    if (!test_direct_scene_rejects_render_xpos()) return 5;
+    if (!test_direct_scene_rejects_center_native()) return 6;
+    if (!test_compose_window_effects()) return 7;
+    if (!test_obj_window_coverage()) return 8;
     return 0;
 }
