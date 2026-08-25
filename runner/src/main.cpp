@@ -29,6 +29,7 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
+#include "diagnostics.h"
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
@@ -346,6 +347,9 @@ int main(int argc, char** argv) {
     bool cli_freebios = false;
     std::string cli_instance_index;
     std::string cli_save_path;
+    std::string cli_diagnostics;
+    std::string cli_diagnostics_dir;
+    std::string cli_diagnostics_interval_ms;
     // beads-yjp.28: where the Tier-3 coverage manifest lands. Empty means
     // "derive it" (next to the save, else next to the ROM). Written on every
     // exit path, with no flag required, so a player's ordinary session yields
@@ -416,6 +420,12 @@ int main(int argc, char** argv) {
             rom_path = argv[++i];
         } else if (a == "--save-path" && i + 1 < argc) {
             cli_save_path = argv[++i];
+        } else if (a == "--diagnostics" && i + 1 < argc) {
+            cli_diagnostics = argv[++i];
+        } else if (a == "--diagnostics-dir" && i + 1 < argc) {
+            cli_diagnostics_dir = argv[++i];
+        } else if (a == "--diagnostics-interval-ms" && i + 1 < argc) {
+            cli_diagnostics_interval_ms = argv[++i];
         } else if (a == "--coverage-manifest" && i + 1 < argc) {
             cli_coverage_manifest = argv[++i];
         } else if (a == "--no-coverage-manifest") {
@@ -554,6 +564,8 @@ int main(int argc, char** argv) {
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
                 "[--serve|--interactive] [--port 19842] "
                 "[--save-path game.sav|--no-save] "
+                "[--diagnostics on|off] [--diagnostics-dir dir] "
+                "[--diagnostics-interval-ms ms] "
                 "[--coverage-manifest out.json|--no-coverage-manifest] "
                 "[--firmware-path firmware.bin] "
                 "[--firmware-state-path mutable-firmware.bin] "
@@ -974,6 +986,30 @@ int main(int argc, char** argv) {
     if (cli_net_capture_no_pcap) frontend_options.network.capture_no_pcap = true;
     if (!cli_net_capture_scenario.empty())
         frontend_options.network.capture_scenario = cli_net_capture_scenario;
+    bool diagnostics_enabled = true;
+    if (!cli_diagnostics.empty() &&
+        !nds_parse_on_off(cli_diagnostics, &diagnostics_enabled)) {
+        std::fprintf(stderr, "invalid --diagnostics (expected on or off)\n");
+        return 2;
+    }
+    uint32_t diagnostics_interval_ms = 2000u;
+    if (!cli_diagnostics_interval_ms.empty()) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(
+            cli_diagnostics_interval_ms.c_str(), &end, 10);
+        if (end == cli_diagnostics_interval_ms.c_str() || *end != '\0' ||
+            parsed < 250ul || parsed > 60000ul) {
+            std::fprintf(stderr,
+                "invalid --diagnostics-interval-ms (expected 250..60000)\n");
+            return 2;
+        }
+        diagnostics_interval_ms = static_cast<uint32_t>(parsed);
+    }
+    nds_diagnostics_configure(diagnostics_enabled,
+                              cli_diagnostics_dir.c_str(),
+                              diagnostics_interval_ms);
+    if (!diagnostics_enabled) coverage_manifest_disabled = true;
+    nds_diagnostics_enable_profile_environment();
 
     // Resolve the network config to backend-ready numeric form. Provider
     // name -> table lookup, optional dns_server string -> IPv4, matching
@@ -1327,6 +1363,12 @@ int main(int argc, char** argv) {
             save_path = derived.string();
         }
     }
+    const std::string rom_name =
+        rom_path.empty()
+            ? std::string()
+            : std::filesystem::path(rom_path).filename().string();
+    nds_diagnostics_set_identity(rom_sha1.c_str(), rom_name.c_str(),
+                                 NDS_RUNNER_BUILD_ID);
     // beads-yjp.28: the coverage manifest a player can hand back. Derived
     // rather than required, because the whole point is that a stock launch
     // with no flags produces one. Prefer the save's directory (the launcher
@@ -1337,8 +1379,18 @@ int main(int argc, char** argv) {
             coverage_manifest_path = cli_coverage_manifest;
         } else {
             std::filesystem::path base;
-            if (!save_path.empty()) base = std::filesystem::path(save_path);
-            else if (!rom_path.empty()) base = std::filesystem::path(rom_path);
+            if (!nds_diagnostics_directory().empty()) {
+                const std::filesystem::path rom_file(rom_path);
+                const std::string stem = rom_file.stem().empty()
+                    ? std::string("nds")
+                    : rom_file.stem().string();
+                base = std::filesystem::path(
+                    nds_diagnostics_directory()) / stem;
+            } else if (!save_path.empty()) {
+                base = std::filesystem::path(save_path);
+            } else if (!rom_path.empty()) {
+                base = std::filesystem::path(rom_path);
+            }
             // Parts are named <base>-coverage-<runstamp>-partNN.json. A fixed
             // filename overwrote the previous session's manifest, so anyone
             // playing twice silently lost the first run; and once the page
@@ -1347,10 +1399,6 @@ int main(int argc, char** argv) {
             coverage_manifest_set_output(
                 base.empty() ? "nds" : base.string().c_str());
         }
-        const std::string rom_name =
-            rom_path.empty()
-                ? std::string()
-                : std::filesystem::path(rom_path).filename().string();
         coverage_manifest_set_identity(rom_sha1.c_str(), rom_name.c_str(),
                                        NDS_RUNNER_BUILD_ID);
     }

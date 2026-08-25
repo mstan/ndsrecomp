@@ -357,6 +357,7 @@ add_executable(nds_runner
     src/title_patches.cpp
     src/tier3.cpp
     src/coverage_manifest.cpp
+    src/diagnostics.cpp
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp

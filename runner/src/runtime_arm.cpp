@@ -25,6 +25,7 @@
 #include "state.h"
 #include "io.h"
 #include "tier3.h"
+#include "diagnostics.h"
 #include "dispatch_lookup.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
@@ -1309,19 +1310,25 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 
     // Discovery-loop log (CLAUDE.md BUILD LOOP step 5): a copy-pasteable
     // [[entry_point]] block per miss, directly appendable to the config.
-    if (std::FILE* f = std::fopen("dispatch_misses.log", "ab")) {
-        std::fprintf(f, "# cpu=%s pc=0x%08X lr=0x%08X%s\n",
-                     cpu, t, g_cpu.R[14],
-                     in_static_rom ? " (static ROM non-function-start entry)"
-                                   : "");
-        if (in_static_rom && have_range)
-            std::fprintf(f, "#   containing static range 0x%08X..0x%08X\n",
-                         rs, re);
-        std::fprintf(f,
-            "[[entry_point]]\naddr = 0x%08X\nmode = \"%s\"\n"
-            "kind = \"runtime_confirmed\"\n\n",
-            t, mode);
-        std::fclose(f);
+    if (nds_diagnostics_enabled()) {
+        const std::string dispatch_log =
+            nds_diagnostics_dispatch_miss_log_path();
+        if (std::FILE* f = std::fopen(dispatch_log.c_str(), "ab")) {
+            std::fprintf(f, "# cpu=%s pc=0x%08X lr=0x%08X%s\n",
+                         cpu, t, g_cpu.R[14],
+                         in_static_rom
+                             ? " (static ROM non-function-start entry)"
+                             : "");
+            if (in_static_rom && have_range)
+                std::fprintf(f,
+                             "#   containing static range 0x%08X..0x%08X\n",
+                             rs, re);
+            std::fprintf(f,
+                "[[entry_point]]\naddr = 0x%08X\nmode = \"%s\"\n"
+                "kind = \"runtime_confirmed\"\n\n",
+                t, mode);
+            std::fclose(f);
+        }
     }
 
     // RAM-resident target (copied firmware code): this is the Tier-3 dirty-RAM

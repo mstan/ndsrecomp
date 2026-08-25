@@ -14,6 +14,7 @@
 #include <string>
 
 #include "debug_server.h"
+#include "diagnostics.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "melonds_compute/TextureUpscale.h"
@@ -1458,6 +1459,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     g_live_stats.freq = frequency;
     g_black_band = {};
     g_input_debug = {};
+    nds_diagnostics_start_performance_log(options);
     auto publish_input_debug = [&]() {
         g_input_debug.active = 1;
         g_input_debug.mph_prime_controls_available =
@@ -2254,6 +2256,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.underruns =
             audio_queue.underruns.load(std::memory_order_relaxed);
         const uint64_t counter = SDL_GetPerformanceCounter();
+        g_live_stats.now_ticks = counter;
+        g_live_stats.freq = frequency;
+        nds_diagnostics_maybe_write_performance_sample(g_live_stats);
         if (counter - fps_start >= frequency) {
             const double seconds = static_cast<double>(counter - fps_start) /
                                    static_cast<double>(frequency);
@@ -2294,6 +2299,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     nds_set_key_mask(0x0FFFu);
     g_live_stats.active = 0;
     g_input_debug.active = 0;
+    nds_diagnostics_stop_performance_log();
     const double soak_seconds = static_cast<double>(
         SDL_GetPerformanceCounter() - soak_start) /
         static_cast<double>(frequency);
