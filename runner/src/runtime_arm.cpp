@@ -31,13 +31,9 @@
 #include "dispatch_stats.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
-#include "title_patches.h"
 
 // ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
 NdsDispatchStats g_nds_dispatch_stats[2] = {};
-uint32_t g_last_live_transfer_source_pc = 0;
-uint32_t g_last_live_transfer_target_pc = 0;
-uint32_t g_last_live_transfer_type = 0;
 
 std::string nds_dispatch_stats_json() {
     std::string out = "{";
@@ -1221,17 +1217,10 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 }
 extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_branch;
-    if (g_last_live_transfer_type == NDS_LIVE_TRANSFER_B &&
-        target_pc == g_last_live_transfer_target_pc &&
-        nds_title_patches_handle_literal_branch(
-            g_last_live_transfer_source_pc, target_pc)) {
-        return;
-    }
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_call;
-    if (nds_title_patches_handle_literal_call(target_pc)) return;
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
@@ -1247,9 +1236,6 @@ extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
 
 extern "C" void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
                                       uint32_t transfer_type) {
-    g_last_live_transfer_source_pc = source_pc;
-    g_last_live_transfer_target_pc = target_pc;
-    g_last_live_transfer_type = transfer_type;
     live_overlay_note_transfer(g_nds_active, source_pc, target_pc, g_cpu.R[14],
                                g_cpu.cpsr, transfer_type);
 }

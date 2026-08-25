@@ -1291,7 +1291,6 @@ int main(int argc, char** argv) {
     std::string rom_sha1;
     bool sm64ds_wide_policy = false;
     bool mph_mouse_aim_policy = false;
-    bool mph_adaptive_room_culling_policy = true;
 #ifdef NDS_HAVE_SM64DS_BANKS
     bool sm64ds_title = false;
 #endif
@@ -1517,13 +1516,6 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (const char* value = std::getenv("NDS_MPH_ADAPTIVE_ROOM_CULLING");
-        value && !nds_parse_on_off(value, &mph_adaptive_room_culling_policy)) {
-        std::fprintf(stderr,
-                     "invalid NDS_MPH_ADAPTIVE_ROOM_CULLING "
-                     "(expected on or off)\n");
-        return 2;
-    }
     nds_gpu2d_set_adaptive_skybox_fill(
         (frontend_options.adaptive_skybox_fill || sm64ds_wide_policy) &&
         adaptive_sky_repair &&
@@ -1543,10 +1535,6 @@ int main(int argc, char** argv) {
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     nds_title_patches_set_mph_mouse_aim(mph_mouse_aim_policy);
-    nds_title_patches_set_mph_adaptive_room_culling(
-        rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
-        mph_adaptive_room_culling_policy &&
-        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     if (!nds_normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
