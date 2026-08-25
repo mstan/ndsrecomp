@@ -77,6 +77,12 @@ context are part of the optional melonDS build and must be handled under its
 GPL terms; they are not part of the native runner. Native DS behavior is
 implemented independently from specifications and measured oracle behavior.
 
+## Title and file-format references
+
+| Reference | License | Use |
+|---|---|---|
+| **MphRead** - github.com/NoneGiven/MphRead | MIT | Metroid Prime Hunters file-format and behavior reference. MPH-specific room/entity/collision/model knowledge belongs in the title repository; generic extraction, archive, validation, and presentation lessons may be promoted to shared ndsrecomp work. See `docs/mphread-shared-nds-opportunities.md`. |
+
 ## Attribution
 
 References actually consulted (including the mGBA timing model, vixl
