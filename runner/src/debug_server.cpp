@@ -31,6 +31,7 @@
 #include "runtime_arm.h"
 #include "spu.h"
 #include "tier3.h"
+#include "title_patches.h"
 
 extern "C" uint32_t g_runtime_break_pc;
 
@@ -633,17 +634,24 @@ std::string handle(const std::string& line) {
     if (cmd == "gx_state") {
         NdsGxStateSnapshot s{};
         nds_gpu3d_state(&s);
-        char buf[448];
+        char buf[640];
         std::snprintf(buf, sizeof(buf),
             "{\"geometry_enabled\":%u,\"rendering_enabled\":%u,"
             "\"gxstat\":%u,\"cycle_count\":%d,\"fifo_level\":%u,"
             "\"pipe_level\":%u,\"num_polygons\":%u,\"num_vertices\":%u,"
             "\"flush_request\":%u,\"num_commands\":%u,\"cur_command\":%u,"
-            "\"param_count\":%u,\"total_params\":%u}",
+            "\"param_count\":%u,\"total_params\":%u,"
+            "\"viewport_x0\":%u,\"viewport_y0\":%u,\"viewport_x1\":%u,"
+            "\"viewport_y1\":%u,\"viewport_width\":%u,"
+            "\"viewport_height\":%u,\"render_width\":%u,"
+            "\"guest_wide_projection\":%u}",
             s.geometry_enabled, s.rendering_enabled, s.gxstat,
             s.cycle_count, s.fifo_level, s.pipe_level,
             s.num_polygons, s.num_vertices, s.flush_request,
-            s.num_commands, s.cur_command, s.param_count, s.total_params);
+            s.num_commands, s.cur_command, s.param_count, s.total_params,
+            s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3],
+            s.viewport[4], s.viewport[5], s.render_width,
+            s.guest_wide_projection);
         return buf;
     }
     if (cmd == "gx_polygon") {
@@ -1059,6 +1067,23 @@ std::string handle(const std::string& line) {
                ",\"now_ticks\":" + std::to_string(s.now_ticks) +
                ",\"freq\":" + std::to_string(s.freq) +
                ",\"underruns\":" + std::to_string(s.underruns) + "}";
+    }
+    if (cmd == "title_patches") {
+        const NdsTitlePatchDebugState s = nds_title_patches_debug_state();
+        return "{\"mph_adventure_wide_enabled\":" +
+               std::to_string(s.mph_adventure_wide_enabled ? 1 : 0) +
+               ",\"active\":" +
+               std::to_string(s.mph_adventure_wide_active ? 1 : 0) +
+               ",\"adaptive_width\":" +
+               std::to_string(s.mph_adventure_wide_width) +
+               ",\"site_applied\":[" +
+               std::to_string(s.mph_adventure_wide_site_applied[0]) + "," +
+               std::to_string(s.mph_adventure_wide_site_applied[1]) + "," +
+               std::to_string(s.mph_adventure_wide_site_applied[2]) + "]" +
+               ",\"frames_active\":" +
+               std::to_string(s.mph_adventure_wide_frames_active) +
+               ",\"frames_inactive\":" +
+               std::to_string(s.mph_adventure_wide_frames_inactive) + "}";
     }
     if (cmd == "frontend_input_stats") {
         NdsFrontendInputDebugState s{};

@@ -576,6 +576,10 @@ bool nds_load_frontend_config(const std::string& path,
             options->adaptive_center_native = *value;
         }
         if (const auto value =
+                (*display)["adaptive_guest_culling"].value<bool>()) {
+            options->adaptive_guest_culling = *value;
+        }
+        if (const auto value =
                 (*display)["adaptive_center_max_polygons"].value<int64_t>()) {
             if (*value < 0 || *value > 2048) {
                 if (error) {

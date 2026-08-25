@@ -55,10 +55,11 @@ events** and only then read state:
 | `audio_samples` | `start`,`count` (max 4096) | Non-destructive ordinal trace: `{start,count,oldest,produced,pcm_s16le}` |
 | `touch` | `x`,`y`,`down` | injects a TSC touch (oracle + native both accept) |
 | `keys` | `mask` | sets the DS button state |
-| `gx_state` | — | geometry-engine internals: gate flags, GXSTAT raw, FIFO/PIPE levels, vertex/polygon counts, packed-GXFIFO protocol state (native + oracle) |
+| `gx_state` | — | geometry-engine internals: gate flags, GXSTAT raw, FIFO/PIPE levels, vertex/polygon counts, packed-GXFIFO protocol state, plus the latched GX VIEWPORT (`viewport_x0/y0/x1/y1/width/height`), host `render_width`, and the `guest_wide_projection` flag (native + oracle; the last three are native-only fields) |
 | `gx_run_sample` | optional `count` | no `count`: `{latest}`; else ring entry `{arm9,stat_before,stat_after,cc_before,cc_after}` for the count-th GPU3D::Run() invocation. The engine's drain state is Run()-call-time dependent, so both sides expose this cadence (native + oracle) |
 | `gx_write_sample` | optional `count` | ring of ARM9 writes into the 3D register window with engine state before/after each (native + oracle) |
 | `dma_sample` | optional `count` | ring of ALL DMA channel completions (`dma_done` in event_counts mirrors the oracle's SetIRQ-hook and counts only IRQ-raising ones) (native only) |
+| `title_patches` | — | opt-in title patch state: `{mph_adventure_wide_enabled,active,adaptive_width,site_applied:[3],frames_active,frames_inactive}` — `site_applied[i]` counts how often guard-matched site *i* was (re)written, so a rising count means the guest keeps restoring the native word (native only) |
 
 `region` ∈ `mainram` (0x02000000, 4 MB) · `wram7` (0x03800000) ·
 `wramshared` · `vramA..vramI` · `palA` · `palB` · `oam` · `itcm` · `dtcm`.

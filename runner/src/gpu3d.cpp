@@ -552,6 +552,10 @@ void nds_gpu3d_state(NdsGxStateSnapshot* out) {
         g3.CurCommand,
         g3.ParamCount,
         g3.TotalParams,
+        {g3.Viewport[0], g3.Viewport[1], g3.Viewport[2], g3.Viewport[3],
+         g3.Viewport[4], g3.Viewport[5]},
+        g3.GetRenderWidth(),
+        g3.GetGuestWideProjection() ? 1u : 0u,
     };
 }
 
@@ -806,6 +810,14 @@ bool nds_gpu3d_set_output_width(uint16_t width) {
 
 uint16_t nds_gpu3d_output_width() {
     return static_cast<uint16_t>(g_nds.GPU.GPU3D.GetRenderWidth());
+}
+
+void nds_gpu3d_set_guest_wide_projection(bool enabled) {
+    g_nds.GPU.GPU3D.SetGuestWideProjection(enabled);
+}
+
+bool nds_gpu3d_guest_wide_projection() {
+    return g_nds.GPU.GPU3D.GetGuestWideProjection();
 }
 
 const uint32_t* nds_gpu3d_wide_line(int line) {

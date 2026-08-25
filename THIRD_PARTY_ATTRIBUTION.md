@@ -75,7 +75,9 @@ remains a device model, not HLE).
   `runner/vendor/melonds/patches/` (GPLv3 §5(a) "you changed the files"
   notices): `GPU3D.cpp`, `GPU3D.h`, `GPU3D_Soft.cpp`, `GPU3D_Soft.h`
   (patch `0009`, host-only adaptive render width plus the attribute
-  surface and a soft-renderer thread-restart fix), and
+  surface and a soft-renderer thread-restart fix; `GPU3D.cpp`/`GPU3D.h`
+  additionally patch `0016`, the opt-in guest-wide-projection viewport
+  mode), and
   `GPU3D_Compute.cpp`, `GPU3D_Compute.h`, `GPU3D_Compute_shaders.h`
   (patch `0010`, adaptive width, polygon-ID attributes in the low
   resolution surface, and the internal-resolution accessors; patch `0014`,

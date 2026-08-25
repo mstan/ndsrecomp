@@ -133,6 +133,12 @@ const uint32_t* nds_gpu3d_line(int line);
 // compositor; wide_line exposes the complete enhanced surface.
 bool nds_gpu3d_set_output_width(uint16_t width);
 uint16_t nds_gpu3d_output_width();
+// Asserted every frame by the title-patch layer (title_patches.cpp) once it
+// has verified its guest-side wide-frustum words are resident. While set, the
+// engine stops rescaling clip X and maps every guest viewport linearly across
+// the enhanced width instead of only the full-screen one.
+void nds_gpu3d_set_guest_wide_projection(bool enabled);
+bool nds_gpu3d_guest_wide_projection();
 const uint32_t* nds_gpu3d_wide_line(int line);
 const uint32_t* nds_gpu3d_wide_attr_line(int line);
 
@@ -193,6 +199,11 @@ struct NdsGxStateSnapshot {
     uint32_t cur_command;
     uint32_t param_count;
     uint32_t total_params;
+    // Latched GX VIEWPORT, decoded as the engine stores it (x0,y0,x1,y1 are
+    // the register corners with Y already flipped; width/height derived).
+    uint32_t viewport[6];
+    uint32_t render_width;
+    uint32_t guest_wide_projection;
 };
 void nds_gpu3d_state(NdsGxStateSnapshot* out);
 

@@ -114,6 +114,8 @@ public:
     [[nodiscard]] u16 GetRenderXPos() const noexcept { return RenderXPos; }
     void SetRenderWidth(u32 width) noexcept;
     [[nodiscard]] u32 GetRenderWidth() const noexcept { return RenderWidth; }
+    void SetGuestWideProjection(bool enable) noexcept;
+    [[nodiscard]] bool GetGuestWideProjection() const noexcept { return GuestWideProjection; }
     u32* GetLine(int line) noexcept;
     const u32* GetAttrLine(int line) noexcept;
 
@@ -196,6 +198,11 @@ private:
     // Host-only enhanced output width. The hardware-visible viewport and
     // registers remain untouched; 256 is the exact native path.
     u32 RenderWidth = 256;
+    // Asserted per frame by the title-patch layer while the guest itself has
+    // been patched to build band-wide frusta. Guest screen X 0..256 then
+    // already spans RenderWidth, so the host must not rescale clip X on top of
+    // it, and every viewport (full or partial) maps linearly across the band.
+    bool GuestWideProjection = false;
 
 public:
     FIFO<CmdFIFOEntry, 256> CmdFIFO {};

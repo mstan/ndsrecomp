@@ -1113,12 +1113,26 @@ void GPU3D::SubmitPolygon() noexcept
         // note: the DS performs these divisions using a 32-bit divider
         // thus, if W is greater than 0xFFFF, some precision is sacrificed
         // to make the numbers fit into the divider
-        const bool enhanced_full_viewport =
-            RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256;
-        const u32 viewport_width =
-            enhanced_full_viewport ? RenderWidth : Viewport[4];
-        const u32 viewport_x = enhanced_full_viewport
-            ? 0 : Viewport[0] + (RenderWidth - 256) / 2;
+        u32 viewport_width, viewport_x;
+        if (GuestWideProjection)
+        {
+            // Guest screen X 0..256 already means the whole RenderWidth band,
+            // so every viewport maps linearly onto it. The end is derived from
+            // the sum, not from a scaled width, so viewports the guest emits
+            // back to back still tile without a seam.
+            const u32 x_start = (Viewport[0] * RenderWidth) / 256;
+            const u32 x_end = ((Viewport[0] + Viewport[4]) * RenderWidth) / 256;
+            viewport_x = x_start;
+            viewport_width = x_end - x_start;
+        }
+        else
+        {
+            const bool enhanced_full_viewport =
+                RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256;
+            viewport_width = enhanced_full_viewport ? RenderWidth : Viewport[4];
+            viewport_x = enhanced_full_viewport
+                ? 0 : Viewport[0] + (RenderWidth - 256) / 2;
+        }
         u32 posX, posY;
         u32 w = vtx->Position[3];
         if (w == 0)
@@ -1375,7 +1389,10 @@ void GPU3D::SubmitVertex() noexcept
     // volume and full-width viewport. Scaling clip X by 256/output_width is
     // equivalent to a wider horizontal projection; the vertical projection,
     // depth, guest matrices, and hardware registers remain unchanged.
-    if (RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256)
+    // Skipped under GuestWideProjection: the guest's own frustum is already
+    // band-wide there, and applying both widenings compounds the FOV.
+    if (!GuestWideProjection &&
+        RenderWidth > 256 && Viewport[0] == 0 && Viewport[4] == 256)
         vertextrans->Position[0] = static_cast<s32>(
             (static_cast<s64>(vertextrans->Position[0]) * 256) /
             RenderWidth);
@@ -2566,6 +2583,11 @@ void GPU3D::SetRenderWidth(u32 width) noexcept
     if (width & 1) width--;
     RenderWidth = width;
     if (CurrentRenderer) CurrentRenderer->SetRenderWidth(width);
+}
+
+void GPU3D::SetGuestWideProjection(bool enable) noexcept
+{
+    GuestWideProjection = enable;
 }
 
 u32* GPU3D::GetLine(int line) noexcept

@@ -219,6 +219,11 @@ struct NdsFrontendOptions {
     // the native composite. Intended for titles with unaudited widened 3D
     // projection/culling edge cases.
     bool adaptive_center_native = false;
+    // Rebuild the guest's own frusta at the adaptive width instead of widening
+    // only the host's full-screen viewport. Title-owned: the patch sites are
+    // per-image guest addresses, so this is meaningless without a title that
+    // implements it.
+    bool adaptive_guest_culling = false;
     // Center only simple low-polygon 3D frames. This lets title configs
     // contain menu/cinematic projection edge cases without disabling adaptive
     // wide gameplay.

@@ -403,3 +403,24 @@ uniform while the no-texture raster program is current can produce
 `GL_INVALID_OPERATION`, closing the runner after the first rendered frames.
 The shader only reads `InvTextureSize` inside `#ifdef UseTexture`, so this
 does not change textured variant sampling or no-texture rendering semantics.
+
+## 0016-gpu3d-guest-wide-projection.patch
+
+`src/GPU3D.{h,cpp}`: adds `GuestWideProjection`, a host mode for titles whose
+guest code has itself been patched to build band-wide frusta
+(`runner/src/title_patches.cpp` asserts it per frame, only while its guest-side
+words are verified resident). While set:
+
+- `SubmitVertex` skips `0009`'s clip-X rescale. That rescale and a widened
+  guest frustum are two spellings of the same widening; applying both compounds
+  the horizontal FOV.
+- `SubmitPolygon` maps EVERY viewport linearly across `RenderWidth` rather than
+  only the full-screen one. Guest screen X `0..256` now means the whole band, so
+  a partial viewport — the per-room sub-viewports adjacent-room portal rendering
+  emits — has to be scaled the same way the full one is, or its geometry hard
+  clips at the native 256-pixel edge. The end is computed from
+  `Viewport[0] + Viewport[4]` rather than from a separately scaled width so that
+  back-to-back viewports still tile without a seam.
+
+Cleared (the default), both sites behave byte-for-byte as `0009` left them, so
+this is inert for every title that does not opt in.

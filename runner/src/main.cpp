@@ -1516,6 +1516,14 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    bool adaptive_guest_culling = frontend_options.adaptive_guest_culling;
+    if (const char* value = std::getenv("NDS_ADAPTIVE_GUEST_CULLING");
+        value && !nds_parse_on_off(value, &adaptive_guest_culling)) {
+        std::fprintf(stderr,
+                     "invalid NDS_ADAPTIVE_GUEST_CULLING "
+                     "(expected on or off)\n");
+        return 2;
+    }
     nds_gpu2d_set_adaptive_skybox_fill(
         (frontend_options.adaptive_skybox_fill || sm64ds_wide_policy) &&
         adaptive_sky_repair &&
@@ -1535,6 +1543,11 @@ int main(int argc, char** argv) {
         sm64ds_wide_policy &&
         (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     nds_title_patches_set_mph_mouse_aim(mph_mouse_aim_policy);
+    nds_title_patches_set_mph_adventure_wide(
+        rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
+            adaptive_guest_culling &&
+            (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u,
+        frontend_options.adaptive_max_width[0]);
     if (!nds_normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
