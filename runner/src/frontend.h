@@ -243,6 +243,9 @@ struct NdsFrontendOptions {
     // Active-high frontend pressed-bit mask (same layout as key_bit()).
     uint16_t relative_mouse_fire_mask = 0;
     bool mph_prime_controls = false;
+    // Default-off compatibility switch for titles that want relative mouse
+    // capture to persist across separate top/bottom presentation windows.
+    bool mph_prime_unified_window_focus = false;
     uint16_t mph_virtual_stylus_sensitivity = 20;  // 10%..400%
     // Right-stick camera speed for Prime Controls on a gamepad (percent of
     // the built-in full-deflection turn rate). The left stick always maps

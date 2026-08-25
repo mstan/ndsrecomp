@@ -1181,6 +1181,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     }
     const bool mph_prime_controls_available =
         options.mph_prime_controls && options.relative_mouse_direct_aim;
+    const bool mph_prime_unified_window_focus =
+        mph_prime_controls_available &&
+        options.mph_prime_unified_window_focus;
     MphPrimeBindingSet mph_prime_bindings{};
     MphPadBindingSet mph_pad_bindings{};
     if (mph_prime_controls_available) {
@@ -1302,7 +1305,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     };
     auto process_mph_prime_key = [&](SDL_Scancode key, bool down,
                                      bool repeat) {
-        if (!mph_prime_active()) return false;
+        if (!mph_prime_controls_available) return false;
         bool consumed = false;
         for (size_t i = 0; i < mph_prime_bindings.bindings.size(); ++i) {
             if (!binding_matches_key(mph_prime_bindings.bindings[i], key))
@@ -1700,7 +1703,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     presentation_window_focus_index(event.window.windowID);
                 if (index >= 0)
                     presentation_window_focused[index] = false;
-                focus_release_pending = true;
+                if (mph_prime_unified_window_focus)
+                    focus_release_pending = true;
+                else {
+                    release_relative_mouse();
+                    clear_tab_turbo();
+                }
             }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED &&
@@ -1802,7 +1810,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 event.button.windowID == presentation.window_ids[1];
             const bool relative_left_down =
                 primary_left_down ||
-                (bottom_left_down && mph_prime_controls_available);
+                (bottom_left_down && mph_prime_unified_window_focus);
             const NdsStackedRelativeMouseRoute stacked_left_route =
                 primary_left_down && !presentation.separate
                     ? nds_route_stacked_relative_mouse_button(
@@ -1830,12 +1838,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button != SDL_BUTTON_LEFT &&
-                is_presentation_window(event.button.windowID) &&
+                (event.button.windowID == presentation.window_ids[0] ||
+                 (mph_prime_unified_window_focus &&
+                  is_presentation_window(event.button.windowID))) &&
                 process_mph_prime_mouse(event.button.button, true, false)) {
                 // Consumed by Prime Controls.
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
-                is_presentation_window(event.button.windowID) &&
+                (event.button.windowID == presentation.window_ids[0] ||
+                 (mph_prime_unified_window_focus &&
+                  is_presentation_window(event.button.windowID))) &&
                 relative_mouse.captured()) {
                 if (process_mph_prime_mouse(
                         event.button.button, false, false)) {
@@ -1850,7 +1862,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
-                !(mph_prime_controls_available &&
+                !(mph_prime_unified_window_focus &&
                   relative_mouse.captured()) &&
                 (presentation.separate
                     ? event.button.x >= bottom_content_left &&
@@ -1889,7 +1901,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                                      bottom_logical_width);
             if (event.type == SDL_MOUSEMOTION &&
                 relative_mouse.captured() &&
-                (is_presentation_window(event.motion.windowID) ||
+                (event.motion.windowID == presentation.window_ids[0] ||
+                 (mph_prime_unified_window_focus &&
+                  is_presentation_window(event.motion.windowID)) ||
                  event.motion.windowID == 0)) {
                 const bool prime_virtual_stylus = mph_prime_active() &&
                     mph_prime_held[static_cast<size_t>(

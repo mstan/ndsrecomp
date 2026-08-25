@@ -335,6 +335,7 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
     std::string cli_mph_prime_controls;
+    std::string cli_mph_prime_unified_window_focus;
     std::string cli_mph_virtual_stylus_sensitivity;
     std::string cli_mph_pad_aim_sensitivity;
     std::string cli_startup_mode;
@@ -454,6 +455,8 @@ int main(int argc, char** argv) {
             cli_relative_mouse_fire_key = argv[++i];
         } else if (a == "--mph-prime-controls" && i + 1 < argc) {
             cli_mph_prime_controls = argv[++i];
+        } else if (a == "--mph-prime-unified-window-focus" && i + 1 < argc) {
+            cli_mph_prime_unified_window_focus = argv[++i];
         } else if (a == "--mph-virtual-stylus-sensitivity" && i + 1 < argc) {
             cli_mph_virtual_stylus_sensitivity = argv[++i];
         } else if (a == "--mph-pad-aim-sensitivity" && i + 1 < argc) {
@@ -568,6 +571,7 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
                 "[--mph-prime-controls on|off] "
+                "[--mph-prime-unified-window-focus on|off] "
                 "[--mph-virtual-stylus-sensitivity 10..400] "
                 "[--mph-pad-aim-sensitivity 10..400] "
                 "[--mph-bind-<action> <key-or-mouse>] "
@@ -834,6 +838,16 @@ int main(int argc, char** argv) {
                           &frontend_options.mph_prime_controls)) {
         std::fprintf(stderr,
                      "invalid --mph-prime-controls (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_mph_prime_unified_window_focus.empty() &&
+        !nds_parse_on_off(
+            cli_mph_prime_unified_window_focus,
+            &frontend_options.mph_prime_unified_window_focus)) {
+        std::fprintf(
+            stderr,
+            "invalid --mph-prime-unified-window-focus "
+            "(expected on or off)\n");
         return 2;
     }
     if (!cli_mph_virtual_stylus_sensitivity.empty() &&

@@ -135,6 +135,7 @@ int main() {
                 "base_port = 27000\n"
                 "[controls.prime]\n"
                 "enabled = true\n"
+                "unified_window_focus = true\n"
                 "virtual_stylus_sensitivity = 125\n"
                 "[controls.prime.bindings]\n"
                 "move-forward = \"Up\"\n"
@@ -163,6 +164,7 @@ int main() {
         !require(options.local_wireless.enabled) ||
         !require(options.local_wireless.base_port == 27000) ||
         !require(options.mph_prime_controls) ||
+        !require(options.mph_prime_unified_window_focus) ||
         !require(options.mph_virtual_stylus_sensitivity == 125) ||
         !require(options.mph_bindings.move_forward == "Up") ||
         !require(options.mph_bindings.shoot == "Mouse Left"))

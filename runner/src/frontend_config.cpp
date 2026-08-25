@@ -769,6 +769,10 @@ bool nds_load_frontend_config(const std::string& path,
                 options->mph_prime_controls = *value;
             }
             if (const auto value =
+                    (*prime)["unified_window_focus"].value<bool>()) {
+                options->mph_prime_unified_window_focus = *value;
+            }
+            if (const auto value =
                     (*prime)["virtual_stylus_sensitivity"].value<int64_t>()) {
                 if (!nds_parse_mouse_sensitivity(std::to_string(*value),
                                                  &options->mph_virtual_stylus_sensitivity)) {
