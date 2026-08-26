@@ -26,6 +26,9 @@ option(NDS_BOOTSTRAP_FIRMWARE
 option(NDS_ENABLE_COMPUTE_RENDERER
     "Build the preferred melonDS OpenGL 4.3 compute renderer"
     ON)
+set(NDS_SDL_BACKEND "SDL3" CACHE STRING
+    "Host presentation backend: SDL3, SDL2, or NONE")
+set_property(CACHE NDS_SDL_BACKEND PROPERTY STRINGS SDL3 SDL2 NONE)
 option(NDS_ENABLE_PCAP_BACKEND
     "Build the vendored melonDS Net_PCap backend (dynamically loads Npcap/WinPcap at runtime; off by default per docs/adr-melonds-wifi-vendoring.md §2)"
     OFF)
@@ -541,16 +544,33 @@ if(SM64DS_BANK_SOURCES)
     endif()
 endif()
 
-# SDL is a host-only presentation layer. The runner remains buildable without
-# it for headless deterministic/oracle work; --interactive reports that the
-# configured binary has no frontend in that case.
-find_package(SDL2 CONFIG QUIET)
-if(TARGET SDL2::SDL2)
-    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
+# SDL is a host-only presentation layer. SDL3 is the default runtime frontend;
+# SDL2 and a no-frontend headless build are explicit compatibility choices.
+if(NDS_SDL_BACKEND STREQUAL "SDL3")
+    find_package(SDL3 CONFIG REQUIRED)
+    if(NOT TARGET SDL3::SDL3)
+        message(FATAL_ERROR "NDS_SDL_BACKEND=SDL3 requires target SDL3::SDL3")
+    endif()
+    target_compile_definitions(nds_runner PRIVATE
+        NDS_HAVE_SDL3=1
+        NDS_SDL_BACKEND_NAME="SDL3")
+    target_link_libraries(nds_runner PRIVATE SDL3::SDL3)
+elseif(NDS_SDL_BACKEND STREQUAL "SDL2")
+    find_package(SDL2 CONFIG REQUIRED)
+    if(NOT TARGET SDL2::SDL2)
+        message(FATAL_ERROR "NDS_SDL_BACKEND=SDL2 requires target SDL2::SDL2")
+    endif()
+    target_compile_definitions(nds_runner PRIVATE
+        NDS_HAVE_SDL2=1
+        NDS_SDL_BACKEND_NAME="SDL2")
     target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+elseif(NDS_SDL_BACKEND STREQUAL "NONE")
+    target_compile_definitions(nds_runner PRIVATE NDS_SDL_BACKEND_NAME="NONE")
+else()
+    message(FATAL_ERROR "NDS_SDL_BACKEND must be SDL3, SDL2, or NONE")
 endif()
-if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2)
-    message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires SDL2")
+if(NDS_ENABLE_COMPUTE_RENDERER AND NDS_SDL_BACKEND STREQUAL "NONE")
+    message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires NDS_SDL_BACKEND=SDL3 or SDL2")
 endif()
 if(NDS_ENABLE_COMPUTE_RENDERER AND CMAKE_DL_LIBS)
     target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})

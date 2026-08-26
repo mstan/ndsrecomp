@@ -30,9 +30,9 @@ Verified present on this machine:
   the `-G Ninja` generator.
 - `g++.exe (Rev9, Built by MSYS2 project) 15.2.0` at
   `C:\msys64\mingw64\bin\g++.exe`.
-- SDL2 CMake config at `C:\msys64\mingw64\lib\cmake\SDL2` (required because
-  the runner defaults `NDS_ENABLE_COMPUTE_RENDERER=ON`, which hard-requires
-  SDL2 at configure time).
+- SDL3 CMake config at `C:\msys64\mingw64\lib\cmake\SDL3` (default host
+  presentation backend). SDL2 remains available with
+  `-DNDS_SDL_BACKEND=SDL2`.
 - `ccache` auto-detected and enabled by the framework's
   `NdsCompilerCache.cmake` (`AUTO` policy) — configure log prints
   `ndsrecomp: compiler cache enabled: C:/msys64/mingw64/bin/ccache.exe`.
@@ -152,7 +152,7 @@ Configure (PowerShell):
 
 Result: configure succeeded in **1.6 seconds**. `CMakeCache.txt` confirms
 `NDS_TITLE_BANK_DIR=F:/Projects/ndsrecomp/mariokartdsrecomp-wiimmfi/generated/recomp`,
-`NDS_BOOTSTRAP_FIRMWARE=ON`, `SDL2_DIR=C:/msys64/mingw64/lib/cmake/SDL2`,
+`NDS_BOOTSTRAP_FIRMWARE=ON`, `SDL3_DIR=C:/msys64/mingw64/lib/cmake/SDL3`,
 `CMAKE_C_COMPILER=C:/msys64/mingw64/bin/cc.exe`.
 
 Build:
