@@ -139,6 +139,21 @@ bool nds_parse_texture_upscale(const std::string& value, uint8_t* out) {
     return true;
 }
 
+bool nds_parse_frame_interpolation(const std::string& value,
+                                   NdsFrameInterpolation* out) {
+    if (!out) return false;
+    const std::string normalized = lower_ascii(value);
+    if (normalized == "off" || normalized == "none" || normalized == "0") {
+        *out = NdsFrameInterpolation::Off;
+        return true;
+    }
+    if (normalized == "blend") {
+        *out = NdsFrameInterpolation::Blend;
+        return true;
+    }
+    return false;
+}
+
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out) {
     if (!out || value.empty()) return false;
     char* end = nullptr;
@@ -401,6 +416,10 @@ const char* nds_screen_layout_name(NdsScreenLayout value) {
     return value == NdsScreenLayout::Separate ? "separate" : "stacked";
 }
 
+const char* nds_frame_interpolation_name(NdsFrameInterpolation value) {
+    return value == NdsFrameInterpolation::Blend ? "blend" : "off";
+}
+
 const char* nds_fullscreen_mode_name(NdsFullscreenMode value) {
     switch (value) {
         case NdsFullscreenMode::Borderless: return "borderless";
@@ -649,6 +668,16 @@ bool nds_load_frontend_config(const std::string& path,
             if (!nds_parse_texture_upscale(std::to_string(*value),
                                            &options->texture_upscale)) {
                 if (error) *error = "display.texture_upscale must be 1, 2, or 4";
+                return false;
+            }
+        }
+        if (const auto value =
+                (*display)["frame_interpolation"].value<std::string>()) {
+            if (!nds_parse_frame_interpolation(
+                    *value, &options->frame_interpolation)) {
+                if (error) {
+                    *error = "display.frame_interpolation must be off or blend";
+                }
                 return false;
             }
         }

@@ -40,6 +40,16 @@ enum class NdsBootMode : uint8_t {
     Direct,
 };
 
+// "Frame interpolation (experimental)". Presentation-only: Blend presents one
+// extra, temporally blended host frame ahead of each completed DS frame on a
+// high-refresh display. Neither mode ever runs the scheduler for a synthetic
+// frame, so guest timing, input sampling, audio, and hardware timers stay
+// locked to one DS frame per kSystemCyclesPerFrame either way. Default Off.
+enum class NdsFrameInterpolation : uint8_t {
+    Off,
+    Blend,
+};
+
 enum NdsAdaptiveScreen : uint8_t {
     NDS_ADAPTIVE_NONE = 0,
     NDS_ADAPTIVE_TOP = 1u << 0,
@@ -243,6 +253,11 @@ struct NdsFrontendOptions {
     // texture once on a cache miss; independent of internal_resolution, but
     // only worth enabling alongside it.
     uint8_t texture_upscale = 1;
+    // Extra presented host frames between DS frames. Purely a presentation
+    // knob: see NdsFrameInterpolation. Blend is ignored (with a one-time
+    // notice) whenever the direct OpenGL top-screen presenter is active,
+    // because that path owns the swap and has no offscreen texture to blend.
+    NdsFrameInterpolation frame_interpolation = NdsFrameInterpolation::Off;
     // Optional host FPS-control transport. This stays default-off and is
     // selected by a title launcher; deterministic/headless routes never
     // synthesize mouse input.
@@ -309,6 +324,8 @@ bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
 bool nds_parse_internal_resolution(const std::string& value, uint8_t* out);
 bool nds_parse_texture_upscale(const std::string& value, uint8_t* out);
+bool nds_parse_frame_interpolation(const std::string& value,
+                                   NdsFrameInterpolation* out);
 bool nds_parse_on_off(const std::string& value, bool* out);
 bool nds_parse_mouse_sensitivity(const std::string& value, uint16_t* out);
 bool nds_parse_mouse_fire_key(const std::string& value, uint16_t* out);
@@ -333,6 +350,7 @@ const char* nds_fullscreen_mode_name(NdsFullscreenMode value);
 const char* nds_startup_mode_name(NdsStartupMode value);
 const char* nds_boot_mode_name(NdsBootMode value);
 const char* nds_adaptive_screens_name(uint8_t value);
+const char* nds_frame_interpolation_name(NdsFrameInterpolation value);
 
 int nds_run_interactive_frontend(const NdsFrontendOptions& options);
 
@@ -358,6 +376,13 @@ struct NdsFrontendLiveStats {
     uint64_t now_ticks;       // performance counter at query time
     uint64_t freq;            // performance frequency (ticks/second)
     uint64_t underruns;       // audio underruns so far
+    // Frame interpolation split of `frames`. real_presents counts host
+    // presents carrying a completed DS frame (so it tracks `frames`);
+    // synthetic_presents counts interpolated presents, which advance no guest
+    // state at all. synthetic_presents stays 0 unless blend mode is both
+    // requested and active, which makes it a direct harness assertion.
+    uint64_t real_presents;
+    uint64_t synthetic_presents;
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
 

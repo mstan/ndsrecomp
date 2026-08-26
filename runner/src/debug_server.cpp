@@ -1066,7 +1066,10 @@ std::string handle(const std::string& line) {
                ",\"drain_ticks\":" + std::to_string(s.drain_ticks) +
                ",\"now_ticks\":" + std::to_string(s.now_ticks) +
                ",\"freq\":" + std::to_string(s.freq) +
-               ",\"underruns\":" + std::to_string(s.underruns) + "}";
+               ",\"underruns\":" + std::to_string(s.underruns) +
+               ",\"real_presents\":" + std::to_string(s.real_presents) +
+               ",\"synthetic_presents\":" +
+               std::to_string(s.synthetic_presents) + "}";
     }
     if (cmd == "title_patches") {
         const NdsTitlePatchDebugState s = nds_title_patches_debug_state();

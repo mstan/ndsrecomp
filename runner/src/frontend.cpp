@@ -12,6 +12,7 @@
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "debug_server.h"
 #include "diagnostics.h"
@@ -693,6 +694,43 @@ struct FrontendPresentation {
     int sample_scale = 1;
 };
 
+// docs/frame_interpolation.md, MVP blend mode. Holds the previous DS frame's
+// post-compositor ARGB pixels per screen plus the scratch the blend is built
+// into. These are copies taken after composition, so nothing the guest can
+// observe is involved and no scheduler work is attached to them.
+struct FrameBlendCache {
+    std::vector<uint32_t> previous[2];
+    std::vector<uint32_t> blended[2];
+    int widths[2]{0, 0};
+    bool valid = false;
+};
+
+// 50/50 per-channel average, the alpha 0.5 midpoint the 120 Hz target wants.
+// The low bit of each channel is dropped rather than rounded (invisible at 8
+// bits, one pass of cheap word arithmetic over ~100k pixels), and the alpha
+// byte is carried straight from the current frame so a blended upload is
+// byte-compatible with the real uploads either side of it.
+void blend_half(const uint32_t* previous, const uint32_t* current,
+                uint32_t* out, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = (current[i] & 0xFF000000u) |
+                 (((previous[i] >> 1) & 0x007F7F7Fu) +
+                  ((current[i] >> 1) & 0x007F7F7Fu));
+    }
+}
+
+void cache_presented_frame(FrameBlendCache& cache, int screen,
+                           const uint32_t* pixels, int width) {
+    const size_t count = static_cast<size_t>(width) * kScreenHeight;
+    if (cache.widths[screen] != width) {
+        cache.widths[screen] = width;
+        cache.previous[screen].assign(count, 0u);
+        cache.blended[screen].assign(count, 0u);
+    }
+    std::memcpy(cache.previous[screen].data(), pixels,
+                count * sizeof(uint32_t));
+}
+
 uint32_t fullscreen_flags(NdsFullscreenMode mode) {
     switch (mode) {
         case NdsFullscreenMode::Borderless:
@@ -1156,6 +1194,64 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     }
 #endif
 
+    // "Frame interpolation (experimental)" — docs/frame_interpolation.md.
+    // Resolved here, after the compute-renderer fallback above, because that
+    // can rebuild the presentation on the SDL path and clear gl_top.
+    //
+    // Diagnostic-only override: NDS_FRAME_INTERPOLATION_MIN_REFRESH=<hz>
+    // lowers the refresh gate so the blend path can be exercised on a 60 Hz
+    // panel during validation. Leave it unset in normal use — a synthetic
+    // present has nowhere to land on a display that is not comfortably above
+    // 60 Hz, and forcing one only spends present time for no visible frame.
+    constexpr int kInterpolationMinRefreshHz = 100;
+    // The audio queue is this frontend's real-time clock, so it is also the
+    // budget for the extra present: a blend happens only while the queue
+    // still holds a comfortable runway (half the steady-state target, ~31 ms).
+    // At or below that the loop is not keeping up and the synthetic present is
+    // skipped for that frame. Nothing in this path ever sleeps or busy-loops.
+    constexpr uint32_t kInterpolationAudioFloorFrames = kAudioQueueFrames / 2;
+    int interpolation_min_refresh_hz = kInterpolationMinRefreshHz;
+    if (const uint64_t forced_min_refresh =
+            environment_u64("NDS_FRAME_INTERPOLATION_MIN_REFRESH")) {
+        interpolation_min_refresh_hz =
+            static_cast<int>(std::min<uint64_t>(forced_min_refresh, 1000));
+        std::fprintf(stderr,
+            "[sdl] frame interpolation: diagnostic min-refresh override "
+            "%d Hz\n", interpolation_min_refresh_hz);
+    }
+    const bool interpolation_requested =
+        options.frame_interpolation == NdsFrameInterpolation::Blend;
+    bool interpolation_active = false;
+    int interpolation_refresh_hz = 0;
+    if (interpolation_requested) {
+        if (presentation.gl_top) {
+            std::fprintf(stderr,
+                "[sdl] frame interpolation (experimental) is disabled: the "
+                "direct OpenGL top-screen presenter owns its own swap and "
+                "needs an offscreen output texture before a blended frame "
+                "can be inserted\n");
+        } else {
+            const int display_index =
+                SDL_GetWindowDisplayIndex(presentation.windows[0]);
+            SDL_DisplayMode display_mode{};
+            if (display_index < 0 ||
+                SDL_GetCurrentDisplayMode(display_index, &display_mode) != 0) {
+                std::fprintf(stderr,
+                    "[sdl] frame interpolation: display refresh unavailable "
+                    "(%s)\n", SDL_GetError());
+            } else {
+                interpolation_refresh_hz = display_mode.refresh_rate;
+            }
+            interpolation_active =
+                interpolation_refresh_hz >= interpolation_min_refresh_hz;
+            std::fprintf(stderr,
+                "[sdl] frame interpolation (experimental): mode=blend "
+                "active=%s refresh=%dHz min_refresh=%dHz\n",
+                interpolation_active ? "yes" : "no",
+                interpolation_refresh_hz, interpolation_min_refresh_hz);
+        }
+    }
+
     AudioQueue audio_queue{};
     SDL_AudioSpec want{};
     // The mixer runs once per 1024 DS system cycles. Request its integer host
@@ -1418,6 +1514,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::fprintf(stderr, "[sdl] relative mouse captured\n");
     };
     uint64_t shown_frames = 0;
+    uint64_t synthetic_presents = 0;
+    FrameBlendCache blend_cache{};
     uint64_t fps_frames = 0;
     uint64_t fps_start = SDL_GetPerformanceCounter();
     const uint64_t frequency = SDL_GetPerformanceFrequency();
@@ -2212,6 +2310,46 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         phase_adaptive_ticks +=
             SDL_GetPerformanceCounter() - adaptive_start;
         observe_top_black_bands(native_top, shown_frames);
+        // At most ONE synthetic frame, presented ahead of the real one, so
+        // the visible order stays real(N-1), blend(N-1,N), real(N). No
+        // scheduler round, no input sampling, no audio production happens
+        // here: this only re-presents pixels that already exist. The direct
+        // presenter is excluded above; direct-present frames are excluded
+        // again per frame because their top surface lives on the GPU.
+        if (interpolation_active && blend_cache.valid && !turbo_active &&
+            !nds_gpu2d_direct_present_frame_active() &&
+            blend_cache.widths[0] == top_width &&
+            blend_cache.widths[1] == bottom_width && audio_started &&
+            audio_queue_count(audio, audio_queue) >
+                kInterpolationAudioFloorFrames) {
+            blend_half(blend_cache.previous[0].data(), top_pixels,
+                       blend_cache.blended[0].data(),
+                       blend_cache.previous[0].size());
+            blend_half(blend_cache.previous[1].data(), bottom_pixels,
+                       blend_cache.blended[1].data(),
+                       blend_cache.previous[1].size());
+            const PresentationTicks synthetic_ticks = present_screens(
+                presentation, blend_cache.blended[0].data(), top_width,
+                blend_cache.blended[1].data(), bottom_width,
+                mph_prime_virtual_stylus,
+                mph_virtual_x, mph_virtual_y);
+            if (!synthetic_ticks.ok) {
+                compute_failed = true;
+                running = false;
+                break;
+            }
+            phase_upload_ticks += synthetic_ticks.upload;
+            phase_draw_ticks += synthetic_ticks.draw;
+            phase_swap_ticks += synthetic_ticks.swap;
+            // phase_present_ticks is measured from phase1, which already
+            // encloses this block; only the sub-counters need folding in.
+            ++synthetic_presents;
+            // Events are still consumed at exactly one point, the top of the
+            // loop, so input keeps its DS-frame sampling cadence. Pumping
+            // here only keeps the OS message queue from backing up across the
+            // extra present.
+            SDL_PumpEvents();
+        }
         const PresentationTicks presentation_ticks = present_screens(
             presentation, top_pixels, top_width,
             bottom_pixels, bottom_width,
@@ -2225,6 +2363,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
         phase_swap_ticks += presentation_ticks.swap;
+        if (interpolation_active &&
+            !nds_gpu2d_direct_present_frame_active()) {
+            cache_presented_frame(blend_cache, 0, top_pixels, top_width);
+            cache_presented_frame(blend_cache, 1, bottom_pixels, bottom_width);
+            blend_cache.valid = true;
+        } else {
+            blend_cache.valid = false;
+        }
         phase_present_ticks += SDL_GetPerformanceCounter() - phase1;
         if (audio && audio_started) {
             const uint32_t queued = audio_queue_count(audio, audio_queue);
@@ -2273,6 +2419,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.drain_ticks = phase_drain_ticks;
         g_live_stats.underruns =
             audio_queue.underruns.load(std::memory_order_relaxed);
+        g_live_stats.real_presents = shown_frames;
+        g_live_stats.synthetic_presents = synthetic_presents;
         const uint64_t counter = SDL_GetPerformanceCounter();
         g_live_stats.now_ticks = counter;
         g_live_stats.freq = frequency;
@@ -2377,6 +2525,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             phase_upload_ticks * tick_seconds,
             phase_draw_ticks * tick_seconds,
             phase_swap_ticks * tick_seconds);
+        std::fprintf(stderr,
+            "[sdl] frame interpolation: mode=%s active=%u refresh=%dHz "
+            "min_refresh=%dHz real_presents=%llu synthetic_presents=%llu\n",
+            nds_frame_interpolation_name(options.frame_interpolation),
+            interpolation_active ? 1u : 0u,
+            interpolation_refresh_hz, interpolation_min_refresh_hz,
+            static_cast<unsigned long long>(shown_frames),
+            static_cast<unsigned long long>(synthetic_presents));
         nds_profile_report(stderr);
     }
     const bool audio_failed = audio_queue_error ||

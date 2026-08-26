@@ -331,6 +331,7 @@ int main(int argc, char** argv) {
     std::string cli_internal_resolution;
     std::string cli_texture_upscale;
     std::string cli_antialiasing;
+    std::string cli_frame_interpolation;
     std::string cli_relative_mouse_touch;
     std::string cli_tab_turbo;
     std::string cli_relative_mouse_sensitivity;
@@ -456,6 +457,8 @@ int main(int argc, char** argv) {
             cli_texture_upscale = argv[++i];
         } else if (a == "--antialiasing" && i + 1 < argc) {
             cli_antialiasing = argv[++i];
+        } else if (a == "--frame-interpolation" && i + 1 < argc) {
+            cli_frame_interpolation = argv[++i];
         } else if (a == "--relative-mouse-touch" && i + 1 < argc) {
             cli_relative_mouse_touch = argv[++i];
         } else if (a == "--tab-turbo" && i + 1 < argc) {
@@ -581,6 +584,7 @@ int main(int argc, char** argv) {
                 "[--internal-resolution 1|2|3|4] "
                 "[--texture-upscale 1|2|4] "
                 "[--antialiasing 0|2|4|8] "
+                "[--frame-interpolation off|blend] "
                 "[--relative-mouse-touch on|off] "
                 "[--tab-turbo on|off] "
                 "[--relative-mouse-sensitivity 10..400] "
@@ -727,6 +731,15 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (const char* value = std::getenv("NDS_FRAME_INTERPOLATION")) {
+        if (!nds_parse_frame_interpolation(
+                value, &frontend_options.frame_interpolation)) {
+            std::fprintf(stderr,
+                         "invalid NDS_FRAME_INTERPOLATION "
+                         "(expected off or blend)\n");
+            return 2;
+        }
+    }
     if (const char* value = std::getenv("NDS_STARTUP_MODE")) {
         if (!nds_parse_startup_mode(value,
                                     &frontend_options.startup_mode)) {
@@ -834,6 +847,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "invalid --antialiasing "
                      "(expected 0, 2, 4, or 8)\n");
+        return 2;
+    }
+    if (!cli_frame_interpolation.empty() &&
+        !nds_parse_frame_interpolation(
+            cli_frame_interpolation,
+            &frontend_options.frame_interpolation)) {
+        std::fprintf(stderr,
+                     "invalid --frame-interpolation "
+                     "(expected off or blend)\n");
         return 2;
     }
     if (!cli_relative_mouse_touch.empty() &&
