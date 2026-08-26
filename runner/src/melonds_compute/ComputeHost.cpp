@@ -8,7 +8,11 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
+#if defined(NDS_GLES)
+#include "melonds_compute/android_gl_compat.h"
+#else
 #include "glad/glad.h"
+#endif
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "TextureUpscale.h"
@@ -484,10 +488,20 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
         return fail_or_fallback("SDL video initialization");
     }
 
+#if defined(NDS_GLES)
+    // The Thor (Adreno / GLES) has no desktop GL: request a GLES 3.2 ES-profile
+    // context, which provides compute shaders, image load/store, atomics,
+    // shared memory and barriers.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                        SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                         SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, presentation_window ? 1 : 0);
     g_window = presentation_window;
     g_visible = presentation_window != nullptr;
@@ -511,12 +525,28 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
                      SDL_GetError());
         return fail_or_fallback("OpenGL 4.3 context creation");
     }
+#if defined(NDS_GLES)
+    // GLES entry points are provided directly by libGLESv3 (no glad loader).
+    // Verify the driver actually gave us at least GLES 3.1 (compute shaders).
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        if (major < 3 || (major == 3 && minor < 1)) {
+            std::fprintf(stderr,
+                         "[gpu3d] GLES %d.%d too old for compute\n",
+                         major, minor);
+            return fail_or_fallback("GLES 3.1+ unavailable");
+        }
+    }
+#else
     if (!gladLoadGLLoader(
             reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)) ||
         !GLAD_GL_VERSION_4_3) {
         std::fprintf(stderr, "[gpu3d] OpenGL 4.3 unavailable\n");
         return fail_or_fallback("OpenGL 4.3 unavailable");
     }
+#endif
     std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
                  reinterpret_cast<const char*>(glGetString(GL_VERSION)),
                  reinterpret_cast<const char*>(glGetString(GL_RENDERER)));

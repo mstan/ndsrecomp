@@ -449,11 +449,20 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
         src/melonds_compute/PlatformCompute.cpp
         src/melonds_compute/ComputeHost.cpp
         vendor/melonds/OpenGLSupport.cpp
-        vendor/melonds/glad/glad.c
         vendor/melonds/xxhash/xxhash.c)
-    target_compile_definitions(nds_runner PRIVATE
-        NDS_HAVE_COMPUTE_RENDERER=1
-        MELONDS_GL_HEADER="glad/glad.h")
+    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_COMPUTE_RENDERER=1)
+    if(ANDROID)
+        # Use platform GLES 3.2 instead of the desktop GL 4.3 glad loader.
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_GLES=1
+            MELONDS_GL_HEADER="melonds_compute/android_gl_compat.h")
+        target_include_directories(nds_runner PRIVATE src)
+        target_link_libraries(nds_runner PRIVATE GLESv3 EGL)
+    else()
+        target_sources(nds_runner PRIVATE vendor/melonds/glad/glad.c)
+        target_compile_definitions(nds_runner PRIVATE
+            MELONDS_GL_HEADER="glad/glad.h")
+    endif()
 else()
     target_sources(nds_runner PRIVATE
         src/melonds_compute/TextureUpscaleStub.cpp)
@@ -580,7 +589,7 @@ else()
         target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
     endif()
 endif()
-if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2)
+if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2)
     message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires SDL2")
 endif()
 if(NDS_ENABLE_COMPUTE_RENDERER AND CMAKE_DL_LIBS)

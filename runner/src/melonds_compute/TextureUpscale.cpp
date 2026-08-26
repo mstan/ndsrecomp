@@ -6,7 +6,11 @@
 #include <cstdio>
 #include <vector>
 
+#if defined(NDS_GLES)
+#include "melonds_compute/android_gl_compat.h"
+#else
 #include "glad/glad.h"
+#endif
 
 namespace {
 
