@@ -18,6 +18,9 @@ std::string nds_diagnostics_run_base(const char* stem);
 std::string nds_diagnostics_dispatch_miss_log_path();
 void nds_diagnostics_set_identity(const char* rom_sha1, const char* rom_name,
                                   const char* build_id);
+void nds_diagnostics_set_rom_header(const char* game_code,
+                                    uint32_t revision,
+                                    uint64_t rom_size);
 
 void nds_diagnostics_start_performance_log(
     const NdsFrontendOptions& options);
