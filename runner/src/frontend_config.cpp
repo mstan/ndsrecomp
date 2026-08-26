@@ -100,8 +100,9 @@ bool nds_parse_widescreen_width(const std::string& value, uint16_t* out) {
     if (!out || value.empty()) return false;
     char* end = nullptr;
     const long parsed = std::strtol(value.c_str(), &end, 10);
-    if (!end || *end != '\0' || parsed < 256 || parsed > 448 ||
-        (parsed & 1) != 0) {
+    if (!end || *end != '\0' ||
+        (parsed != 256 && parsed != 320 &&
+         parsed != 384 && parsed != 448)) {
         return false;
     }
     *out = static_cast<uint16_t>(parsed);
@@ -560,8 +561,8 @@ bool nds_load_frontend_config(const std::string& path,
             if (!nds_parse_widescreen_width(std::to_string(*value), &width)) {
                 if (error) {
                     *error =
-                        "display.adaptive_width must be an even value from "
-                        "256 through 448";
+                        "display.adaptive_width must be 256, 320, 384, "
+                        "or 448";
                 }
                 return false;
             }

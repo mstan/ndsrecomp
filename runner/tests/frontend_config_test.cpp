@@ -297,13 +297,13 @@ int main() {
                 "sha1 = \"90164d1ac127ee5f9815ea4ae7de798c7b5fc629\"\n"
                 "[display]\n"
                 "adaptive_capability = \"top\"\n"
-                "adaptive_width = 342\n";
+                "adaptive_width = 320\n";
     }
     options = {};
     if (!require(
             nds_load_frontend_config(path.string(), &options, &error)))
         return 25;
-    if (!require(options.adaptive_max_width[0] == 342))
+    if (!require(options.adaptive_max_width[0] == 320))
         return 26;
     {
         uint16_t width = 0;
@@ -314,6 +314,8 @@ int main() {
             return 28;
         if (!require(!nds_parse_widescreen_width("449", &width)))
             return 29;
+        if (!require(!nds_parse_widescreen_width("342", &width)))
+            return 30;
     }
 
     {

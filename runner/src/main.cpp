@@ -687,7 +687,7 @@ int main(int argc, char** argv) {
         if (!nds_parse_widescreen_width(value, &width)) {
             std::fprintf(stderr,
                          "invalid NDS_WIDESCREEN_WIDTH "
-                         "(expected even 256..448)\n");
+                         "(expected 256, 320, 384, or 448)\n");
             return 2;
         }
         apply_adaptive_width(width);
@@ -800,7 +800,7 @@ int main(int argc, char** argv) {
         if (!nds_parse_widescreen_width(cli_widescreen_width, &width)) {
             std::fprintf(stderr,
                          "invalid --widescreen-width "
-                         "(expected even 256..448)\n");
+                         "(expected 256, 320, 384, or 448)\n");
             return 2;
         }
         apply_adaptive_width(width);
