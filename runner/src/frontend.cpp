@@ -869,6 +869,13 @@ bool create_presentation(const NdsFrontendOptions& options,
             destroy_presentation(presentation);
             return false;
         }
+        if (SDL_SetTextureScaleMode(presentation.textures[screen],
+                                    SDL_ScaleModeNearest) != 0) {
+            std::fprintf(stderr, "[sdl] texture scale mode failed: %s\n",
+                         SDL_GetError());
+            destroy_presentation(presentation);
+            return false;
+        }
         if (presentation.sample_scale > 1) {
             presentation.sample_targets[screen] = SDL_CreateTexture(
                 presentation.renderers[screen], SDL_PIXELFORMAT_ARGB8888,
@@ -880,6 +887,15 @@ bool create_presentation(const NdsFrontendOptions& options,
                 std::fprintf(stderr,
                              "[sdl] supersample target failed: %s\n",
                              SDL_GetError());
+                destroy_presentation(presentation);
+                return false;
+            }
+            if (SDL_SetTextureScaleMode(presentation.sample_targets[screen],
+                                        SDL_ScaleModeNearest) != 0) {
+                std::fprintf(
+                    stderr,
+                    "[sdl] supersample target scale mode failed: %s\n",
+                    SDL_GetError());
                 destroy_presentation(presentation);
                 return false;
             }
@@ -1039,9 +1055,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         std::fprintf(stderr, "[sdl] thread priority unchanged: %s\n",
                      SDL_GetError());
 
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
-                (options.supersampling > 1 || options.antialiasing > 0)
-                    ? "1" : "0");
+    if (!SDL_SetHintWithPriority(SDL_HINT_RENDER_SCALE_QUALITY, "0",
+                                 SDL_HINT_OVERRIDE)) {
+        std::fprintf(stderr,
+                     "[sdl] render scale quality hint was not applied\n");
+    }
     FrontendPresentation presentation{};
     if (!create_presentation(options, presentation)) {
         SDL_Quit();
