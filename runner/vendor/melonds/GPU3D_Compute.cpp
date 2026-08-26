@@ -36,7 +36,21 @@ bool ComputeRenderer::CompileShader(GLuint& shader, const std::string& source, c
 {
     std::string shaderName;
     std::string shaderSource;
+#if defined(NDS_GLES)
+    // GLES 3.2 compute. Requires an es-profile version and explicit default
+    // precision for float/int and every opaque (sampler/image) type used.
+    shaderSource += "#version 320 es\n";
+    shaderSource += "precision highp float;\n";
+    shaderSource += "precision highp int;\n";
+    shaderSource += "precision highp sampler2D;\n";
+    shaderSource += "precision highp usampler2D;\n";
+    shaderSource += "precision highp isampler2D;\n";
+    shaderSource += "precision highp image2D;\n";
+    shaderSource += "precision highp uimage2D;\n";
+    shaderSource += "precision highp iimage2D;\n";
+#else
     shaderSource += "#version 430 core\n";
+#endif
     for (const char* define : defines)
     {
         shaderSource += "#define ";

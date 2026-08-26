@@ -790,7 +790,16 @@ bool create_presentation(const NdsFrontendOptions& options,
     const bool direct_top_requested =
         (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u ||
         options.internal_resolution > 1u;
-    presentation.gl_top = presentation.separate &&
+    // On Android the bottom screen is presented on the Thor's second physical
+    // display, so the single main window shows only the top -- exactly the
+    // gl_top (direct-GL compute) model, even in the stacked layout.
+    bool gl_top_layout_ok = presentation.separate;
+#if defined(__ANDROID__)
+    // The Thor always presents the bottom screen on its second physical
+    // display, so the main window is top-only regardless of attach timing.
+    gl_top_layout_ok = true;
+#endif
+    presentation.gl_top = gl_top_layout_ok &&
         allow_gl_top &&
         direct_top_requested &&
         nds_gpu3d_renderer_prefers_compute() &&
@@ -888,6 +897,11 @@ bool create_presentation(const NdsFrontendOptions& options,
                 SDL_GetWindowID(presentation.windows[screen]);
             continue;
         }
+#if defined(__ANDROID__)
+        // gl_top on Android has no bottom SDL window/renderer: the bottom
+        // screen is blitted to the Thor's second display instead.
+        if (screen == 1 && presentation.gl_top) continue;
+#endif
         const int logical_height =
             !presentation.separate && screen == 0
                 ? kScreenHeight * 2 : kScreenHeight;
@@ -1007,6 +1021,12 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         ticks.upload += gl_ticks.upload;
         ticks.draw += gl_ticks.draw;
         ticks.swap += gl_ticks.swap;
+#if defined(__ANDROID__)
+        // Bottom screen -> Thor's second physical display; no SDL renderer.
+        android_second_screen_present(bottom_pixels, bottom_width,
+                                      kScreenHeight);
+        return ticks;
+#endif
         uint64_t start = SDL_GetPerformanceCounter();
         SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
                           bottom_width * sizeof(uint32_t));
@@ -2395,10 +2415,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             break;
         }
 #if defined(__ANDROID__)
-        // Mirror the DS bottom screen onto the Thor's second physical display
-        // (no-op until MyGame attaches its Presentation surface).
-        android_second_screen_present(bottom_pixels, bottom_width,
-                                      kScreenHeight);
+        // Mirror the DS bottom screen onto the Thor's second physical display.
+        // Skip when gl_top is active -- present_screens already blitted it
+        // there in the compute path (avoids a double present).
+        if (!presentation.gl_top)
+            android_second_screen_present(bottom_pixels, bottom_width,
+                                          kScreenHeight);
 #endif
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
