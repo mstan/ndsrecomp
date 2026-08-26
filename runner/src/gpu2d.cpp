@@ -11,6 +11,7 @@
 
 #include "gpu3d.h"
 #include "io.h"
+#include "title_patches.h"
 #include "vram.h"
 
 namespace {
@@ -1827,7 +1828,8 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const bool supported_scene =
         palette && oam && vram && !(u.dispcnt & 0x80u) &&
         mode == 1u && bg0_3d && supported_hud_bgs && windows_supported &&
-        nds_gpu3d_render_xpos() == 0u && !g_present_capture_active;
+        nds_gpu3d_render_xpos() == 0u && !g_present_capture_active &&
+        !nds_title_patches_mph_adaptive_centered_native();
     if (!supported_scene) {
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,

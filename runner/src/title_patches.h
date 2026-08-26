@@ -20,6 +20,8 @@ void nds_title_patches_set_mph_mouse_aim(bool enabled);
 // band. `adaptive_width` must equal the host 3D render width.
 void nds_title_patches_set_mph_adventure_wide(bool enabled,
                                               uint16_t adaptive_width);
+void nds_title_patches_set_mph_adaptive(bool enabled);
 bool nds_title_patches_apply_mph_mouse_delta(int32_t dx, int32_t dy);
+bool nds_title_patches_mph_adaptive_centered_native();
 NdsTitlePatchDebugState nds_title_patches_debug_state();
 void nds_title_patches_start_frame();

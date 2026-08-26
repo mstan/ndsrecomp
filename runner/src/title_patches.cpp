@@ -25,6 +25,12 @@ constexpr double kFix12One = 4096.0;
 // path but removes the finite physical touchscreen edge.
 constexpr uint32_t kMphUs10AimX = 0x020DE526u;
 constexpr uint32_t kMphUs10AimY = 0x020DE52Eu;
+constexpr uint32_t kMphOverlay0Identity = 0x02102228u;
+constexpr uint32_t kMphOverlay0IdentityValue = 0xE59F106Cu;
+constexpr uint32_t kMphFrontendMenuList = 0x0214C7E0u;
+constexpr int32_t kMphFrontendMenuListValue = 0x021D8DD4u;
+constexpr uint32_t kMphFrontendCurrentMenu = 0x0214C7E4u;
+constexpr int32_t kMphBriefingMenuValue = 0x021DB9CCu;
 
 // AMHE0 adventure mode builds every frustum from a 4:3 literal and from two
 // aspect numerators baked into Camera_SetupProjection and Rooms_TraverseAndDraw.
@@ -46,6 +52,8 @@ constexpr MphWideSite kMphWideSites[kMphWideSiteCount] = {
 
 bool g_sm64ds_adaptive = false;
 bool g_mph_mouse_aim = false;
+bool g_mph_adaptive = false;
+bool g_mph_adaptive_centered_native = false;
 bool g_logged_sm64ds_clipper = false;
 
 bool g_mph_adventure_wide = false;
@@ -195,6 +203,18 @@ void patch_sm64ds_clipper() {
     }
 }
 
+bool mph_briefing_active() {
+    int32_t overlay_identity = 0;
+    int32_t menu_list = 0;
+    int32_t current_menu = 0;
+    return read_main_ram32(kMphOverlay0Identity, &overlay_identity) &&
+           read_main_ram32(kMphFrontendMenuList, &menu_list) &&
+           read_main_ram32(kMphFrontendCurrentMenu, &current_menu) &&
+           static_cast<uint32_t>(overlay_identity) == kMphOverlay0IdentityValue &&
+           menu_list == kMphFrontendMenuListValue &&
+           current_menu == kMphBriefingMenuValue;
+}
+
 }  // namespace
 
 void nds_title_patches_set_sm64ds_adaptive(bool enabled) {
@@ -236,6 +256,11 @@ void nds_title_patches_set_mph_adventure_wide(bool enabled,
     }
 }
 
+void nds_title_patches_set_mph_adaptive(bool enabled) {
+    g_mph_adaptive = enabled;
+    if (!enabled) g_mph_adaptive_centered_native = false;
+}
+
 bool nds_title_patches_apply_mph_mouse_delta(int32_t dx, int32_t dy) {
     if (!g_mph_mouse_aim || (dx == 0 && dy == 0)) return false;
     if (dx != 0)
@@ -243,6 +268,10 @@ bool nds_title_patches_apply_mph_mouse_delta(int32_t dx, int32_t dy) {
     if (dy != 0)
         bus_write_u32_slow(kMphUs10AimY, static_cast<uint32_t>(dy));
     return true;
+}
+
+bool nds_title_patches_mph_adaptive_centered_native() {
+    return g_mph_adaptive_centered_native;
 }
 
 static_assert(kMphWideSiteCount ==
@@ -262,6 +291,10 @@ NdsTitlePatchDebugState nds_title_patches_debug_state() {
 }
 
 void nds_title_patches_start_frame() {
+    // The frontend presents the completed framebuffer after this boundary.
+    // Keep this title-specific scene decision on the same frame boundary.
+    g_mph_adaptive_centered_native =
+        g_mph_adaptive && mph_briefing_active();
     if (g_sm64ds_adaptive) patch_sm64ds_clipper();
     if (g_mph_adventure_wide) patch_mph_adventure_wide();
 }
