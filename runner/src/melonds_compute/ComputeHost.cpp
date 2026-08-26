@@ -30,6 +30,39 @@ GLuint g_hd_below_texture[2] = {};
 int g_texture_width = 0;
 unsigned g_present_buffer = 0;
 
+struct PresentViewport {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+PresentViewport fit_present_viewport(int drawable_width, int drawable_height,
+                                     int content_width, int content_height)
+{
+    PresentViewport viewport{};
+    if (drawable_width <= 0 || drawable_height <= 0 ||
+        content_width <= 0 || content_height <= 0) {
+        return viewport;
+    }
+
+    viewport.width = drawable_width;
+    viewport.height = static_cast<int>(
+        static_cast<long long>(drawable_width) * content_height /
+        content_width);
+    if (viewport.height > drawable_height) {
+        viewport.height = drawable_height;
+        viewport.width = static_cast<int>(
+            static_cast<long long>(drawable_height) * content_width /
+            content_height);
+    }
+    if (viewport.width < 1) viewport.width = 1;
+    if (viewport.height < 1) viewport.height = 1;
+    viewport.x = (drawable_width - viewport.width) / 2;
+    viewport.y = (drawable_height - viewport.height) / 2;
+    return viewport;
+}
+
 const char* kPresentVertex = R"GLSL(
 #version 430 core
 out vec2 uv;
@@ -579,23 +612,11 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
     int drawable_width = 0;
     int drawable_height = 0;
     SDL_GL_GetDrawableSize(g_window, &drawable_width, &drawable_height);
-    int viewport_x = 0;
-    int viewport_y = 0;
-    int viewport_width = drawable_width;
-    int viewport_height = drawable_height;
-    if (width == 256 && drawable_width > 0 && drawable_height > 0) {
-        const int target_width = drawable_height * 4 / 3;
-        if (target_width < drawable_width) {
-            viewport_width = target_width;
-            viewport_x = (drawable_width - viewport_width) / 2;
-        } else {
-            viewport_height = drawable_width * 3 / 4;
-            viewport_y = (drawable_height - viewport_height) / 2;
-        }
-    }
+    const PresentViewport viewport =
+        fit_present_viewport(drawable_width, drawable_height, width, 192);
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
-    glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
+    glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
     glUseProgram(g_present_program);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, g_object_texture[buffer]);
