@@ -29,7 +29,7 @@ game until that gate is met.
   interpreter (the correctness floor running the firmware's own copied
   bytes). The firmware menu runs interpreted at first, promoted to banks
   later.
-- **Host:** SDL2, single window stacked 256×384 (engine A top / B
+- **Host:** SDL3 by default, single window stacked 256×384 (engine A top / B
   bottom), software rendering; mouse → ARM7 TSC touch.
 
 ## Inputs (verified, in `bios/`, git-ignored)

@@ -6,7 +6,12 @@
 #include <cstring>
 
 #define SDL_MAIN_HANDLED
+#if defined(NDS_HAVE_SDL3)
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#else
 #include <SDL.h>
+#endif
 
 #include "glad/glad.h"
 #include "gpu2d.h"
@@ -29,6 +34,63 @@ GLuint g_hd_top_texture[2] = {};
 GLuint g_hd_below_texture[2] = {};
 int g_texture_width = 0;
 unsigned g_present_buffer = 0;
+
+#if defined(NDS_HAVE_SDL3)
+bool sdl_ok(bool result)
+{
+    return result;
+}
+#else
+bool sdl_ok(int result)
+{
+    return result == 0;
+}
+#endif
+
+SDL_Window* create_gl_window(const char* title, int width, int height,
+                             uint64_t flags)
+{
+#if defined(NDS_HAVE_SDL3)
+    return SDL_CreateWindow(title, width, height,
+                            static_cast<SDL_WindowFlags>(flags));
+#else
+    return SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED,
+                            SDL_WINDOWPOS_UNDEFINED, width, height,
+                            static_cast<uint32_t>(flags));
+#endif
+}
+
+bool sdl_init_video()
+{
+#if defined(NDS_HAVE_SDL3)
+    return SDL_InitSubSystem(SDL_INIT_VIDEO);
+#else
+    return SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
+#endif
+}
+
+bool sdl_make_current(SDL_Window* window, SDL_GLContext context)
+{
+    return sdl_ok(SDL_GL_MakeCurrent(window, context));
+}
+
+void sdl_destroy_context(SDL_GLContext context)
+{
+#if defined(NDS_HAVE_SDL3)
+    SDL_GL_DestroyContext(context);
+#else
+    SDL_GL_DeleteContext(context);
+#endif
+}
+
+void sdl_get_drawable_size(SDL_Window* window, int* width, int* height)
+{
+#if defined(NDS_HAVE_SDL3)
+    SDL_GetWindowSizeInPixels(window, width, height);
+#else
+    SDL_GL_GetDrawableSize(window, width, height);
+#endif
+}
 
 struct PresentViewport {
     int x = 0;
@@ -444,11 +506,11 @@ void configure_layer_texture(GLuint texture, int width)
 void release_host_objects()
 {
     if (g_context && g_window) {
-        SDL_GL_MakeCurrent(g_window, g_context);
+        sdl_make_current(g_window, g_context);
         stop_presenter();
     }
     if (g_context) nds_texture_upscale_shutdown();
-    if (g_context) SDL_GL_DeleteContext(g_context);
+    if (g_context) sdl_destroy_context(g_context);
     if (g_window && g_owns_window) SDL_DestroyWindow(g_window);
     if (g_owns_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
     g_window = nullptr;
@@ -478,7 +540,7 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
 
     SDL_SetMainReady();
     g_owns_video = (SDL_WasInit(SDL_INIT_VIDEO) == 0);
-    if (g_owns_video && SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+    if (g_owns_video && !sdl_init_video()) {
         std::fprintf(stderr, "[gpu3d] SDL video init failed: %s\n",
                      SDL_GetError());
         return fail_or_fallback("SDL video initialization");
@@ -492,9 +554,8 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
     g_window = presentation_window;
     g_visible = presentation_window != nullptr;
     if (!g_window) {
-        g_window = SDL_CreateWindow(
-            "ndsrecomp compute context", SDL_WINDOWPOS_UNDEFINED,
-            SDL_WINDOWPOS_UNDEFINED, 1, 1,
+        g_window = create_gl_window(
+            "ndsrecomp compute context", 1, 1,
             SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
         g_owns_window = true;
         if (!g_window) {
@@ -506,7 +567,7 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
     }
     g_context = SDL_GL_CreateContext(g_window);
     SDL_GL_ResetAttributes();
-    if (!g_context || SDL_GL_MakeCurrent(g_window, g_context) != 0) {
+    if (!g_context || !sdl_make_current(g_window, g_context)) {
         std::fprintf(stderr, "[gpu3d] compute GL 4.3 context failed: %s\n",
                      SDL_GetError());
         return fail_or_fallback("OpenGL 4.3 context creation");
@@ -541,7 +602,7 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
 
 bool nds_compute_host_make_current()
 {
-    return !g_active || SDL_GL_MakeCurrent(g_window, g_context) == 0;
+    return !g_active || sdl_make_current(g_window, g_context);
 }
 
 bool nds_compute_host_has_visible_context()
@@ -556,7 +617,7 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
 {
     if (!g_active || !g_visible || !g_present_program || !ticks)
         return false;
-    if (SDL_GL_MakeCurrent(g_window, g_context) != 0) return false;
+    if (!sdl_make_current(g_window, g_context)) return false;
     const int width = direct_frame ? direct_frame->width : fallback_width;
     if (width <= 0 || width > 448) return false;
     if (g_texture_width != width) {
@@ -611,7 +672,7 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
     start = SDL_GetPerformanceCounter();
     int drawable_width = 0;
     int drawable_height = 0;
-    SDL_GL_GetDrawableSize(g_window, &drawable_width, &drawable_height);
+    sdl_get_drawable_size(g_window, &drawable_width, &drawable_height);
     const PresentViewport viewport =
         fit_present_viewport(drawable_width, drawable_height, width, 192);
     glClearColor(0.f, 0.f, 0.f, 1.f);
@@ -683,7 +744,7 @@ void nds_compute_host_stop()
         release_host_objects();
         return;
     }
-    SDL_GL_MakeCurrent(g_window, g_context);
+    sdl_make_current(g_window, g_context);
     nds_gpu3d_restore_soft_renderer();
     release_host_objects();
 }

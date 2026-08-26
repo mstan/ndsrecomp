@@ -181,8 +181,10 @@ cmake -G Ninja -B runner/build runner
 cmake --build runner/build
 ```
 
-SDL2 is optional at configure time; without it, the runner is headless and
-interactive presentation is unavailable.
+SDL3 is the default host presentation backend. Configure with
+`-DNDS_SDL_BACKEND=SDL2` for the compatibility backend, or
+`-DNDS_SDL_BACKEND=NONE` for a headless runner with no interactive
+presentation.
 
 ### Game-owned static banks
 
