@@ -20,11 +20,20 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
-ABI_VERSION = 4
+ABI_VERSION = 5
 PAGE_SIZE = 4096
+
+# Backends that can build a live shard. "gcc" is the dev/CI toolchain; "tcc" is
+# the bundled, toolchain-free player fallback staged by tools/make_release.ps1.
+# Each owns a cache namespace (<cache>/gcc, <cache>/tcc) and hashes into a
+# distinct provider identity, so their shards never alias one another.
+BACKENDS = ("gcc", "tcc")
 
 
 def load_json(path: Path) -> object:
@@ -38,6 +47,87 @@ def atomic_json(path: Path, value: object) -> None:
         json.dumps(value, indent=2, sort_keys=True) + "\n",
         encoding="utf-8", newline="\n")
     os.replace(temporary, path)
+
+
+INDEX_LOCK_NAME = "live-index.lock"
+
+
+@contextmanager
+def exclusive_file_lock(lock_path: Path, timeout: float | None = 120.0):
+    """Kernel-owned cross-process lock on one permanent byte-range file.
+
+    Mirrors psxrecomp tools/compile_overlays.py::_exclusive_file_lock. The
+    lock file is intentionally permanent: OS byte-range locks are released
+    by the kernel when a process dies, whereas deleting the file creates an
+    inode/handle split that lets two processes both believe they own it.
+    """
+    lock_path = lock_path.resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "a+b")
+    if lock_path.stat().st_size == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    deadline = (time.monotonic() + timeout if timeout is not None else None)
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                lock_file.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for live index lock {lock_path}")
+                time.sleep(0.025)
+        yield
+    finally:
+        if acquired:
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def empty_index(rom_sha1: str) -> dict:
+    return {"schema": 2, "rom_sha1": rom_sha1, "captures": {}}
+
+
+def record_capture(args: argparse.Namespace, index: dict, key: str,
+                   entry: dict) -> None:
+    """Merge one capture into the shared index under an exclusive lock.
+
+    Two runners can share one cache directory, so the index is never written
+    from a snapshot read at process start: the read-modify-write is redone
+    inside the lock against whatever is on disk right now, and `index` (this
+    process's working view) is refreshed from the merged result. Entries this
+    process holds but that are absent from disk are carried forward; on a key
+    collision the on-disk entry wins, since it names a DLL already published.
+    """
+    with exclusive_file_lock(args.cache / INDEX_LOCK_NAME):
+        current = load_json(args.index) if args.index.is_file() else None
+        if (not isinstance(current, dict) or
+                current.get("rom_sha1") != args.rom_sha1 or
+                int(current.get("schema", 0)) not in (1, 2)):
+            current = empty_index(args.rom_sha1)
+        current["schema"] = 2
+        captures = current.setdefault("captures", {})
+        for other_key, other in index.get("captures", {}).items():
+            captures.setdefault(other_key, other)
+        captures[key] = entry
+        atomic_json(args.index, current)
+    index.clear()
+    index.update(current)
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
@@ -244,32 +334,76 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def provider_identity(args: argparse.Namespace) -> str:
-    runtime_header = (
-        args.ndsrecomp_root / "recompiler" / "armv4t" / "runtime_arm.h"
-    )
-    if not runtime_header.is_file():
-        raise RuntimeError(f"runtime ABI header does not exist: {runtime_header}")
+def runtime_headers(args: argparse.Namespace) -> list[Path]:
+    """Every runtime ABI header a shard can include, in a stable order.
+
+    Hashing only runtime_arm.h used to be enough, but the shared ARM core
+    extraction moved the type definitions it includes into
+    external/arm-recomp-core/common/runtime_arm_types.h. An ABI change over
+    there would not have invalidated a single cached shard.
+    """
+    found: dict[str, Path] = {}
+    for directory in args.runtime_include:
+        if not directory.is_dir():
+            raise RuntimeError(
+                f"runtime include directory does not exist: {directory}")
+        for path in sorted(directory.glob("*.h")):
+            found.setdefault(path.name, path)
+    if "runtime_arm.h" not in found:
+        raise RuntimeError(
+            "runtime_arm.h was not found in any --runtime-include directory: "
+            + ", ".join(str(d) for d in args.runtime_include))
+    return [found[name] for name in sorted(found)]
+
+
+def compiler_identity(args: argparse.Namespace) -> dict:
+    """Identify the backend well enough that its shards never share a cache.
+
+    A tcc-built and a gcc-built shard for the same page are different native
+    code from different code generators; they are namespaced on disk AND must
+    hash differently, or a cache warmed by one backend is served as if the
+    other had produced it.
+    """
+    if args.compiler == "tcc":
+        try:
+            # tcc prints "tcc version X (target)" on stderr and exits 0.
+            result = subprocess.run([str(args.tcc), "-v"],
+                                    capture_output=True, text=True)
+        except OSError as error:
+            raise RuntimeError(f"cannot identify live-shard compiler: {error}")
+        banner = (result.stdout or "") + (result.stderr or "")
+        banner = banner.strip().splitlines()[0].strip() if banner.strip() else ""
+        if not banner:
+            raise RuntimeError(
+                f"cannot identify live-shard compiler: {args.tcc} -v was silent")
+        return {"compiler": "tcc", "tcc_banner": banner,
+                "tcc_sha256": file_sha256(Path(args.tcc))}
     try:
-        gcc_machine = subprocess.check_output(
+        machine = subprocess.check_output(
             [str(args.gcc), "-dumpmachine"], text=True).strip()
-        gcc_version = subprocess.check_output(
+        version = subprocess.check_output(
             [str(args.gcc), "-dumpfullversion", "-dumpversion"],
             text=True).strip()
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError(f"cannot identify live-shard compiler: {error}")
+    return {"compiler": "gcc", "gcc_machine": machine, "gcc_version": version}
+
+
+def provider_identity(args: argparse.Namespace) -> str:
+    headers = runtime_headers(args)
     value = {
-        "schema": 1,
+        "schema": 2,
         "abi": ABI_VERSION,
         "provider_sha256": file_sha256(Path(__file__)),
         "recompiler_sha256": file_sha256(args.recompiler),
-        "runtime_header_sha256": file_sha256(runtime_header),
-        "gcc_machine": gcc_machine,
-        "gcc_version": gcc_version,
+        "runtime_header_sha256": {
+            path.name: file_sha256(path) for path in headers
+        },
         "generated_opt": args.generated_opt,
         "max_function_bytes": args.max_function_bytes,
         "include_roots": args.include_roots,
         "merge_cache_snapshots": args.merge_cache_snapshots,
+        **compiler_identity(args),
     }
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -382,6 +516,12 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
         f'    info.candidate_id = "{candidate_id}";',
         f'    info.title_sha1 = "{rom_sha1}";',
         f"    info.cpu = {cpu_token};",
+        # Report what the bodies were ACTUALLY compiled with rather than
+        # re-deriving it from `cpu`: the point of the field is to catch the
+        # build passing the two independently and disagreeing. No fallback
+        # default -- a shard built without -DNDS_STATIC_CPU must fail to
+        # compile, not publish a guessed identity.
+        "    info.static_cpu = (uint32_t)(NDS_STATIC_CPU);",
         f"    info.exc_base = {exc_base};",
         f"    info.dispatch = g_dispatch_{bank};",
         f"    info.dispatch_len = g_dispatch_{bank}_len;",
@@ -397,6 +537,170 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
         "}",
         "",
     ]), encoding="utf-8", newline="\n")
+
+
+# ---- TinyCC (tcc) backend — the toolchain-free player fallback -------------
+#
+# tcc bundles its own headers and linker, so it is self-contained: a player box
+# needs no gcc, no binutils and no MSYS. Two accommodations are required, and
+# both are confined to throwaway copies so the REAL runtime headers (which the
+# provider identity hashes) stay byte-identical across backends:
+#
+#   1. tcc 0.9.27 does not skip a UTF-8 BOM. Strip it from the copies.
+#   2. tcc has no equivalent of gcc's -Wl,--enable-auto-import, so every
+#      runtime DATA symbol the generated bodies touch (g_cpu, g_busf_main,
+#      g_busf_itcm, g_runtime_cycles, ...) fails to link with
+#      "undefined symbol 'g_cpu', missing __declspec(dllimport)?". Marking the
+#      extern declarations dllimport in the copied headers is what makes the
+#      import thunks get emitted. Functions are marked too, which is both
+#      harmless and correct — they all come from the runner image as well.
+#
+# NOTE the transform is applied ONLY to the runtime include dirs, never to the
+# generated shard's own source dir: that one declares symbols the shard itself
+# defines (g_dispatch_<bank>), and importing those would be wrong.
+#
+# tcc 0.9.27 needs no __builtin_* shim for this codebase: the generated bodies
+# use none, and runtime_arm.h names __builtin_clz only in a comment explaining
+# why runtime_clz() exists instead. If that changes, add the shim as a prefix
+# on the disposable generated source rather than in the headers.
+
+_TCC_EXTERN_RE = re.compile(rb'^(extern[ \t]+)(?!"C")', re.M)
+
+# Runtime data symbols that MUST come out of the transform as dllimport. This
+# is a tripwire, not the mechanism: if a header refactor moves these behind a
+# macro the regex stops matching and every tcc shard would silently fall back
+# to a link error (or worse, a private copy), so assert them up front.
+_TCC_REQUIRED_IMPORTS = (
+    "g_cpu", "g_busf_main", "g_busf_itcm", "g_runtime_cycles",
+)
+
+
+def _strip_bom(data: bytes) -> bytes:
+    return data[3:] if data[:3] == b"\xef\xbb\xbf" else data
+
+
+def tcc_include_dir(args: argparse.Namespace) -> Path:
+    """Memoized BOM-stripped, dllimport-marked copy of the runtime headers.
+
+    Keyed by a digest of the real header contents, so it self-invalidates when
+    a header changes and can safely persist in the cache across runs.
+    """
+    headers = runtime_headers(args)
+    digest = hashlib.sha256(b"nds-live-tcc-include-1\0")
+    payload: list[tuple[str, bytes]] = []
+    for path in headers:
+        data = _strip_bom(path.read_bytes())
+        marked, count = _TCC_EXTERN_RE.subn(
+            rb"\1__declspec(dllimport) ", data)
+        payload.append((path.name, marked))
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(f"\0{count}\0".encode("ascii"))
+    out = args.cache / "tcc" / f"include-{digest.hexdigest()[:16]}"
+    marker = out / ".complete"
+    if not marker.is_file():
+        staging = Path(tempfile.mkdtemp(
+            prefix="include-", dir=str(args.cache / "tcc")))
+        for name, data in payload:
+            (staging / name).write_bytes(data)
+        (staging / ".complete").write_bytes(b"")
+        if out.exists():
+            shutil.rmtree(out, ignore_errors=True)
+        try:
+            os.replace(staging, out)
+        except OSError:
+            # Another process published the same content-keyed directory.
+            shutil.rmtree(staging, ignore_errors=True)
+            if not marker.is_file():
+                raise
+    blob = b"\n".join(
+        _strip_bom((out / name).read_bytes()) for name, _ in payload)
+    missing = [
+        symbol for symbol in _TCC_REQUIRED_IMPORTS
+        if (b"__declspec(dllimport) " in blob and
+            re.search(rb"__declspec\(dllimport\)[^;]*?\b"
+                      + symbol.encode("ascii") + rb"\b", blob) is None)
+    ]
+    if missing:
+        raise RuntimeError(
+            "tcc header transform did not mark these runtime data symbols "
+            "dllimport (runtime_arm.h shape changed?): " + ", ".join(missing))
+    return out
+
+
+def tcc_import_dir(args: argparse.Namespace) -> Path:
+    """Memoized tcc import library (.def) for the runner image.
+
+    tcc cannot read MinGW's libnds_runner.dll.a ("invalid object file"), but it
+    can generate and consume its own .def. `tcc -impdef` reads the export table
+    straight out of the runner executable, so no gcc/binutils is involved and
+    the import name automatically tracks whatever the shipped exe is called.
+    """
+    exe = args.runner_exe
+    if not exe or not exe.is_file():
+        raise RuntimeError(
+            "the tcc backend needs --runner-exe pointing at the runner "
+            f"executable whose exports the shards import (got: {exe})")
+    stem = exe.stem
+    key = hashlib.sha256(
+        f"nds-live-tcc-impdef-1\0{exe.name}\0".encode("utf-8")
+        + file_sha256(exe).encode("ascii")).hexdigest()[:16]
+    out = args.cache / "tcc" / f"imp-{key}"
+    target = out / f"{stem}.def"
+    if not target.is_file():
+        out.mkdir(parents=True, exist_ok=True)
+        staged = out / f"{stem}.def.{os.getpid()}.tmp"
+        result = subprocess.run(
+            [str(args.tcc), "-impdef", str(exe), "-o", str(staged)],
+            capture_output=True, text=True)
+        if result.returncode != 0 or not staged.is_file():
+            staged.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"tcc -impdef failed for {exe} (exit {result.returncode}): "
+                + (result.stderr or result.stdout or "").strip())
+        os.replace(staged, target)
+    return out
+
+
+def compile_shard_dll(args: argparse.Namespace, sources: list[Path],
+                      src_dir: Path, stage: Path, cpu: int) -> bool:
+    """Build one shard DLL with the selected backend.
+
+    Both backends must see the SAME preprocessor state. NDS_STATIC_CPU is the
+    only define that reaches the generated bodies, and it is load-bearing:
+    runtime_arm.h folds g_nds_active on it, and the runner rejects a bank whose
+    reported static_cpu disagrees with its cpu. Flag drift between backends is
+    the classic way to ship a tcc tier that links but runs the wrong timing
+    model, so the define list is built once here rather than per backend.
+    """
+    static_cpu = 0 if cpu == 9 else 1
+    defines = [f"-DNDS_STATIC_CPU={static_cpu}"]
+    if args.compiler == "tcc":
+        includes = [tcc_include_dir(args), src_dir]
+        import_dir = tcc_import_dir(args)
+        command = [
+            str(args.tcc), "-shared", *defines,
+            *[f"-I{path}" for path in includes],
+            "-o", str(stage),
+            *[str(path) for path in sources],
+            f"-L{import_dir}", f"-l{args.runner_exe.stem}",
+        ]
+        ok = run(command).returncode == 0
+        # tcc -shared drops an export .def beside the output. It is a build
+        # artifact, not part of the published pair; leaving it behind litters
+        # the cache namespace the loader scans.
+        stage.with_suffix(".def").unlink(missing_ok=True)
+        return ok
+    command = [
+        str(args.gcc), "-shared", args.generated_opt, "-g0", *defines,
+        *[f"-I{path}" for path in [*args.runtime_include, src_dir]],
+        "-Wl,--enable-auto-import",
+        "-o", str(stage),
+        *[str(path) for path in sources],
+        str(args.runner_import_lib),
+    ]
+    return run(command).returncode == 0
 
 
 def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
@@ -417,6 +721,10 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
         if indexed.get("status") == "unsupported":
             print(f"capture {key}: previously rejected unsupported opcode",
                   flush=True)
+            return "skipped", None
+        if indexed.get("status") == "compile-failed":
+            print(f"capture {key}: previously failed to build under "
+                  f"{indexed.get('compiler', '?')}", flush=True)
             return "skipped", None
         dll = Path(indexed.get("dll", ""))
         if dll.is_file():
@@ -457,18 +765,20 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
     if any('runtime_unimplemented_op("' in path.read_text(
             encoding="utf-8") for path in bank_sources
             if path.name != f"{bank}_dispatch.c"):
-        index.setdefault("captures", {})[key] = {
+        record_capture(args, index, key, {
             "status": "unsupported",
             "cpu": cpu,
             "page": f"0x{addr:08X}",
             "page_sha1": page_sha1,
             "entries": len(entries),
-        }
-        atomic_json(args.index, index)
+        })
         print(f"capture {key}: generated body contains an unsupported opcode; "
               "kept in Tier 3", flush=True)
         return "skipped", None
-    dll_dir = args.cache / "gcc"
+    # Each backend owns a cache namespace. The loader scans both and prefers
+    # gcc for the same generation, so a player box still LOADS the gcc shards
+    # shipped in the prebuilt cache and only fills the gaps with tcc.
+    dll_dir = args.cache / args.compiler
     dll_dir.mkdir(parents=True, exist_ok=True)
     dll = dll_dir / f"{bank}_{candidate_id}.dll"
     if not dll.is_file():
@@ -481,22 +791,26 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
             raise RuntimeError(f"generated source set is incomplete for {bank}")
         stage = dll.with_suffix(".stage.dll")
         stage.unlink(missing_ok=True)
-        gcc = [
-            args.gcc, "-shared", args.generated_opt, "-g0",
-            f"-DNDS_STATIC_CPU={0 if cpu == 9 else 1}",
-            "-I", str(args.ndsrecomp_root / "recompiler" / "armv4t"),
-            "-I", str(src_dir),
-            "-Wl,--enable-auto-import",
-            "-o", str(stage),
-            *[str(path) for path in sources],
-            str(args.runner_import_lib),
-        ]
-        if run(gcc).returncode != 0:
+        if not compile_shard_dll(args, sources, src_dir, stage, cpu):
             stage.unlink(missing_ok=True)
-            return "failed", None
+            # Account for the failure per shard instead of retrying this exact
+            # page every trigger forever. The key folds provider_id, which
+            # folds the backend, so a gcc pass over the same cache is still
+            # free to attempt (and publish) the page that tcc could not build.
+            record_capture(args, index, key, {
+                "status": "compile-failed",
+                "compiler": args.compiler,
+                "cpu": cpu,
+                "page": f"0x{addr:08X}",
+                "page_sha1": page_sha1,
+                "entries": len(entries),
+            })
+            print(f"capture {key}: {args.compiler} could not build this page; "
+                  "kept in Tier 3", flush=True)
+            return "skipped", None
         os.replace(stage, dll)
 
-    index.setdefault("captures", {})[key] = {
+    record_capture(args, index, key, {
         "candidate_id": candidate_id,
         "provider_id": args.provider_id,
         "generation_id": page_sha1,
@@ -505,8 +819,7 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
         "page_sha1": page_sha1,
         "entries": len(entries),
         "dll": dll.resolve().as_posix(),
-    }
-    atomic_json(args.index, index)
+    })
     print(f"NDS_SHARD_PUBLISHED {dll.resolve().as_posix()}", flush=True)
     return "ok", dll
 
@@ -523,10 +836,26 @@ def main() -> int:
                                  else None))
     parser.add_argument("--rom-sha1",
                         default=os.environ.get("NDS_LIVE_OVERLAY_ROM_SHA1", ""))
-    parser.add_argument("--ndsrecomp-root", type=Path, required=True)
-    parser.add_argument("--runner-build", type=Path, required=True)
+    # Optional because the bundled player toolchain is not a source checkout:
+    # it ships flattened headers and passes --runtime-include instead.
+    parser.add_argument("--ndsrecomp-root", type=Path)
+    parser.add_argument("--runtime-include", type=Path, action="append",
+                        default=[],
+                        help="directory of runtime ABI headers the generated "
+                             "shard includes; repeatable. Defaults to the "
+                             "in-tree pair under --ndsrecomp-root.")
+    # Only the gcc backend links the MinGW import library out of a runner
+    # build tree; tcc derives its own .def from --runner-exe.
+    parser.add_argument("--runner-build", type=Path)
+    parser.add_argument("--runner-exe", type=Path,
+                        help="runner executable whose exports the shards "
+                             "import (required by the tcc backend)")
     parser.add_argument("--recompiler", type=Path, required=True)
+    parser.add_argument("--compiler", choices=BACKENDS, default="gcc",
+                        help="shard backend: gcc (dev/CI) or tcc (bundled, "
+                             "toolchain-free player fallback)")
     parser.add_argument("--gcc", default="gcc")
+    parser.add_argument("--tcc", default="tcc")
     parser.add_argument("--generated-opt", default="-O2")
     parser.add_argument("--max-function-bytes", type=int, default=512)
     parser.add_argument("--max-pages", type=int, default=6,
@@ -555,9 +884,35 @@ def main() -> int:
         raise SystemExit("ROM SHA-1 is required")
     if not args.recompiler.is_file():
         raise SystemExit(f"recompiler does not exist: {args.recompiler}")
+    if not args.runtime_include:
+        if not args.ndsrecomp_root:
+            raise SystemExit(
+                "pass --runtime-include or --ndsrecomp-root so the runtime "
+                "ABI headers can be found")
+        # runtime_arm.h lives in the recompiler tree but includes
+        # runtime_arm_types.h out of the shared ARM core submodule; a shard
+        # needs BOTH on the include path or it does not preprocess at all.
+        args.runtime_include = [
+            args.ndsrecomp_root / "recompiler" / "armv4t",
+            args.ndsrecomp_root / "external" / "arm-recomp-core" / "common",
+        ]
+    args.runtime_include = [
+        path for path in args.runtime_include if path.is_dir()]
+    if not args.runtime_include:
+        raise SystemExit("no runtime include directory exists")
+    if args.compiler == "tcc":
+        if not args.runner_exe or not args.runner_exe.is_file():
+            raise SystemExit(
+                "the tcc backend needs --runner-exe (the runner executable "
+                f"whose exports the shards import); got {args.runner_exe}")
+    elif not args.runner_build:
+        raise SystemExit("the gcc backend needs --runner-build")
     args.cache.mkdir(parents=True, exist_ok=True)
     args.index = args.cache / "live-index.json"
-    args.runner_import_lib = find_import_lib(args.runner_build)
+    args.runner_import_lib = (
+        find_import_lib(args.runner_build) if args.compiler == "gcc" else None)
+    if args.compiler == "tcc":
+        (args.cache / "tcc").mkdir(parents=True, exist_ok=True)
     args.provider_id = provider_identity(args)
 
     manifest = load_json(args.manifest)
@@ -568,8 +923,9 @@ def main() -> int:
     if str(manifest.get("rom_sha1", "")).lower() != args.rom_sha1.lower():
         raise SystemExit("coverage manifest ROM SHA-1 does not match the runner")
 
-    index = load_json(args.index) if args.index.is_file() else {
-        "schema": 2, "rom_sha1": args.rom_sha1, "captures": {}}
+    with exclusive_file_lock(args.cache / INDEX_LOCK_NAME):
+        index = (load_json(args.index) if args.index.is_file()
+                 else empty_index(args.rom_sha1))
     if index.get("rom_sha1") != args.rom_sha1:
         raise SystemExit("live cache index belongs to a different ROM")
     if int(index.get("schema", 0)) not in (1, 2):
@@ -593,7 +949,8 @@ def main() -> int:
                             str(page["sha1"]).lower(), entries,
                             args.provider_id)
         indexed = index.get("captures", {}).get(key)
-        if indexed and (indexed.get("status") == "unsupported" or
+        if indexed and (indexed.get("status") in ("unsupported",
+                                                  "compile-failed") or
                         Path(indexed.get("dll", "")).is_file()):
             skipped += 1
             continue

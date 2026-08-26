@@ -284,6 +284,77 @@ void dump_replay_status() {
     }
 }
 
+// ── Live-overlay backend policy ────────────────────────────────────────────
+//
+// Tier order is static banks > gcc shards > tcc shards > interpreter. Which
+// COMPILER fills the remaining gaps is a separate question from which shards
+// the loader consumes: consumption is backend-blind, so a machine with no gcc
+// still loads gcc-built shards out of a prebuilt cache.
+//
+//   gcc         use the command the launcher/CLI supplied (a dev checkout)
+//   tcc         force the bundled, toolchain-free toolchain beside the exe
+//   auto        gcc when a command was supplied, else the bundled tcc tier
+//   auto-no-gcc force the tcc branch even where gcc IS present — this is how
+//               a dev box exercises the exact path a player gets
+//
+// Precedence: NDS_LIVE_OVERLAY_BACKEND > auto.
+enum class LiveOverlayBackend { Auto, Gcc, Tcc, AutoNoGcc };
+
+LiveOverlayBackend parse_live_overlay_backend(const char* text) {
+    if (!text || !*text) return LiveOverlayBackend::Auto;
+    const std::string value(text);
+    if (value == "gcc") return LiveOverlayBackend::Gcc;
+    if (value == "tcc") return LiveOverlayBackend::Tcc;
+    if (value == "auto-no-gcc") return LiveOverlayBackend::AutoNoGcc;
+    return LiveOverlayBackend::Auto;
+}
+
+// Deliberately argv[0]-based rather than GetModuleFileNameA: main.cpp keeps
+// windows.h out of this translation unit on purpose (see the winsock include
+// ordering note below). The launcher spawns the runner by absolute path, so
+// argv[0] is absolute in the shipped configuration, and the relative case is
+// resolved against the working directory.
+std::filesystem::path exe_dir_from_argv(const char* argv0) {
+    std::error_code ec;
+    if (!argv0 || !*argv0) return std::filesystem::current_path(ec);
+    auto dir = std::filesystem::absolute(
+        std::filesystem::path(argv0), ec).parent_path();
+    return ec ? std::filesystem::current_path(ec) : dir;
+}
+
+// Build the autocompile command for the bundled toolchain, or "" when this
+// install has none (a source checkout, or a package built without it). The
+// cache, manifest and ROM SHA-1 reach the child through the
+// NDS_LIVE_OVERLAY_* environment variables that live_overlay.cpp sets, so
+// they are deliberately absent here.
+std::string bundled_tcc_command(const std::filesystem::path& exe_dir) {
+    std::error_code ec;
+    const auto tk = exe_dir / "overlay_toolchain";
+    // The interpreter is ALWAYS the bundled one, addressed absolutely. Never
+    // bare `python`/`py`: whatever a player has on PATH may be a Cygwin or
+    // Store build that mangles Windows paths or dies outright, and this runs
+    // unattended behind cmd.exe with its output going only to a log file.
+    const auto python = tk / "python" / "python.exe";
+    const auto script = tk / "compile_live_shards.py";
+    const auto recompiler = tk / "nds_recompile.exe";
+    const auto tcc = tk / "tcc" / "tcc.exe";
+    const auto include = tk / "include";
+    const auto runner = exe_dir / "nds_runner.exe";
+    for (const auto& required : {python, script, recompiler, tcc, runner}) {
+        if (!std::filesystem::is_regular_file(required, ec)) return {};
+    }
+    if (!std::filesystem::is_directory(include, ec)) return {};
+    auto q = [](const std::filesystem::path& p) {
+        return "\"" + p.string() + "\"";
+    };
+    return q(python) + " " + q(script) +
+        " --recompiler " + q(recompiler) +
+        " --runtime-include " + q(include) +
+        " --runner-exe " + q(runner) +
+        " --compiler tcc --tcc " + q(tcc) +
+        " --max-pages 6 --min-hits 8";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1532,6 +1603,38 @@ int main(int argc, char** argv) {
     if (!cli_live_overlay_auto_cooldown_set &&
         cli_live_overlay_auto_cooldown_ms == 0u) {
         cli_live_overlay_auto_cooldown_ms = 60000u;
+    }
+    // Resolve which compiler fills tier-3 gaps before configuring. A shipped
+    // build has no --live-overlay-command (the launcher only supplies one when
+    // it finds a dev provider checkout plus gcc), so AUTO lands on the bundled
+    // tcc toolchain staged beside the exe by tools/make_release.ps1.
+    {
+        const LiveOverlayBackend want =
+            parse_live_overlay_backend(std::getenv("NDS_LIVE_OVERLAY_BACKEND"));
+        const bool have_gcc_command = !cli_live_overlay_command.empty();
+        const bool force_tcc = want == LiveOverlayBackend::Tcc ||
+                               want == LiveOverlayBackend::AutoNoGcc ||
+                               (want == LiveOverlayBackend::Auto &&
+                                !have_gcc_command);
+        if (cli_live_overlay_enable && force_tcc) {
+            const auto exe_dir = exe_dir_from_argv(argv[0]);
+            std::string bundled = bundled_tcc_command(exe_dir);
+            if (!bundled.empty()) {
+                cli_live_overlay_command = std::move(bundled);
+                std::fprintf(stderr,
+                    "[live-overlay] tcc tier using bundled toolchain (%s)\n",
+                    (exe_dir / "overlay_toolchain").string().c_str());
+            } else if (want != LiveOverlayBackend::Auto) {
+                // An explicit request we cannot honour must be loud: silently
+                // running gcc after being told "tcc" would invalidate any
+                // measurement taken of the player path.
+                cli_live_overlay_command.clear();
+                std::fprintf(stderr,
+                    "[live-overlay] tcc tier requested but no bundled "
+                    "toolchain at %s (tier-3 gaps stay interpreted)\n",
+                    (exe_dir / "overlay_toolchain").string().c_str());
+            }
+        }
     }
     live_overlay_configure(cli_live_overlay_enable, cli_live_overlay_auto,
                            cli_live_overlay_activation_delay_ms,

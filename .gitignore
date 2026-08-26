@@ -67,3 +67,7 @@ Thumbs.db
 
 # third_party/ is vendored locally, EXCEPT the explicit freebios submodule.
 !third_party/freebios
+
+# Tier-2 toolchain downloads and test scratch
+/tools/_toolchain_cache/
+/runner/tests/live-index-lock-work/

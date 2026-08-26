@@ -89,6 +89,10 @@ struct LoadedBank {
     uint64_t native_hits = 0u;
     uint64_t rejects = 0u;
     uint64_t content_identity = 0u;
+    // Which backend namespace the DLL was scanned out of. Consumption is
+    // backend-blind — a bank is a bank — but when two of them cover the exact
+    // same generation the better code generator must win. See backend_tier().
+    uint32_t backend_tier = 0u;
     bool registered = false;
     bool superseded = false;
 #if defined(_WIN32)
@@ -385,6 +389,16 @@ bool preflight_live_bank(const NdsLiveBankInfo& info,
         error = "live bank has unknown safety flags";
         return false;
     }
+    // The shard build passes the CPU identity twice: as metadata `cpu` and
+    // as -DNDS_STATIC_CPU, which folds the ARM9/ARM7 timing ternaries into
+    // the generated bodies at compile time. If they disagree the bank runs
+    // under the other CPU's timing model with nothing to show for it, so
+    // the wrapper reports what it was actually compiled with and this is a
+    // fail-closed cross-check, not an advisory.
+    if (info.static_cpu != static_cast<uint32_t>(info.cpu)) {
+        error = "live bank static CPU build identity does not match its CPU";
+        return false;
+    }
     if (!info.bank_id || !*info.bank_id) {
         error = "live bank missing bank_id";
         return false;
@@ -529,6 +543,7 @@ uint64_t hash_bytes(uint64_t hash, const void* data, std::size_t size) {
 uint64_t bank_content_identity(const NdsLiveBankInfo& info) {
     uint64_t hash = 1469598103934665603ull;
     hash = hash_bytes(hash, &info.cpu, sizeof(info.cpu));
+    hash = hash_bytes(hash, &info.static_cpu, sizeof(info.static_cpu));
     hash = hash_bytes(hash, &info.exc_base, sizeof(info.exc_base));
     hash = hash_bytes(hash, &info.flags, sizeof(info.flags));
     for (unsigned i = 0; i < info.dispatch_len; ++i) {
@@ -562,6 +577,19 @@ bool is_final_dll_path(const std::filesystem::path& path) {
         return false;
     }
     return lower_ascii(path.extension().string()) == ".dll";
+}
+
+// Tier order for two banks covering the SAME generation: gcc > tcc > unknown.
+// The compiler writes each shard into <cache>/<backend>/, so the immediate
+// parent directory names the backend. An unrecognized layout scores 0 rather
+// than being rejected: third-party ABI-v5 providers keep working, they just
+// lose a tie against a shard we know was optimized.
+uint32_t backend_tier(const std::filesystem::path& path) {
+    const std::string parent =
+        lower_ascii(path.parent_path().filename().string());
+    if (parent == "gcc") return 2u;
+    if (parent == "tcc") return 1u;
+    return 0u;
 }
 
 bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
@@ -612,6 +640,7 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
 
     bank = {};
     bank.path = canon;
+    bank.backend_tier = backend_tier(path);
     bank.bank_id = info->bank_id ? info->bank_id : "";
     bank.candidate_id = info->candidate_id ? info->candidate_id : "";
     using GenerationFn = const char* (*)();
@@ -658,6 +687,30 @@ bool commit_prepared_bank(LoadedBank bank) {
         }
         if (bank.handle) FreeLibrary(bank.handle);
         return loaded.content_identity == bank.content_identity;
+    }
+    // Never demote a generation that a better backend already covers. A dev
+    // box (or a player whose shipped cache was built by CI) can hold a gcc
+    // shard for exactly this generation while the local tcc tier independently
+    // compiles its own; without this the arrival order alone would decide, and
+    // an unoptimized shard could evict an optimized one for the rest of the
+    // session. The incoming bank is simply dropped — the generation stays
+    // covered natively, so nothing falls back to the interpreter.
+    for (const LoadedBank& loaded : g_live.loaded) {
+        if (!loaded.registered || loaded.cpu != bank.cpu ||
+            loaded.bank_id != bank.bank_id ||
+            loaded.generation_id != bank.generation_id) {
+            continue;
+        }
+        if (loaded.backend_tier > bank.backend_tier) {
+            std::fprintf(stderr,
+                         "[live-overlay] kept tier-%u %s for generation %s; "
+                         "declined tier-%u candidate %s\n",
+                         loaded.backend_tier, loaded.bank_id.c_str(),
+                         loaded.generation_id.c_str(), bank.backend_tier,
+                         bank.candidate_id.c_str());
+            if (bank.handle) FreeLibrary(bank.handle);
+            return true;
+        }
     }
     // A compiler pass may discover additional resume roots for a generation
     // already cached at this page. Replace that revision at a scheduler
@@ -771,6 +824,7 @@ void commit_one_ready_bank() {
 struct CachedDllPath {
     std::filesystem::path path;
     std::filesystem::file_time_type write_time{};
+    uint32_t tier = 0u;
 };
 
 void rescan_cache() {
@@ -789,10 +843,15 @@ void rescan_cache() {
             ec.clear();
             continue;
         }
-        paths.push_back({path, write_time});
+        paths.push_back({path, write_time, backend_tier(path)});
     }
+    // Weakest backend first, so that when a cold scan finds both a tcc and a
+    // gcc shard for one generation the gcc one is queued LAST and therefore
+    // supersedes. Within a tier the original oldest-first ordering stands, so
+    // the newest revision of a generation still wins on recompile.
     std::sort(paths.begin(), paths.end(), [](const CachedDllPath& a,
                                              const CachedDllPath& b) {
+        if (a.tier != b.tier) return a.tier < b.tier;
         if (a.write_time != b.write_time) return a.write_time < b.write_time;
         return lower_ascii(path_string(a.path)) <
             lower_ascii(path_string(b.path));
@@ -956,6 +1015,30 @@ bool live_overlay_info_for_test(const NdsLiveBankInfo* info,
     return ok;
 }
 
+void live_overlay_publish_bank_for_test(int cpu,
+                                        const char* bank_id,
+                                        const char* candidate_id,
+                                        const NdsDispatchEntry* dispatch,
+                                        unsigned dispatch_len) {
+    // Test-only injection of a resident bank. Loading a real DLL needs a
+    // compiled shard; the registration lifecycle this exercises (publish ->
+    // runtime reset -> poll re-registers) is independent of where the rows
+    // came from, so the unit layer supplies its own rows.
+    LoadedBank bank{};
+    bank.bank_id = bank_id ? bank_id : "";
+    bank.candidate_id = candidate_id ? candidate_id : "";
+    bank.generation_id = bank.candidate_id;
+    bank.cpu = cpu;
+    bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
+    bank.dispatch = dispatch;
+    bank.dispatch_len = dispatch_len;
+    bank.serial = g_live.next_bank_serial++;
+    bank.generation = static_cast<uint32_t>(++g_live.publication_generation);
+    g_live.loaded.push_back(std::move(bank));
+    register_loaded_bank(g_live.loaded.back());
+    ++g_live.banks_loaded;
+}
+
 void live_overlay_configure(bool enabled, bool auto_trigger,
                             uint32_t activation_delay_ms,
                             uint32_t auto_start_delay_ms,
@@ -1021,6 +1104,12 @@ void live_overlay_shutdown() {
 void live_overlay_runtime_reset() {
     for (LoadedBank& bank : g_live.loaded)
         bank.registered = false;
+    // beads-yjp.41: runtime_init() clears the dispatch index and this call
+    // clears the matching registration bits, so the resident cache is now
+    // unregistered on both sides. The one-shot guard in live_overlay_poll()
+    // is what puts it back; leaving the guard latched would leave every
+    // cached shard dark until the process restarts.
+    g_live.initial_cache_scan_done = false;
 }
 
 void live_overlay_register_cached_banks() {
