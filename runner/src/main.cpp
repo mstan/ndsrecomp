@@ -1399,6 +1399,19 @@ int main(int argc, char** argv) {
             : std::filesystem::path(rom_path).filename().string();
     nds_diagnostics_set_identity(rom_sha1.c_str(), rom_name.c_str(),
                                  NDS_RUNNER_BUILD_ID);
+    std::string rom_game_code;
+    uint32_t rom_revision = 0;
+    if (rom.size() >= 0x20) {
+        for (size_t i = 0; i < 4; ++i) {
+            const uint8_t ch = rom[0x0C + i];
+            rom_game_code.push_back(
+                ch >= 0x20 && ch <= 0x7E ? static_cast<char>(ch) : '?');
+        }
+        rom_revision = rom[0x1E];
+    }
+    nds_diagnostics_set_rom_header(
+        rom_game_code.c_str(), rom_revision,
+        static_cast<uint64_t>(rom.size()));
     // beads-yjp.28: the coverage manifest a player can hand back. Derived
     // rather than required, because the whole point is that a stock launch
     // with no flags produces one. Prefer the save's directory (the launcher

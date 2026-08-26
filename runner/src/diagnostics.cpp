@@ -14,6 +14,9 @@
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+#include "melonds_compute/ComputeHost.h"
+#endif
 #include "scheduler.h"
 #include "tier3.h"
 #include "wifi_net.h"
@@ -29,6 +32,9 @@ uint64_t g_last_ticks = 0;
 std::string g_rom_sha1;
 std::string g_rom_name;
 std::string g_build_id;
+std::string g_rom_game_code;
+uint32_t g_rom_revision = 0;
+uint64_t g_rom_size = 0;
 NdsFrontendLiveStats g_prev_frontend{};
 Tier3Stats g_prev_tier3{};
 NdsDispatchStats g_prev_dispatch[2]{};
@@ -191,6 +197,13 @@ void nds_diagnostics_set_identity(const char* rom_sha1, const char* rom_name,
     g_build_id = build_id ? build_id : "";
 }
 
+void nds_diagnostics_set_rom_header(const char* game_code, uint32_t revision,
+                                    uint64_t rom_size) {
+    g_rom_game_code = game_code ? game_code : "";
+    g_rom_revision = revision;
+    g_rom_size = rom_size;
+}
+
 void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
     if (!g_enabled || g_perf) return;
     ensure_directory();
@@ -203,11 +216,29 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         return;
     }
     std::fprintf(stderr, "[diagnostics] writing %s\n", path.c_str());
+    const NdsGpu3dRendererPolicy renderer_policy =
+        nds_gpu3d_renderer_policy();
+    const bool compute_built = nds_gpu3d_compute_renderer_built();
+    const bool compute_preferred = nds_gpu3d_renderer_prefers_compute();
+    const bool compute_required = nds_gpu3d_renderer_requires_compute();
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    const bool compute_active = nds_compute_host_active();
+    const bool direct_present = nds_compute_host_has_visible_context();
+#else
+    const bool compute_active = false;
+    const bool direct_present = false;
+#endif
     std::fprintf(g_perf,
         "{\"kind\":\"session\",\"build_id\":\"%s\",\"rom_sha1\":\"%s\","
-        "\"rom_name\":\"%s\",\"interval_ms\":%u,\"settings\":{"
+        "\"rom_name\":\"%s\",\"rom_game_code\":\"%s\","
+        "\"rom_revision\":%u,\"rom_size\":%llu,\"interval_ms\":%u,"
+        "\"renderer\":{\"policy\":\"%s\",\"effective\":\"%s\","
+        "\"compute_built\":%s,\"compute_preferred\":%s,"
+        "\"compute_required\":%s,\"direct_present\":%s},\"settings\":{"
         "\"screen_layout\":\"%s\",\"fullscreen\":\"%s\","
-        "\"adaptive_screens\":\"%s\",\"internal_resolution\":%u,"
+        "\"adaptive_screens\":\"%s\",\"adaptive_supported\":\"%s\","
+        "\"adaptive_width_top\":%u,\"adaptive_width_bottom\":%u,"
+        "\"internal_resolution\":%u,"
         "\"texture_upscale\":%u,\"supersampling\":%u,\"antialiasing\":%u,"
         "\"relative_mouse_touch\":%s,\"mph_prime_controls\":%s,"
         "\"mph_prime_unified_window_focus\":%s,"
@@ -215,10 +246,20 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         "\"local_wireless_enabled\":%s}}\n",
         json_escape(g_build_id.c_str()).c_str(),
         json_escape(g_rom_sha1.c_str()).c_str(),
-        json_escape(g_rom_name.c_str()).c_str(), g_interval_ms,
+        json_escape(g_rom_name.c_str()).c_str(),
+        json_escape(g_rom_game_code.c_str()).c_str(),
+        g_rom_revision, (unsigned long long)g_rom_size, g_interval_ms,
+        nds_gpu3d_renderer_policy_name(renderer_policy),
+        compute_active ? "compute" : "soft",
+        compute_built ? "true" : "false",
+        compute_preferred ? "true" : "false",
+        compute_required ? "true" : "false",
+        direct_present ? "true" : "false",
         nds_screen_layout_name(options.screen_layout),
         nds_fullscreen_mode_name(options.fullscreen),
         nds_adaptive_screens_name(options.adaptive_screens),
+        nds_adaptive_screens_name(options.adaptive_supported),
+        options.adaptive_max_width[0], options.adaptive_max_width[1],
         options.internal_resolution, options.texture_upscale,
         options.supersampling, options.antialiasing,
         options.relative_mouse_touch ? "true" : "false",
