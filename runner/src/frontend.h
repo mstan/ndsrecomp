@@ -304,6 +304,7 @@ bool nds_parse_boot_mode(const std::string& value, NdsBootMode* out);
 // still be harmless but is rejected anyway, to keep bad CLI input loud).
 bool nds_parse_instance_index(const std::string& value, uint32_t* out);
 bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out);
+bool nds_parse_widescreen_width(const std::string& value, uint16_t* out);
 bool nds_parse_supersampling(const std::string& value, uint8_t* out);
 bool nds_parse_antialiasing(const std::string& value, uint8_t* out);
 bool nds_parse_internal_resolution(const std::string& value, uint8_t* out);

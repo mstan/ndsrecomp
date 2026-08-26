@@ -96,6 +96,19 @@ bool nds_parse_adaptive_screens(const std::string& value, uint8_t* out) {
     return false;
 }
 
+bool nds_parse_widescreen_width(const std::string& value, uint16_t* out) {
+    if (!out || value.empty()) return false;
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' ||
+        (parsed != 256 && parsed != 320 &&
+         parsed != 384 && parsed != 448)) {
+        return false;
+    }
+    *out = static_cast<uint16_t>(parsed);
+    return true;
+}
+
 bool nds_parse_supersampling(const std::string& value, uint8_t* out) {
     if (!out || value.empty()) return false;
     char* end = nullptr;
@@ -544,15 +557,15 @@ bool nds_load_frontend_config(const std::string& path,
         }
         if (const auto value =
                 (*display)["adaptive_width"].value<int64_t>()) {
-            if (*value < 256 || *value > 448 || (*value & 1) != 0) {
+            uint16_t width = 0;
+            if (!nds_parse_widescreen_width(std::to_string(*value), &width)) {
                 if (error) {
                     *error =
-                        "display.adaptive_width must be an even value from "
-                        "256 through 448";
+                        "display.adaptive_width must be 256, 320, 384, "
+                        "or 448";
                 }
                 return false;
             }
-            const uint16_t width = static_cast<uint16_t>(*value);
             if (options->adaptive_supported & NDS_ADAPTIVE_TOP)
                 options->adaptive_max_width[0] = width;
             if (options->adaptive_supported & NDS_ADAPTIVE_BOTTOM)

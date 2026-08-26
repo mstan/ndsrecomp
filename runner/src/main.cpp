@@ -326,6 +326,7 @@ int main(int argc, char** argv) {
     std::string cli_screen_layout;
     std::string cli_fullscreen;
     std::string cli_adaptive_screens;
+    std::string cli_widescreen_width;
     std::string cli_supersampling;
     std::string cli_internal_resolution;
     std::string cli_texture_upscale;
@@ -445,6 +446,8 @@ int main(int argc, char** argv) {
             cli_fullscreen = argv[++i];
         } else if (a == "--adaptive-widescreen" && i + 1 < argc) {
             cli_adaptive_screens = argv[++i];
+        } else if (a == "--widescreen-width" && i + 1 < argc) {
+            cli_widescreen_width = argv[++i];
         } else if (a == "--supersampling" && i + 1 < argc) {
             cli_supersampling = argv[++i];
         } else if (a == "--internal-resolution" && i + 1 < argc) {
@@ -573,6 +576,7 @@ int main(int argc, char** argv) {
                 "[--screen-layout stacked|separate] "
                 "[--fullscreen off|borderless|exclusive] "
                 "[--adaptive-widescreen none|top|bottom|both] "
+                "[--widescreen-width even:256..448] "
                 "[--supersampling 1|2|3|4] "
                 "[--internal-resolution 1|2|3|4] "
                 "[--texture-upscale 1|2|4] "
@@ -671,6 +675,22 @@ int main(int argc, char** argv) {
                          "(expected none, top, bottom, or both)\n");
             return 2;
         }
+    }
+    auto apply_adaptive_width = [&](uint16_t width) {
+        if (frontend_options.adaptive_supported & NDS_ADAPTIVE_TOP)
+            frontend_options.adaptive_max_width[0] = width;
+        if (frontend_options.adaptive_supported & NDS_ADAPTIVE_BOTTOM)
+            frontend_options.adaptive_max_width[1] = width;
+    };
+    if (const char* value = std::getenv("NDS_WIDESCREEN_WIDTH")) {
+        uint16_t width = 0;
+        if (!nds_parse_widescreen_width(value, &width)) {
+            std::fprintf(stderr,
+                         "invalid NDS_WIDESCREEN_WIDTH "
+                         "(expected 256, 320, 384, or 448)\n");
+            return 2;
+        }
+        apply_adaptive_width(width);
     }
     if (const char* value = std::getenv("NDS_SUPERSAMPLING")) {
         if (!nds_parse_supersampling(value,
@@ -774,6 +794,16 @@ int main(int argc, char** argv) {
                      "invalid --adaptive-widescreen "
                      "(expected none, top, bottom, or both)\n");
         return 2;
+    }
+    if (!cli_widescreen_width.empty()) {
+        uint16_t width = 0;
+        if (!nds_parse_widescreen_width(cli_widescreen_width, &width)) {
+            std::fprintf(stderr,
+                         "invalid --widescreen-width "
+                         "(expected 256, 320, 384, or 448)\n");
+            return 2;
+        }
+        apply_adaptive_width(width);
     }
     if (!cli_supersampling.empty() &&
         !nds_parse_supersampling(cli_supersampling,
