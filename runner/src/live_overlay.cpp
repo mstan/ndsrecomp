@@ -122,6 +122,21 @@ struct State {
     uint64_t runs_failed = 0;
     uint64_t banks_loaded = 0;
     uint64_t banks_rejected = 0;
+    // Futility guard. A compile run that published shards and had EVERY one of
+    // them rejected has proven this provider cannot produce loadable banks for
+    // this runner -- an ABI mismatch or a failed preflight is a property of the
+    // provider, not of the workload, so the next cooldown would commission the
+    // identical work and reject it identically, forever. run_watch tracks the
+    // shards a finished run queued; once they have all resolved, the loaded/
+    // rejected deltas say whether the run accomplished anything.
+    bool run_watch = false;
+    uint64_t run_published = 0;
+    uint64_t run_queued = 0;
+    uint64_t run_loaded_mark = 0;
+    uint64_t run_rejected_mark = 0;
+    uint64_t futile_runs = 0;
+    bool auto_suppressed = false;
+    std::string futility_reason;
     uint32_t next_bank_serial = 1u;
     uint64_t publication_generation = 0;
     std::string last_error;
@@ -137,6 +152,11 @@ struct State {
     std::deque<std::filesystem::path> prepare_queue;
     std::deque<LoadedBank> ready_queue;
     std::deque<std::string> prepare_errors;
+    // Shards the prepare worker has taken off prepare_queue but not yet
+    // resolved onto ready_queue/prepare_errors. Without this the three
+    // containers are all momentarily empty mid-load, which would let the
+    // futility check read a verdict that has not been reached yet.
+    int prepare_in_flight = 0;
     std::unordered_set<std::string> queued_paths;
     std::thread prepare_thread;
     bool prepare_stop = false;
@@ -509,9 +529,69 @@ void request_generation_compile() {
 
 void schedule_pending_compile() {
     if (!g_live.generation_pending || !compile_delay_elapsed()) return;
+    // A provider proven futile stays uncommissioned. The pending flag is left
+    // set on purpose: an explicit live_overlay_trigger_now() lifts the
+    // suppression, and the work it was going to do is still wanted then.
+    if (g_live.auto_suppressed) return;
     if (g_live.trigger_requests > g_live.runs_started) return;
     g_live.generation_pending = false;
     ++g_live.trigger_requests;
+}
+
+// Called once every finished run's published shards have all resolved into
+// either a load or a rejection. All-rejected means the provider is futile:
+// shout the cause once, naming it, and stop auto-commissioning the identical
+// work every cooldown. Mirrors psxrecomp's futility backoff plus its
+// warn_on_cgtag_mismatch-style one-time shout.
+void evaluate_run_futility() {
+    if (!g_live.run_watch) return;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        if (!g_live.prepare_queue.empty() || !g_live.ready_queue.empty() ||
+            !g_live.prepare_errors.empty() || g_live.prepare_in_flight != 0) {
+            return;
+        }
+    }
+#if defined(_WIN32)
+    if (g_live.child) return;
+#endif
+    g_live.run_watch = false;
+    const uint64_t loaded = g_live.banks_loaded - g_live.run_loaded_mark;
+    const uint64_t rejected = g_live.banks_rejected - g_live.run_rejected_mark;
+    // Futile means REJECTED, never merely "did not become resident". Three
+    // healthy outcomes also leave banks_loaded unmoved and must not latch the
+    // guard:
+    //   - every shard was DECLINED because a better backend already covers
+    //     that generation. This is the normal steady state on any install that
+    //     ships a prebuilt gcc cache: the bundled tcc tier recompiles a page,
+    //     the gcc bank wins, the generation stays covered natively. Treating
+    //     it as futility would switch gap-filling off for most players.
+    //   - a shard matched a candidate identity already resident.
+    //   - the provider republished paths already examined, so nothing new was
+    //     queued at all.
+    // Requiring that EVERY newly examined shard produced a rejection is what
+    // separates "this provider cannot satisfy this runner" from all of these.
+    if (loaded != 0u || g_live.run_queued == 0u ||
+        rejected != g_live.run_queued) {
+        return;
+    }
+    ++g_live.futile_runs;
+    g_live.auto_suppressed = true;
+    g_live.futility_reason = g_live.last_error;
+    std::fprintf(stderr,
+        "[live-overlay] FUTILE COMPILE RUN: the provider published %llu "
+        "shard(s), and all %llu newly examined were REJECTED "
+        "(%s). This runner requires live bank ABI %u; a provider built against "
+        "another ABI can never satisfy it. Auto-recompilation is now "
+        "SUPPRESSED -- the identical work will not be re-commissioned every "
+        "%u ms. Banks already resident keep running, and an explicit trigger "
+        "lifts the suppression. Provider command: %s\n",
+        static_cast<unsigned long long>(g_live.run_published),
+        static_cast<unsigned long long>(g_live.run_queued),
+        g_live.futility_reason.empty() ? "no reason recorded"
+                                       : g_live.futility_reason.c_str(),
+        NDS_LIVE_BANK_ABI_VERSION, g_live.auto_cooldown_ms,
+        g_live.command.empty() ? "(none)" : g_live.command.c_str());
 }
 
 const char* diag_kind_name(DiagKind kind) {
@@ -761,6 +841,7 @@ void prepare_worker_main() {
             if (g_live.prepare_stop && g_live.prepare_queue.empty()) return;
             path = std::move(g_live.prepare_queue.front());
             g_live.prepare_queue.pop_front();
+            ++g_live.prepare_in_flight;
         }
         LoadedBank bank{};
         std::string error;
@@ -769,6 +850,7 @@ void prepare_worker_main() {
             std::lock_guard<std::mutex> lock(g_live.publish_mutex);
             if (ok) g_live.ready_queue.push_back(std::move(bank));
             else    g_live.prepare_errors.push_back(std::move(error));
+            --g_live.prepare_in_flight;
         }
     }
 }
@@ -1062,6 +1144,14 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
     g_live.next_trigger[0] = g_live.next_trigger[1] = kFirstTriggerTier3;
     g_live.generation_pending = false;
     g_live.last_error.clear();
+    g_live.run_watch = false;
+    g_live.run_published = 0;
+    g_live.run_queued = 0;
+    g_live.run_loaded_mark = 0;
+    g_live.run_rejected_mark = 0;
+    g_live.futile_runs = 0;
+    g_live.auto_suppressed = false;
+    g_live.futility_reason.clear();
     if (g_live.enabled &&
         (g_live.cache_dir.empty() || g_live.rom_sha1.empty())) {
         g_live.enabled = false;
@@ -1205,6 +1295,7 @@ void live_overlay_poll() {
     // multiple candidates, but at most one complete bank becomes visible per
     // poll so lookup can never observe a partially populated bundle.
     commit_one_ready_bank();
+    evaluate_run_futility();
     if (g_live.child) {
         DWORD exit_code = STILL_ACTIVE;
         if (GetExitCodeProcess(g_live.child, &exit_code) &&
@@ -1222,8 +1313,16 @@ void live_overlay_poll() {
                     std::to_string(exit_code);
             }
             const auto published = published_paths_from_log();
+            // Watch this run's own shards through to their verdict. Note the
+            // marks are taken BEFORE queueing so nothing this run produced can
+            // be attributed to an earlier one.
+            g_live.run_loaded_mark = g_live.banks_loaded;
+            g_live.run_rejected_mark = g_live.banks_rejected;
+            g_live.run_queued = 0;
+            g_live.run_published = published.size();
             for (const auto& path : published)
-                queue_bank_dll(path);
+                if (queue_bank_dll(path)) ++g_live.run_queued;
+            g_live.run_watch = !published.empty();
             if (exit_code == 0 && published.empty()) {
                 for (int cpu = 0; cpu < 2; ++cpu) {
                     g_live.next_trigger[cpu] = std::max(
@@ -1246,6 +1345,17 @@ void live_overlay_poll() {
 bool live_overlay_trigger_now() {
     if (!g_live.enabled) return false;
     if (!activation_delay_elapsed()) return false;
+    // An explicit request is a human (or a test) saying "try anyway" -- most
+    // likely because the provider was just replaced. Lift the futility
+    // suppression so the next failure is judged on its own evidence.
+    if (g_live.auto_suppressed) {
+        g_live.auto_suppressed = false;
+        std::fprintf(stderr,
+            "[live-overlay] explicit trigger lifts futility suppression "
+            "(previous cause: %s)\n",
+            g_live.futility_reason.empty() ? "unrecorded"
+                                           : g_live.futility_reason.c_str());
+    }
     ++g_live.trigger_requests;
     live_overlay_poll();
     return true;
@@ -1288,6 +1398,12 @@ std::string live_overlay_status_json() {
         << ",\"runs_failed\":" << g_live.runs_failed
         << ",\"banks_loaded\":" << g_live.banks_loaded
         << ",\"banks_rejected\":" << g_live.banks_rejected
+        << ",\"live_bank_abi\":" << NDS_LIVE_BANK_ABI_VERSION
+        << ",\"futile_runs\":" << g_live.futile_runs
+        << ",\"auto_suppressed\":"
+        << (g_live.auto_suppressed ? "true" : "false")
+        << ",\"futility_reason\":\""
+        << json_escape(g_live.futility_reason) << "\""
         << ",\"loaded\":[";
     for (std::size_t i = 0; i < g_live.loaded.size(); ++i) {
         const LoadedBank& bank = g_live.loaded[i];
