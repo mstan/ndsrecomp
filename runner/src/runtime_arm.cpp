@@ -233,6 +233,14 @@ static_assert(sizeof(CachedStaticLookup) == 128u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
     g_dispatch_cache{};
 
+// Clear element-wise: assigning a whole 8 MB std::array from `= {}` lets the
+// compiler materialize the temporary on the stack, which overflows the 8 MB
+// main-thread stack on Android/bionic (observed SIGSEGV in runtime_init).
+static void dispatch_cache_clear(std::array<CachedStaticLookup,
+                                            kDispatchCacheSize>& cache) {
+    for (CachedStaticLookup& entry : cache) entry = CachedStaticLookup{};
+}
+
 // Cycle budget for the run slice; runtime_should_yield trips when reached
 // so a guest spin loop can't hang the host.
 unsigned long long g_cycle_cap = 0;  // 0 = unlimited
@@ -635,7 +643,7 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
     ctx.exc_base = exc_base;
     // A PC cached as absent before a newly registered bank may now resolve.
     if (++ctx.dispatch_epoch == 0u) {
-        g_dispatch_cache[cpu & 1] = {};
+        dispatch_cache_clear(g_dispatch_cache[cpu & 1]);
         ctx.dispatch_epoch = 1u;
     }
 }
@@ -659,7 +667,7 @@ extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                        }),
         ctx.dispatch_index.end());
     if (++ctx.dispatch_epoch == 0u) {
-        g_dispatch_cache[cpu & 1] = {};
+        dispatch_cache_clear(g_dispatch_cache[cpu & 1]);
         ctx.dispatch_epoch = 1u;
     }
 }
@@ -1557,7 +1565,8 @@ extern "C" void runtime_init(void*) {
         ctx.exc_base = 0u;
     }
     g_static_guard = nullptr;
-    g_dispatch_cache = {};
+    dispatch_cache_clear(g_dispatch_cache[0]);
+    dispatch_cache_clear(g_dispatch_cache[1]);
 #if defined(NDS_PROFILE_HLE_HEAT)
     g_hle_heat.clear();
     g_hle_irq_epoch[0] = 0u;

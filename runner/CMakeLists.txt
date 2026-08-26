@@ -141,11 +141,21 @@ if(TITLE_GROUP_COUNT GREATER 0)
     endforeach()
     set(TITLE_BANK_SOURCES ${TITLE_BANK_BODIES} ${TITLE_BANK_DISPATCH})
 endif()
+# Retail BIOS banks exist only when the developer has generated them from
+# their own hash-verified dumps; without them the FreeBIOS path still works,
+# so link empty dispatch tables instead of requiring the dumps at build time.
+if(EXISTS "${GEN}/arm9_bios.c")
+    set(RETAIL_BIOS_BANK_SOURCES
+        ${GEN}/arm9_bios.c
+        ${GEN}/arm9_bios_dispatch.c
+        ${GEN}/arm7_bios.c
+        ${GEN}/arm7_bios_dispatch.c)
+else()
+    set(RETAIL_BIOS_BANK_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/retail_bios_stub.c)
+endif()
 add_library(nds_banks STATIC
-    ${GEN}/arm9_bios.c
-    ${GEN}/arm9_bios_dispatch.c
-    ${GEN}/arm7_bios.c
-    ${GEN}/arm7_bios_dispatch.c
+    ${RETAIL_BIOS_BANK_SOURCES}
     ${GEN}/freebios_arm9.c
     ${GEN}/freebios_arm9_dispatch.c
     ${GEN}/freebios_arm7.c
@@ -329,7 +339,7 @@ add_library(nds_armv4t STATIC ${NDS_ARM_RECOMP_SOURCES})
 target_include_directories(nds_armv4t PUBLIC
     ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 
-add_executable(nds_runner
+set(NDS_RUNNER_SOURCES
     src/runtime_arm.cpp
     src/live_overlay.cpp
     src/battery_save.cpp
@@ -382,7 +392,19 @@ add_executable(nds_runner
     vendor/melonds/net/Net.cpp
     vendor/melonds/net/PacketDispatcher.cpp
     vendor/melonds/net/Net_Slirp.cpp)
-set_target_properties(nds_runner PROPERTIES ENABLE_EXPORTS ON)
+# On Android the runner is loaded by SDLActivity as libmain.so; everywhere else
+# it is a standalone executable. The source list and all target_* wiring are
+# identical -- only the target kind differs.
+if(ANDROID)
+    list(APPEND NDS_RUNNER_SOURCES src/android_second_screen.cpp)
+    add_library(nds_runner SHARED ${NDS_RUNNER_SOURCES})
+    set_target_properties(nds_runner PROPERTIES OUTPUT_NAME main)
+    # main.cpp includes <SDL_main.h> under __ANDROID__, which renames main() to
+    # an extern "C", default-visibility SDL_main that SDLActivity dlsym's.
+else()
+    add_executable(nds_runner ${NDS_RUNNER_SOURCES})
+    set_target_properties(nds_runner PROPERTIES ENABLE_EXPORTS ON)
+endif()
 ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
@@ -544,10 +566,19 @@ endif()
 # SDL is a host-only presentation layer. The runner remains buildable without
 # it for headless deterministic/oracle work; --interactive reports that the
 # configured binary has no frontend in that case.
-find_package(SDL2 CONFIG QUIET)
-if(TARGET SDL2::SDL2)
+# On Android the app's jni CMakeLists adds the SDL2 subproject before this one,
+# exposing plain `SDL2`/`SDL2main` targets (no SDL2::SDL2 namespaced alias);
+# link those and pull in SDL's Android JNI entry (SDL2main) so libmain.so
+# exports Java_org_libsdl_app_SDLActivity_nativeRunMain.
+if(ANDROID AND TARGET SDL2)
     target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
-    target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+    target_link_libraries(nds_runner PRIVATE SDL2 SDL2main log android)
+else()
+    find_package(SDL2 CONFIG QUIET)
+    if(TARGET SDL2::SDL2)
+        target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
+        target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
+    endif()
 endif()
 if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2)
     message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires SDL2")

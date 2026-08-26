@@ -16,6 +16,9 @@
 
 #include "debug_server.h"
 #include "diagnostics.h"
+#if defined(__ANDROID__)
+#include "android_second_screen.h"
+#endif
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "melonds_compute/TextureUpscale.h"
@@ -1036,6 +1039,25 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         start = SDL_GetPerformanceCounter();
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
+#if defined(__ANDROID__)
+        if (android_second_screen_active()) {
+            // The bottom screen is on the Thor's second physical display, so
+            // the main window shows the top screen alone, stretched to fill the
+            // entire panel edge-to-edge (no letterbox). Disable the logical-size
+            // letterbox mapping and copy the top texture to the full drawable.
+            SDL_RenderSetIntegerScale(renderer, SDL_FALSE);
+            SDL_RenderSetLogicalSize(renderer, 0, 0);
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+            const SDL_Rect top_only{0, 0, out_w, out_h};
+            render_screen(presentation, 0, top_only);
+            ticks.draw += SDL_GetPerformanceCounter() - start;
+            start = SDL_GetPerformanceCounter();
+            SDL_RenderPresent(renderer);
+            ticks.swap += SDL_GetPerformanceCounter() - start;
+            return ticks;
+        }
+#endif
         const SDL_Rect top_rect{
             (presentation.canvas_width -
              presentation.screen_widths[0]) / 2,
@@ -2213,6 +2235,18 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             relative_delta_x = 0;
             relative_delta_y = 0;
         }
+#if defined(__ANDROID__)
+        // Route the Thor's second-display touch surface to the DS bottom screen
+        // when the in-game Prime aim logic below is not driving the stylus
+        // (menus, "touch to start", map, etc.).
+        if (android_second_screen_active() && !mph_prime_is_active) {
+            int tx = 0, ty = 0;
+            bool tdown = false;
+            android_second_screen_touch(&tx, &ty, &tdown);
+            nds_set_touch(static_cast<uint16_t>(tx),
+                          static_cast<uint16_t>(ty), tdown);
+        }
+#endif
         if (mph_prime_is_active) {
             if (mph_touch_sequence.active()) {
                 mph_touch_sequence.tick();
@@ -2360,6 +2394,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             running = false;
             break;
         }
+#if defined(__ANDROID__)
+        // Mirror the DS bottom screen onto the Thor's second physical display
+        // (no-op until MyGame attaches its Presentation surface).
+        android_second_screen_present(bottom_pixels, bottom_width,
+                                      kScreenHeight);
+#endif
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
         phase_swap_ticks += presentation_ticks.swap;
