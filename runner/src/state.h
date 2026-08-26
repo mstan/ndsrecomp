@@ -57,6 +57,10 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base);
 extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                                         unsigned len);
+// Both registration calls are emulation-thread-only (see the convention
+// comment in runtime_arm.cpp). Debug builds pin the first caller's thread;
+// call this to re-pin if emulation ever moves to another thread.
+extern "C" void nds_dispatch_bind_thread(void);
 extern "C" void nds_set_cycle_cap(unsigned long long cap);
 extern "C" void nds_reschedule_slice(unsigned long long system_deadline);
 extern "C" void nds_halt(const char* reason);

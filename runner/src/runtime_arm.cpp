@@ -21,6 +21,9 @@
 #include <cstring>
 #include <unordered_set>
 #include <vector>
+#if !defined(NDEBUG)
+#include <thread>
+#endif
 
 #include "state.h"
 #include "io.h"
@@ -627,8 +630,58 @@ extern "C" void runtime_note_live_write(uint32_t addr, uint32_t width,
                             old_value, new_value);
 }
 
+// ── Dispatch registration threading convention ─────────────────────────
+// nds_register_dispatch / nds_unregister_dispatch mutate ctx.banks and
+// ctx.dispatch_index as raw std::vectors, and the lookup path reads those
+// vectors with no lock or atomics. That is sound only because every caller
+// runs on the single emulation thread: static banks are registered from
+// main() before the scheduler starts, and live-overlay banks from
+// live_overlay_poll() at the scheduler rendezvous (scheduler.cpp:462).
+// The live-overlay prepare worker deliberately stops at LoadLibrary +
+// preflight and hands the prepared bank back through a queue precisely so
+// that it never touches these vectors.
+//
+// Debug builds pin the first caller's thread and assert every later call
+// matches; the check compiles out entirely under NDEBUG (Release), where
+// the registration path is on the boot/publication path and not hot enough
+// to matter either way.
+#if !defined(NDEBUG)
+namespace {
+std::thread::id g_dispatch_thread{};
+bool g_dispatch_thread_bound = false;
+
+void assert_dispatch_thread(const char* who) {
+    const std::thread::id self = std::this_thread::get_id();
+    if (!g_dispatch_thread_bound) {
+        g_dispatch_thread = self;
+        g_dispatch_thread_bound = true;
+        return;
+    }
+    if (g_dispatch_thread == self) return;
+    std::fprintf(stderr,
+                 "[dispatch] %s called off the emulation thread; the dispatch "
+                 "index is not thread-safe\n", who);
+    std::abort();
+}
+}  // namespace
+#define NDS_ASSERT_DISPATCH_THREAD(who) assert_dispatch_thread(who)
+#else
+#define NDS_ASSERT_DISPATCH_THREAD(who) ((void)0)
+#endif
+
+// Re-pin the dispatch-registration thread. Only for a runner that moves
+// emulation onto a different thread after boot; the debug assert otherwise
+// binds itself to the first caller.
+extern "C" void nds_dispatch_bind_thread(void) {
+#if !defined(NDEBUG)
+    g_dispatch_thread = std::this_thread::get_id();
+    g_dispatch_thread_bound = true;
+#endif
+}
+
 extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base) {
+    NDS_ASSERT_DISPATCH_THREAD("nds_register_dispatch");
     CpuCtx& ctx = g_ctx[cpu & 1];
     ctx.banks.push_back({t, len});
     nds_dispatch_index_add(ctx.dispatch_index, t, len);
@@ -642,6 +695,7 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
 
 extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                                          unsigned len) {
+    NDS_ASSERT_DISPATCH_THREAD("nds_unregister_dispatch");
     CpuCtx& ctx = g_ctx[cpu & 1];
     ctx.banks.erase(
         std::remove_if(ctx.banks.begin(), ctx.banks.end(),

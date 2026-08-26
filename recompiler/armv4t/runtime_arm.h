@@ -93,7 +93,12 @@ typedef struct NdsDispatchEntry {
     const NdsStaticValidation* validation;
 } NdsDispatchEntry;
 
-#define NDS_LIVE_BANK_ABI_VERSION 4u
+// ABI 5 adds static_cpu: the NDS_STATIC_CPU value the shard's bodies were
+// actually built with. The build passes the CPU identity twice (metadata
+// cpu and -DNDS_STATIC_CPU), and a disagreement silently runs one CPU's
+// code under the other's folded timing model, so the runner cross-checks
+// them. Bumping this invalidates every previously cached shard by design.
+#define NDS_LIVE_BANK_ABI_VERSION 5u
 #define NDS_LIVE_BANK_FLAG_DEPENDENCY_CLOSURE 0x00000001u
 
 typedef struct NdsBusFastWin NdsBusFastWin;
@@ -105,6 +110,10 @@ typedef struct NdsLiveBankInfo {
     const char* candidate_id;
     const char* title_sha1;
     int cpu;
+    // The NDS_STATIC_CPU the bank's generated bodies were compiled with.
+    // Must equal `cpu` (NDS_ARM9 = 0, NDS_ARM7 = 1); the runner rejects the
+    // bank otherwise rather than run it under the wrong timing model.
+    uint32_t static_cpu;
     uint32_t exc_base;
     const NdsDispatchEntry* dispatch;
     unsigned dispatch_len;

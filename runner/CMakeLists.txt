@@ -689,6 +689,23 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
 
   if(Python3_Interpreter_FOUND)
+    # Two runners may share one live-overlay cache directory, so the shard
+    # index read-modify-write has to survive concurrent writers.
+    add_test(
+        NAME live_index_lock_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_index_lock_test.py"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-index-lock-work")
+    if(WIN32)
+      # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
+      # what the runner cross-checks against the bank's metadata CPU.
+      add_test(
+          NAME live_shard_wrapper_test
+          COMMAND "${Python3_EXECUTABLE}"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_wrapper_test.py"
+                  --gcc "${CMAKE_C_COMPILER}"
+                  --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-wrapper-work")
+    endif()
     add_test(
         NAME m7_collect_two_instance_evidence_test
         COMMAND "${Python3_EXECUTABLE}"

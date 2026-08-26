@@ -10,10 +10,13 @@ NdsCpu g_nds_active = NDS_ARM9;
 NdsBusFastWin g_busf_main = {};
 NdsBusFastWin g_busf_itcm = {};
 
+unsigned g_registrations = 0u;
+unsigned g_unregistrations = 0u;
+
 extern "C" void nds_register_dispatch(int, const NdsDispatchEntry*, unsigned,
-                                       uint32_t) {}
+                                       uint32_t) { ++g_registrations; }
 extern "C" void nds_unregister_dispatch(int, const NdsDispatchEntry*,
-                                         unsigned) {}
+                                         unsigned) { ++g_unregistrations; }
 bool coverage_manifest_write(const char*, char*, unsigned) { return false; }
 bool coverage_manifest_write_live_snapshot(const char*, uint32_t, char*,
                                            unsigned) { return false; }
@@ -43,6 +46,7 @@ NdsLiveBankInfo bank_info(const char* candidate_id,
     info.candidate_id = candidate_id;
     info.title_sha1 = "test";
     info.cpu = NDS_ARM9;
+    info.static_cpu = static_cast<uint32_t>(NDS_ARM9);
     info.exc_base = 0xFFFF0000u;
     info.dispatch = rows;
     info.dispatch_len = row_count;
@@ -209,6 +213,70 @@ int main() {
                     std::strstr(error, "imports") != nullptr,
                 "shadowed DLL data imports should be rejected"))
         return 1;
+
+    // The build hands the shard its CPU identity twice (metadata cpu and
+    // -DNDS_STATIC_CPU). A disagreement runs one CPU's bodies under the
+    // other's folded timing model, so it must fail closed.
+    NdsLiveBankInfo wrong_static_cpu =
+        bank_info("candidate-static-cpu", interior_rows, 2u);
+    wrong_static_cpu.static_cpu = static_cast<uint32_t>(NDS_ARM7);
+    if (!expect(!preflight(wrong_static_cpu, error, sizeof(error)) &&
+                    std::strstr(error, "static CPU") != nullptr,
+                "a shard built for the other CPU should be rejected"))
+        return 1;
+    if (!expect(!metadata(wrong_static_cpu, error, sizeof(error)),
+                "the static CPU cross-check must also run in full preflight"))
+        return 1;
+
+    NdsLiveBankInfo arm7_bank = bank_info("candidate-arm7", interior_rows, 2u);
+    arm7_bank.cpu = NDS_ARM7;
+    arm7_bank.static_cpu = static_cast<uint32_t>(NDS_ARM7);
+    arm7_bank.exc_base = 0x00000000u;
+    if (!expect(preflight(arm7_bank, error, sizeof(error)),
+                "a matching ARM7 static CPU identity should be accepted"))
+        return 1;
+
+    // beads-yjp.41: an in-process reset (runtime_init clears the dispatch
+    // index, live_overlay_runtime_reset clears the registration bits) must
+    // also unlatch the one-shot cache-scan guard, or every resident cached
+    // shard stays dark until the process restarts.
+    live_overlay_configure(true, false, 0u, 0u, 0u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    const unsigned before_publish = g_registrations;
+    live_overlay_publish_bank_for_test(NDS_ARM9, "test_live_bank",
+                                       "candidate-resident", interior_rows,
+                                       2u);
+    if (!expect(g_registrations == before_publish + 1u,
+                "publishing a bank should register it once"))
+        return 1;
+    live_overlay_register_cached_banks();
+    if (!expect(live_overlay_status_json().find(
+                    "\"initial_cache_scan_done\":true") != std::string::npos,
+                "the initial cache scan should latch after registration"))
+        return 1;
+
+    live_overlay_runtime_reset();
+    if (!expect(live_overlay_status_json().find(
+                    "\"registered\":false") != std::string::npos,
+                "a runtime reset should clear the registration bits"))
+        return 1;
+    if (!expect(live_overlay_status_json().find(
+                    "\"initial_cache_scan_done\":false") != std::string::npos,
+                "a runtime reset should unlatch the cache-scan guard"))
+        return 1;
+
+#if defined(_WIN32)
+    const unsigned before_poll = g_registrations;
+    live_overlay_poll();
+    if (!expect(g_registrations == before_poll + 1u,
+                "one poll after a reset should re-register the cached bank"))
+        return 1;
+    if (!expect(live_overlay_status_json().find(
+                    "\"registered\":true") != std::string::npos,
+                "the revived bank should report itself registered"))
+        return 1;
+#endif
+    live_overlay_shutdown();
 
     std::puts("PASS: live overlay preflight rejects malformed bundles");
     return 0;

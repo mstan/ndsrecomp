@@ -34,6 +34,13 @@ bool live_overlay_info_for_test(const NdsLiveBankInfo* info,
                                 const char* expected_rom_sha1,
                                 char* error,
                                 uint32_t error_len);
+// Test-only: publish a resident bank without compiling a shard DLL, so the
+// registration lifecycle can be pinned at the unit layer.
+void live_overlay_publish_bank_for_test(int cpu,
+                                        const char* bank_id,
+                                        const char* candidate_id,
+                                        const NdsDispatchEntry* dispatch,
+                                        unsigned dispatch_len);
 void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
                              uint32_t width, uint32_t old_value,
                              uint32_t new_value);
