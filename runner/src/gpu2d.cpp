@@ -1832,12 +1832,16 @@ void drain_pool(uint32_t cause) {
     merge_scratch(g_inline_scratch);
 }
 
-// A capture-enabled frame writes back into guest VRAM (DoCapture) and bumps
-// the texture generation the 3D engine reads, so it renders inline.
-bool line_must_be_inline(const LineJob& job) {
-    return job.cap || job.unit[0].capture_latch ||
-           (job.unit[0].capture & 0x80000000u) != 0u;
-}
+// A line that captures writes back into guest VRAM (DoCapture) and bumps the
+// texture generation the 3D engine reads, so it renders on this thread, after
+// a drain so no outstanding worker is reading the destination bank.
+//
+// Only the capturing lines, not the whole frame: DISPCAPCNT's height field is
+// 64, 128 or 192, and the lines past it call no capture path at all. They are
+// still ordered correctly because every capture line drains before it runs, so
+// all writes for lines below the capture height have landed before any later
+// line is latched -- exactly the single-threaded order.
+bool line_must_be_inline(const LineJob& job) { return job.cap; }
 
 // g_pool holds joinable std::threads; destroying it with the workers still
 // running would call std::terminate. This guard is declared after g_pool so it

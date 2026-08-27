@@ -1,7 +1,9 @@
 #include "gpu2d_window.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 
 // Compile the production implementation into this focused test with device
 // stubs below. This keeps the OBJ-window and compose assertions on the exact
@@ -15,6 +17,7 @@ std::array<uint8_t, 0x400> g_oam{};
 NdsVramRendererView g_view{};
 std::array<uint32_t, 448> g_3d_line{};
 std::array<uint8_t, 0x20000> g_capture_bank{};
+bool g_lcdc_mapped = false;
 uint16_t g_3d_output_width = 256;
 uint16_t g_3d_render_xpos = 0;
 uint32_t g_3d_render_polygon_count = 0;
@@ -353,6 +356,101 @@ bool test_obj_window_coverage() {
 
 }  // namespace
 
+// DISPCAPCNT display capture writes back into guest-visible VRAM and bumps the
+// texture generation the 3D engine reads, so capture lines must be rendered on
+// the scheduler thread even when threaded scanline rendering is on. This pins
+// both halves: the captured bytes and the framebuffers must be identical to
+// the single-threaded path, and the classification counters must show the
+// capture lines going inline while the non-capture lines go to a worker.
+struct CaptureRun {
+    std::array<uint8_t, 0x20000> bank{};
+    std::array<uint32_t, 256 * 192> top{};
+    std::array<uint32_t, 256 * 192> bottom{};
+    uint64_t threaded_lines = 0;
+    uint64_t inline_lines = 0;
+};
+
+void run_capture_frame(uint32_t capture_size, CaptureRun& out) {
+    nds_gpu2d_reset();
+    g_capture_bank.fill(0);
+    g_palette.fill(0);
+    g_oam.fill(0);
+    g_view = {};
+    g_lcdc_mapped = true;
+    // A non-black backdrop so the composite the capture unit reads is not all
+    // zero, and a distinguishable per-line 3D source.
+    write16(g_palette, 0, 0x3DEFu);
+    for (size_t i = 0; i < g_3d_line.size(); ++i)
+        g_3d_line[i] = static_cast<uint32_t>((i * 0x00010203u) | 0x1F000000u);
+
+    Unit& u = g_unit[0];
+    u.dispcnt = 0x00010000u;   // display mode 1 (composite), BG mode 0
+    u.master_bright = 0;
+    // Enable + size + source A = composite, dest bank 0, no offsets.
+    u.capture = 0x80000000u | (capture_size << 20);
+    g_unit[1].dispcnt = 0x00010000u;
+
+    nds_gpu2d_start_frame();
+    for (int y = 0; y < 192; ++y) nds_gpu2d_render_scanline(y);
+
+    NdsGpu2dProfile prof{};
+    nds_gpu2d_profile(&prof);
+    out.threaded_lines = prof.threaded_lines;
+    out.inline_lines = prof.inline_lines;
+    out.bank = g_capture_bank;
+    // Rasterization targets the back buffer; the front flip happens at the
+    // frame wrap, which this fixture does not reach.
+    std::copy_n(g_fb[g_front ^ 1][0].data(), 256 * 192, out.top.data());
+    std::copy_n(g_fb[g_front ^ 1][1].data(), 256 * 192, out.bottom.data());
+}
+
+bool test_capture_serializes_and_matches() {
+    // size 3 = 256x192: every line captures.
+    // size 0 = 128x128: lines 0..127 capture, 128..191 do not.
+    for (const uint32_t size : {3u, 0u}) {
+        CaptureRun single{};
+        nds_gpu2d_set_threaded(false, 1);
+        run_capture_frame(size, single);
+
+        CaptureRun threaded{};
+        nds_gpu2d_set_threaded(true, 2);
+        run_capture_frame(size, threaded);
+        nds_gpu2d_set_threaded(false, 1);
+
+        std::fprintf(stderr,
+            "[capture size %u] single inline=%llu threaded=%llu | "
+            "threaded inline=%llu threaded=%llu | bank_eq=%d top_eq=%d "
+            "bot_eq=%d nonzero=%d\n",
+            size,
+            (unsigned long long)single.inline_lines,
+            (unsigned long long)single.threaded_lines,
+            (unsigned long long)threaded.inline_lines,
+            (unsigned long long)threaded.threaded_lines,
+            (int)(single.bank == threaded.bank),
+            (int)(single.top == threaded.top),
+            (int)(single.bottom == threaded.bottom),
+            (int)std::any_of(single.bank.begin(), single.bank.end(),
+                             [](uint8_t v) { return v != 0u; }));
+        if (!require(single.bank == threaded.bank)) return false;
+        if (!require(single.top == threaded.top)) return false;
+        if (!require(single.bottom == threaded.bottom)) return false;
+        // The capture must actually have written something, or the comparison
+        // is vacuous.
+        if (!require(std::any_of(single.bank.begin(), single.bank.end(),
+                                 [](uint8_t v) { return v != 0u; })))
+            return false;
+        // Single-threaded: every line inline, none threaded.
+        if (!require(single.threaded_lines == 0u)) return false;
+        if (!require(single.inline_lines == 192u)) return false;
+        // Threaded: exactly the capturing lines went inline.
+        const uint64_t expected_inline = size == 3u ? 192u : 128u;
+        if (!require(threaded.inline_lines == expected_inline)) return false;
+        if (!require(threaded.threaded_lines == 192u - expected_inline))
+            return false;
+    }
+    return true;
+}
+
 // Minimal device implementations required by the production renderer object.
 uint16_t nds_powercontrol9() { return 0x8002u; }
 const uint8_t* nds_vram_renderer_palette(int) { return g_palette.data(); }
@@ -362,7 +460,7 @@ uint32_t nds_vram_read_bg(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_obj(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_bg_extpal(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_obj_extpal(int, uint32_t, uint32_t) { return 0; }
-bool nds_vram_lcdc_mapped(unsigned) { return false; }
+bool nds_vram_lcdc_mapped(unsigned) { return g_lcdc_mapped; }
 uint8_t* nds_vram_bank_data(unsigned) { return g_capture_bank.data(); }
 void nds_vram_note_capture_write() {}
 uint32_t nds_video_read(int, uint32_t, uint32_t) { return 0; }
@@ -385,5 +483,6 @@ int main() {
     if (!test_direct_scene_centers_low_polygon_frames()) return 7;
     if (!test_compose_window_effects()) return 8;
     if (!test_obj_window_coverage()) return 9;
+    if (!test_capture_serializes_and_matches()) return 10;
     return 0;
 }
