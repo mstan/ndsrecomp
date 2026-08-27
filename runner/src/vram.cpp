@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "gpu2d.h"
 #include "io.h"
 
 namespace {
@@ -321,6 +322,8 @@ void nds_vram_map(unsigned bank, uint8_t value) {
     if (bank >= 9) return;
     const uint8_t next = sanitize(bank, value);
     if (next == g_cnt[bank]) return;
+    // A remap rebuilds the flattened renderer views a worker dereferences.
+    nds_gpu2d_memory_fence(NDS_GPU2D_FENCE_VRAMCNT);
     apply_map(bank, g_cnt[bank], false);
     g_cnt[bank] = next;
     apply_map(bank, next, true);
@@ -432,6 +435,14 @@ uint32_t nds_video_read(int cpu, uint32_t addr, uint32_t width) {
 }
 void nds_video_write(int cpu, uint32_t addr, uint32_t value, uint32_t width) {
     addr &= ~(width - 1u);
+    // Threaded scanline jobs read VRAM/palette/OAM live, so a guest write
+    // to those regions must not overtake a line that was latched before it.
+    if (nds_gpu2d_jobs_outstanding.load(std::memory_order_relaxed) != 0u) {
+        const uint32_t region = addr & 0xFF000000u;
+        nds_gpu2d_drain(region == 0x05000000u ? NDS_GPU2D_FENCE_PALETTE
+                        : region == 0x07000000u ? NDS_GPU2D_FENCE_OAM
+                                                : NDS_GPU2D_FENCE_VRAM);
+    }
     if (cpu == 7) {
         if ((addr & 0xFF000000u) == 0x06000000u)
             mapped_write(g_arm7[(addr >> 17) & 1u], addr, value, width);

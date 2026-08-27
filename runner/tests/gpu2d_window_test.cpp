@@ -270,7 +270,7 @@ bool test_obj_window_coverage() {
     // Index zero is transparent and produces neither output nor coverage.
     reset_obj_fixture(obj_vram);
     set_obj(0, 2u << 10u, 0, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 0)) return false;
 
@@ -278,13 +278,13 @@ bool test_obj_window_coverage() {
     reset_obj_fixture(obj_vram);
     set_4bpp_index(obj_vram, 0, 0, 1);
     set_obj(0, 2u << 10u, 0x1000u, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[7] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
     set_4bpp_index(obj_vram, 0, 0, 1);
     set_obj(0, 2u << 10u, 0x2000u, 0);
-    render_obj_line(0, 7, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 7, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
 
@@ -295,7 +295,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0100u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0x0100u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
@@ -303,7 +303,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0100u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0xFF00u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[1] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
@@ -311,7 +311,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0300u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0x0100u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 4, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 4, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[4] && coverage[11] && coverage_count(coverage) == 8))
         return false;
@@ -320,14 +320,14 @@ bool test_obj_window_coverage() {
     reset_obj_fixture(obj_vram);
     for (int x = 0; x < 8; ++x) set_4bpp_index(obj_vram, x, 0, 1);
     set_obj(0, 2u << 10u, 0x01FCu, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 4 && coverage[0] && coverage[3]))
         return false;
     reset_obj_fixture(obj_vram);
     for (int x = 0; x < 8; ++x) set_4bpp_index(obj_vram, x, 0, 1);
     set_obj(0, 2u << 10u, 0x01FFu, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 7 && coverage[0] && coverage[6]))
         return false;
@@ -336,7 +336,7 @@ bool test_obj_window_coverage() {
     // tile zero. The scanline below wraps from Y=250 to source row 8.
     obj_vram[0x400] = 1;
     set_obj(0, 250u | (2u << 10u), 0x4000u, 0);  // 16x16 OBJ at Y=250.
-    render_obj_line(0, 2, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 2, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
 
@@ -346,7 +346,7 @@ bool test_obj_window_coverage() {
     set_4bpp_index(obj_vram, 1, 0, 1);
     set_obj(0, 2u << 10u, 0, 3u << 10u);
     set_obj(1, 2u << 10u, 0, 0u << 10u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     return require(coverage[0] && coverage[1]);
 }

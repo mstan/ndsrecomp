@@ -1,6 +1,44 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+
+// ---- Threaded scanline rendering -----------------------------------------
+// Per-scanline rendering can run on worker threads driven from a per-line
+// latch taken on the scheduler thread. The latch owns every piece of
+// renderer-mutable state (BG2/BG3 affine accumulators, the DISPCAPCNT enable
+// latch) and the 3D line fetch; workers are pure producers of host pixels.
+//
+// The renderer still reads guest VRAM, palette and OAM live, so any guest
+// write to those regions -- or a VRAMCNT remap -- must not be applied while
+// jobs are outstanding. Call nds_gpu2d_memory_fence() before applying such a
+// write; it is a single relaxed load in the common case.
+//
+// See docs/device_work_parallelization.md.
+extern std::atomic<uint32_t> nds_gpu2d_jobs_outstanding;
+enum NdsGpu2dFenceCause : uint32_t {
+    NDS_GPU2D_FENCE_VRAM = 0,
+    NDS_GPU2D_FENCE_VRAMCNT,
+    NDS_GPU2D_FENCE_PALETTE,
+    NDS_GPU2D_FENCE_OAM,
+    NDS_GPU2D_FENCE_FRAME,
+    NDS_GPU2D_FENCE_PRESENT,
+    NDS_GPU2D_FENCE_SLOTS,
+    NDS_GPU2D_FENCE_CAUSE_COUNT,
+};
+const char* nds_gpu2d_fence_cause_name(uint32_t index);
+// Blocks until every outstanding line job has been rendered, executing
+// unclaimed jobs on the calling (scheduler) thread rather than idling.
+void nds_gpu2d_drain(uint32_t cause);
+inline void nds_gpu2d_memory_fence(uint32_t cause) {
+    if (nds_gpu2d_jobs_outstanding.load(std::memory_order_relaxed) != 0u)
+        nds_gpu2d_drain(cause);
+}
+// Startup configuration. Threading is off by default; the inline path is the
+// same latch/execute sequence with the execute taken immediately.
+void nds_gpu2d_set_threaded(bool enabled, unsigned workers);
+bool nds_gpu2d_threaded();
+void nds_gpu2d_shutdown_workers();
 
 void nds_gpu2d_reset();
 // Console power-off clears both physical front/back buffers without resetting
@@ -156,5 +194,14 @@ struct NdsGpu2dProfile {
         NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
     uint64_t direct_extra_master_bright_frames[
         NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
+    // Threaded-render accounting. Always maintained (not gated on
+    // NDS_PROFILE_GPU) because fence frequency is the whole performance
+    // question and must be observable on any run.
+    uint64_t threaded_lines;
+    uint64_t inline_lines;
+    uint64_t fence_drains[NDS_GPU2D_FENCE_CAUSE_COUNT];
+    uint64_t fenced_lines[NDS_GPU2D_FENCE_CAUSE_COUNT];
+    uint64_t fence_wait_ns;
+    uint64_t fence_helped_lines;
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);

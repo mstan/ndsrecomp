@@ -1294,7 +1294,21 @@ std::string handle(const std::string& line) {
         const std::string direct_extra_master_bright_frames =
             indexed_profile_json(gpu.direct_extra_master_bright_frames,
                                  NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT);
-        return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
+        const std::string fence_drains =
+            indexed_profile_json(gpu.fence_drains,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        const std::string fenced_lines =
+            indexed_profile_json(gpu.fenced_lines,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        return "{\"gpu2d\":{\"threaded_lines\":" +
+               std::to_string(gpu.threaded_lines) +
+               ",\"inline_lines\":" + std::to_string(gpu.inline_lines) +
+               ",\"fence_wait_ns\":" + std::to_string(gpu.fence_wait_ns) +
+               ",\"fence_helped_lines\":" +
+               std::to_string(gpu.fence_helped_lines) +
+               ",\"fence_drains\":" + fence_drains +
+               ",\"fenced_lines\":" + fenced_lines +
+               ",\"render_ns\":" + std::to_string(gpu.render_ns) +
                ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
                ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +
