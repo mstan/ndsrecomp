@@ -209,20 +209,7 @@ bool CompilerShader(GLuint& id, const std::string& source, const std::string& na
         char* log = new char[res+1];
         glGetShaderInfoLog(id, res+1, NULL, log);
         Log(LogLevel::Error, "OpenGL: failed to compile %s shader %s: %s\n", type.c_str(), name.c_str(), log);
-        {
-            // Numbered per-line dump so on-device logcat shows exact lines.
-            int ln = 1;
-            size_t pos = 0;
-            const std::string& s = source;
-            while (pos <= s.size()) {
-                size_t nl = s.find('\n', pos);
-                std::string line = s.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-                Log(LogLevel::Error, "SRC %d: %s\n", ln, line.c_str());
-                if (nl == std::string::npos) break;
-                pos = nl + 1;
-                ++ln;
-            }
-        }
+        Log(LogLevel::Debug, "shader source:\n--\n%s\n--\n", source.c_str());
         delete[] log;
 
         glDeleteShader(id);
