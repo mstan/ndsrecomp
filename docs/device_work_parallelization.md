@@ -157,7 +157,19 @@ Memory the line render reads, and how each is captured:
 
 ## 5. Sync points
 
-### 5.1 Palette / OAM versioned snapshot
+> **As built.** The palette/OAM versioned snapshot below is **deferred**;
+> palette and OAM writes currently take the same fence as VRAM (§5.2). The
+> fence is exact either way, and the snapshot is purely an optimization to
+> reduce fence frequency. The census that decides whether it is worth
+> building now exists: `fence_drains` / `fenced_lines` are reported per
+> cause, and on the firmware route the split is 556 VRAM drains against 1
+> OAM drain and 0 palette drains over 866 frames — palette/OAM writes during
+> active display are not the problem there. Revisit against an MPH route
+> before building the ring.
+>
+> **As built.** Capture serialization is per **line**, not per frame (§5.4).
+
+### 5.1 Palette / OAM versioned snapshot (deferred)
 
 `g_palette` and `g_oam` are 2 KiB total each. A monotonically increasing
 `g_pal_oam_generation` is bumped by every palette/OAM write in
@@ -224,7 +236,16 @@ exact.
 
 ### 5.4 Serialization classes (rendered inline on the emu thread)
 
-- any frame with display capture live (F1/F2/F3)
+- **capture lines** (F1/F2/F3) — the lines below the DISPCAPCNT height
+  field (64, 128 or 192), not the whole frame. Each drains before it runs,
+  so every capture write has landed before any later line is latched, which
+  is exactly the single-threaded order. Lines past the capture height call
+  no capture path at all and go to a worker.
+  Pinned by `test_capture_serializes_and_matches` in
+  `runner/tests/gpu2d_window_test.cpp`, which requires the captured VRAM
+  bank and both framebuffers to be byte-identical between the two modes and
+  the line classification to be exactly 128 inline + 64 threaded for a
+  128x128 capture.
 - the frame after a reset / power transition (`nds_gpu2d_reset`,
   `nds_gpu2d_stop`)
 - when `NDS_GPU2D_THREADED=0` (the default until proven)
