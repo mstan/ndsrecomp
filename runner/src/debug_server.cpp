@@ -516,6 +516,23 @@ std::string handle(const std::string& line) {
             (unsigned long long)s.clean_ram_rejects[1]);
         return buf;
     }
+    if (cmd == "force_tier3") {
+        // Phase-scoped forcing (beads-yjp.42). Booting an entire route through
+        // the interpreter costs far more wall time than the phase under study,
+        // so the harness boots faithfully, drives to the phase it wants, then
+        // flips the selector here and measures. Toggling is a single bool
+        // store: the selector applies AFTER the dispatch-cache lookup, so no
+        // cache or epoch invalidation is required and this is safe from the
+        // debug-server thread. Omit "on" to read the state without changing it.
+        if (line.find("\"on\"") != std::string::npos)
+            g_nds_force_tier3 = json_u64(line, "on", 0) != 0;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+            "{\"forced_tier3\":%s,\"forced_tier3_misses\":%llu}",
+            g_nds_force_tier3 ? "true" : "false",
+            (unsigned long long)g_nds_force_tier3_misses);
+        return buf;
+    }
     if (cmd == "exec_provenance") {
         const int cpu = json_u64(line, "cpu", 9) == 7 ? 7 : 9;
         const uint32_t addr = static_cast<uint32_t>(json_u64(line, "addr", 0));

@@ -1,0 +1,832 @@
+{
+  "aggregate_top_runner_symbols": [
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 144,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:424"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 114,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1012"
+    },
+    {
+      "function": "runtime_unwinding",
+      "samples": 112,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1067"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 99,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1214"
+    },
+    {
+      "function": "runtime_tick",
+      "samples": 78,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:988"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 77,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1188"
+    },
+    {
+      "function": "runtime_mem_cycles",
+      "samples": 76,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1049"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 73,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1189"
+    },
+    {
+      "function": "runtime_tick",
+      "samples": 51,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:997"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 43,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1220"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 42,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:977"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 40,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/dispatch_lookup.h:85"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1008"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1053"
+    },
+    {
+      "function": "runtime_mem_cycles",
+      "samples": 35,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1051"
+    },
+    {
+      "function": "runtime_tick",
+      "samples": 30,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:996"
+    },
+    {
+      "function": "runtime_mem_cycles",
+      "samples": 30,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1112"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 25,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:423"
+    },
+    {
+      "function": "cp15_data_cacheable(unsigned int)",
+      "samples": 24,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/cp15.cpp:69"
+    },
+    {
+      "function": "runtime_dispatch",
+      "samples": 23,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:600"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 22,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1014"
+    },
+    {
+      "function": "runtime_trace_event",
+      "samples": 21,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:913"
+    },
+    {
+      "function": "runtime_dispatch",
+      "samples": 21,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1234"
+    },
+    {
+      "function": "(anonymous namespace)::decode_text_line(int, int, int, unsigned char const*, NdsVramRendererView const&, (anonymous namespace)::BgLine&)",
+      "samples": 21,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/gpu2d.cpp:531"
+    },
+    {
+      "function": "(anonymous namespace)::render_obj_line(int, int, (anonymous namespace)::Pixel*, int, unsigned char const*, unsigned char const*, NdsVramRendererView const&, unsigned char*) [clone .constprop.0]",
+      "samples": 20,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_algobase.h:925"
+    },
+    {
+      "function": "nds_event_break_hit()",
+      "samples": 20,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2317"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 20,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1017"
+    },
+    {
+      "function": "runtime_dispatch",
+      "samples": 19,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1265"
+    },
+    {
+      "function": "runtime_tick",
+      "samples": 18,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:995"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 18,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/array:211"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 18,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1226"
+    },
+    {
+      "function": "melonDS::GPU3D::ExecuteCommand()",
+      "samples": 18,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/vendor/melonds/GPU3D.cpp:714"
+    },
+    {
+      "function": "runtime_trace_event",
+      "samples": 17,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:926"
+    },
+    {
+      "function": "(anonymous namespace)::render_engine_line(int, int)",
+      "samples": 17,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/gpu2d.cpp:1320"
+    },
+    {
+      "function": "cp15_code_cacheable(unsigned int)",
+      "samples": 17,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/cp15.cpp:69"
+    },
+    {
+      "function": "runtime_dispatch",
+      "samples": 17,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:595"
+    },
+    {
+      "function": "bus_write_u32",
+      "samples": 17,
+      "source": "mph_arm9_mp_runtime_00.c:?"
+    },
+    {
+      "function": "(anonymous namespace)::compose((anonymous namespace)::Unit const&, (anonymous namespace)::Pixel const&, (anonymous namespace)::Pixel const&, bool)",
+      "samples": 16,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/gpu2d.cpp:945"
+    },
+    {
+      "function": "arm7_cycle_combine",
+      "samples": 16,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1278"
+    },
+    {
+      "function": "runtime_live_transfer",
+      "samples": 16,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1318"
+    },
+    {
+      "function": "bus_write_u32",
+      "samples": 16,
+      "source": "mph_arm9_mp_runtime_07.c:?"
+    },
+    {
+      "function": "nds_tick_timers(int, unsigned long long)",
+      "samples": 15,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2694"
+    },
+    {
+      "function": "runtime_mem_cycles",
+      "samples": 15,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1080"
+    },
+    {
+      "function": "bus_exec_page_generation(unsigned int)",
+      "samples": 15,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:210"
+    },
+    {
+      "function": "bus_write_u32",
+      "samples": 15,
+      "source": "mph_arm9_mp_runtime_13.c:?"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 14,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:979"
+    },
+    {
+      "function": "nds_tick_timers(int, unsigned long long)",
+      "samples": 14,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2702"
+    },
+    {
+      "function": "runtime_should_yield",
+      "samples": 14,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1024"
+    },
+    {
+      "function": "mph_arm9_mp_runtime_afunc_020882E0",
+      "samples": 14,
+      "source": "mph_arm9_mp_runtime_13.c:?"
+    },
+    {
+      "function": "(anonymous namespace)::decode_text_line(int, int, int, unsigned char const*, NdsVramRendererView const&, (anonymous namespace)::BgLine&)",
+      "samples": 13,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/gpu2d.cpp:243"
+    }
+  ],
+  "bead": "beads-yjp.42",
+  "created_local": "2026-08-26 18:25:01",
+  "dispatch_stats": {
+    "arm7": {
+      "cache_hit": 159905998,
+      "cache_hit_absent": 1,
+      "cache_slow_lookup": 210327,
+      "crs_hit": 10272216,
+      "crs_miss": 1647530,
+      "crs_push": 10465567,
+      "crs_scan_iters": 53404608,
+      "dispatch_exchange": 4524356,
+      "dispatch_slice_yield": 4497416,
+      "dispatch_total": 164613740,
+      "exception_dispatch": 1092525,
+      "literal_branch": 15496173,
+      "literal_call": 10281300,
+      "literal_fallthrough": 117785277,
+      "resume_dispatch": 14988718
+    },
+    "arm9": {
+      "cache_hit": 335969299,
+      "cache_hit_absent": 3363330,
+      "cache_slow_lookup": 853739,
+      "crs_hit": 33268529,
+      "crs_miss": 1419999,
+      "crs_push": 33792821,
+      "crs_scan_iters": 57293777,
+      "dispatch_exchange": 2846813,
+      "dispatch_slice_yield": 7584251,
+      "dispatch_total": 344387307,
+      "exception_dispatch": 81148,
+      "literal_branch": 150666302,
+      "literal_call": 32247133,
+      "literal_fallthrough": 67259979,
+      "resume_dispatch": 87793662
+    },
+    "forced_tier3": false,
+    "forced_tier3_misses": 0
+  },
+  "executable": "F:\\Projects\\ndsrecomp\\ndsrecomp-interp-perf\\runner\\build-interp-perf\\nds_runner.exe",
+  "executable_sha256": "0e977b7863182e2892ca824a82dccde855d4effd1f4d5e1f6a365b78b0aa6319",
+  "forced": false,
+  "host": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]"
+  },
+  "phase": {
+    "average_frame_ms": 16.722101125401927,
+    "dispatch_delta": {
+      "arm7": {
+        "cache_hit": 10067887,
+        "cache_hit_absent": 1,
+        "cache_slow_lookup": 23420,
+        "crs_hit": 544949,
+        "crs_miss": 48846,
+        "crs_push": 549900,
+        "crs_scan_iters": 2985719,
+        "dispatch_exchange": 134773,
+        "dispatch_slice_yield": 296982,
+        "dispatch_total": 10388288,
+        "exception_dispatch": 29920,
+        "literal_branch": 943820,
+        "literal_call": 532435,
+        "literal_fallthrough": 7976021,
+        "resume_dispatch": 738084
+      },
+      "arm9": {
+        "cache_hit": 11743175,
+        "cache_hit_absent": 196737,
+        "cache_slow_lookup": 167090,
+        "crs_hit": 3115495,
+        "crs_miss": 11839,
+        "crs_push": 3120175,
+        "crs_scan_iters": 3188983,
+        "dispatch_exchange": 145147,
+        "dispatch_slice_yield": 287010,
+        "dispatch_total": 12194373,
+        "exception_dispatch": 2166,
+        "literal_branch": 2235883,
+        "literal_call": 3037754,
+        "literal_fallthrough": 3596685,
+        "resume_dispatch": 3168432
+      },
+      "forced_tier3": 0,
+      "forced_tier3_misses": 0
+    },
+    "forced_tier3": false,
+    "forced_tier3_misses_delta": 0,
+    "fps": 59.80109751165998,
+    "frames": 622,
+    "gpu2d_ms_per_frame": {
+      "direct_overlay": 0.05168987138263666,
+      "engine_a": 0.1458459807073955,
+      "engine_b": 0.27614099678456594,
+      "obj": 0.08462073954983923,
+      "render": 0.42198697749196146
+    },
+    "gpu3d_ms_per_frame": {
+      "compute_map": 0.3526662379421222,
+      "compute_submit": 0.027896302250803858,
+      "compute_sync": 0.380596463022508,
+      "getline": 0.0,
+      "vcount144": 0.0001792604501607717,
+      "vcount215": 0.06853183279742765
+    },
+    "insn7": 14042533,
+    "insn9": 85760994,
+    "label": "faithful_steady",
+    "phase_ms_per_frame": {
+      "audio_drain": 8.47958344051447,
+      "emu": 7.4770922829582,
+      "present": 0.7522345659163987,
+      "unaccounted": 0.013190836012861737
+    },
+    "present_ms_per_frame": {
+      "adaptive": 0.21822025723472668,
+      "draw": 0.004014790996784565,
+      "swap": 0.2251654340836013,
+      "upload": 0.01895418006430868
+    },
+    "raw_front_delta": {
+      "active": 0,
+      "adaptive_ticks": 1357330,
+      "drain_ticks": 52743009,
+      "draw_ticks": 24972,
+      "emu_ticks": 46507514,
+      "frames": 622,
+      "freq": 0,
+      "now_ticks": 104011469,
+      "present_ticks": 4678899,
+      "real_presents": 622,
+      "swap_ticks": 1400529,
+      "synthetic_presents": 0,
+      "underruns": 0,
+      "upload_ticks": 117895
+    },
+    "raw_profile_delta": {
+      "dispatch": {
+        "arm7": {
+          "cache_hit": 10067887,
+          "cache_hit_absent": 1,
+          "cache_slow_lookup": 23420,
+          "crs_hit": 544949,
+          "crs_miss": 48846,
+          "crs_push": 549900,
+          "crs_scan_iters": 2985719,
+          "dispatch_exchange": 134773,
+          "dispatch_slice_yield": 296982,
+          "dispatch_total": 10388288,
+          "exception_dispatch": 29920,
+          "literal_branch": 943820,
+          "literal_call": 532435,
+          "literal_fallthrough": 7976021,
+          "resume_dispatch": 738084
+        },
+        "arm9": {
+          "cache_hit": 11743175,
+          "cache_hit_absent": 196737,
+          "cache_slow_lookup": 167090,
+          "crs_hit": 3115495,
+          "crs_miss": 11839,
+          "crs_push": 3120175,
+          "crs_scan_iters": 3188983,
+          "dispatch_exchange": 145147,
+          "dispatch_slice_yield": 287010,
+          "dispatch_total": 12194373,
+          "exception_dispatch": 2166,
+          "literal_branch": 2235883,
+          "literal_call": 3037754,
+          "literal_fallthrough": 3596685,
+          "resume_dispatch": 3168432
+        },
+        "forced_tier3": 0,
+        "forced_tier3_misses": 0
+      },
+      "gpu2d": {
+        "direct_class_engine_a_ns": {
+          "capture": 0,
+          "center_native": 0,
+          "disabled": 0,
+          "display_mode": 0,
+          "engine_off": 0,
+          "extra_bg": 61090300,
+          "force_blank": 0,
+          "force_cpu": 0,
+          "no_bg0_3d": 0,
+          "render_xpos": 0,
+          "renderer_view": 0,
+          "screen_route": 0,
+          "supported": 2137300,
+          "width": 0,
+          "windows": 27488600
+        },
+        "direct_class_frames": {
+          "capture": 0,
+          "center_native": 0,
+          "disabled": 0,
+          "display_mode": 0,
+          "engine_off": 0,
+          "extra_bg": 154,
+          "force_blank": 0,
+          "force_cpu": 0,
+          "no_bg0_3d": 0,
+          "render_xpos": 0,
+          "renderer_view": 0,
+          "screen_route": 0,
+          "supported": 416,
+          "width": 0,
+          "windows": 52
+        },
+        "direct_class_transitions": 2,
+        "direct_extra_bg_mask_engine_a_ns": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 61090300
+        },
+        "direct_extra_bg_mask_frames": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 154
+        },
+        "direct_extra_bg_mode_frames": {
+          "0": 154,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0
+        },
+        "direct_extra_effect_frames": {
+          "0": 0,
+          "1": 154,
+          "2": 0,
+          "3": 0
+        },
+        "direct_extra_master_bright_frames": {
+          "0": 133,
+          "1": 21,
+          "2": 0,
+          "3": 0
+        },
+        "direct_frames": 416,
+        "direct_overlay_ns": 32151100,
+        "engine_a_ns": 90716200,
+        "engine_b_ns": 171759700,
+        "hd_frames": 0,
+        "hd_presented": 0,
+        "obj_ns": 52634100,
+        "render_ns": 262475900,
+        "scanlines": 119424
+      },
+      "gpu3d": {
+        "compute_map_calls": 206,
+        "compute_map_ns": 219358400,
+        "compute_submit_calls": 206,
+        "compute_submit_ns": 17351500,
+        "compute_sync_calls": 206,
+        "compute_sync_ns": 236731000,
+        "getline_calls": 0,
+        "getline_ns": 0,
+        "vcount144_calls": 622,
+        "vcount144_ns": 111500,
+        "vcount215_calls": 622,
+        "vcount215_ns": 42626800
+      },
+      "sched": {
+        "arm7_ns": 1062900,
+        "arm9_ns": 3404100,
+        "crs_words": 22816453,
+        "devices_ns": 1463700,
+        "display_ns": 503600,
+        "next_event_ns": 305400,
+        "rounds": 3531131,
+        "rtc_ns": 127700,
+        "sampled_round_ns": 6601300,
+        "sampled_rounds": 3499,
+        "spu_ns": 167500,
+        "switch_ns": 24700,
+        "switches": 402076,
+        "sysev_ns": 148100,
+        "wifi_ns": 97800
+      },
+      "static_coverage": {
+        "clean_ram_rejects7": 0,
+        "clean_ram_rejects9": 0,
+        "tier3_entries7": 1,
+        "tier3_entries9": 14944,
+        "tier3_insns7": 1,
+        "tier3_insns9": 187516
+      }
+    },
+    "scheduler_sample_share": {
+      "arm7": 0.16101373971793434,
+      "arm9": 0.5156711556814567,
+      "devices": 0.22172905336827595,
+      "display": 0.07628800387802402,
+      "next_event": 0.04626361474255071,
+      "rtc": 0.019344674533803948,
+      "spu": 0.02537379001105843,
+      "switch": 0.0037416872434217503,
+      "sysev": 0.022434974929180614,
+      "wifi": 0.014815263660188144
+    },
+    "seconds": 10.4011469,
+    "tier3_delta": {
+      "clean_ram_rejects7": 0,
+      "clean_ram_rejects9": 0,
+      "tier3_entries7": 1,
+      "tier3_entries9": 14944,
+      "tier3_insns7": 1,
+      "tier3_insns9": 187516
+    },
+    "tier3_insn7_share": 7.121222360666697e-08,
+    "tier3_insn9_share": 0.0021865768020365994,
+    "tier3_insns7": 1,
+    "tier3_insns9": 187523,
+    "tier_problems": [],
+    "tier_verified": true,
+    "underruns": 0,
+    "vblank9": 622
+  },
+  "sampler": {
+    "interval_us": 1000,
+    "preferred_image_base": 5368709120,
+    "runtime_image_base": 140700600434688
+  },
+  "schema": "mph-forced-tier3-profile/1",
+  "threads": [
+    {
+      "runner_samples": 0,
+      "thread_id": 2900,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 25284,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 28832,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 30808,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 37488,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 37524,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 39568,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 51040,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 59836,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 64688,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 4406,
+      "thread_id": 70324,
+      "top_runner_symbols": [
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 144,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:424"
+        },
+        {
+          "function": "runtime_should_yield",
+          "samples": 114,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1012"
+        },
+        {
+          "function": "runtime_unwinding",
+          "samples": 112,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1067"
+        },
+        {
+          "function": "runtime_code_cycles",
+          "samples": 99,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1214"
+        },
+        {
+          "function": "runtime_tick",
+          "samples": 78,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:988"
+        },
+        {
+          "function": "runtime_code_cycles",
+          "samples": 77,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1188"
+        },
+        {
+          "function": "runtime_mem_cycles",
+          "samples": 76,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1049"
+        },
+        {
+          "function": "runtime_code_cycles",
+          "samples": 73,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1189"
+        },
+        {
+          "function": "runtime_tick",
+          "samples": 51,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:997"
+        },
+        {
+          "function": "runtime_code_cycles",
+          "samples": 43,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1220"
+        },
+        {
+          "function": "runtime_code_cycles",
+          "samples": 42,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:977"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 40,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/dispatch_lookup.h:85"
+        },
+        {
+          "function": "runtime_should_yield",
+          "samples": 37,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1008"
+        },
+        {
+          "function": "runtime_should_yield",
+          "samples": 37,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1053"
+        },
+        {
+          "function": "runtime_mem_cycles",
+          "samples": 35,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1051"
+        },
+        {
+          "function": "runtime_tick",
+          "samples": 30,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:996"
+        },
+        {
+          "function": "runtime_mem_cycles",
+          "samples": 30,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1112"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 25,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:423"
+        },
+        {
+          "function": "cp15_data_cacheable(unsigned int)",
+          "samples": 24,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/cp15.cpp:69"
+        },
+        {
+          "function": "runtime_dispatch",
+          "samples": 23,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:600"
+        },
+        {
+          "function": "runtime_should_yield",
+          "samples": 22,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1014"
+        },
+        {
+          "function": "runtime_trace_event",
+          "samples": 21,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:913"
+        },
+        {
+          "function": "runtime_dispatch",
+          "samples": 21,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1234"
+        },
+        {
+          "function": "(anonymous namespace)::decode_text_line(int, int, int, unsigned char const*, NdsVramRendererView const&, (anonymous namespace)::BgLine&)",
+          "samples": 21,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/gpu2d.cpp:531"
+        },
+        {
+          "function": "(anonymous namespace)::render_obj_line(int, int, (anonymous namespace)::Pixel*, int, unsigned char const*, unsigned char const*, NdsVramRendererView const&, unsigned char*) [clone .constprop.0]",
+          "samples": 20,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_algobase.h:925"
+        },
+        {
+          "function": "nds_event_break_hit()",
+          "samples": 20,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2317"
+        },
+        {
+          "function": "runtime_should_yield",
+          "samples": 20,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1017"
+        },
+        {
+          "function": "runtime_dispatch",
+          "samples": 19,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1265"
+        },
+        {
+          "function": "runtime_tick",
+          "samples": 18,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:995"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 18,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/array:211"
+        }
+      ],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 72140,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 78552,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 89804,
+      "top_runner_symbols": [],
+      "total_samples": 10235
+    }
+  ]
+}

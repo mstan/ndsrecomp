@@ -1,0 +1,836 @@
+{
+  "aggregate_top_runner_symbols": [
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 253,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:424"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode_data_processing(unsigned int, unsigned int)",
+      "samples": 164,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:17"
+    },
+    {
+      "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+      "samples": 144,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_algobase.h:2095"
+    },
+    {
+      "function": "armv4t::Interpreter::cond_passes(armv4t::Cond, armv4t::CPSR const&)",
+      "samples": 109,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:228"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode_single_data_transfer(unsigned int, unsigned int)",
+      "samples": 94,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:21"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 90,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:17"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 85,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:77"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 81,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:218"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 81,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:21"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 71,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:423"
+    },
+    {
+      "function": "nds_dma_cpu_stalled(int)",
+      "samples": 67,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:918"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 57,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:221"
+    },
+    {
+      "function": "armv4t::Interpreter::step(armv4t::CPUState&, armv4t::Bus&, armv4t::Instr const&, unsigned int*)",
+      "samples": 54,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:500"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 53,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/dispatch_lookup.h:85"
+    },
+    {
+      "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+      "samples": 52,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:70"
+    },
+    {
+      "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+      "samples": 49,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable_policy.h:584"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 49,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:358"
+    },
+    {
+      "function": "tier3_run(unsigned int)",
+      "samples": 48,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:389"
+    },
+    {
+      "function": "tier3_run(unsigned int)",
+      "samples": 47,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/recompiler/armv4t/runtime_arm.h:287"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 47,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:216"
+    },
+    {
+      "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+      "samples": 43,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable.h:2212"
+    },
+    {
+      "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+      "samples": 43,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_function.h:375"
+    },
+    {
+      "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+      "samples": 40,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_vector.h:1119"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 40,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:418"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 40,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:29"
+    },
+    {
+      "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+      "samples": 39,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:661"
+    },
+    {
+      "function": "(anonymous namespace)::RtBus::write32(unsigned int, unsigned int)",
+      "samples": 38,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:127"
+    },
+    {
+      "function": "runtime_call_should_return",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1457"
+    },
+    {
+      "function": "nds_irq_pending(int)",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2466"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:421"
+    },
+    {
+      "function": "armv4t::Interpreter::step(armv4t::CPUState&, armv4t::Bus&, armv4t::Instr const&, unsigned int*)",
+      "samples": 37,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:1341"
+    },
+    {
+      "function": "tier3_run(unsigned int)",
+      "samples": 36,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:271"
+    },
+    {
+      "function": "coverage_note_generation_entry(int, unsigned int, bool, unsigned char, unsigned int)",
+      "samples": 36,
+      "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable_policy.h:1432"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 36,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:73"
+    },
+    {
+      "function": "(anonymous namespace)::RtBus::write32(unsigned int, unsigned int)",
+      "samples": 35,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/recompiler/armv4t/runtime_arm.h:274"
+    },
+    {
+      "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+      "samples": 35,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:636"
+    },
+    {
+      "function": "(anonymous namespace)::RtBus::read32(unsigned int)",
+      "samples": 34,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/recompiler/armv4t/runtime_arm.h:284"
+    },
+    {
+      "function": "armv4t::Interpreter::step(armv4t::CPUState&, armv4t::Bus&, armv4t::Instr const&, unsigned int*)",
+      "samples": 34,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:476"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 33,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1214"
+    },
+    {
+      "function": "(anonymous namespace)::resolve(unsigned int, unsigned int)",
+      "samples": 31,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:345"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 31,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:497"
+    },
+    {
+      "function": "runtime_code_cycles",
+      "samples": 31,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:1230"
+    },
+    {
+      "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+      "samples": 29,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:225"
+    },
+    {
+      "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+      "samples": 29,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:479"
+    },
+    {
+      "function": "tier3_run(unsigned int)",
+      "samples": 29,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:287"
+    },
+    {
+      "function": "tier3_run(unsigned int)",
+      "samples": 28,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/recompiler/armv4t/runtime_arm.h:290"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 28,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:548"
+    },
+    {
+      "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+      "samples": 26,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:642"
+    },
+    {
+      "function": "nds_cpu_halted(int)",
+      "samples": 26,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2469"
+    },
+    {
+      "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+      "samples": 25,
+      "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:505"
+    }
+  ],
+  "bead": "beads-yjp.42",
+  "created_local": "2026-08-26 18:21:30",
+  "dispatch_stats": {
+    "arm7": {
+      "cache_hit": 165822608,
+      "cache_hit_absent": 0,
+      "cache_slow_lookup": 210848,
+      "crs_hit": 10269478,
+      "crs_miss": 3370076,
+      "crs_push": 10471020,
+      "crs_scan_iters": 159996151,
+      "dispatch_exchange": 4395419,
+      "dispatch_slice_yield": 4040805,
+      "dispatch_total": 149112677,
+      "exception_dispatch": 1054372,
+      "literal_branch": 13998410,
+      "literal_call": 9436578,
+      "literal_fallthrough": 105161250,
+      "resume_dispatch": 14646130
+    },
+    "arm9": {
+      "cache_hit": 444361208,
+      "cache_hit_absent": 3329409,
+      "cache_slow_lookup": 4435797,
+      "crs_hit": 33289635,
+      "crs_miss": 6650718,
+      "crs_push": 33813880,
+      "crs_scan_iters": 91687902,
+      "dispatch_exchange": 2634902,
+      "dispatch_slice_yield": 7155760,
+      "dispatch_total": 328813435,
+      "exception_dispatch": 79848,
+      "literal_branch": 147331670,
+      "literal_call": 27686137,
+      "literal_fallthrough": 61830507,
+      "resume_dispatch": 85770116
+    },
+    "forced_tier3": true,
+    "forced_tier3_misses": 151351477
+  },
+  "executable": "F:\\Projects\\ndsrecomp\\ndsrecomp-interp-perf\\runner\\build-interp-perf\\nds_runner.exe",
+  "executable_sha256": "0e977b7863182e2892ca824a82dccde855d4effd1f4d5e1f6a365b78b0aa6319",
+  "forced": true,
+  "host": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]"
+  },
+  "phase": {
+    "average_frame_ms": 16.71832347266881,
+    "dispatch_delta": {
+      "arm7": {
+        "cache_hit": 13734961,
+        "cache_hit_absent": 0,
+        "cache_slow_lookup": 23536,
+        "crs_hit": 539894,
+        "crs_miss": 1128072,
+        "crs_push": 549994,
+        "crs_scan_iters": 68150800,
+        "dispatch_exchange": 53269,
+        "dispatch_slice_yield": 4549,
+        "dispatch_total": 625209,
+        "exception_dispatch": 6120,
+        "literal_branch": 0,
+        "literal_call": 0,
+        "literal_fallthrough": 30438,
+        "resume_dispatch": 518016
+      },
+      "arm9": {
+        "cache_hit": 84744696,
+        "cache_hit_absent": 172222,
+        "cache_slow_lookup": 2570120,
+        "crs_hit": 3109051,
+        "crs_miss": 3493436,
+        "crs_push": 3113705,
+        "crs_scan_iters": 26336062,
+        "dispatch_exchange": 2170,
+        "dispatch_slice_yield": 16,
+        "dispatch_total": 1804782,
+        "exception_dispatch": 1214,
+        "literal_branch": 0,
+        "literal_call": 0,
+        "literal_fallthrough": 0,
+        "resume_dispatch": 1801398
+      },
+      "forced_tier3": 0,
+      "forced_tier3_misses": 100839167
+    },
+    "forced_tier3": true,
+    "forced_tier3_misses_delta": 100759636,
+    "fps": 59.81461009740626,
+    "frames": 622,
+    "gpu2d_ms_per_frame": {
+      "direct_overlay": 0.049359967845659165,
+      "engine_a": 0.1470024115755627,
+      "engine_b": 0.26944903536977494,
+      "obj": 0.08308456591639872,
+      "render": 0.41645144694533764
+    },
+    "gpu3d_ms_per_frame": {
+      "compute_map": 0.3314376205787781,
+      "compute_submit": 0.027968971061093247,
+      "compute_sync": 0.35943504823151123,
+      "getline": 0.0,
+      "vcount144": 0.00017266881028938906,
+      "vcount215": 0.057580225080385856
+    },
+    "insn7": 14040066,
+    "insn9": 85672243,
+    "label": "forced_tier3_steady",
+    "phase_ms_per_frame": {
+      "audio_drain": 3.9856736334405145,
+      "emu": 12.011771704180065,
+      "present": 0.7088168810289389,
+      "unaccounted": 0.012061254019292604
+    },
+    "present_ms_per_frame": {
+      "adaptive": 0.2252516077170418,
+      "draw": 0.0032408360128617364,
+      "swap": 0.2050644694533762,
+      "upload": 0.016270418006430868
+    },
+    "raw_front_delta": {
+      "active": 0,
+      "adaptive_ticks": 1401065,
+      "drain_ticks": 24790890,
+      "draw_ticks": 20158,
+      "emu_ticks": 74713220,
+      "frames": 622,
+      "freq": 0,
+      "now_ticks": 103987972,
+      "present_ticks": 4408841,
+      "real_presents": 622,
+      "swap_ticks": 1275501,
+      "synthetic_presents": 0,
+      "underruns": 0,
+      "upload_ticks": 101202
+    },
+    "raw_profile_delta": {
+      "dispatch": {
+        "arm7": {
+          "cache_hit": 13734961,
+          "cache_hit_absent": 0,
+          "cache_slow_lookup": 23536,
+          "crs_hit": 539894,
+          "crs_miss": 1128072,
+          "crs_push": 549994,
+          "crs_scan_iters": 68150800,
+          "dispatch_exchange": 53269,
+          "dispatch_slice_yield": 4549,
+          "dispatch_total": 625209,
+          "exception_dispatch": 6120,
+          "literal_branch": 0,
+          "literal_call": 0,
+          "literal_fallthrough": 30438,
+          "resume_dispatch": 518016
+        },
+        "arm9": {
+          "cache_hit": 84744696,
+          "cache_hit_absent": 172222,
+          "cache_slow_lookup": 2570120,
+          "crs_hit": 3109051,
+          "crs_miss": 3493436,
+          "crs_push": 3113705,
+          "crs_scan_iters": 26336062,
+          "dispatch_exchange": 2170,
+          "dispatch_slice_yield": 16,
+          "dispatch_total": 1804782,
+          "exception_dispatch": 1214,
+          "literal_branch": 0,
+          "literal_call": 0,
+          "literal_fallthrough": 0,
+          "resume_dispatch": 1801398
+        },
+        "forced_tier3": 0,
+        "forced_tier3_misses": 100839167
+      },
+      "gpu2d": {
+        "direct_class_engine_a_ns": {
+          "capture": 0,
+          "center_native": 0,
+          "disabled": 0,
+          "display_mode": 0,
+          "engine_off": 0,
+          "extra_bg": 59835000,
+          "force_blank": 0,
+          "force_cpu": 0,
+          "no_bg0_3d": 0,
+          "render_xpos": 0,
+          "renderer_view": 0,
+          "screen_route": 0,
+          "supported": 2142400,
+          "width": 0,
+          "windows": 29458100
+        },
+        "direct_class_frames": {
+          "capture": 0,
+          "center_native": 0,
+          "disabled": 0,
+          "display_mode": 0,
+          "engine_off": 0,
+          "extra_bg": 154,
+          "force_blank": 0,
+          "force_cpu": 0,
+          "no_bg0_3d": 0,
+          "render_xpos": 0,
+          "renderer_view": 0,
+          "screen_route": 0,
+          "supported": 410,
+          "width": 0,
+          "windows": 58
+        },
+        "direct_class_transitions": 2,
+        "direct_extra_bg_mask_engine_a_ns": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 59835000
+        },
+        "direct_extra_bg_mask_frames": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 154
+        },
+        "direct_extra_bg_mode_frames": {
+          "0": 154,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0
+        },
+        "direct_extra_effect_frames": {
+          "0": 0,
+          "1": 154,
+          "2": 0,
+          "3": 0
+        },
+        "direct_extra_master_bright_frames": {
+          "0": 133,
+          "1": 21,
+          "2": 0,
+          "3": 0
+        },
+        "direct_frames": 410,
+        "direct_overlay_ns": 30701900,
+        "engine_a_ns": 91435500,
+        "engine_b_ns": 167597300,
+        "hd_frames": 0,
+        "hd_presented": 0,
+        "obj_ns": 51678600,
+        "render_ns": 259032800,
+        "scanlines": 119424
+      },
+      "gpu3d": {
+        "compute_map_calls": 212,
+        "compute_map_ns": 206154200,
+        "compute_submit_calls": 212,
+        "compute_submit_ns": 17396700,
+        "compute_sync_calls": 212,
+        "compute_sync_ns": 223568600,
+        "getline_calls": 0,
+        "getline_ns": 0,
+        "vcount144_calls": 622,
+        "vcount144_ns": 107400,
+        "vcount215_calls": 622,
+        "vcount215_ns": 35814900
+      },
+      "sched": {
+        "arm7_ns": 1128400,
+        "arm9_ns": 6148800,
+        "crs_words": 27462731,
+        "devices_ns": 1635700,
+        "display_ns": 669200,
+        "next_event_ns": 264700,
+        "rounds": 3527794,
+        "rtc_ns": 124500,
+        "sampled_round_ns": 9537200,
+        "sampled_rounds": 3496,
+        "spu_ns": 180800,
+        "switch_ns": 29400,
+        "switches": 401190,
+        "sysev_ns": 155800,
+        "wifi_ns": 96100
+      },
+      "static_coverage": {
+        "clean_ram_rejects7": 0,
+        "clean_ram_rejects9": 0,
+        "tier3_entries7": 444784,
+        "tier3_entries9": 1798670,
+        "tier3_insns7": 13107314,
+        "tier3_insns9": 85663756
+      }
+    },
+    "scheduler_sample_share": {
+      "arm7": 0.11831564819863272,
+      "arm9": 0.6447175271568175,
+      "devices": 0.1715073606509248,
+      "display": 0.07016734471333305,
+      "next_event": 0.0277544772050497,
+      "rtc": 0.013054145870905507,
+      "spu": 0.018957345971563982,
+      "switch": 0.003082665771924674,
+      "sysev": 0.016336031539655245,
+      "wifi": 0.010076332676257183
+    },
+    "seconds": 10.3987972,
+    "tier3_delta": {
+      "clean_ram_rejects7": 0,
+      "clean_ram_rejects9": 0,
+      "tier3_entries7": 444784,
+      "tier3_entries9": 1798670,
+      "tier3_insns7": 13107314,
+      "tier3_insns9": 85663756
+    },
+    "tier3_insn7_share": 0.9328842186354395,
+    "tier3_insn9_share": 0.9995951430850246,
+    "tier3_insns7": 13097756,
+    "tier3_insns9": 85637558,
+    "tier_problems": [],
+    "tier_verified": true,
+    "underruns": 0,
+    "vblank9": 622
+  },
+  "sampler": {
+    "interval_us": 1000,
+    "preferred_image_base": 5368709120,
+    "runtime_image_base": 140700600434688
+  },
+  "schema": "mph-forced-tier3-profile/1",
+  "selector_engaged": {
+    "forced_tier3": true,
+    "forced_tier3_misses": 0
+  },
+  "threads": [
+    {
+      "runner_samples": 0,
+      "thread_id": 12760,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 6808,
+      "thread_id": 34512,
+      "top_runner_symbols": [
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 253,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:424"
+        },
+        {
+          "function": "armv4t::ArmDecoder::decode_data_processing(unsigned int, unsigned int)",
+          "samples": 164,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:17"
+        },
+        {
+          "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+          "samples": 144,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_algobase.h:2095"
+        },
+        {
+          "function": "armv4t::Interpreter::cond_passes(armv4t::Cond, armv4t::CPSR const&)",
+          "samples": 109,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:228"
+        },
+        {
+          "function": "armv4t::ArmDecoder::decode_single_data_transfer(unsigned int, unsigned int)",
+          "samples": 94,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:21"
+        },
+        {
+          "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+          "samples": 90,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:17"
+        },
+        {
+          "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+          "samples": 85,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:77"
+        },
+        {
+          "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+          "samples": 81,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:218"
+        },
+        {
+          "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+          "samples": 81,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:21"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 71,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:423"
+        },
+        {
+          "function": "nds_dma_cpu_stalled(int)",
+          "samples": 67,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:918"
+        },
+        {
+          "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+          "samples": 57,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:221"
+        },
+        {
+          "function": "armv4t::Interpreter::step(armv4t::CPUState&, armv4t::Bus&, armv4t::Instr const&, unsigned int*)",
+          "samples": 54,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/interpreter.cpp:500"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 53,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/dispatch_lookup.h:85"
+        },
+        {
+          "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+          "samples": 52,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:70"
+        },
+        {
+          "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+          "samples": 49,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable_policy.h:584"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 49,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:358"
+        },
+        {
+          "function": "tier3_run(unsigned int)",
+          "samples": 48,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:389"
+        },
+        {
+          "function": "tier3_run(unsigned int)",
+          "samples": 47,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/recompiler/armv4t/runtime_arm.h:287"
+        },
+        {
+          "function": "(anonymous namespace)::sync_out(armv4t::CPUState const&)",
+          "samples": 47,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:216"
+        },
+        {
+          "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+          "samples": 43,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable.h:2212"
+        },
+        {
+          "function": "(anonymous namespace)::coverage_note(unsigned int, bool, unsigned char, unsigned int)",
+          "samples": 43,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_function.h:375"
+        },
+        {
+          "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+          "samples": 40,
+          "source": "C:/msys64/mingw64/include/c++/15.2.0/bits/stl_vector.h:1119"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 40,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:418"
+        },
+        {
+          "function": "armv4t::ArmDecoder::decode(unsigned int, unsigned int)",
+          "samples": 40,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/external/arm-recomp-core/common/arm_decode.cpp:29"
+        },
+        {
+          "function": "bus_range_has_write_provenance(unsigned int, unsigned int)",
+          "samples": 39,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/bus.cpp:661"
+        },
+        {
+          "function": "(anonymous namespace)::RtBus::write32(unsigned int, unsigned int)",
+          "samples": 38,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/tier3.cpp:127"
+        },
+        {
+          "function": "runtime_call_should_return",
+          "samples": 37,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:1457"
+        },
+        {
+          "function": "nds_irq_pending(int)",
+          "samples": 37,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/io.cpp:2466"
+        },
+        {
+          "function": "(anonymous namespace)::lookup_static_cached_impl((anonymous namespace)::CpuCtx const&, unsigned int, bool)",
+          "samples": 37,
+          "source": "F:/Projects/ndsrecomp/ndsrecomp-interp-perf/runner/src/runtime_arm.cpp:421"
+        }
+      ],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 57356,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 59272,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 63684,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 63908,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 72096,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 74472,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 75416,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 76948,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 80660,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 88216,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 88304,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    },
+    {
+      "runner_samples": 0,
+      "thread_id": 92528,
+      "top_runner_symbols": [],
+      "total_samples": 10222
+    }
+  ]
+}

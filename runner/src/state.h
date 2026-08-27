@@ -28,6 +28,23 @@ extern const char* g_nds_halt_reason;
 // promotion. Normal/release execution keeps this false and misses stay fatal.
 extern bool g_discover_static_misses;
 
+// Forced-interpreter measurement selector (beads-yjp.42). When true every
+// non-BIOS static/live dispatch lookup is reported as a miss, so all game and
+// captured-firmware code executes through Tier 3 on BOTH CPUs. This is the
+// "candidate path forced on" leg of the one-binary selector contract
+// (docs/host_optimization_strategy.md): faithful (false) and forced (true)
+// live in the same build, and the harness verifies which one ran.
+//
+// BIOS banks deliberately stay native. Tier 3 can only execute bytes with
+// write provenance in writable RAM; the immutable BIOS ROM has neither, so
+// forcing it would produce a fatal dispatch miss rather than a measurement.
+// It is also the representative shape: a player who loses native game banks
+// still has native BIOS.
+extern bool g_nds_force_tier3;
+// Cumulative count of lookups the selector converted into a miss. Zero in
+// faithful mode is what proves the selector was off.
+extern unsigned long long g_nds_force_tier3_misses;
+
 // CP15 (ARM9 system-control) state the bus must honor — TCM placement
 // changes what an address means, so the bus reads this directly.
 struct Cp15State {

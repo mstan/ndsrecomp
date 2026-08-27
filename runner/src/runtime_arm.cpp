@@ -70,6 +70,13 @@ std::string nds_dispatch_stats_json() {
 }
 
 // ── Globals the ABI exposes ─────────────────────────────────────────────
+    // Selector state, so a harness can VERIFY the tier it believes it is
+    // measuring instead of assuming it. forced_tier3_misses is the proof the
+    // selector actually converted lookups, not merely that a flag was set.
+    out += std::string(",\"forced_tier3\":") +
+        (g_nds_force_tier3 ? "true" : "false") +
+        ",\"forced_tier3_misses\":" +
+        std::to_string(g_nds_force_tier3_misses);
 extern "C" ArmCpuState g_cpu = {};
 extern "C" unsigned long long g_runtime_cycles = 0;
 // On by default: the recompiled banks gate their per-instruction hook on this,
@@ -94,6 +101,8 @@ struct DispatchBank {
 };
 struct CpuCtx {
     std::vector<DispatchBank> banks;
+bool        g_nds_force_tier3 = false;
+unsigned long long g_nds_force_tier3_misses = 0;
     // Flat candidate index across all immutable and live banks. Entries with
     // the same (address,state) remain registration-ordered so lookup can walk
     // an exact identity chain and choose the newest matching generation
@@ -405,8 +414,8 @@ bool cache_rejected_candidate_chain(const CpuCtx& c, uint32_t pc, bool thumb,
     return slot.page_count != 0u;
 }
 
-const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
-                                               bool thumb) {
+const CachedStaticLookup* lookup_static_cached_impl(const CpuCtx& c,
+                                                    uint32_t pc, bool thumb) {
     auto& cache = g_dispatch_cache[g_nds_active];
     CachedStaticLookup& slot =
         cache[((pc >> 1u) ^ (pc >> 13u) ^ uint32_t{thumb}) &
@@ -514,6 +523,22 @@ bool cached_static_guard(const CachedStaticLookup& cached,
                          StaticExecutionGuard& guard) {
     guard = {};
     if (!cached.validation) return true;
+// Single dispatch chokepoint. Both consumers -- runtime_dispatch (native
+// entry) and nds_has_bank (Tier 3's per-instruction takeover poll) -- go
+// through here, on both CPUs, so one branch covers the whole selector.
+//
+// The forced miss is applied AFTER the real lookup, not instead of it. Short-
+// circuiting ahead of the cache would delete the very per-instruction poll
+// cost the campaign exists to measure and would report a flattering number
+// for a path no player ever runs. The lookup runs, the result is discarded.
+const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
+                                               bool thumb) {
+    const CachedStaticLookup* hit = lookup_static_cached_impl(c, pc, thumb);
+    if (!g_nds_force_tier3 || !hit || static_bios_pc(pc)) return hit;
+    ++g_nds_force_tier3_misses;
+    return nullptr;
+}
+
     // lookup_static_cached() just proved this exact slot live using these
     // generation values. Copy that validated snapshot into the active guard
     // instead of resolving and rereading the same pages a second time.

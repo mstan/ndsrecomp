@@ -460,6 +460,7 @@ int main(int argc, char** argv) {
     bool interactive = false;
     bool config_explicit = false;
     bool discover_static_misses = false;
+    bool force_tier3 = false;
     bool save_disabled = false;
     // One-shot batch-mode diagnostic: dump the (Wiimmfi M0) network event
     // ring to stderr at the end of a plain (non-serve, non-interactive) run,
@@ -482,6 +483,8 @@ int main(int argc, char** argv) {
             interactive = true;
         } else if (a == "--discover-static-misses") {
             discover_static_misses = true;
+        } else if (a == "--force-tier3") {
+            force_tier3 = true;
         } else if (a == "--rtc-host") {
             // Start the guest RTC at host local time on every boot. Opt-in:
             // the oracle gates compare RTC state, so parity runs keep the
@@ -688,7 +691,8 @@ int main(int argc, char** argv) {
                 "--live-overlay-cache DIR] [--live-overlay-auto] "
                 "[--live-overlay-activation-delay-ms N] "
                 "[--live-overlay-auto-delay-ms N] "
-                "[--live-overlay-auto-cooldown-ms N]\n",
+                "[--live-overlay-auto-cooldown-ms N] "
+                "[--force-tier3 | NDS_FORCE_TIER3=1]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
@@ -1276,6 +1280,23 @@ int main(int argc, char** argv) {
 
     g_discover_static_misses = discover_static_misses;
 
+    // Forced-interpreter selector (beads-yjp.42). Env and flag are equivalent;
+    // env exists because the scenario harnesses launch the runner themselves
+    // and pass the parent environment through. Announce it on stderr: a mode
+    // this expensive must never be entered silently, and the launch log is a
+    // second independent witness alongside dispatch_stats.forced_tier3.
+    if (!force_tier3) {
+        if (const char* value = std::getenv("NDS_FORCE_TIER3"))
+            force_tier3 = (value[0] == '1' && value[1] == '\0');
+    }
+    g_nds_force_tier3 = force_tier3;
+    if (force_tier3) {
+        std::fprintf(stderr,
+                     "[force-tier3] selector ON: all non-BIOS dispatch "
+                     "lookups report a miss; every game and captured-firmware "
+                     "instruction runs through the Tier 3 interpreter on both "
+                     "CPUs. This is a measurement mode and is very slow.\n");
+    }
     const NdsGpu3dRendererPolicy renderer_policy =
         nds_gpu3d_renderer_policy();
     if (renderer_policy == NdsGpu3dRendererPolicy::Invalid) {
