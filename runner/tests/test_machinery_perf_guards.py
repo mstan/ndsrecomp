@@ -32,6 +32,7 @@ RUNTIME_H = ROOT / "recompiler/armv4t/runtime_arm.h"
 RUNTIME_CPP = ROOT / "runner/src/runtime_arm.cpp"
 SHIMS_CPP = ROOT / "runner/src/runtime_abi_shims.cpp"
 IO_CPP = ROOT / "runner/src/io.cpp"
+TIER3_CPP = ROOT / "runner/src/tier3.cpp"
 DEBUG_CPP = ROOT / "runner/src/debug_server.cpp"
 EXPORTS_DEF = ROOT / "runner/src/runtime_exports.def"
 SHARD_TOOL = ROOT / "tools/compile_live_shards.py"
@@ -124,14 +125,23 @@ def main():
     # fast path does not.
     for condition in ("g_cycle_fast_limit_enabled",   # the selector
                       "g_cpu_fast_poll",              # faithful poll mode
-                      "g_yield_poll_hint",            # existing eager hint
                       "g_runtime_break_pc",           # per-PC, not cyclic
                       "g_nds_terminal",
                       "g_deferred_cycles",            # HALT debt owed
                       "active_static_code_changed",   # guest rewrote code
+                      "g_nds_insn_stop",              # exact-index observer
+                      "nds_event_break_hit",          # debug break fired
+                      "nds_cpu_halted",               # resumable sleep
+                      "nds_dma_cpu_stalled",          # DMA owns the bus slot
                       "g_nds_irq_pending_cache"):     # IRQ due next tick
         if condition not in publish:
             fail(f"publish_fast_limit no longer disqualifies on {condition}")
+    # The predicate must NOT depend on g_yield_poll_hint. Tier 3 does not
+    # maintain that flag, so requiring it silently pins the deadline at zero
+    # for every fully interpreted stretch -- measured, before this was fixed.
+    if "g_yield_poll_hint" in publish:
+        fail("publish_fast_limit consults g_yield_poll_hint again; Tier 3 "
+             "does not maintain it and would never get a deadline")
 
     # publish is only ever reached from the faithful scan's all-clear exits.
     slow = body(runtime, "runtime_should_yield_slow")
@@ -174,6 +184,38 @@ def main():
 
     if "runtime_clear_fast_limit" not in body(io, "nds_io_reset"):
         fail("machine reset does not clear the deadline")
+    for fn in ("nds_event_break_arm", "nds_event_break_disarm"):
+        if "runtime_clear_fast_limit" not in body(io, fn):
+            fail(f"{fn} does not clear the deadline; an event break armed "
+                 "from the debug thread would not be seen until the slice "
+                 "boundary")
+
+    # ── 3b. The Tier-3 loop is bounded by the same deadline ──────────────
+    tier3 = TIER3_CPP.read_text(encoding="utf-8", errors="replace")
+    run = body(tier3, "tier3_run")
+    if "g_nds_fast_limit" not in run:
+        fail("the Tier-3 per-instruction loop no longer consults the "
+             "deadline; its five cross-TU exit polls are back per "
+             "interpreted instruction")
+    for guarded, why in (
+            ("poll_exits && nds_event_break_hit", "event break"),
+            ("poll_exits && g_nds_insn_stop", "instruction-anchored stop"),
+            ("poll_after && (nds_cpu_halted", "halt / DMA stall"),
+            ("poll_after && !ic.cpsr.i && nds_irq_pending", "IRQ delivery"),
+            ("poll_after && g_nds_insn_stop", "post-retire stop"),
+            ("poll_after && nds_slice_over", "slice boundary")):
+        if guarded not in run:
+            fail(f"Tier-3 exit poll for {why} is no longer deadline-bounded")
+    # poll_after must be recomputed AFTER the cycle commit, or it would be
+    # stale for exactly the instruction that moved the clock past the limit.
+    commit = run.find("g_runtime_cycles += cyc + runtime_deferred_cycles_take")
+    recompute = run.find("const bool poll_after")
+    if commit < 0 or recompute < 0 or recompute < commit:
+        fail("Tier-3 poll_after is not recomputed after the cycle commit")
+    if "if (poll_after) runtime_publish_fast_limit();" not in run:
+        fail("the Tier-3 loop no longer republishes the deadline after its "
+             "own all-clear scan; only the bank path would arm it and a "
+             "fully interpreted stretch would never get one")
     # Debug-server intervention from another thread.
     if debug.count("runtime_clear_fast_limit()") < 2:
         fail("run_to_pc must clear the deadline when it both sets and clears "

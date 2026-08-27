@@ -1040,8 +1040,20 @@ extern "C" uint32_t runtime_fp_save_file(const char*) { return 0; }
 
 // ── Tick / yield ────────────────────────────────────────────────────────
 namespace {
-// Publish the deadline. Called ONLY from the faithful scan, and only once
-// that scan has established there is nothing to service right now.
+// Publish the deadline. Called only from a faithful scan that has just
+// established there is nothing to service right now — the bank path's
+// runtime_should_yield_slow, and the Tier-3 loop's own exit scan through
+// runtime_publish_fast_limit().
+//
+// It deliberately does NOT consult g_yield_poll_hint. On the bank path the
+// hint is provably zero here (both call sites reach this either inside the
+// hint-clear branch or immediately after clearing it), so the check was
+// always dead; and Tier 3 does not maintain that flag at all, so requiring
+// it would have silently pinned the deadline at zero for every fully
+// interpreted stretch — which is exactly what the first Tier-3 measurement
+// showed. Instead the four conditions the hint stood for that this function
+// could not otherwise see are checked directly below. That makes the
+// predicate self-sufficient and identical for both tiers.
 //
 // The limit is the scheduler's LIVE slice cap and nothing else. That is the
 // dual-CPU safety argument in one line: runtime_should_yield already bounds
@@ -1054,12 +1066,15 @@ namespace {
 void publish_fast_limit() {
     if (!g_cycle_fast_limit_enabled ||      // selector: NDS_CYCLE_FAST_LIMIT=0
         !g_cpu_fast_poll ||                 // faithful full-poll reference mode
-        g_yield_poll_hint ||                // something already wants a scan
         g_runtime_break_pc ||               // per-PC predicate, not cycle-based
         g_nds_terminal ||
         g_cycle_cap == 0u ||                // no slice bound to inherit
         g_deferred_cycles != 0u ||          // tick must commit HALT debt
         active_static_code_changed() ||     // guest rewrote executing code
+        g_nds_insn_stop ||                  // exact-index observer armed
+        nds_event_break_hit() ||            // debug event break already fired
+        nds_cpu_halted(g_nds_active) ||     // resumable hardware sleep
+        nds_dma_cpu_stalled(g_nds_active) ||  // DMA owns this CPU's bus slot
         g_nds_irq_pending_cache[g_nds_active] != 0u) {  // IRQ due at next tick
         g_nds_fast_limit = 0u;
         return;
@@ -1071,6 +1086,14 @@ void publish_fast_limit() {
     ++g_nds_fast_limit_publishes;
 }
 }  // namespace
+
+// Tier 3's entry point to the same publisher. The interpreter loop runs its
+// own equivalent of the faithful scan (event break, instruction stop, halt,
+// DMA stall, IRQ, slice boundary) at the bottom of every iteration; when that
+// scan finds nothing, this arms the deadline so the next iterations can skip
+// the whole set. Without it the deadline is only ever published by the bank
+// path, and a fully interpreted stretch never gets one.
+extern "C" void runtime_publish_fast_limit(void) { publish_fast_limit(); }
 
 extern "C" void runtime_tick_slow(uint32_t cycles) {
     // Generated-code ticks are guest instruction boundaries. Commit any

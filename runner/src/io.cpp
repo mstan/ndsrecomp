@@ -2321,11 +2321,16 @@ void nds_event_break_arm(const char* name, uint64_t target) {
                              std::strcmp(name, "insn9") == 0);
     g_nds_insn_stop = false;
     nds_insn_hook_recompute();
+    // Re-arm site: arming an event break from the debug-server thread must
+    // drop the deadline, or the Tier-3 loop and the bank path would both run
+    // to the slice boundary before noticing the new break.
+    runtime_clear_fast_limit();
 }
 void nds_event_break_disarm() {
     g_brk_ptr = nullptr; g_brk_hit = false;
     g_brk_is_insn = false; g_nds_insn_stop = false;
     nds_insn_hook_recompute();
+    runtime_clear_fast_limit();
 }
 bool nds_event_break_hit() { return g_brk_hit; }
 

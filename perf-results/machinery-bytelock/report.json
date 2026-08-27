@@ -1,6 +1,6 @@
 {
   "exe": "F:\\Projects\\ndsrecomp\\ndsrecomp-interp-perf\\runner\\build-interp-perf\\nds_runner.exe",
-  "exe_sha256": "4bda8e47a78da145132cc3cc2d5e64c6eb5ca22451fa39c32c6c1eaeba9f3740",
+  "exe_sha256": "3ffd55599bd4f228ca72f6cc926bdd859fbc067d4315bca0c4883bcc1410eac3",
   "stops_off": [
     {
       "fb_A": "4584da3d1e8bafa8a3b5390ec37919524f27cd1367eca62a4bfcd4507999fc59",
@@ -576,7 +576,7 @@
         "cyc9": 2131805962,
         "cyc7": 1065902940
       },
-      "fast_limit_publishes": 5744890,
+      "fast_limit_publishes": 5745130,
       "cycle_fast_limit": true,
       "stop": 100000000
     },
@@ -648,7 +648,7 @@
         "cyc9": 2702292593,
         "cyc7": 1351146250
       },
-      "fast_limit_publishes": 7704189,
+      "fast_limit_publishes": 7704441,
       "cycle_fast_limit": true,
       "stop": 200000000
     },
@@ -720,7 +720,7 @@
         "cyc9": 2882640904,
         "cyc7": 1441320422
       },
-      "fast_limit_publishes": 9322320,
+      "fast_limit_publishes": 9322575,
       "cycle_fast_limit": true,
       "stop": 300000000
     },
@@ -792,7 +792,7 @@
         "cyc9": 3060480076,
         "cyc7": 1530240003
       },
-      "fast_limit_publishes": 10919635,
+      "fast_limit_publishes": 10919892,
       "cycle_fast_limit": true,
       "stop": 400000000
     },
@@ -864,7 +864,7 @@
         "cyc9": 3241934932,
         "cyc7": 1620967424
       },
-      "fast_limit_publishes": 12543781,
+      "fast_limit_publishes": 12544043,
       "cycle_fast_limit": true,
       "stop": 500000000
     },
@@ -936,7 +936,7 @@
         "cyc9": 3419574008,
         "cyc7": 1709786982
       },
-      "fast_limit_publishes": 14141398,
+      "fast_limit_publishes": 14141662,
       "cycle_fast_limit": true,
       "stop": 600000000
     },
@@ -1008,7 +1008,7 @@
         "cyc9": 3591568338,
         "cyc7": 1795784114
       },
-      "fast_limit_publishes": 15694588,
+      "fast_limit_publishes": 15694853,
       "cycle_fast_limit": true,
       "stop": 700000000
     }

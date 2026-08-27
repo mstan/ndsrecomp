@@ -31,6 +31,7 @@ using armv4t::Instr;
 // Runtime/scheduler hooks (defined in runtime_arm.cpp).
 extern "C" int  nds_has_bank(uint32_t pc, int thumb);
 extern "C" int  nds_slice_over(void);
+extern "C" void runtime_publish_fast_limit(void);
 extern "C" uint32_t nds_exception_base(void);
 
 namespace {
@@ -261,6 +262,27 @@ void tier3_run(uint32_t /*entry*/) {
         // instruction-set state for subsequent fetches.
         sync_out(ic);
 
+        // Deadline-bounded exit polling (beads-yjp.42 phase 1, Tier-3 half).
+        // Same contract as the generated-bank path: while
+        // g_runtime_cycles < g_nds_fast_limit, NONE of this loop's exit
+        // conditions can be true, so the five cross-TU predicate calls per
+        // interpreted instruction collapse to one compare. See
+        // recompiler/armv4t/runtime_arm.h for the publish rule and the re-arm
+        // sites; the argument here is tighter than on the bank path:
+        //   * nds_slice_over  -- the limit never exceeds g_cycle_cap, which is
+        //     exactly what slice_over compares against.
+        //   * nds_irq_pending -- a nonzero pending cache refuses to publish,
+        //     and irq_recompute (its single funnel) clears the deadline.
+        //   * nds_cpu_halted / nds_dma_cpu_stalled -- both are entered by THIS
+        //     CPU's own store during an interpreted instruction, and both
+        //     entry points (nds_cpu_enter_halt, dma_start) already call
+        //     runtime_request_yield_poll, which zeroes the deadline.
+        //   * nds_event_break_hit / g_nds_insn_stop -- set by brk_check, which
+        //     also calls runtime_request_yield_poll, and armed by
+        //     nds_event_break_arm, which clears the deadline explicitly for
+        //     the cross-thread case.
+        const bool poll_exits = g_runtime_cycles >= g_nds_fast_limit;
+
         // insn7/insn9 anchor reached during interpreted code → stop AT this
         // (not-yet-executed) instruction, symmetric with the bank path's
         // runtime_should_yield check. State is fully in `ic`; sync_out below.
@@ -268,12 +290,12 @@ void tier3_run(uint32_t /*entry*/) {
         // instruction. Finish that instruction (and any immediate IRQ entry),
         // then unwind so run_to_event stops at its exact boundary instead of
         // executing the remainder of the Tier-3 slice.
-        if (nds_event_break_hit()) {
+        if (poll_exits && nds_event_break_hit()) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
         }
-        if (g_nds_insn_stop) {
+        if (poll_exits && g_nds_insn_stop) {
             // Propagate the per-instruction stop through any enclosing static
             // dispatch frames (notably BIOS IRQ -> copied-RAM handler).  A bare
             // break returns normally and lets the interrupted bank execute a
@@ -387,6 +409,11 @@ void tier3_run(uint32_t /*entry*/) {
         // across sleep. Tier 3 commits that debt with the first interpreted
         // instruction, just as a generated bank's runtime_tick() does.
         g_runtime_cycles += cyc + runtime_deferred_cycles_take();
+        // Re-evaluated because this instruction just advanced the clock, and
+        // because anything it did that could need service (a HALTCNT store, a
+        // DMA start, an IRQ raise, an event break) has already zeroed the
+        // deadline through its own re-arm site.
+        const bool poll_after = g_runtime_cycles >= g_nds_fast_limit;
         if (traced) {
             trace_push(ic, 2, pc, in.raw, ic.R[15],
                        static_cast<uint8_t>(r));
@@ -397,8 +424,8 @@ void tier3_run(uint32_t /*entry*/) {
         // guest state and unwind exactly like the generated-bank path; the
         // scheduler will move this instruction's cost into deferred debt and
         // run DMA bus units instead of the CPU until completion.
-        if (nds_cpu_halted(g_nds_active) ||
-            nds_dma_cpu_stalled(g_nds_active)) {
+        if (poll_after && (nds_cpu_halted(g_nds_active) ||
+                           nds_dma_cpu_stalled(g_nds_active))) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
@@ -470,7 +497,7 @@ void tier3_run(uint32_t /*entry*/) {
 
         // Deliver a pending IRQ to the interpreted CPU (vectors to the BIOS
         // handler bank next iteration).
-        if (!ic.cpsr.i && nds_irq_pending(g_nds_active)) {
+        if (poll_after && !ic.cpsr.i && nds_irq_pending(g_nds_active)) {
             const uint32_t target = nds_exception_base() + 0x18u;
             nds_note_irq_accept(g_nds_active, ic.R[15]);
             Interpreter::enter_irq(ic, ic.R[15]);
@@ -488,12 +515,12 @@ void tier3_run(uint32_t /*entry*/) {
         // The retire hook may have reached an exact-index breakpoint during
         // this instruction. Capture the just-retired state before a coincident
         // slice boundary can return through enclosing BIOS/IRQ host frames.
-        if (g_nds_insn_stop) {
+        if (poll_after && g_nds_insn_stop) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
         }
-        if (nds_slice_over()) {
+        if (poll_after && nds_slice_over()) {
             // Tier 3 is often nested under a recompiled BIOS IRQ/vector call.
             // A normal return would resume that stale caller and overwrite the
             // interpreted PC. Preserve the guest state and unwind to the
@@ -502,6 +529,11 @@ void tier3_run(uint32_t /*entry*/) {
             nds_preserve_unwind_state();
             break;
         }
+        // The scan above found nothing to service. Arm the deadline so the
+        // next iterations can skip it entirely. Only from the polled path:
+        // if poll_after was false we did not scan, so we have established
+        // nothing and must not republish.
+        if (poll_after) runtime_publish_fast_limit();
         if (++guard > 50'000'000) {
             sync_out(ic);
             nds_halt("tier3: slice guard (no exit)");

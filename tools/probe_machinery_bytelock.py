@@ -126,6 +126,10 @@ def run_leg(args, enabled: bool, port: int) -> list[dict]:
     ]
     if args.config:
         cmd += ["--config", str(args.config)]
+    # --force-tier3 makes this the byte-lock for the Tier-3 half of the
+    # deadline: every non-BIOS instruction is interpreted, so the loop's
+    # deadline-bounded exit polls are what is being compared.
+    cmd += list(args.runner_arg)
     log = args.output / f"leg-{'on' if enabled else 'off'}.log"
     args.output.mkdir(parents=True, exist_ok=True)
     with open(log, "wb") as handle:
@@ -175,6 +179,8 @@ def main() -> int:
     p.add_argument("--step", type=int, default=100_000_000)
     p.add_argument("--count", type=int, default=7)
     p.add_argument("--timeout", type=float, default=3600.0)
+    p.add_argument("--runner-arg", action="append", default=[],
+                   help="extra nds_runner argument (e.g. --force-tier3)")
     p.add_argument("--output", type=pathlib.Path,
                    default=ROOT / "perf-results" / "machinery-bytelock")
     args = p.parse_args()
