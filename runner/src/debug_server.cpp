@@ -23,6 +23,7 @@
 #include "gpu3d.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
@@ -1241,6 +1242,11 @@ std::string handle(const std::string& line) {
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
+    // Cost companion to dispatch_stats: same snapshot-twice-and-subtract
+    // model, answering how expensive each class is rather than how often it
+    // ran. Cache-path `events` here is the dispatcher-only population; the
+    // all-consumers lookup totals are in dispatch_stats.
+    if (cmd == "dispatch_timing") return nds_dispatch_timing_json();
     if (cmd == "cart_save_info") {
         const uint8_t* data = nullptr;
         uint32_t size = 0;
