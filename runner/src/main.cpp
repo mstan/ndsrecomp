@@ -1297,6 +1297,19 @@ int main(int argc, char** argv) {
                      "instruction runs through the Tier 3 interpreter on both "
                      "CPUs. This is a measurement mode and is very slow.\n");
     }
+
+    // Deadline-bounded per-instruction machinery selector (beads-yjp.42).
+    // NDS_CYCLE_FAST_LIMIT=0 runs the faithful path in the SAME binary; it is
+    // the A leg of the A/B and the standing LLE-floor escape hatch. Announced
+    // for the same reason force-tier3 is: a leg must never be silent.
+    if (const char* value = std::getenv("NDS_CYCLE_FAST_LIMIT")) {
+        if (value[0] == '0' && value[1] == '\0')
+            std::fprintf(stderr,
+                         "[cycle-fast-limit] selector OFF: every "
+                         "runtime_should_yield / runtime_tick takes the "
+                         "faithful unbounded path.\n");
+    }
+
     const NdsGpu3dRendererPolicy renderer_policy =
         nds_gpu3d_renderer_policy();
     if (renderer_policy == NdsGpu3dRendererPolicy::Invalid) {

@@ -31,6 +31,8 @@ EXPORTS
     g_insn_count DATA
     g_insn_hook_armed DATA
     g_nds_active DATA
+    g_nds_fast_limit DATA
+    g_nds_unwinding DATA
     g_runtime_break_pc DATA
     g_runtime_cycles DATA
     g_runtime_deep_trace DATA
@@ -41,6 +43,7 @@ EXPORTS
     runtime_call_should_return
     runtime_call_stack_depth
     runtime_call_stack_restore
+    runtime_clear_fast_limit
     runtime_clz
     runtime_code_cycles
     runtime_coproc_cdp
@@ -79,10 +82,12 @@ EXPORTS
     runtime_restore_cpsr_from_spsr
     runtime_set_deep_trace
     runtime_should_yield
+    runtime_should_yield_slow
     runtime_shutdown
     runtime_slice_yield
     runtime_swi
     runtime_tick
+    runtime_tick_slow
     runtime_trace_copy_recent
     runtime_trace_dump_recent
     runtime_trace_event

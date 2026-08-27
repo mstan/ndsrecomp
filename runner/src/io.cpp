@@ -24,6 +24,10 @@
 // Runner-only rare-condition hint owned by runtime_arm.cpp. Generated banks
 // keep calling the unchanged runtime_should_yield ABI.
 extern "C" void runtime_request_yield_poll(void);
+// Re-arm for the per-instruction cycle deadline (beads-yjp.42). Narrower than
+// the hint: it forces the next poll back onto the faithful path without
+// waking the hint's other consumers.
+extern "C" void runtime_clear_fast_limit(void);
 
 uint32_t g_nds_irq_pending_cache[2] = {0, 0};
 
@@ -60,6 +64,14 @@ inline void irq_recompute(int cpu) {
     cpu &= 1;
     g_nds_irq_pending_cache[cpu] =
         (g_ime[cpu] & 1u) ? (g_ie[cpu] & g_if[cpu]) : 0u;
+    // RE-ARM SITE for the per-instruction cycle deadline (beads-yjp.42).
+    // This is the SINGLE funnel for the pending cache -- every IF/IE/IME
+    // write and every nds_raise_irq/nds_clear_irq reaches it -- and the fast
+    // tick path does not look at the cache, so a newly pending IRQ must drop
+    // the deadline or its delivery boundary would slip. Cleared
+    // unconditionally (including on a clear-to-zero) so the next full scan
+    // republishes from live state rather than this function guessing.
+    runtime_clear_fast_limit();
 }
 uint16_t g_exmemcnt[2] = {0x4000u, 0x4000u}; // 0x204, shared ownership bits
 uint16_t g_powercontrol7 = 0x0001u;    // 0x304 POWCNT2 (sound on, Wi-Fi off)
@@ -1765,6 +1777,7 @@ void nds_io_reset() {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
         g_ime[i] = 0; g_ie[i] = 0; g_if[i] = 0; g_haltcnt[i] = 0;
         g_nds_irq_pending_cache[i] = 0;
+        runtime_clear_fast_limit();   // re-arm site: machine reset
         g_cpu_halted[i] = false;
         g_halt_entry_cycle[i] = 0;
         g_dispstat[i] = 0;

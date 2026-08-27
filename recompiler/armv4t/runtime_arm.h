@@ -563,21 +563,96 @@ void runtime_insn_slow(void);      // armed-path payload; no counter bump
 uint32_t runtime_fp_save_file(const char* path);
 uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                    uint32_t max_entries);
+// ── Deadline-bounded per-instruction machinery (beads-yjp.42 phase 1) ──
+//
+// g_nds_fast_limit is the EARLIEST value of g_runtime_cycles at which the
+// active CPU could need any service at all: the current slice / rendezvous
+// cap the scheduler already enforces, and nothing later. While
+//
+//     g_runtime_cycles < g_nds_fast_limit
+//
+// is true, runtime_should_yield() cannot return true and runtime_tick()
+// cannot deliver an IRQ, so both reduce to a compare (plus an add) with NO
+// event derivation at all. At or over the limit the ORIGINAL, unchanged
+// faithful path runs — nothing is approximated, only skipped when it is
+// provably a no-op.
+//
+// ZERO MEANS "ALWAYS TAKE THE FAITHFUL PATH". Every site that could make a
+// service condition true earlier than a published limit sets it back to
+// zero (runtime_request_yield_poll / runtime_clear_fast_limit); the limit is
+// republished only from inside the full faithful scan, once that scan has
+// established there is nothing to do. A too-small limit is only slow, never
+// wrong, so every ambiguous case errs to zero.
+//
+// The limit NEVER exceeds the scheduler's live slice cap, so a longer inline
+// run can never carry one CPU past a point the other could observe — the
+// dual-CPU rendezvous bound is exactly the bound it already was.
+//
+// NDS_CYCLE_FAST_LIMIT=0 keeps the limit pinned at zero for the whole
+// process, so the same binary runs the faithful path end to end.
+extern unsigned long long g_nds_fast_limit;
+// Cumulative guest-cycle clock (full comment below at its canonical decl).
+extern unsigned long long g_runtime_cycles;
+// Host-stack unwind flag, published as data so the per-instruction check is
+// a load rather than a cross-TU call. Written only by the runtime.
+extern unsigned char g_nds_unwinding;
+
+// Faithful out-of-line paths. These are the ORIGINAL runtime_tick /
+// runtime_should_yield bodies, unmodified except for the limit republish at
+// the "nothing to do" exit.
+void runtime_tick_slow(uint32_t cycles);
+bool runtime_should_yield_slow(void);
+// Force the next per-instruction poll back onto the faithful path.
+void runtime_clear_fast_limit(void);
+
+#ifdef NDS_RUNTIME_ABI_SHIMS
+// runner/src/runtime_abi_shims.cpp builds the exported out-of-line symbols
+// that live shards compiled before this change still import by name. Their
+// bodies are the inline bodies below, verbatim.
 void runtime_tick(uint32_t cycles);
+bool runtime_should_yield(void);
+bool runtime_unwinding(void);
+#else
+// ALWAYS_INLINE, not merely `static inline`. Measured on the MPH ARM9 banks:
+// with plain `static inline`, GCC -O3 declined to inline these into the
+// generated bank bodies and emitted a LOCAL out-of-line copy instead
+// (nm showed `t runtime_tick` calling `U runtime_tick_slow` across 2,186
+// call sites in one bank). The bodies are three instructions; the whole
+// point of the deadline is to remove the call, so the inline-unit-growth
+// heuristic must be overridden rather than trusted. The heuristic is
+// reasonable in general -- these bank functions are enormous -- which is
+// exactly why it has to be told about this case explicitly.
+#if defined(__GNUC__)
+#define NDS_MACHINERY_INLINE static inline __attribute__((always_inline))
+#else
+#define NDS_MACHINERY_INLINE static inline
+#endif
+NDS_MACHINERY_INLINE void runtime_tick(uint32_t cycles) {
+    const unsigned long long next = g_runtime_cycles + cycles;
+    if (next < g_nds_fast_limit) { g_runtime_cycles = next; return; }
+    runtime_tick_slow(cycles);
+}
 // Per-instruction unwind signal (terminal halt only — dispatch miss /
 // unlowered op). Checked at the top of every emitted instruction.
-bool runtime_should_yield(void);
+NDS_MACHINERY_INLINE bool runtime_should_yield(void) {
+    if (g_runtime_cycles < g_nds_fast_limit) return false;
+    return runtime_should_yield_slow();
+}
+// True while the host stack is unwinding for a slice-yield (not a real
+// guest return). The BL/BLX return-check uses this to PRESERVE the pending
+// return-push instead of cancelling it — the call-return stack is saved/
+// restored per-CPU across the preemption, so the guest return survives.
+NDS_MACHINERY_INLINE bool runtime_unwinding(void) {
+    return g_nds_unwinding != 0u;
+}
+#endif
+
 // Cooperative slice-yield signal, checked ONLY at backward branches (loop
 // tops, which are dispatch entries). Lets the scheduler preempt a guest
 // spin to run the other core, with a clean re-dispatch on resume. Returns
 // 0 in single-CPU / non-scheduled contexts. When it returns true it also
 // arms runtime_unwinding() for the duration of the unwind.
 bool runtime_slice_yield(void);
-// True while the host stack is unwinding for a slice-yield (not a real
-// guest return). The BL/BLX return-check uses this to PRESERVE the pending
-// return-push instead of cancelling it — the call-return stack is saved/
-// restored per-CPU across the preemption, so the guest return survives.
-bool runtime_unwinding(void);
 // Cumulative guest-cycle clock. Incremented by runtime_tick on EVERY tick
 // (per-instruction exec ticks AND halt-pump chunks), so it is the authoritative
 // total-cycle count — unlike runtime.cpp's `cycles_elapsed`, which only tallied

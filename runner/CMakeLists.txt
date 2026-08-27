@@ -334,6 +334,10 @@ target_include_directories(nds_armv4t PUBLIC
 
 add_executable(nds_runner
     src/runtime_arm.cpp
+    # Out-of-line runtime_tick / runtime_should_yield / runtime_unwinding for
+    # live shards published before those became header inlines. Must stay a
+    # separate TU: it defines NDS_RUNTIME_ABI_SHIMS to suppress the inlines.
+    src/runtime_abi_shims.cpp
     src/live_overlay.cpp
     src/battery_save.cpp
     src/firmware_state.cpp
@@ -709,6 +713,15 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
 
   if(Python3_Interpreter_FOUND)
+    # The deadline-bounded per-instruction machinery has no value anyone can
+    # assert; its correctness is a set of structural properties (fast path
+    # present and slice-bounded, every re-arm site zeroing it, faithful path
+    # still selectable, no divergent shard semantics). Each is one named
+    # assertion in the test.
+    add_test(
+        NAME machinery_perf_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_machinery_perf_guards.py")
     # Two runners may share one live-overlay cache directory, so the shard
     # index read-modify-write has to survive concurrent writers.
     add_test(

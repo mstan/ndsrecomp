@@ -1,0 +1,485 @@
+{
+  "build": {
+    "adaptive_widescreen": "from game.toml",
+    "boot": "direct",
+    "compute_readback_overlap": true,
+    "config": "F:\\Projects\\ndsrecomp\\metroidprimehuntersrecomp-mph-perf\\game.toml",
+    "discover_static_misses": false,
+    "executable": "F:\\Projects\\ndsrecomp\\ndsrecomp-interp-perf\\runner\\build-interp-perf\\nds_runner.exe",
+    "executable_sha256": "c24130be995a69b1356e272025ff3783c0ea8720947a8dc039971595640d7966",
+    "framework_revision": "3fd2fc747fbca0f1142f4a8bb3f36883920af87f",
+    "framework_root": "F:\\Projects\\ndsrecomp\\ndsrecomp-mph-perf",
+    "gpu3d_threaded": true,
+    "profiled": false,
+    "renderer": "auto",
+    "rom": "F:\\Projects\\ndsrecomp\\metroidprimehuntersrecomp\\Metroid Prime Hunters.nds",
+    "save_source": null,
+    "screen_layout": "from game.toml",
+    "target_revision": "7e472a50a23394a0c017b9aa1bbeccc64e9e30d3"
+  },
+  "created_local": "20260826-193857",
+  "host": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]"
+  },
+  "route": {
+    "description": "Adventure file A into Celestial Archives gameplay",
+    "hold_frames": 3,
+    "hold_key": "up",
+    "insn9_phases": [
+      {
+        "cumulative_insn9": 5000000,
+        "label": "adventure_settle"
+      },
+      {
+        "cumulative_insn9": 40000000,
+        "label": "adventure_walk"
+      },
+      {
+        "cumulative_insn9": 125000000,
+        "label": "adventure_steady"
+      }
+    ],
+    "name": "adventure",
+    "phase_timeout_seconds": 600.0,
+    "scenario": "adventure_start.json",
+    "scenario_actions": [
+      {
+        "kind": "touch",
+        "x": 84,
+        "y": 92
+      },
+      {
+        "frames": 180,
+        "kind": "wait"
+      },
+      {
+        "kind": "touch",
+        "x": 48,
+        "y": 80
+      },
+      {
+        "key": "a",
+        "kind": "key"
+      },
+      {
+        "frames": 180,
+        "kind": "wait"
+      },
+      {
+        "kind": "touch",
+        "x": 48,
+        "y": 80
+      },
+      {
+        "key": "a",
+        "kind": "key"
+      },
+      {
+        "frames": 300,
+        "kind": "wait"
+      },
+      {
+        "kind": "touch",
+        "x": 236,
+        "y": 184
+      },
+      {
+        "frames": 600,
+        "kind": "wait"
+      },
+      {
+        "frames": 800,
+        "kind": "wait"
+      },
+      {
+        "key": "a",
+        "kind": "key"
+      },
+      {
+        "frames": 600,
+        "kind": "wait"
+      }
+    ],
+    "settle_frames": 45,
+    "title_tap": [
+      128,
+      96
+    ],
+    "title_vblank": 7800,
+    "vblank_windows": []
+  },
+  "runs": [
+    {
+      "final_event_counts": {
+        "cyc7": 6410254177,
+        "cyc9": 12820508340,
+        "dma_done": 0,
+        "fifo7to9": 46759,
+        "fifo9to7": 6246,
+        "insn7": 244588224,
+        "insn9": 4198766401,
+        "ipcsync_w": 6912,
+        "irq7": 160623,
+        "irq9": 76829,
+        "soundbias_first": 0,
+        "soundbias_last": 0,
+        "soundbias_w": 0,
+        "spi_w": 19292,
+        "timer_ovf": 155820,
+        "vblank7": 11428,
+        "vblank9": 11422
+      },
+      "final_framebuffer_sha256": {
+        "A": "735ad269a2083277f91deb66c701e774626d3d3f1c97fd905c1d90086fc5b2f7",
+        "A_size": "256x192",
+        "B": "3c5c6e62b2153d15e7e703dc3288c7ab5aeb89b803630ae7bab2edc8583126e4",
+        "B_size": "256x192"
+      },
+      "mode": "plain",
+      "phases": [
+        {
+          "average_frame_ms": 16.61624716981132,
+          "dispatch_delta": {
+            "arm7": {
+              "cache_hit": 903821,
+              "cache_hit_absent": 0,
+              "cache_slow_lookup": 2009,
+              "crs_hit": 47914,
+              "crs_miss": 4227,
+              "crs_push": 48337,
+              "crs_scan_iters": 295947,
+              "dispatch_exchange": 11682,
+              "dispatch_slice_yield": 25077,
+              "dispatch_total": 930907,
+              "exception_dispatch": 2622,
+              "literal_branch": 83435,
+              "literal_call": 46765,
+              "literal_fallthrough": 720971,
+              "resume_dispatch": 62500
+            },
+            "arm9": {
+              "cache_hit": 731002,
+              "cache_hit_absent": 10125,
+              "cache_slow_lookup": 10437,
+              "crs_hit": 193193,
+              "crs_miss": 848,
+              "crs_push": 193580,
+              "crs_scan_iters": 198138,
+              "dispatch_exchange": 9815,
+              "dispatch_slice_yield": 17522,
+              "dispatch_total": 758692,
+              "exception_dispatch": 160,
+              "literal_branch": 139824,
+              "literal_call": 187299,
+              "literal_fallthrough": 229907,
+              "resume_dispatch": 191245
+            },
+            "cycle_fast_limit": 0,
+            "fast_limit_publishes": 150085,
+            "forced_tier3": 0,
+            "forced_tier3_misses": 0
+          },
+          "end_event_counts": {
+            "cyc7": 6406332840,
+            "cyc9": 12812665680,
+            "dma_done": 0,
+            "fifo7to9": 46748,
+            "fifo9to7": 6241,
+            "insn7": 244397391,
+            "insn9": 4198023617,
+            "ipcsync_w": 6912,
+            "irq7": 160551,
+            "irq9": 76772,
+            "soundbias_first": 0,
+            "soundbias_last": 0,
+            "soundbias_w": 0,
+            "spi_w": 19280,
+            "timer_ovf": 155759,
+            "vblank7": 11421,
+            "vblank9": 11415
+          },
+          "end_framebuffer_sha256": {
+            "A": "058573cfee19d41f23f7fc07b55377c2437ca98bfbd0e131bba148c37c93cea1",
+            "A_size": "256x192",
+            "B": "3c5c6e62b2153d15e7e703dc3288c7ab5aeb89b803630ae7bab2edc8583126e4",
+            "B_size": "256x192"
+          },
+          "fps": 60.18206095398105,
+          "frames": 53,
+          "gpu2d_ms_per_frame": {
+            "direct_overlay": 0.08027358490566038,
+            "engine_a": 0.005086792452830188,
+            "engine_b": 0.2825207547169811,
+            "obj": 0.06187735849056604,
+            "render": 0.28760754716981135
+          },
+          "gpu3d_ms_per_frame": {
+            "compute_map": 0.0,
+            "compute_submit": 0.0,
+            "compute_sync": 0.0,
+            "getline": 0.0,
+            "vcount144": 0.00019811320754716983,
+            "vcount215": 0.10056603773584905
+          },
+          "insn9": 4713822,
+          "label": "adventure_settle",
+          "phase_ms_per_frame": {
+            "audio_drain": 10.802758490566038,
+            "emu": 5.295256603773585,
+            "present": 0.495888679245283,
+            "unaccounted": 0.022343396226415093
+          },
+          "present_ms_per_frame": {
+            "adaptive": 9.811320754716981e-05,
+            "draw": 0.026252830188679244,
+            "swap": 0.4383698113207547,
+            "upload": 0.02971320754716981
+          },
+          "raw_front_delta": {
+            "active": 0,
+            "adaptive_ticks": 52,
+            "drain_ticks": 5725462,
+            "draw_ticks": 13914,
+            "emu_ticks": 2806486,
+            "frames": 53,
+            "freq": 0,
+            "now_ticks": 8806611,
+            "present_ticks": 262821,
+            "real_presents": 53,
+            "swap_ticks": 232336,
+            "synthetic_presents": 0,
+            "underruns": 0,
+            "upload_ticks": 15748
+          },
+          "raw_profile_delta": {
+            "dispatch": {
+              "arm7": {
+                "cache_hit": 903821,
+                "cache_hit_absent": 0,
+                "cache_slow_lookup": 2009,
+                "crs_hit": 47914,
+                "crs_miss": 4227,
+                "crs_push": 48337,
+                "crs_scan_iters": 295947,
+                "dispatch_exchange": 11682,
+                "dispatch_slice_yield": 25077,
+                "dispatch_total": 930907,
+                "exception_dispatch": 2622,
+                "literal_branch": 83435,
+                "literal_call": 46765,
+                "literal_fallthrough": 720971,
+                "resume_dispatch": 62500
+              },
+              "arm9": {
+                "cache_hit": 731002,
+                "cache_hit_absent": 10125,
+                "cache_slow_lookup": 10437,
+                "crs_hit": 193193,
+                "crs_miss": 848,
+                "crs_push": 193580,
+                "crs_scan_iters": 198138,
+                "dispatch_exchange": 9815,
+                "dispatch_slice_yield": 17522,
+                "dispatch_total": 758692,
+                "exception_dispatch": 160,
+                "literal_branch": 139824,
+                "literal_call": 187299,
+                "literal_fallthrough": 229907,
+                "resume_dispatch": 191245
+              },
+              "cycle_fast_limit": 0,
+              "fast_limit_publishes": 150085,
+              "forced_tier3": 0,
+              "forced_tier3_misses": 0
+            },
+            "gpu2d": {
+              "direct_class_engine_a_ns": {
+                "capture": 0,
+                "center_native": 0,
+                "disabled": 0,
+                "display_mode": 0,
+                "engine_off": 0,
+                "extra_bg": 0,
+                "force_blank": 0,
+                "force_cpu": 0,
+                "no_bg0_3d": 0,
+                "render_xpos": 0,
+                "renderer_view": 0,
+                "screen_route": 0,
+                "supported": 269600,
+                "width": 0,
+                "windows": 0
+              },
+              "direct_class_frames": {
+                "capture": 0,
+                "center_native": 0,
+                "disabled": 0,
+                "display_mode": 0,
+                "engine_off": 0,
+                "extra_bg": 0,
+                "force_blank": 0,
+                "force_cpu": 0,
+                "no_bg0_3d": 0,
+                "render_xpos": 0,
+                "renderer_view": 0,
+                "screen_route": 0,
+                "supported": 53,
+                "width": 0,
+                "windows": 0
+              },
+              "direct_class_transitions": 0,
+              "direct_extra_bg_mask_engine_a_ns": {
+                "0": 0,
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0,
+                "6": 0,
+                "7": 0
+              },
+              "direct_extra_bg_mask_frames": {
+                "0": 0,
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0,
+                "6": 0,
+                "7": 0
+              },
+              "direct_extra_bg_mode_frames": {
+                "0": 0,
+                "1": 0,
+                "2": 0,
+                "3": 0,
+                "4": 0,
+                "5": 0,
+                "6": 0,
+                "7": 0
+              },
+              "direct_extra_effect_frames": {
+                "0": 0,
+                "1": 0,
+                "2": 0,
+                "3": 0
+              },
+              "direct_extra_master_bright_frames": {
+                "0": 0,
+                "1": 0,
+                "2": 0,
+                "3": 0
+              },
+              "direct_frames": 53,
+              "direct_overlay_ns": 4254500,
+              "engine_a_ns": 269600,
+              "engine_b_ns": 14973600,
+              "hd_frames": 0,
+              "hd_presented": 0,
+              "obj_ns": 3279500,
+              "render_ns": 15243200,
+              "scanlines": 10176
+            },
+            "gpu3d": {
+              "compute_map_calls": 0,
+              "compute_map_ns": 0,
+              "compute_submit_calls": 0,
+              "compute_submit_ns": 0,
+              "compute_sync_calls": 0,
+              "compute_sync_ns": 0,
+              "getline_calls": 0,
+              "getline_ns": 0,
+              "vcount144_calls": 53,
+              "vcount144_ns": 10500,
+              "vcount215_calls": 53,
+              "vcount215_ns": 5330000
+            },
+            "sched": {
+              "arm7_ns": 72000,
+              "arm9_ns": 167200,
+              "crs_words": 1586007,
+              "devices_ns": 91200,
+              "display_ns": 21200,
+              "next_event_ns": 22700,
+              "rounds": 233479,
+              "rtc_ns": 8400,
+              "sampled_round_ns": 380400,
+              "sampled_rounds": 232,
+              "spu_ns": 13700,
+              "switch_ns": 1700,
+              "switches": 24277,
+              "sysev_ns": 10600,
+              "wifi_ns": 9100
+            },
+            "static_coverage": {
+              "clean_ram_rejects7": 0,
+              "clean_ram_rejects9": 0,
+              "tier3_entries7": 0,
+              "tier3_entries9": 899,
+              "tier3_insns7": 0,
+              "tier3_insns9": 9899
+            }
+          },
+          "requested_insn9": 5000000,
+          "scheduler_sample_share": {
+            "arm7": 0.1892744479495268,
+            "arm9": 0.4395373291272345,
+            "devices": 0.23974763406940064,
+            "display": 0.05573080967402734,
+            "next_event": 0.05967402733964248,
+            "rtc": 0.022082018927444796,
+            "spu": 0.03601472134595163,
+            "switch": 0.004468980021030494,
+            "sysev": 0.02786540483701367,
+            "wifi": 0.02392218717139853
+          },
+          "seconds": 0.8806611,
+          "tier3_delta": {
+            "clean_ram_rejects7": 0,
+            "clean_ram_rejects9": 0,
+            "tier3_entries7": 0,
+            "tier3_entries9": 899,
+            "tier3_insns7": 0,
+            "tier3_insns9": 9899
+          },
+          "underruns": 0,
+          "vblank9": 48
+        }
+      ],
+      "pid": 54564,
+      "repetition": 1,
+      "returncode": 0,
+      "route": "adventure",
+      "valid": true
+    }
+  ],
+  "schema": 1,
+  "summary": {
+    "discarded_runs": 0,
+    "overall_fps_values": [
+      60.18206095398105
+    ],
+    "overall_max_fps": 60.18206095398105,
+    "overall_median_fps": 60.18206095398105,
+    "overall_min_fps": 60.18206095398105,
+    "phases": [
+      {
+        "fps_values": [
+          60.18206095398105
+        ],
+        "label": "adventure_settle",
+        "max_fps": 60.18206095398105,
+        "median_emu_ms_per_frame": 5.295256603773585,
+        "median_fps": 60.18206095398105,
+        "median_frame_ms": 16.61624716981132,
+        "median_present_ms_per_frame": 0.495888679245283,
+        "min_fps": 60.18206095398105,
+        "total_underruns": 0
+      }
+    ],
+    "run_count": 1
+  },
+  "title": "Metroid Prime Hunters"
+}

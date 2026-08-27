@@ -38,6 +38,11 @@
 // ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
 NdsDispatchStats g_nds_dispatch_stats[2] = {};
 
+// Deadline-bounded machinery selector state (beads-yjp.42). Defined here so
+// the stats JSON below can report it; the mechanism itself is further down.
+namespace { bool g_cycle_fast_limit_enabled = true; }
+unsigned long long g_nds_fast_limit_publishes = 0;
+
 std::string nds_dispatch_stats_json() {
     std::string out = "{";
     const char* cpus[2] = {"arm9", "arm7"};
@@ -65,11 +70,6 @@ std::string nds_dispatch_stats_json() {
             ",\"crs_miss\":" + std::to_string(s.crs_miss) +
             ",\"crs_scan_iters\":" + std::to_string(s.crs_scan_iters) + "}";
     }
-    out += "}";
-    return out;
-}
-
-// ── Globals the ABI exposes ─────────────────────────────────────────────
     // Selector state, so a harness can VERIFY the tier it believes it is
     // measuring instead of assuming it. forced_tier3_misses is the proof the
     // selector actually converted lookups, not merely that a flag was set.
@@ -77,6 +77,17 @@ std::string nds_dispatch_stats_json() {
         (g_nds_force_tier3 ? "true" : "false") +
         ",\"forced_tier3_misses\":" +
         std::to_string(g_nds_force_tier3_misses);
+    // Same idea for the deadline-bounded machinery selector: the flag AND a
+    // counter proving deadlines were actually published (beads-yjp.42).
+    out += std::string(",\"cycle_fast_limit\":") +
+        (g_cycle_fast_limit_enabled ? "true" : "false") +
+        ",\"fast_limit_publishes\":" +
+        std::to_string(g_nds_fast_limit_publishes);
+    out += "}";
+    return out;
+}
+
+// ── Globals the ABI exposes ─────────────────────────────────────────────
 extern "C" ArmCpuState g_cpu = {};
 extern "C" unsigned long long g_runtime_cycles = 0;
 // On by default: the recompiled banks gate their per-instruction hook on this,
@@ -90,6 +101,17 @@ NdsCpu      g_nds_active = NDS_ARM9;
 bool        g_nds_terminal = false;
 const char* g_nds_halt_reason = nullptr;
 bool        g_discover_static_misses = false;
+bool        g_nds_force_tier3 = false;
+unsigned long long g_nds_force_tier3_misses = 0;
+
+// Deadline-bounded per-instruction machinery (beads-yjp.42 phase 1).
+// Contract and rationale: recompiler/armv4t/runtime_arm.h. Zero = "every
+// per-instruction poll takes the faithful path", which is both the initial
+// state and the state every re-arm site restores.
+extern "C" unsigned long long g_nds_fast_limit = 0;
+// The host-stack unwind flag, promoted from a file-local bool to exported
+// data so runtime_unwinding() is a load in the caller instead of a call.
+extern "C" unsigned char g_nds_unwinding = 0;
 
 // ── Per-CPU dispatch registration ───────────────────────────────────────
 // DispatchEntry is declared in state.h (layout-matches the generated table).
@@ -101,8 +123,6 @@ struct DispatchBank {
 };
 struct CpuCtx {
     std::vector<DispatchBank> banks;
-bool        g_nds_force_tier3 = false;
-unsigned long long g_nds_force_tier3_misses = 0;
     // Flat candidate index across all immutable and live banks. Entries with
     // the same (address,state) remain registration-ordered so lookup can walk
     // an exact identity chain and choose the newest matching generation
@@ -252,6 +272,24 @@ std::vector<uint64_t> g_discovery_seen;
 uint32_t g_yield_poll_hint = 1u;
 bool g_cpu_fast_poll = true;
 
+// Deadline-bounded per-instruction machinery (beads-yjp.42 phase 1). See the
+// contract in recompiler/armv4t/runtime_arm.h. NDS_CYCLE_FAST_LIMIT=0 pins
+// the limit at zero for the process, so the SAME BINARY runs the faithful
+// path end to end (the one-binary selector rule in
+// docs/host_optimization_strategy.md); =1 (default) is the normal policy.
+bool configured_cycle_fast_limit() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_CYCLE_FAST_LIMIT");
+        if (!value || (value[0] == '1' && value[1] == '\0')) return true;
+        if (value[0] == '0' && value[1] == '\0') return false;
+        std::fprintf(stderr,
+                     "invalid NDS_CYCLE_FAST_LIMIT value (expected 0 or 1); "
+                     "using the faithful unbounded path\n");
+        return false;
+    }();
+    return enabled;
+}
+
 // ARM9 content-validated banks have no direct C-to-C calls: every body is
 // entered through runtime_dispatch. Let a generated body return its adjacent
 // fallthrough target to that dispatch invocation instead of recursively
@@ -275,7 +313,14 @@ struct TailDispatchScope {
     ~TailDispatchScope() { g_tail_dispatch = state.saved; }
 };
 
-void request_yield_poll() { g_yield_poll_hint = 1u; }
+// RE-ARM FUNNEL. Every site that can make a per-instruction service condition
+// true earlier than a previously published deadline routes through here (or
+// through runtime_clear_fast_limit below), and both drop the limit to zero so
+// the very next poll runs the full faithful scan and republishes.
+void request_yield_poll() {
+    g_yield_poll_hint = 1u;
+    g_nds_fast_limit = 0u;
+}
 
 bool configured_cpu_fast_poll() {
     static const bool enabled = [] {
@@ -478,6 +523,22 @@ const CachedStaticLookup* lookup_static_cached_impl(const CpuCtx& c,
     return hit ? &slot : nullptr;
 }
 
+// Single dispatch chokepoint. Both consumers -- runtime_dispatch (native
+// entry) and nds_has_bank (Tier 3's per-instruction takeover poll) -- go
+// through here, on both CPUs, so one branch covers the whole selector.
+//
+// The forced miss is applied AFTER the real lookup, not instead of it. Short-
+// circuiting ahead of the cache would delete the very per-instruction poll
+// cost the campaign exists to measure and would report a flattering number
+// for a path no player ever runs. The lookup runs, the result is discarded.
+const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
+                                               bool thumb) {
+    const CachedStaticLookup* hit = lookup_static_cached_impl(c, pc, thumb);
+    if (!g_nds_force_tier3 || !hit || static_bios_pc(pc)) return hit;
+    ++g_nds_force_tier3_misses;
+    return nullptr;
+}
+
 bool arm_static_guard(const NdsStaticValidation* validation,
                       StaticExecutionGuard& guard) {
     guard = {};
@@ -523,22 +584,6 @@ bool cached_static_guard(const CachedStaticLookup& cached,
                          StaticExecutionGuard& guard) {
     guard = {};
     if (!cached.validation) return true;
-// Single dispatch chokepoint. Both consumers -- runtime_dispatch (native
-// entry) and nds_has_bank (Tier 3's per-instruction takeover poll) -- go
-// through here, on both CPUs, so one branch covers the whole selector.
-//
-// The forced miss is applied AFTER the real lookup, not instead of it. Short-
-// circuiting ahead of the cache would delete the very per-instruction poll
-// cost the campaign exists to measure and would report a flattering number
-// for a path no player ever runs. The lookup runs, the result is discarded.
-const CachedStaticLookup* lookup_static_cached(const CpuCtx& c, uint32_t pc,
-                                               bool thumb) {
-    const CachedStaticLookup* hit = lookup_static_cached_impl(c, pc, thumb);
-    if (!g_nds_force_tier3 || !hit || static_bios_pc(pc)) return hit;
-    ++g_nds_force_tier3_misses;
-    return nullptr;
-}
-
     // lookup_static_cached() just proved this exact slot live using these
     // generation values. Copy that validated snapshot into the active guard
     // instead of resolving and rereading the same pages a second time.
@@ -631,6 +676,12 @@ bool bracket_static_range(const DispatchEntry* table, unsigned len,
 }  // namespace
 
 extern "C" void runtime_request_yield_poll(void) { request_yield_poll(); }
+
+// Narrow re-arm for sites that must invalidate the deadline but have no
+// reason to force the hint's other consumers (io.cpp's irq_recompute is the
+// motivating case: an IRQ that becomes pending must be delivered at the next
+// instruction boundary, and the fast tick path does not look at it).
+extern "C" void runtime_clear_fast_limit(void) { g_nds_fast_limit = 0u; }
 
 extern "C" void runtime_note_code_write(void) {
     // beads-yjp.28: every guest RAM write funnels through here -- the slow bus
@@ -846,12 +897,18 @@ extern "C" void runtime_hle_profile_end(
 #endif
 }
 
-extern "C" void nds_set_cycle_cap(unsigned long long cap) { g_cycle_cap = cap; }
+extern "C" void nds_set_cycle_cap(unsigned long long cap) {
+    g_cycle_cap = cap;
+    g_nds_fast_limit = 0u;      // the deadline is derived from the cap
+}
 extern "C" void nds_reschedule_slice(unsigned long long system_deadline) {
     const unsigned long long cpu_deadline =
         (g_nds_active == NDS_ARM9) ? (system_deadline << 1u) : system_deadline;
-    if (g_cycle_cap == 0 || cpu_deadline < g_cycle_cap)
+    if (g_cycle_cap == 0 || cpu_deadline < g_cycle_cap) {
         g_cycle_cap = cpu_deadline;
+        // A device scheduled an EARLIER deadline than the published limit.
+        g_nds_fast_limit = 0u;
+    }
 }
 
 // Tier-3 helpers: does the active CPU have a Tier-1 bank fn at (pc, thumb)?
@@ -982,7 +1039,40 @@ extern "C" uint32_t runtime_fp_count(void) { return 0; }
 extern "C" uint32_t runtime_fp_save_file(const char*) { return 0; }
 
 // ── Tick / yield ────────────────────────────────────────────────────────
-extern "C" void runtime_tick(uint32_t cycles) {
+namespace {
+// Publish the deadline. Called ONLY from the faithful scan, and only once
+// that scan has established there is nothing to service right now.
+//
+// The limit is the scheduler's LIVE slice cap and nothing else. That is the
+// dual-CPU safety argument in one line: runtime_should_yield already bounds
+// every inline run by g_cycle_cap, so a fast run bounded by the same value
+// cannot carry this CPU one cycle further than the faithful path would have,
+// and therefore cannot cross a rendezvous the peer could observe.
+//
+// Every disqualifying condition below yields zero — "always take the
+// faithful path". A too-small limit is only slow, never wrong.
+void publish_fast_limit() {
+    if (!g_cycle_fast_limit_enabled ||      // selector: NDS_CYCLE_FAST_LIMIT=0
+        !g_cpu_fast_poll ||                 // faithful full-poll reference mode
+        g_yield_poll_hint ||                // something already wants a scan
+        g_runtime_break_pc ||               // per-PC predicate, not cycle-based
+        g_nds_terminal ||
+        g_cycle_cap == 0u ||                // no slice bound to inherit
+        g_deferred_cycles != 0u ||          // tick must commit HALT debt
+        active_static_code_changed() ||     // guest rewrote executing code
+        g_nds_irq_pending_cache[g_nds_active] != 0u) {  // IRQ due at next tick
+        g_nds_fast_limit = 0u;
+        return;
+    }
+    g_nds_fast_limit = g_cycle_cap;
+    // Witness for the harness: a selector flag that is set but publishes no
+    // deadline proves nothing (the forced-tier3 lesson, one level down).
+    // Counted here and not on the per-instruction path, which stays clean.
+    ++g_nds_fast_limit_publishes;
+}
+}  // namespace
+
+extern "C" void runtime_tick_slow(uint32_t cycles) {
     // Generated-code ticks are guest instruction boundaries. Commit any
     // ARM::Cycles debt carried across HALT together with this instruction.
     g_runtime_cycles += cycles + g_deferred_cycles;
@@ -1000,12 +1090,11 @@ extern "C" void runtime_tick(uint32_t cycles) {
 // Per-instruction unwind: terminal halts only (a guest spin waiting on the
 // other core is NOT a fault — it is preempted at a backward branch instead).
 namespace {
-bool g_unwinding = false;
 bool g_preserved_unwind_state_valid = false;
 ArmCpuState g_preserved_unwind_state{};
 }
 
-extern "C" bool runtime_should_yield(void) {
+extern "C" bool runtime_should_yield_slow(void) {
     // In fast mode rare state transitions eagerly set the hint. While it is
     // clear, only the two per-instruction dynamic predicates remain. The full
     // scan below is unchanged and is also the NDS_CPU_FAST_POLL=0 reference.
@@ -1015,21 +1104,24 @@ extern "C" bool runtime_should_yield(void) {
             (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u);
         const bool cycle_cap_hit =
             g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap;
-        if (!break_pc_hit && !cycle_cap_hit) return false;
+        // Nothing to service: this is one of the two "all clear" exits, so
+        // republish the deadline (see publish_fast_limit). Reaching here with
+        // a zero limit is exactly how a re-armed limit gets recomputed.
+        if (!break_pc_hit && !cycle_cap_hit) { publish_fast_limit(); return false; }
     }
 
     // insn7/insn9 anchor reached → stop at this exact instruction (see io.cpp
     // g_nds_insn_stop). The bisector resets per K, so the mid-function unwind
     // (which does not preserve the call-return stack) is never resumed from.
     if (g_nds_insn_stop || nds_event_break_hit()) {
-        g_unwinding = true;
+        g_nds_unwinding = 1u;
         return true;
     }
     // HALTCNT/CP15 sleep is a resumable hardware state. Unwind the current
     // static function before its next instruction; the scheduler owns wakeup
     // and timestamp advancement while no guest instructions retire.
     if (nds_cpu_halted(g_nds_active) || nds_dma_cpu_stalled(g_nds_active)) {
-        g_unwinding = true;
+        g_nds_unwinding = 1u;
         return true;
     }
     // A guest store touched a page containing the currently executing
@@ -1037,18 +1129,21 @@ extern "C" bool runtime_should_yield(void) {
     // redispatch will either select a matching generation or enter Tier 3 for
     // the guest's newly written bytes. Never continue stale native semantics.
     if (active_static_code_changed()) {
-        g_unwinding = true;
+        g_nds_unwinding = 1u;
         return true;
     }
     if (g_runtime_break_pc &&
         (g_cpu.R[15] & ~1u) == (g_runtime_break_pc & ~1u))
         nds_halt("break pc");
     if (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) {
-        g_unwinding = true;
+        g_nds_unwinding = 1u;
         return true;
     }
-    if (g_nds_terminal) { g_unwinding = true; return true; }
+    if (g_nds_terminal) { g_nds_unwinding = 1u; return true; }
     g_yield_poll_hint = 0u;
+    // The second "all clear" exit: the full faithful scan found nothing to
+    // service, so it is safe to publish a fresh deadline.
+    publish_fast_limit();
     return false;
 }
 // Cooperative slice preemption: trips once this slice's cycle cap is
@@ -1059,20 +1154,22 @@ extern "C" bool runtime_should_yield(void) {
 // any call depth can be preempted and cleanly resumed.
 extern "C" bool runtime_slice_yield(void) {
     if (g_cycle_cap != 0 && g_runtime_cycles >= g_cycle_cap) {
-        g_unwinding = true;
+        g_nds_unwinding = 1u;
         return true;
     }
     return false;
 }
-extern "C" bool runtime_unwinding(void) { return g_unwinding; }
+// runtime_unwinding() is now a static-inline load over g_nds_unwinding
+// (runtime_arm.h); the exported out-of-line symbol that pre-existing live
+// shards import lives in runner/src/runtime_abi_shims.cpp.
 extern "C" void nds_clear_unwinding(void) {
-    g_unwinding = false;
+    g_nds_unwinding = 0u;
     g_preserved_unwind_state_valid = false;
 }
 void nds_preserve_unwind_state() {
     g_preserved_unwind_state = g_cpu;
     g_preserved_unwind_state_valid = true;
-    g_unwinding = true;
+    g_nds_unwinding = 1u;
 }
 void nds_restore_unwind_state() {
     if (!g_preserved_unwind_state_valid) return;
@@ -1485,6 +1582,10 @@ extern "C" uint32_t runtime_deferred_cycles(void) {
 }
 extern "C" void runtime_deferred_cycles_set(uint32_t cycles) {
     g_deferred_cycles = cycles;
+    // HALT/DMA debt must be committed by the next tick, which only the
+    // faithful path does. (The scheduler re-arms the slice right after this,
+    // which would zero the limit anyway; this makes it unconditional.)
+    if (cycles) g_nds_fast_limit = 0u;
 }
 extern "C" uint32_t runtime_deferred_cycles_take(void) {
     const uint32_t cycles = g_deferred_cycles;
@@ -1625,7 +1726,8 @@ extern "C" void runtime_unimplemented_op(const char* op_name, uint32_t pc) {
 }
 extern "C" void runtime_init(void*) {
     g_cpu_fast_poll = configured_cpu_fast_poll();
-    request_yield_poll();
+    g_cycle_fast_limit_enabled = configured_cycle_fast_limit();
+    request_yield_poll();       // re-arm site: machine reset
     g_crs_depth = 0;
     g_deferred_cycles = 0;
     g_discovery_seen.clear();

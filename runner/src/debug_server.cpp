@@ -1400,6 +1400,11 @@ std::string handle(const std::string& line) {
         if (!pc) return "{\"error\":\"pc must be nonzero\"}";
         if (max_rounds > 100000000u) max_rounds = 100000000u;
         g_runtime_break_pc = pc;
+        // Re-arm site: the break-PC predicate is per-PC, not cycle-based, so
+        // a deadline published while it was clear would let the guest run to
+        // the slice boundary before noticing it. Debug intervention from
+        // another thread must drop the deadline.
+        runtime_clear_fast_limit();
         uint64_t rounds = 0;
         while (!scheduler_cpu_terminal_halted(0) &&
                !scheduler_cpu_terminal_halted(1) && rounds < max_rounds) {
@@ -1407,6 +1412,7 @@ std::string handle(const std::string& line) {
             ++rounds;
         }
         g_runtime_break_pc = 0;
+        runtime_clear_fast_limit();
         const bool reached = ((g_cpu.R[15] & ~1u) == (pc & ~1u)) &&
             (scheduler_cpu_terminal_halted(0) || scheduler_cpu_terminal_halted(1));
         return std::string("{\"reached\":") + (reached ? "true" : "false") +

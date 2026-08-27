@@ -93,6 +93,12 @@ extern "C" void nds_clear_unwinding(void);
 void nds_preserve_unwind_state();
 void nds_restore_unwind_state();
 
+// Re-arm the per-instruction cycle deadline (beads-yjp.42): force the next
+// poll back onto the faithful path. See recompiler/armv4t/runtime_arm.h for
+// the contract and runner/tests/test_machinery_perf_guards.py for the list
+// of sites obliged to call this.
+extern "C" void runtime_clear_fast_limit(void);
+
 // Bus lifecycle / image loading (implemented in bus.cpp).
 void bus_init();
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n);
