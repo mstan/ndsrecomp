@@ -234,18 +234,52 @@ An additional drain is taken before any debug-server read of the
 framebuffer or the gpu2d profile, so instruction-precise queries stay
 exact.
 
-### 5.4 Serialization classes (rendered inline on the emu thread)
+### 5.4 Display capture: staged, not serialized
 
-- **capture lines** (F1/F2/F3) — the lines below the DISPCAPCNT height
-  field (64, 128 or 192), not the whole frame. Each drains before it runs,
-  so every capture write has landed before any later line is latched, which
-  is exactly the single-threaded order. Lines past the capture height call
-  no capture path at all and go to a worker.
-  Pinned by `test_capture_serializes_and_matches` in
-  `runner/tests/gpu2d_window_test.cpp`, which requires the captured VRAM
-  bank and both framebuffers to be byte-identical between the two modes and
-  the line classification to be exactly 128 inline + 64 threaded for a
-  128x128 capture.
+Capture lines are **not** serialized. Serializing them capped MPH — which
+captures on ~79 % of frames at full height — at 11–21 % eligible lines, so
+the capture unit is split in two instead:
+
+- `stage_capture` runs on whichever thread renders the line. It reads
+  source A (already in hand) and source B (an LCDC bank) and writes only
+  into the job's `capture_pixels`, recording the destination bank, the
+  start address and the pixel count. It touches no guest state.
+- `apply_staged_capture` runs on the **scheduler thread only**, in ring
+  order, at the next drain. It performs the guest-visible half: the VRAM
+  write (reproducing the exact `& 0xFFFF` address sequence from the
+  recorded start) and the `nds_vram_note_capture_write()` texture-generation
+  bump (F2).
+
+F3 is unaffected: the DISPCAPCNT enable latch was already set in
+`latch_line` and cleared in `nds_gpu2d_vblank`, both on the scheduler
+thread, and `nds_gpu2d_vblank` drains first — so every capture write for a
+frame lands before VCount 192, well before the 3D engine's VCount 215.
+
+**Why deferring the write is exact.** `DoCapture` writes only when the
+destination bank is LCDC-mapped, and a bank has exactly one VRAMCNT
+setting, so an LCDC bank is by construction absent from the BG/OBJ renderer
+views and from the texture slots. **BG/OBJ decode therefore can never read
+a staged bank**, and a VRAMCNT remap that would change that already fences
+(F14). That leaves exactly three readers:
+
+| Reader | Handling |
+|--------|----------|
+| Display mode 2 (reads the DISPCNT-selected LCDC bank) | `line_reads_staged_bank` drains before the line is published — after which the line still goes to a worker, not inline |
+| Capture source B (same bank field; only when the capture actually uses B, i.e. not source-A-only and not the all-zero FIFO) | same drain |
+| The guest / DMA / debug server | `nds_video_read` and `nds_video_get_region` take a read-side fence on `nds_gpu2d_staged_captures`. Guest *writes* already fenced on `nds_gpu2d_jobs_outstanding`. |
+
+The read fence costs one relaxed atomic load, and the counter is only ever
+non-zero on capture frames with threading on, so the single-threaded path
+pays nothing.
+
+Pinned by `test_capture_serializes_and_matches` in
+`runner/tests/gpu2d_window_test.cpp`: the captured VRAM bank and both
+framebuffers must be byte-identical between the two modes, the captured
+bytes must be non-zero, every capture write must have been applied (192 and
+128 for the two DISPCAPCNT sizes), and all 192 lines must be threaded.
+
+On MPH this takes the census from 110,761 threaded / 413,760 inline to
+**524,521 threaded / 0 inline**, with **zero** capture-hazard drains.
 - the frame after a reset / power transition (`nds_gpu2d_reset`,
   `nds_gpu2d_stop`)
 - when `NDS_GPU2D_THREADED=0` (the default until proven)
@@ -381,36 +415,68 @@ height.** With threading on, `inline_lines`=413,760 against
 `threaded_lines`=110,761 — only **21 %** of scanlines are eligible for a
 worker, because capture lines serialize by construction (§5.4).
 
-Interleaved min-of-3 at insn9=200M (2,391 frames; 49,344 threaded lines
-against 413,760 inline, i.e. 10.7 % eligible at that anchor):
+With capture staging (§5.4) MPH is **100 % eligible**: 463,104 threaded
+lines against 0 inline at insn9=200M, and zero capture-hazard drains.
 
-| leg | wall (uninstrumented) | `display_ns` | `devices_ns` | `sampled_round_ns` |
-|-----|----------------------:|-------------:|-------------:|-------------------:|
-| threaded off | 16.872 s | 3676.2 ms | 6122.5 ms | 20639.2 ms |
-| threaded on  | 17.602 s | 3668.1 ms | 6090.6 ms | 20024.9 ms |
-| delta | **+4.3 %** | −0.2 % | −0.5 % | −3.0 % |
+Interleaved min-of-5 at insn9=200M, 2,391 frames, one worker, both legs
+pinned to the same core mask, measured on an **idle** box (no other runner,
+compiler or ninja process; verified before and after each configuration):
 
-**There is no MPH win.** End-to-end wall time is slightly *worse*, and the
-display delta is inside noise. Single unrepeated runs at insn9=400M appeared
-to show display −18.8 %, but they do not survive the min-of-3 and should not
-be quoted. The dev box was also running another session's PGO A/B during
-part of this, which widens the spread; that is recorded rather than hidden.
+| cores | wall off | wall on | Δ wall | `display_ns` off | on | Δ display |
+|-------|--------:|--------:|-------:|-----------------:|---:|----------:|
+| all (16 logical / 8 physical, 9800X3D) | 15.692 s | 15.033 s | **−4.2 %** | 3041.7 ms | 3184.8 ms | +4.7 % |
+| 4 (`0xF`) | 16.562 s | 15.620 s | **−5.7 %** | 3669.9 ms | 2755.4 ms | **−24.9 %** |
+| 2 (`0x3`) | 15.073 s | 17.283 s | **+14.7 %** | 3732.9 ms | 3766.3 ms | +0.9 % |
 
-**Honest conclusion.** The mechanism works, is exact, and is worth about
-half of display time and 15 % of end-to-end run time on content where lines
-are eligible. On MPH the ceiling is capture serialization, not the
-threading, and the change as it stands is **not** an MPH win — which is why
-the toggle ships default-off. Turning it on for a title is a per-title
-decision that the `threaded_lines` / `inline_lines` census answers directly.
+**Read this plainly.**
 
-### The follow-up that unblocks MPH
+- **4 cores and all cores are a real win**: 4–6 % off end-to-end wall time,
+  and at 4 cores a quarter off the emu thread's display cost. These are the
+  decision numbers, because the field hardware in question (5700X, 7730U)
+  is 8-core.
+- **2 cores is a clear regression, −14.7 % throughput.** With two CPUs the
+  emu thread, the GPU2D worker and the GPU3D render thread contend, and the
+  emu thread ends up blocking in the vblank drain for work it could have
+  done itself. Do not enable the toggle on a dual-core host.
+- The all-cores `display_ns` rising while wall time falls is consistent with
+  that same effect at a smaller scale: with 16 logical CPUs the OS spreads
+  the three threads across CCX boundaries, so the drain wait lands inside
+  `display_ns` even though total throughput improves. The uninstrumented
+  wall column is the metric to trust.
 
-Let a capture line render on a worker into a staging line, and apply the
-`DoCapture` write into guest VRAM on the scheduler thread at the next
-drain. The capture unit's inputs are the composite (or the 3D line) plus an
-LCDC source bank; only the *destination write* has to be on the scheduler
-thread. That converts MPH from 21 % eligible to ~100 % and is the single
-highest-value next step.
+For contrast, **before** capture staging the same MPH route measured
+**+4.3 %** wall at all cores — a regression — because only 11–21 % of lines
+were eligible. Staging is what turned MPH from a regression into a win.
+
+Earlier single unrepeated runs at insn9=400M appeared to show display
+−18.8 %, and an earlier min-of-3 sweep produced wall times that *fell* as
+cores were removed (22.3 s at all cores against 17.9 s at two), which is
+physically impossible and proves that run was dominated by another
+session's concurrent PGO A/B. Neither set is quoted; both were discarded
+and re-measured on the idle box.
+
+**Honest conclusion.** The mechanism works, is exact, and every route is
+now 100 % eligible. It is worth ~15 % of end-to-end run time on the
+firmware route and ~4–6 % on MPH at four or more cores, and it is a
+**regression on two cores**. It is latency hiding, not work reduction: it
+needs a spare core to hide the work on.
+
+That is why the toggle ships **default-off**. Enabling it is a per-host
+decision — sensible on the 4+ core parts that dominate the field hardware,
+wrong on a dual-core machine. A future auto-enable should key on
+`std::thread::hardware_concurrency()` rather than being global.
+
+### Remaining follow-ups
+
+- **Auto-enable policy.** Turn the toggle on by default above a core-count
+  threshold, measured rather than guessed.
+- **Worker count.** Everything above uses one worker. `NDS_GPU2D_WORKERS`
+  goes to 16 and has not been swept; MPH's `display_ns` behaviour at all
+  cores suggests the drain wait, not the render, is the remaining cost, so
+  more workers may help there and hurt at low core counts.
+- **Palette/OAM snapshot ring** (§5.1), if a route ever shows palette or
+  OAM writes dominating the fence census. Neither the firmware route nor
+  MPH does today.
 
 ## 10. What is explicitly not done
 
