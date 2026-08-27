@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -360,7 +361,21 @@ void main()
 GLuint compile_shader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
+#if defined(NDS_GLES)
+    // Swap the desktop version line for a GLES 3.2 es-profile header with the
+    // precision qualifiers GLES requires (harmless in the vertex stage).
+    std::string src = source;
+    const std::string ver = "#version 430 core";
+    size_t pos = src.find(ver);
+    if (pos != std::string::npos)
+        src.replace(pos, ver.size(),
+            "#version 320 es\nprecision highp float;\nprecision highp int;\n"
+            "precision highp usampler2D;\nprecision highp sampler2D;");
+    const char* patched = src.c_str();
+    glShaderSource(shader, 1, &patched, nullptr);
+#else
     glShaderSource(shader, 1, &source, nullptr);
+#endif
     glCompileShader(shader);
     GLint ok = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
