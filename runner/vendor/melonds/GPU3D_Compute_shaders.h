@@ -1268,7 +1268,7 @@ void PlotTranslucent(inout uint color, inout uint depth, inout uint attr, bool i
         if (writeDepth)
             depth = tileDepth;
 
-        if ((attr & (1U<<15)) == 0)
+        if ((attr & (1U<<15)) == 0u)
             blendAttr &= ~(1U<<15);
         attr = blendAttr;
 
@@ -1278,11 +1278,11 @@ void PlotTranslucent(inout uint color, inout uint depth, inout uint attr, bool i
         uint dstG = color & 0x003F00U;
         uint dstA = color & 0x1F000000U;
 
-        uint alpha = (srcA >> 24) + 1;
-        if (dstA != 0)
+        uint alpha = (srcA >> 24) + 1u;
+        if (dstA != 0u)
         {
-            srcRB = ((srcRB * alpha) + (dstRB * (32-alpha))) >> 5;
-            srcG = ((srcG * alpha) + (dstG * (32-alpha))) >> 5;
+            srcRB = ((srcRB * alpha) + (dstRB * (32u-alpha))) >> 5;
+            srcG = ((srcG * alpha) + (dstG * (32u-alpha))) >> 5;
         }
 
         color = (srcRB & 0x3F003FU) | (srcG & 0x003F00U) | max(dstA, srcA);
@@ -1297,24 +1297,24 @@ void ProcessCoarseMask(int linearTile, uint coarseMask, uint coarseOffset,
 
     while (coarseMask != 0U)
     {
-        uint coarseBit = findLSB(coarseMask);
+        uint coarseBit = uint(findLSB(coarseMask));
         coarseMask &= ~(1U << coarseBit);
 
-        uint tileOffset = linearTile * BinStride + coarseBit + coarseOffset;
+        uint tileOffset = uint(linearTile * BinStride) + coarseBit + coarseOffset;
 
-        uint fineMask = BinningMaskAndOffset[BinningMaskStart + tileOffset];
-        uint workIdx = BinningMaskAndOffset[BinningWorkOffsetsStart + tileOffset];
+        uint fineMask = BinningMaskAndOffset[uint(BinningMaskStart) + tileOffset];
+        uint workIdx = BinningMaskAndOffset[uint(BinningWorkOffsetsStart) + tileOffset];
 
         while (fineMask != 0U)
         {
-            uint fineIdx = findLSB(fineMask);
+            uint fineIdx = uint(findLSB(fineMask));
             fineMask &= ~(1U << fineIdx);
 
-            uint pixelindex = tileInnerOffset + workIdx * TileSize * TileSize;
+            uint pixelindex = uint(tileInnerOffset) + workIdx * uint(TileSize * TileSize);
             uint tileColor = ColorTiles[pixelindex];
             workIdx++;
 
-            uint polygonIdx = fineIdx + (coarseBit + coarseOffset) * 32;
+            uint polygonIdx = fineIdx + (coarseBit + coarseOffset) * 32u;
 
             if (tileColor != 0U)
             {
