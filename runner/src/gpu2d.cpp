@@ -1025,6 +1025,16 @@ struct LineJob {
     uint32_t capw = 0;
     uint8_t direct_class = 0;
     uint8_t direct_extra_bg_mask = 0;
+    // Staged display capture. The pixels are produced by whichever thread
+    // renders the line; the write into guest VRAM, and the texture-generation
+    // bump that goes with it, are applied by the scheduler thread in line
+    // order at the next drain. capture_count == 0 means nothing was staged
+    // (no capture on this line, or the destination bank is not LCDC-mapped,
+    // in which case the hardware writes nothing either).
+    std::array<uint16_t, 256> capture_pixels{};
+    uint32_t capture_dstaddr = 0;
+    uint32_t capture_dstbank = 0;
+    uint32_t capture_count = 0;
 };
 
 // The set of BG layers this engine decodes on this line. Single source of
@@ -1110,13 +1120,17 @@ void compose_line6(int engine, int y, const Unit& u, const uint8_t* palette,
 // writes 15-bit+alpha pixels into the physical destination bank (gated on
 // its LCDC mapping), blending source A (composite or 3D-only line, in the
 // internal 6-bit format) with source B (LCDC VRAM or the display FIFO).
-void do_capture(const Unit& u, int line, uint32_t width,
-                const uint32_t* comp6, const uint32_t* line3d) {
+// Produce the capture line's pixels. Pure with respect to guest state: it
+// reads source A (already in hand) and source B (an LCDC bank), and writes
+// only into the job. apply_staged_capture performs the guest-visible half.
+void stage_capture(const Unit& u, int line, uint32_t width,
+                   const uint32_t* comp6, const uint32_t* line3d,
+                   LineJob& job) {
     const uint32_t cap = u.capture;
     const uint32_t dstbank = (cap >> 16) & 3u;
+    job.capture_count = 0;
     if (!nds_vram_lcdc_mapped(dstbank)) return;
-    uint16_t* const dstp =
-        reinterpret_cast<uint16_t*>(nds_vram_bank_data(dstbank));
+    uint16_t* const dstp = job.capture_pixels.data();
     uint32_t dstaddr = (((cap >> 18) & 3u) << 14) + line * width;
 
     // Source A: the 3D-only line or the pre-master-brightness composite.
@@ -1144,6 +1158,9 @@ void do_capture(const Unit& u, int line, uint32_t width,
     }
     dstaddr &= 0xFFFFu;
     srcBaddr &= 0xFFFFu;
+    job.capture_dstbank = dstbank;
+    job.capture_dstaddr = dstaddr;
+    job.capture_count = width;
 
     switch ((cap >> 29) & 3u) {
         case 0:  // source A only
@@ -1153,14 +1170,14 @@ void do_capture(const Unit& u, int line, uint32_t width,
                 const uint32_t g = (val >> 9) & 0x1Fu;
                 const uint32_t b = (val >> 17) & 0x1Fu;
                 const uint32_t a = (!srcA_3d || (val >> 24)) ? 0x8000u : 0u;
-                dstp[dstaddr] = static_cast<uint16_t>(r | (g << 5) |
-                                                      (b << 10) | a);
+                dstp[i] = static_cast<uint16_t>(r | (g << 5) |
+                                               (b << 10) | a);
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
             break;
         case 1:  // source B only
             for (uint32_t i = 0; i < width; ++i) {
-                dstp[dstaddr] = srcB ? srcB[srcBaddr & 0xFFFFu] : 0;
+                dstp[i] = srcB ? srcB[srcBaddr & 0xFFFFu] : 0;
                 srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
@@ -1198,16 +1215,15 @@ void do_capture(const Unit& u, int line, uint32_t width,
                 if (rD > 0x1Fu) rD = 0x1Fu;
                 if (gD > 0x1Fu) gD = 0x1Fu;
                 if (bD > 0x1Fu) bD = 0x1Fu;
-                dstp[dstaddr] = static_cast<uint16_t>(rD | (gD << 5) |
-                                                      (bD << 10) |
-                                                      (aD << 15));
+                dstp[i] = static_cast<uint16_t>(rD | (gD << 5) |
+                                               (bD << 10) |
+                                               (aD << 15));
                 srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
             break;
         }
     }
-    nds_vram_note_capture_write();
 }
 
 // True when this engine's line render takes the general (melonDS
@@ -1225,7 +1241,7 @@ bool line_forceblank(const LineJob& job, int engine) {
            (job.unit[engine].dispcnt & 0x80u);
 }
 
-void render_engine_line(const LineJob& job, int engine, LineScratch& sc) {
+void render_engine_line(LineJob& job, int engine, LineScratch& sc) {
     const Unit& u = job.unit[engine];
     const int y = job.y;
     Frame& fb = g_fb[job.buffer][job.screen[engine]];
@@ -1279,8 +1295,9 @@ void render_engine_line(const LineJob& job, int engine, LineScratch& sc) {
             // is not implemented; an unfed FIFO displays black.
             std::fill_n(dst, 256, to_rgb32(bright(0u)));
         }
-        if (cap) do_capture(u, y, capw, need_comp ? comp6.data() : nullptr,
-                            line3d);
+        if (cap)
+            stage_capture(u, y, capw, need_comp ? comp6.data() : nullptr,
+                          line3d, job);
         return;
     }
 
@@ -1643,7 +1660,7 @@ void latch_line(int y, LineJob& job) {
     }
 }
 
-void render_line_job(const LineJob& job, LineScratch& sc) {
+void render_line_job(LineJob& job, LineScratch& sc) {
     if (!profiling()) {
         if (job.engine_active[0]) render_engine_line(job, 0, sc);
         if (job.engine_active[1]) render_engine_line(job, 1, sc);
@@ -1732,6 +1749,11 @@ uint64_t g_fence_drains[NDS_GPU2D_FENCE_CAUSE_COUNT] = {};
 uint64_t g_fenced_lines[NDS_GPU2D_FENCE_CAUSE_COUNT] = {};
 uint64_t g_fence_wait_ns = 0;
 uint64_t g_fence_helped_lines = 0;
+uint64_t g_staged_captures = 0;
+// Banks holding a staged, not-yet-applied capture write.
+uint32_t g_staged_bank_mask = 0;
+// Next ring index whose staged capture has still to be applied.
+uint64_t g_capture_apply_index = 0;
 
 void worker_main(Pool* pool, LineScratch* sc) {
     for (;;) {
@@ -1770,8 +1792,30 @@ void worker_main(Pool* pool, LineScratch* sc) {
     }
 }
 
+// The guest-visible half of display capture: the VRAM write and the texture
+// generation bump the 3D engine reads. Runs on the scheduler thread only, in
+// ring order, so the sequence of writes is exactly the single-threaded one.
+void drain_pool(uint32_t cause);
+
+void apply_staged_capture(LineJob& job) {
+    if (!job.capture_count) return;
+    uint16_t* const dstp = reinterpret_cast<uint16_t*>(
+        nds_vram_bank_data(job.capture_dstbank));
+    uint32_t dstaddr = job.capture_dstaddr;
+    for (uint32_t i = 0; i < job.capture_count; ++i) {
+        dstp[dstaddr] = job.capture_pixels[i];
+        dstaddr = (dstaddr + 1u) & 0xFFFFu;
+    }
+    job.capture_count = 0;
+    ++g_staged_captures;
+    nds_vram_note_capture_write();
+}
+
 void stop_pool() {
     if (!g_pool) return;
+    // Any staged capture write must land in guest VRAM before the ring that
+    // holds it goes away.
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
     Pool* const pool = g_pool.get();
     {
         std::lock_guard<std::mutex> lock(pool->m);
@@ -1797,6 +1841,17 @@ void start_pool() {
         pool->threads.emplace_back(worker_main, pool, pool->scratch[i].get());
 }
 
+// Apply every staged capture up to (not including) `target`, in ring order.
+// Every one of those jobs has completed by the time this is called.
+void apply_staged_range(uint64_t target) {
+    Pool* const pool = g_pool.get();
+    if (!pool) return;
+    for (; g_capture_apply_index < target; ++g_capture_apply_index)
+        apply_staged_capture(pool->jobs[g_capture_apply_index % kJobSlots]);
+    g_staged_bank_mask = 0;
+    nds_gpu2d_staged_captures.store(0u, std::memory_order_relaxed);
+}
+
 // Render every published-but-unrendered job, helping rather than idling, then
 // wait for any job a worker is still inside.
 void drain_pool(uint32_t cause) {
@@ -1806,6 +1861,7 @@ void drain_pool(uint32_t cause) {
     const uint64_t already = pool->done.load(std::memory_order_acquire);
     if (already >= target) {
         nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+        apply_staged_range(target);
         return;
     }
     if (cause < NDS_GPU2D_FENCE_CAUSE_COUNT) {
@@ -1831,20 +1887,35 @@ void drain_pool(uint32_t cause) {
     }
     g_fence_wait_ns += ns_since(wait_start, std::chrono::steady_clock::now());
     nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+    apply_staged_range(target);
     for (auto& sc : pool->scratch) merge_scratch(*sc);
     merge_scratch(g_inline_scratch);
 }
 
-// A line that captures writes back into guest VRAM (DoCapture) and bumps the
-// texture generation the 3D engine reads, so it renders on this thread, after
-// a drain so no outstanding worker is reading the destination bank.
+// Capture lines render on a worker; only the VRAM write is deferred to the
+// scheduler thread. What a deferred write must not do is let a later line read
+// the destination bank and see stale data.
 //
-// Only the capturing lines, not the whole frame: DISPCAPCNT's height field is
-// 64, 128 or 192, and the lines past it call no capture path at all. They are
-// still ordered correctly because every capture line drains before it runs, so
-// all writes for lines below the capture height have landed before any later
-// line is latched -- exactly the single-threaded order.
-bool line_must_be_inline(const LineJob& job) { return job.cap; }
+// BG/OBJ decode can never be that reader: DoCapture writes only when the
+// destination bank is LCDC-mapped, and a bank has one VRAMCNT setting, so an
+// LCDC bank is by construction absent from the BG/OBJ renderer views. A
+// VRAMCNT remap that would change that already fences (F14).
+//
+// That leaves exactly two readers, both engine A: display mode 2, which reads
+// the DISPCNT-selected LCDC bank, and the capture unit's own source B, which
+// reads the same bank field. Either one hitting a bank with a staged write
+// takes a drain first -- after which the line still goes to a worker.
+bool line_reads_staged_bank(const LineJob& job) {
+    if (!g_staged_bank_mask) return false;
+    const Unit& u = job.unit[0];
+    const uint32_t bank_bit = 1u << ((u.dispcnt >> 18) & 3u);
+    if (!(g_staged_bank_mask & bank_bit)) return false;
+    if (((u.dispcnt >> 16) & 3u) == 2u) return true;   // VRAM display
+    // Source B is read unless the capture takes source A only, or is fed from
+    // the (unimplemented, all-zero) main-memory FIFO.
+    return job.cap && ((u.capture >> 29) & 3u) != 0u &&
+           !(u.capture & 0x02000000u);
+}
 
 // g_pool holds joinable std::threads; destroying it with the workers still
 // running would call std::terminate. This guard is declared after g_pool so it
@@ -1858,26 +1929,29 @@ void submit_line(int y) {
     if (!g_pool) {
         latch_line(y, g_latch_job);
         render_line_job(g_latch_job, g_inline_scratch);
+        // Single-threaded: the capture write lands immediately, exactly where
+        // DoCapture used to run.
+        apply_staged_capture(g_latch_job);
         merge_scratch(g_inline_scratch);
         ++g_inline_lines;
         return;
     }
     Pool* const pool = g_pool.get();
     // Reserve the slot before latching into it.
-    const uint64_t head = pool->head.load(std::memory_order_relaxed);
-    if (head - pool->done.load(std::memory_order_acquire) >= kJobSlots)
+    uint64_t head = pool->head.load(std::memory_order_relaxed);
+    if (head - pool->done.load(std::memory_order_acquire) >= kJobSlots) {
         drain_pool(NDS_GPU2D_FENCE_SLOTS);
+        head = pool->head.load(std::memory_order_relaxed);
+    }
     LineJob& job = pool->jobs[head % kJobSlots];
     latch_line(y, job);
-    if (line_must_be_inline(job)) {
-        // Everything already published must land before a capture line, so
-        // the capture sees the same VRAM the inline path would have.
-        drain_pool(NDS_GPU2D_FENCE_FRAME);
-        render_line_job(job, g_inline_scratch);
-        merge_scratch(g_inline_scratch);
-        ++g_inline_lines;
-        return;
+    if (line_reads_staged_bank(job)) {
+        drain_pool(NDS_GPU2D_FENCE_CAPTURE);
+        // The drain does not move head, so the reserved slot is still ours.
     }
+    if (job.cap)
+        g_staged_bank_mask |=
+            1u << ((job.unit[0].capture >> 16) & 3u);
     // Publish under the mutex: a worker that has already evaluated its
     // predicate and is between that check and its wait would otherwise miss
     // the notification and sleep with work queued.
@@ -1886,6 +1960,8 @@ void submit_line(int y) {
         pool->head.store(head + 1, std::memory_order_release);
     }
     nds_gpu2d_jobs_outstanding.store(1u, std::memory_order_relaxed);
+    if (job.cap)
+        nds_gpu2d_staged_captures.store(1u, std::memory_order_relaxed);
     ++g_threaded_lines;
     pool->work_cv.notify_one();
 }
@@ -1931,6 +2007,9 @@ void nds_gpu2d_reset(){
     g_inline_lines = 0;
     g_fence_wait_ns = 0;
     g_fence_helped_lines = 0;
+    g_staged_captures = 0;
+    g_staged_bank_mask = 0;
+    g_capture_apply_index = 0;
     std::fill_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
     std::fill_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
     g_direct_frame_class = NDS_GPU2D_DIRECT_DISABLED;
@@ -1958,10 +2037,12 @@ void nds_gpu2d_write(uint32_t addr,uint32_t value,uint32_t width){
     reg_write8(u, e, off, static_cast<uint8_t>(value));
 }
 std::atomic<uint32_t> nds_gpu2d_jobs_outstanding{0};
+std::atomic<uint32_t> nds_gpu2d_staged_captures{0};
 
 const char* nds_gpu2d_fence_cause_name(uint32_t index) {
     static const char* const kNames[NDS_GPU2D_FENCE_CAUSE_COUNT] = {
-        "vram", "vramcnt", "palette", "oam", "frame", "present", "slots"};
+        "vram", "vramcnt", "palette", "oam", "frame", "present", "slots",
+        "capture"};
     return index < NDS_GPU2D_FENCE_CAUSE_COUNT ? kNames[index] : "?";
 }
 
@@ -2528,6 +2609,7 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     out->inline_lines = g_inline_lines;
     out->fence_wait_ns = g_fence_wait_ns;
     out->fence_helped_lines = g_fence_helped_lines;
+    out->staged_captures = g_staged_captures;
     std::copy_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT,
                 out->fence_drains);
     std::copy_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT,

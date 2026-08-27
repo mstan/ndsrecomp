@@ -1306,6 +1306,8 @@ std::string handle(const std::string& line) {
                ",\"fence_wait_ns\":" + std::to_string(gpu.fence_wait_ns) +
                ",\"fence_helped_lines\":" +
                std::to_string(gpu.fence_helped_lines) +
+               ",\"staged_captures\":" +
+               std::to_string(gpu.staged_captures) +
                ",\"fence_drains\":" + fence_drains +
                ",\"fenced_lines\":" + fenced_lines +
                ",\"render_ns\":" + std::to_string(gpu.render_ns) +

@@ -42,10 +42,11 @@ void nds_profile_report(std::FILE* out) {
     if (gpu_profile.threaded_lines || gpu_profile.inline_lines) {
         std::fprintf(out,
             "  GPU2D threading: threaded=%llu inline=%llu helped=%llu "
-            "fence_wait=%.3f ms\n",
+            "captures_applied=%llu fence_wait=%.3f ms\n",
             (unsigned long long)gpu_profile.threaded_lines,
             (unsigned long long)gpu_profile.inline_lines,
             (unsigned long long)gpu_profile.fence_helped_lines,
+            (unsigned long long)gpu_profile.staged_captures,
             static_cast<double>(gpu_profile.fence_wait_ns) / 1.0e6);
         std::fprintf(out, "  GPU2D fences:");
         for (uint32_t i = 0; i < NDS_GPU2D_FENCE_CAUSE_COUNT; ++i) {

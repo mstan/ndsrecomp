@@ -415,6 +415,9 @@ bool nds_vram_live_bytes_equal(int cpu, uint32_t addr,
     return true;
 }
 uint32_t nds_video_read(int cpu, uint32_t addr, uint32_t width) {
+    // A staged display-capture write has been computed but not yet applied to
+    // guest VRAM; a guest read must not see the pre-capture bytes.
+    nds_gpu2d_read_fence();
     addr &= ~(width - 1u);
     if (cpu == 7) {
         if ((addr & 0xFF000000u) != 0x06000000u) return 0;
@@ -464,6 +467,8 @@ void nds_video_write(int cpu, uint32_t addr, uint32_t value, uint32_t width) {
 
 bool nds_video_get_region(const char* name, const uint8_t** ptr, uint32_t* len) {
     if (!name || !ptr || !len) return false;
+    // Debug/savestate readers see applied VRAM, never a staged capture.
+    nds_gpu2d_read_fence();
     for (unsigned i = 0; i < 9; ++i) {
         char expected[6] = {'v','r','a','m',static_cast<char>('A'+i),0};
         if (std::strcmp(name, expected) == 0) {

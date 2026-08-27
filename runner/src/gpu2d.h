@@ -16,6 +16,10 @@
 //
 // See docs/device_work_parallelization.md.
 extern std::atomic<uint32_t> nds_gpu2d_jobs_outstanding;
+// Non-zero only while a display-capture line has been rendered but its write
+// into guest VRAM has not been applied yet. Guest READS of VRAM must fence on
+// this; guest writes already fence on nds_gpu2d_jobs_outstanding.
+extern std::atomic<uint32_t> nds_gpu2d_staged_captures;
 enum NdsGpu2dFenceCause : uint32_t {
     NDS_GPU2D_FENCE_VRAM = 0,
     NDS_GPU2D_FENCE_VRAMCNT,
@@ -24,6 +28,7 @@ enum NdsGpu2dFenceCause : uint32_t {
     NDS_GPU2D_FENCE_FRAME,
     NDS_GPU2D_FENCE_PRESENT,
     NDS_GPU2D_FENCE_SLOTS,
+    NDS_GPU2D_FENCE_CAPTURE,
     NDS_GPU2D_FENCE_CAUSE_COUNT,
 };
 const char* nds_gpu2d_fence_cause_name(uint32_t index);
@@ -33,6 +38,12 @@ void nds_gpu2d_drain(uint32_t cause);
 inline void nds_gpu2d_memory_fence(uint32_t cause) {
     if (nds_gpu2d_jobs_outstanding.load(std::memory_order_relaxed) != 0u)
         nds_gpu2d_drain(cause);
+}
+// Read-side fence: a guest read of VRAM must not observe memory that a staged
+// capture write has not been applied to yet.
+inline void nds_gpu2d_read_fence() {
+    if (nds_gpu2d_staged_captures.load(std::memory_order_relaxed) != 0u)
+        nds_gpu2d_drain(NDS_GPU2D_FENCE_CAPTURE);
 }
 // Startup configuration. Threading is off by default; the inline path is the
 // same latch/execute sequence with the execute taken immediately.
@@ -203,5 +214,6 @@ struct NdsGpu2dProfile {
     uint64_t fenced_lines[NDS_GPU2D_FENCE_CAUSE_COUNT];
     uint64_t fence_wait_ns;
     uint64_t fence_helped_lines;
+    uint64_t staged_captures;
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);

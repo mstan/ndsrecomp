@@ -368,6 +368,7 @@ struct CaptureRun {
     std::array<uint32_t, 256 * 192> bottom{};
     uint64_t threaded_lines = 0;
     uint64_t inline_lines = 0;
+    uint64_t staged_captures = 0;
 };
 
 void run_capture_frame(uint32_t capture_size, CaptureRun& out) {
@@ -397,6 +398,7 @@ void run_capture_frame(uint32_t capture_size, CaptureRun& out) {
     nds_gpu2d_profile(&prof);
     out.threaded_lines = prof.threaded_lines;
     out.inline_lines = prof.inline_lines;
+    out.staged_captures = prof.staged_captures;
     out.bank = g_capture_bank;
     // Rasterization targets the back buffer; the front flip happens at the
     // frame wrap, which this fixture does not reach.
@@ -431,6 +433,10 @@ bool test_capture_serializes_and_matches() {
             (int)(single.bottom == threaded.bottom),
             (int)std::any_of(single.bank.begin(), single.bank.end(),
                              [](uint8_t v) { return v != 0u; }));
+        std::fprintf(stderr,
+            "[capture size %u] applied single=%llu threaded=%llu\n",
+            size, (unsigned long long)single.staged_captures,
+            (unsigned long long)threaded.staged_captures);
         if (!require(single.bank == threaded.bank)) return false;
         if (!require(single.top == threaded.top)) return false;
         if (!require(single.bottom == threaded.bottom)) return false;
@@ -442,10 +448,16 @@ bool test_capture_serializes_and_matches() {
         // Single-threaded: every line inline, none threaded.
         if (!require(single.threaded_lines == 0u)) return false;
         if (!require(single.inline_lines == 192u)) return false;
-        // Threaded: exactly the capturing lines went inline.
-        const uint64_t expected_inline = size == 3u ? 192u : 128u;
-        if (!require(threaded.inline_lines == expected_inline)) return false;
-        if (!require(threaded.threaded_lines == 192u - expected_inline))
+        // Threaded: capture no longer forces a line inline. The pixels are
+        // produced on a worker and only the VRAM write is applied by the
+        // scheduler thread at the drain, so every line is threaded.
+        if (!require(threaded.inline_lines == 0u)) return false;
+        if (!require(threaded.threaded_lines == 192u)) return false;
+        // And every capturing line must actually have had its write applied.
+        const uint64_t expected_applied = size == 3u ? 192u : 128u;
+        if (!require(threaded.staged_captures == expected_applied))
+            return false;
+        if (!require(single.staged_captures == expected_applied))
             return false;
     }
     return true;
