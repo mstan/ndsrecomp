@@ -53,3 +53,8 @@ struct NdsDispatchStats {
 extern NdsDispatchStats g_nds_dispatch_stats[2];
 
 std::string nds_dispatch_stats_json();
+
+// B2 direct-link slot state: enabled/gated flags, the current link epoch
+// (bumped by every bank register/unregister and every machine reset), the
+// live guard-record count, and per-CPU slot hits / resolves / skips.
+extern "C" const char* nds_direct_link_json(void);

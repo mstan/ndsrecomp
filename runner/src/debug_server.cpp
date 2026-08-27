@@ -1247,6 +1247,11 @@ std::string handle(const std::string& line) {
     // ran. Cache-path `events` here is the dispatcher-only population; the
     // all-consumers lookup totals are in dispatch_stats.
     if (cmd == "dispatch_timing") return nds_dispatch_timing_json();
+    // B2 direct linking: whether the per-callsite link slots are live
+    // right now (they are gated off under deep trace) and how the
+    // literal transfers actually resolved. Snapshot-twice-and-subtract
+    // like its two neighbours.
+    if (cmd == "direct_link") return nds_direct_link_json();
     if (cmd == "cart_save_info") {
         const uint8_t* data = nullptr;
         uint32_t size = 0;

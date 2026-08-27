@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-ABI_VERSION = 5
+ABI_VERSION = 6
 PAGE_SIZE = 4096
 
 # Backends that can build a live shard. "gcc" is the dev/CI toolchain; "tcc" is

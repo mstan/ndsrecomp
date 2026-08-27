@@ -96,15 +96,56 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   validated instead of recomputing it through `arm_static_guard`. The
   reference builder remains as the safe fallback for any future cache slot
   without a complete snapshot. Runtime-only; no generated-bank change.
-- **B2. Validated direct calls for BL**: B0 measured only
-  ~1.6K–3.1K literal BL dispatches/frame on ARM9, so this is no longer
-  projected as the dominant dispatch win. A safe implementation must
-  preserve ordered overlapping-bank selection and install the same nested
-  static guard as `runtime_dispatch`; a same-bank byte/generation check is
-  insufficient. Keep plain `B` out of this design: it is a tail transfer,
-  and `callee(); return` can grow the host stack around cross-function
-  cycles and skip dispatch preemption. Reconsider after B1/A1 and the
-  fallthrough work are measured.
+- **B2. Validated direct linking for literal transfers — IMPLEMENTED
+  (beads-yjp.45, branch `wt/direct-linking`)**: NOT the native-to-native
+  jump the name suggests. Reading the code settled the shape: every one of
+  this entry's original warnings is load-bearing, and together they leave
+  exactly one redundant step. `runtime_dispatch` performs the tail-dispatch
+  hand-off, the slice-yield preemption point, the `R15` publication, the
+  trace event, the nested `StaticGuardScope`, the lookup, and the guarded
+  call. Only the LOOKUP is redundant for a compile-time-constant target.
+  Deleting the slice yield moves scheduler preemption to different guest
+  instructions and is guest visible; turning a literal `B` into
+  `callee(); return` grows the host stack around a cross-function guest
+  loop, as warned above.
+
+  So B2 keeps the entire guest-visible sequence and replaces only the
+  lookup. Each literal `B` / `BL` / fall-through callsite gets a 24-byte
+  mutable `NdsLinkSlot` in the emitting body: `{fn, key, target_pc,
+  guard}`. It exists because `g_dispatch_cache` is 65,536 128-byte slots
+  per CPU — 8 MiB — direct-mapped on a PC hash, so a hot literal
+  transfer is a near-certain LLC + TLB miss pair. B0's per-class timing
+  measured `cache_hit` at **44.0 ns (ARM9) / 33.2 ns (ARM7)**, the largest
+  measured per-class region. A per-callsite slot is touched by the code
+  that just ran.
+
+  Soundness, in the order the checks run: `key` = `(link_epoch << 1) | cpu`,
+  and `link_epoch` bumps on every `nds_register_dispatch`, every
+  `nds_unregister_dispatch`, and every `runtime_init`, so any change to the
+  candidate set invalidates every slot at once — no repatch walk, no
+  slot registry, and upgrade/downgrade fall out of the same rule. (It is a
+  separate counter from `dispatch_epoch` because `runtime_init` resets that
+  one to 1, which a stale slot would falsely match.) `CPSR.T` must still
+  agree. A content-validated target revalidates its backing-page
+  generations on EVERY use from the resolve-time snapshot, exactly as
+  `cached_lookup_live` does. Resolution itself always runs through
+  `lookup_static_cached`, so ordered overlapping-bank selection and
+  registration priority are inherited rather than reimplemented. Superblock
+  coalescing needs no special case: the dispatch row for an interior member
+  already names the leader body, and the emitter publishes `R15` before the
+  link call.
+
+  EMISSION CHANGED (title banks need regeneration) and
+  `NDS_LIVE_BANK_ABI_VERSION` went 5 → 6, invalidating cached player
+  shards by design. A runner-owned table keyed by target PC was rejected as
+  the runner-only alternative: that IS `g_dispatch_cache`, so it would have
+  moved nothing. `NDS_DIRECT_LINK=0` disables linking wholesale at runtime.
+  Linking is deliberately NOT gated on `g_runtime_deep_trace` — unlike
+  the bus fast path it skips nothing observable (same trace event, same
+  yield decision, same `dispatch_total`, same live-overlay native-hit
+  accounting), and gating it would have made `--serve` byte-lock probes
+  compare two identical unlinked legs. Structural regressions are pinned in
+  `runner/tests/test_machinery_perf_guards.py`.
 - **B3. Per-callsite monomorphic inline cache** for computed transfers
   (BX reg / LDR pc / LDM pc): a static per-site slot {target, fn,
   generation snapshot}; hit = compare + call, miss = dispatch + refill.

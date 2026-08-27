@@ -98,7 +98,14 @@ typedef struct NdsDispatchEntry {
 // cpu and -DNDS_STATIC_CPU), and a disagreement silently runs one CPU's
 // code under the other's folded timing model, so the runner cross-checks
 // them. Bumping this invalidates every previously cached shard by design.
-#define NDS_LIVE_BANK_ABI_VERSION 5u
+//
+// ABI 6 adds per-callsite direct-link slots (NdsLinkSlot below). A shard
+// built before ABI 6 emits runtime_dispatch_literal_* only and would still
+// run correctly, but its bodies do not export the mutable slot storage the
+// runner needs, so the version is bumped rather than silently mixing linked
+// and unlinked shards. Bumping invalidates every previously cached shard by
+// design.
+#define NDS_LIVE_BANK_ABI_VERSION 6u
 #define NDS_LIVE_BANK_FLAG_DEPENDENCY_CLOSURE 0x00000001u
 
 typedef struct NdsBusFastWin NdsBusFastWin;
@@ -465,6 +472,38 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_literal_branch(uint32_t target_pc);
 void runtime_dispatch_literal_call(uint32_t target_pc);
 void runtime_dispatch_literal_fallthrough(uint32_t target_pc);
+
+// ── B2 validated direct linking ────────────────────────────────────
+// Every literal B / BL / fall-through transfer carries a compile-time
+// constant guest target. The dispatcher resolves that target through an
+// 8 MiB-per-CPU direct-mapped hash (g_dispatch_cache), which is a
+// guaranteed cache/TLB miss pair on a hot dispatch. A link slot is the
+// same resolution held in the CALLER's own data, adjacent to the code
+// that uses it, so a repeated transfer costs a compare instead of a probe.
+//
+// The slot caches nothing the dispatcher does not already cache; it only
+// moves the storage. `key` pins the resolution to one (dispatch epoch,
+// CPU) pair. Registering or unregistering ANY bank bumps the epoch, so a
+// slot self-invalidates on every bank load, reject-supersede, unregister,
+// and machine reset with no repatch walk over emitted code. `guard` is a
+// runner-owned generation snapshot for content-validated targets and is
+// null for immutable ones; a validated target still revalidates its
+// backing-page generations on every use, exactly as the dispatcher does.
+//
+// Slots are mutable per-callsite storage in a generated body. They are
+// pure cache: zeroing one at any time is always safe, and linking can be
+// disabled wholesale at runtime (NDS_DIRECT_LINK=0), which restores the
+// literal-dispatch behaviour byte for byte.
+typedef struct NdsLinkSlot {
+    void (*fn)(void);       // resolved leader body, or 0 when unresolved
+    uint32_t key;           // (dispatch_epoch << 1) | cpu; 0 = unresolved
+    uint32_t target_pc;     // guest target PC; bit 0 = THUMB
+    const void* guard;      // runner-owned NdsLinkGuard, or 0 if immutable
+} NdsLinkSlot;
+
+void runtime_link_call(NdsLinkSlot* slot);
+void runtime_link_branch(NdsLinkSlot* slot);
+void runtime_link_fallthrough(NdsLinkSlot* slot);
 void runtime_discovery_note_static(uint32_t pc, uint32_t thumb);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);

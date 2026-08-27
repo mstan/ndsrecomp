@@ -282,6 +282,70 @@ def main():
             fail("the shard compiler writes the deadline; it is published "
                  "only by the runner")
 
+    # ── B2 validated direct linking (beads-yjp.45) ───────────────────────
+    # The win is a data-locality change, not a semantic one. Every assertion
+    # here pins one clause of that safety argument. A refactor that deletes
+    # any of them turns a guest-invisible cache move into a real behaviour
+    # change that no byte-lock on one machine would necessarily catch.
+
+    # (a) The LLE-faithful slow path stays forceable at runtime.
+    if "NDS_DIRECT_LINK" not in runtime:
+        fail("the direct-link off switch (NDS_DIRECT_LINK) is gone; the "
+             "unlinked dispatcher must stay reachable for oracle probes")
+
+    # (b) A linked transfer keeps the ENTIRE guest-visible dispatch
+    # sequence. The three wrappers must route into the dispatch loop, never
+    # call the resolved body themselves: calling it directly would delete
+    # the slice-yield preemption point (moving scheduler preemption to
+    # different guest instructions) and, for a literal B, turn a guest tail
+    # transfer into an unbounded host call chain.
+    for name in ("runtime_link_branch", "runtime_link_call",
+                 "runtime_link_fallthrough"):
+        wrapper = body(runtime, name)
+        if "runtime_dispatch_impl" not in wrapper:
+            fail(f"{name} no longer enters the dispatch loop; it would skip "
+                 "the slice-yield preemption point and the static guard")
+        if re.search(r"slot\s*->\s*fn\s*\(", wrapper):
+            fail(f"{name} calls the linked body directly; a literal branch "
+                 "would grow the host stack around a guest loop")
+    loop = body(runtime, "runtime_dispatch_impl")
+    for required in ("runtime_slice_yield", "g_cpu.R[15] = pc",
+                     "StaticGuardScope"):
+        if required not in loop:
+            fail(f"the dispatch loop lost {required}; linking is only sound "
+                 "while it changes nothing but where the resolution came "
+                 "from")
+
+    # (c) Resolution authority is inherited, never reimplemented: a slot may
+    # only ever publish what the ordinary lookup returned, so ordered
+    # overlapping-bank selection and registration priority still decide.
+    fill = body(runtime, "link_slot_fill")
+    if "hit->fn" not in fill or "nds_dispatch_lookup" in fill:
+        fail("link_slot_fill no longer publishes the dispatcher's own "
+             "resolution; bank ordering would diverge from lookup_static")
+
+    # (d) Invalidation covers every event that changes the candidate set.
+    # Without all three, a slot could outlive the body it points at.
+    for site in ("nds_register_dispatch", "nds_unregister_dispatch",
+                 "runtime_init"):
+        if "link_epoch_bump" not in body(runtime, site):
+            fail(f"{site} does not bump the link epoch; link slots would "
+                 "survive a change to the set of registered banks")
+
+    # (e) A content-validated target revalidates its backing pages on EVERY
+    # use, exactly as a cache hit does.
+    admit = body(runtime, "link_slot_admit")
+    if "link_guard_live" not in admit:
+        fail("link_slot_admit skips the generation check; a guest write to "
+             "a validated target would not downgrade the slot")
+
+    # (f) Shards reach the linked entry points, and never own slot state.
+    for symbol in ("runtime_link_branch", "runtime_link_call",
+                   "runtime_link_fallthrough"):
+        if not re.search(r"^\s*" + symbol + r"\s*$", exports, re.M):
+            fail(f"{symbol} is not exported; a live shard body could not "
+                 "reach the linked dispatcher")
+
     print("machinery perf guards: OK")
     return 0
 

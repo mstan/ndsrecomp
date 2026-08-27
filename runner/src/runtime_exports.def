@@ -56,6 +56,9 @@ EXPORTS
     runtime_dispatch_literal_branch
     runtime_dispatch_literal_call
     runtime_dispatch_literal_fallthrough
+    runtime_link_branch
+    runtime_link_call
+    runtime_link_fallthrough
     runtime_dispatch_bad_entry
     runtime_dispatch_miss
     runtime_dispatch_with_exchange

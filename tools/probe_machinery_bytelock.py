@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Instruction-anchored byte-lock between the two NDS_CYCLE_FAST_LIMIT legs.
+"""Instruction-anchored byte-lock between the two states of one env selector.
+
+Defaults to NDS_CYCLE_FAST_LIMIT (beads-yjp.42); --toggle-env retargets it at
+any other single-variable runtime selector that is supposed to be guest
+invisible, e.g. NDS_DIRECT_LINK (beads-yjp.45, B2 direct linking). The
+witness check adapts to the selector: the ON leg must prove the feature was
+actually live, so a gate can never pass by disabling both legs.
 
 WHY THIS EXISTS RATHER THAN THE ROUTE HARNESS
 ---------------------------------------------
@@ -112,12 +118,29 @@ def capture(client: Client) -> dict:
     stats = client.cmd("dispatch_stats")
     out["fast_limit_publishes"] = stats.get("fast_limit_publishes")
     out["cycle_fast_limit"] = stats.get("cycle_fast_limit")
+    # Composition counters that a dispatch-side selector is expected to move.
+    # They are recorded but deliberately NOT part of the equality set: they
+    # describe the runtime machinery, not guest state. dispatch_stats is
+    # nested per CPU, so flatten it rather than reading the top level and
+    # silently recording None for every field.
+    out["dispatch_composition"] = {
+        cpu: {key: stats.get(cpu, {}).get(key)
+              for key in ("literal_branch", "literal_call",
+                          "literal_fallthrough", "resume_dispatch",
+                          "dispatch_total", "cache_hit", "cache_hit_absent",
+                          "cache_slow_lookup")}
+        for cpu in ("arm9", "arm7") if isinstance(stats.get(cpu), dict)
+    }
+    try:
+        out["direct_link"] = client.cmd("direct_link")
+    except Exception:
+        out["direct_link"] = None
     return out
 
 
 def run_leg(args, enabled: bool, port: int) -> list[dict]:
     env = dict(os.environ)
-    env["NDS_CYCLE_FAST_LIMIT"] = "1" if enabled else "0"
+    env[args.toggle_env] = "1" if enabled else "0"
     # A byte-lock must not race an audio device or a window: serve mode is
     # headless and steps only when a run_to_event is in flight.
     cmd = [
@@ -181,16 +204,19 @@ def main() -> int:
     p.add_argument("--timeout", type=float, default=3600.0)
     p.add_argument("--runner-arg", action="append", default=[],
                    help="extra nds_runner argument (e.g. --force-tier3)")
+    p.add_argument("--toggle-env", default="NDS_CYCLE_FAST_LIMIT",
+                   help="runtime env selector under test; the OFF leg is the "
+                        "faithful control and the ON leg must witness itself")
     p.add_argument("--output", type=pathlib.Path,
                    default=ROOT / "perf-results" / "machinery-bytelock")
     args = p.parse_args()
 
-    print("leg A: NDS_CYCLE_FAST_LIMIT=0 (faithful, forced)")
+    print(f"leg A: {args.toggle_env}=0 (faithful control)")
     off = run_leg(args, False, args.port)
-    print("leg B: NDS_CYCLE_FAST_LIMIT=1 (normal policy)")
+    print(f"leg B: {args.toggle_env}=1 (feature enabled)")
     on = run_leg(args, True, args.port + 1)
 
-    report = {"exe": str(args.exe),
+    report = {"exe": str(args.exe), "toggle_env": args.toggle_env,
               "exe_sha256": hashlib.sha256(args.exe.read_bytes()).hexdigest(),
               "stops_off": off, "stops_on": on}
     args.output.mkdir(parents=True, exist_ok=True)
@@ -211,14 +237,33 @@ def main() -> int:
                         if a[key].get(k) != b[key].get(k):
                             print(f"    {k}: off={a[key].get(k)} "
                                   f"on={b[key].get(k)}")
-    # The witness: a leg claiming the deadline is on must have published one.
-    if on and not any(s["fast_limit_publishes"] for s in on):
-        print("INVALID: the enabled leg never published a deadline; "
-              "the selector state proves nothing")
-        ok = False
-    if off and any(s["fast_limit_publishes"] for s in off):
-        print("INVALID: the faithful leg published a deadline")
-        ok = False
+    # The witness. A gate whose feature was inert in BOTH legs proves
+    # nothing, so the ON leg has to show the machinery actually ran.
+    if args.toggle_env == "NDS_CYCLE_FAST_LIMIT":
+        if on and not any(s["fast_limit_publishes"] for s in on):
+            print("INVALID: the enabled leg never published a deadline; "
+                  "the selector state proves nothing")
+            ok = False
+        if off and any(s["fast_limit_publishes"] for s in off):
+            print("INVALID: the faithful leg published a deadline")
+            ok = False
+    elif args.toggle_env == "NDS_DIRECT_LINK":
+        def link_hits(stops):
+            total = 0
+            for s in stops:
+                dl = s.get("direct_link") or {}
+                for cpu in ("arm9", "arm7"):
+                    total += (dl.get(cpu) or {}).get("hits", 0)
+            return total
+        on_hits, off_hits = link_hits(on), link_hits(off)
+        print(f"witness: link slot hits on={on_hits} off={off_hits}")
+        if on_hits == 0:
+            print("INVALID: the enabled leg never took a linked transfer; "
+                  "the selector state proves nothing")
+            ok = False
+        if off_hits != 0:
+            print("INVALID: the control leg took linked transfers")
+            ok = False
 
     print("BYTE-LOCK PASS" if ok else "BYTE-LOCK FAIL")
     print(f"report: {args.output / 'report.json'}")
