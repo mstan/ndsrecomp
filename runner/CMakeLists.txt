@@ -132,6 +132,38 @@ if(TITLE_GROUP_COUNT GREATER 0)
             "${_group_dir}/*_dispatch.c")
         list(SORT _group_bodies)
         list(SORT _group_dispatch)
+        # Optional explicit registration priority. Runtime dispatch is
+        # first-match-wins in registration order; the default order is this
+        # alphabetical sort. A title may ship registration-order.txt in its
+        # bank dir listing bank names (one per line, comments with #) that
+        # must register FIRST, in the listed order; unlisted banks follow in
+        # sorted order. Content validation still gates every row, so for
+        # banks whose byte content differs this changes only which candidate
+        # is CONSULTED first, never which code runs. It exists so a
+        # whole-module bank (e.g. an ARM7 alias) can precede single-page
+        # generation banks that would otherwise suppress its superblock
+        # coalescing (see MPH, beads-0vo).
+        set(_order_file "${_group_dir}/registration-order.txt")
+        if(EXISTS "${_order_file}")
+            file(STRINGS "${_order_file}" _order_names)
+            set(_ordered)
+            foreach(_name IN LISTS _order_names)
+                string(STRIP "${_name}" _name)
+                if(_name STREQUAL "" OR _name MATCHES "^#")
+                    continue()
+                endif()
+                set(_want "${_group_dir}/${_name}_dispatch.c")
+                list(FIND _group_dispatch "${_want}" _idx)
+                if(_idx EQUAL -1)
+                    message(FATAL_ERROR
+                        "registration-order.txt names bank '${_name}' but "
+                        "${_want} does not exist in the group")
+                endif()
+                list(APPEND _ordered "${_want}")
+                list(REMOVE_ITEM _group_dispatch "${_want}")
+            endforeach()
+            list(INSERT _group_dispatch 0 ${_ordered})
+        endif()
         if(NOT _group_bodies OR NOT _group_dispatch)
             message(FATAL_ERROR
                 "title bank group ${_gi} (${_group_dir}) must contain "

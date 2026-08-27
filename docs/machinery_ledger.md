@@ -204,3 +204,28 @@ route that runs 0.2% interpreted, ~52% of interpreted cost is ~0.1% of frame
 time. They should be gated on measuring a genuinely interpreter-heavy route
 (MKDS local multiplayer is the known case) rather than done because they are
 well-evidenced.
+
+- 2026-08-27 **MPH superblock coalescing (exp 1)**: RETAINED as flat-cost
+  simplification. --coalesce-fallthroughs was never passed to MPH bank
+  generation; wired for the ARM9/ARM7 main closures + both ARM7 alias banks
+  with preceding-dispatch lists mirroring the runner's per-CPU sorted-glob
+  registration order. Census: 17,056 + 2,409 + 261 + 13 merged edges.
+  Interleaved 3+3 A/B (adventure + attract) timing-flat (every delta inside
+  one side's own spread); ARM9 literal_fallthrough fell monotonically in all
+  10 phases (-0.24..-6.45%); ARM7 unchanged (registration-order blocked).
+  Binary 250,815,513 -> 212,182,455 (-15.4%). Correctness: cross-binary
+  byte-lock identical at 100M..700M; soak FNV pair exact; 81-bank inventory.
+- 2026-08-27 **ARM7 WRAM-alias registration unlock (exp 2)**: RETAINED,
+  owner decision (candidate adds the registration-order mechanism; on the
+  dev i9 the timing win is 2.4% adventure / 1.8% attract, below the strict
+  5% complexity gate, but the mechanism is decisive and the field population
+  is dispatch-bound at ~2.5x the dev per-cycle cost). registration-order.txt
+  in the title bank dir lets a whole-module bank register ahead of
+  page-generation banks; MPH names mph_arm7_wram_alias, unlocking its
+  coalescing 261 -> 3,198 edges. Measured: ARM7 dispatch_total -25.9%
+  gameplay / -59.1% boot, literal_fallthrough -33.5% / -86.7% (700M window:
+  -44.4% / -61.6%); ARM9 counters bit-identical; adventure emu -2.4%
+  (3/3 pairwise), attract -1.8%, soak emu -3.7%; one FMV window
+  (attract_2400_3000) +1.2%, consistent with the extra failed validation
+  while a materialized generation is live. Correctness gates identical to
+  exp 1, all green.
