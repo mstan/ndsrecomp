@@ -607,6 +607,16 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
     if (g_texture_width != width) {
         for (int i = 0; i < 2; ++i) {
             configure_integer_texture(g_fallback_texture[i], width);
+#if defined(NDS_GLES)
+            // The 2D framebuffer is ARGB8888 (BGRA byte order). Desktop uploads
+            // it as GL_BGRA_INTEGER, but GLES has no such format, so it is
+            // uploaded as GL_RGBA_INTEGER with red/blue transposed. Swizzle the
+            // fallback texture to read them back in the correct order (fixes the
+            // blue tint on 2D content).
+            glBindTexture(GL_TEXTURE_2D, g_fallback_texture[i]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+#endif
             configure_integer_texture(g_object_texture[i], width);
             configure_layer_texture(g_hd_top_texture[i], width);
             configure_layer_texture(g_hd_below_texture[i], width);
