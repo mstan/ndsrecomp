@@ -73,6 +73,11 @@ class PairedMachines:
         self.audio_nonzero_samples = 0
         self.audio_last_state = {}
 
+    # Diagnostic escape hatch. A run with audio comparison downgraded is NOT
+    # a G1 pass; it exists so a framebuffer/counter regression can still be
+    # located while an unrelated audio divergence is outstanding upstream.
+    ignore_audio = False
+
     def compare_audio(self, where: str) -> None:
         native_info, oracle_info = self.command(
             "audio_samples", start=self.audio_cursor, count=0
@@ -124,10 +129,15 @@ class PairedMachines:
                 oracle_value = int.from_bytes(
                     oracle_pcm[offset:offset + 2], "little", signed=True
                 )
-                raise TraversalFailure(
-                    f"{where}: audio differs at frame {frame} {channel}: "
-                    f"native={native_value} oracle={oracle_value}"
-                )
+                message = (f"{where}: audio differs at frame {frame} "
+                           f"{channel}: native={native_value} "
+                           f"oracle={oracle_value}")
+                if not self.ignore_audio:
+                    raise TraversalFailure(message)
+                if not getattr(self, "_audio_ignored_reported", False):
+                    print(f"  AUDIO IGNORED (not a G1 pass): {message}")
+                    self._audio_ignored_reported = True
+                break
             self.audio_hash.update(native_pcm)
             self.audio_nonzero_samples += sum(
                 int.from_bytes(native_pcm[i:i + 2], "little", signed=True) != 0
@@ -477,6 +487,14 @@ def main() -> int:
               "Tier-3 coverage for content-validated static variants"),
     )
     parser.add_argument(
+        "--ignore-audio",
+        action="store_true",
+        help=("downgrade an audio divergence to a warning. DIAGNOSTIC ONLY -- "
+              "a run with this flag is NOT a G1 pass; it lets the framebuffer "
+              "and event-counter checkpoints be reached while an unrelated "
+              "audio divergence is outstanding"),
+    )
+    parser.add_argument(
         "--require-zero-tier3",
         action="store_true",
         help=("fail unless both CPUs complete the traversal with zero Tier-3 "
@@ -492,6 +510,9 @@ def main() -> int:
 
     ignored = set(manifest.get("ignored_counter_differences", []))
     pair = PairedMachines(args.native_port, args.oracle_port, args.timeout)
+    pair.ignore_audio = args.ignore_audio
+    if args.ignore_audio:
+        print("WARNING: --ignore-audio is set; this run is NOT a G1 pass")
     report: list[dict[str, Any]] = []
     capture_path: Path | None = None
     static_coverage: dict[str, Any] | None = None

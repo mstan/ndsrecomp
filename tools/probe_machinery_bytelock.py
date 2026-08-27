@@ -117,13 +117,21 @@ def capture(client: Client) -> dict:
 
 def run_leg(args, enabled: bool, port: int) -> list[dict]:
     env = dict(os.environ)
-    env["NDS_CYCLE_FAST_LIMIT"] = "1" if enabled else "0"
+    # The selector under test is an env var so both legs are the SAME binary.
+    # Default is the cycle-fast-limit selector; --selector-env retargets it at
+    # any other 0/1 runner toggle (e.g. NDS_GPU2D_THREADED, NDS_3D_THREADED)
+    # without forking the probe.
+    env[args.selector_env] = "1" if enabled else "0"
     # A byte-lock must not race an audio device or a window: serve mode is
     # headless and steps only when a run_to_event is in flight.
     cmd = [
         str(args.exe), str(args.bios), "--serve", "--port", str(port),
-        "--rom", str(args.rom), "--boot", args.boot, "--no-save",
+        "--boot", args.boot, "--no-save",
     ]
+    # A firmware-only byte-lock (framework runner, no title banks) runs with
+    # no cartridge inserted at all.
+    if not args.no_rom:
+        cmd += ["--rom", str(args.rom)]
     if args.config:
         cmd += ["--config", str(args.config)]
     # --force-tier3 makes this the byte-lock for the Tier-3 half of the
@@ -174,6 +182,10 @@ def main() -> int:
                    "Metroid Prime Hunters.nds")
     p.add_argument("--config", type=pathlib.Path, default=None)
     p.add_argument("--boot", default="direct", choices=("direct", "lle"))
+    p.add_argument("--no-rom", action="store_true",
+                   help="run with no cartridge (firmware-only byte-lock)")
+    p.add_argument("--selector-env", default="NDS_CYCLE_FAST_LIMIT",
+                   help="name of the 0/1 env toggle the two legs differ on")
     p.add_argument("--port", type=int, default=19950)
     p.add_argument("--start", type=int, default=100_000_000)
     p.add_argument("--step", type=int, default=100_000_000)
@@ -185,12 +197,13 @@ def main() -> int:
                    default=ROOT / "perf-results" / "machinery-bytelock")
     args = p.parse_args()
 
-    print("leg A: NDS_CYCLE_FAST_LIMIT=0 (faithful, forced)")
+    print(f"leg A: {args.selector_env}=0 (faithful, forced)")
     off = run_leg(args, False, args.port)
-    print("leg B: NDS_CYCLE_FAST_LIMIT=1 (normal policy)")
+    print(f"leg B: {args.selector_env}=1 (selector engaged)")
     on = run_leg(args, True, args.port + 1)
 
     report = {"exe": str(args.exe),
+              "selector_env": args.selector_env,
               "exe_sha256": hashlib.sha256(args.exe.read_bytes()).hexdigest(),
               "stops_off": off, "stops_on": on}
     args.output.mkdir(parents=True, exist_ok=True)
@@ -212,13 +225,20 @@ def main() -> int:
                             print(f"    {k}: off={a[key].get(k)} "
                                   f"on={b[key].get(k)}")
     # The witness: a leg claiming the deadline is on must have published one.
-    if on and not any(s["fast_limit_publishes"] for s in on):
-        print("INVALID: the enabled leg never published a deadline; "
-              "the selector state proves nothing")
-        ok = False
-    if off and any(s["fast_limit_publishes"] for s in off):
-        print("INVALID: the faithful leg published a deadline")
-        ok = False
+    # This is specific to the cycle-fast-limit selector; when the probe is
+    # retargeted at another toggle the witness lives in that toggle's own
+    # counters (e.g. profile.gpu2d.threaded_lines) and is checked separately.
+    if args.selector_env == "NDS_CYCLE_FAST_LIMIT":
+        if on and not any(s["fast_limit_publishes"] for s in on):
+            print("INVALID: the enabled leg never published a deadline; "
+                  "the selector state proves nothing")
+            ok = False
+        if off and any(s["fast_limit_publishes"] for s in off):
+            print("INVALID: the faithful leg published a deadline")
+            ok = False
+    else:
+        print(f"witness for {args.selector_env} is not the deadline counter; "
+              f"verify it in that toggle's own profile counters")
 
     print("BYTE-LOCK PASS" if ok else "BYTE-LOCK FAIL")
     print(f"report: {args.output / 'report.json'}")
