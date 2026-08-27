@@ -48,3 +48,27 @@ void live_overlay_poll();
 bool live_overlay_trigger_now();
 std::string live_overlay_status_json();
 std::string live_overlay_diagnostics_json(uint32_t max_entries);
+
+// Flat snapshot of the live-bank state for the diagnostics record. The full
+// status JSON is a nested document built through an ostringstream and carries
+// a per-bank array; a periodic perf sample wants a handful of scalars, and
+// the fields below (notably backend_tier, which the status JSON does not emit
+// at all) are the ones that distinguish "player is running native gcc-built
+// banks" from "player is running the interpreter" in a field bundle.
+struct NdsLiveOverlaySummary {
+    bool enabled;
+    bool active;
+    uint64_t banks_loaded;
+    uint64_t banks_rejected;
+    uint64_t native_hits;       // summed over every loaded bank
+    uint64_t bank_rejects;      // per-bank guard rejects, summed
+    uint32_t registered_banks;  // loaded AND registered, not superseded
+    // Best backend that actually has a registered bank: 0 = untiered/none,
+    // 1 = tcc (embedded fallback compiler), 2 = gcc (shipped shard cache).
+    uint32_t backend_tier;
+    uint64_t tier3[2];
+    uint64_t mismatch_rejects[2];
+    uint64_t futile_runs;
+    bool auto_suppressed;
+};
+void live_overlay_summary(NdsLiveOverlaySummary* out);

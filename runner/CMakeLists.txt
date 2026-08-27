@@ -397,6 +397,8 @@ add_executable(nds_runner
     src/tier3.cpp
     src/coverage_manifest.cpp
     src/diagnostics.cpp
+    src/dispatch_timing.cpp
+    src/host_info.cpp
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
@@ -487,25 +489,40 @@ if(NDS_ENABLE_PCAP_BACKEND)
 endif()
 # beads-yjp.28: stamped into the coverage manifest so an ingested playthrough
 # can be tied to the build whose static coverage it was measured against.
-# Resolved at configure time; a source tree without git still builds, it just
-# reports "unknown".
-set(NDS_RUNNER_BUILD_ID "unknown")
-find_package(Git QUIET)
-if(GIT_FOUND)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        OUTPUT_VARIABLE _nds_runner_git_id
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(_nds_runner_git_id)
-        set(NDS_RUNNER_BUILD_ID "${_nds_runner_git_id}")
-    endif()
-endif()
-target_compile_definitions(nds_runner PRIVATE
-    NDS_RUNNER_BUILD_ID="${NDS_RUNNER_BUILD_ID}")
+# beads-yjp.44: re-read at BUILD time, not configure time. The old
+# execute_process froze the id at `cmake -B`, so every incremental build after
+# that reported a stale commit -- a shipped v0.6.3 runner reported 12ee1b9
+# while containing 8de5d86-only behaviour, which made its field diagnostics
+# bundle lie about what code the player ran. The script writes the header only
+# when the id actually changes, so an unchanged HEAD costs no recompile, and it
+# still degrades to "unknown" with no git or outside a work tree.
+set(NDS_BUILD_ID_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/nds_build_id.h")
+set(NDS_BUILD_ID_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/NdsBuildIdScript.cmake")
+# Seed at configure time so the header exists before the first compile even if
+# the custom target has not run yet.
+execute_process(COMMAND "${CMAKE_COMMAND}"
+    "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+    "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+    "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+    "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+    -P "${NDS_BUILD_ID_SCRIPT}")
+add_custom_target(nds_build_id ALL
+    BYPRODUCTS "${NDS_BUILD_ID_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+        "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+        "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+        "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+        -P "${NDS_BUILD_ID_SCRIPT}"
+    COMMENT "Stamping git HEAD into nds_build_id.h"
+    VERBATIM)
+add_dependencies(nds_runner nds_build_id)
 
 target_include_directories(nds_runner PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"   # nds_build_id.h (build-time)
     $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
     $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
     src

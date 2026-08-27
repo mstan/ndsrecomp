@@ -32,6 +32,7 @@
 #include "dispatch_lookup.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 
@@ -644,14 +645,27 @@ struct StaticGuardScope {
         g_static_guard = saved;
         if (saved && saved->invalidated) request_yield_poll();
     }
-    bool call(const CachedStaticLookup* hit) {
+    // Split in two so the dispatch-cost sampler can close its region between
+    // the machinery (guard construction) and the guest code (fn()). Timing
+    // fn() would make literal_call inclusive of the entire callee and every
+    // dispatch nested inside it, so the per-class buckets would nest and
+    // their sum would exceed wall time. prepare() does exactly what call()'s
+    // first half did, in the same order and with the same side effects.
+    bool prepare(const CachedStaticLookup* hit) {
         if (!hit || !hit->fn ||
             !cached_static_guard(*hit, active))
             return false;
         g_static_guard = &active;
-        hit->fn();
+        ready = hit;
         return true;
     }
+    void invoke() { ready->fn(); }
+    bool call(const CachedStaticLookup* hit) {
+        if (!prepare(hit)) return false;
+        invoke();
+        return true;
+    }
+    const CachedStaticLookup* ready = nullptr;
 };
 
 // Bracket the static function range containing `pc` in a dispatch table
@@ -1326,6 +1340,11 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t ci, uint32_t r
 extern "C" void runtime_dispatch(uint32_t target_pc) {
     TailDispatchScope tail;
     for (;;) {
+        // One exclusive dispatch-machinery region per loop iteration: opened
+        // here, closed the instant before guest code runs (see
+        // dispatch_timing.h). The destructor is the backstop for the early
+        // returns that never reach the close.
+        NdsDispatchRegion cost_region(g_nds_active);
         tail.state.pending = false;
         const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
         // CPSR.T, not stale low bits left by the producer, owns the current
@@ -1350,7 +1369,37 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
         const CpuCtx& c = g_ctx[g_nds_active];
         StaticGuardScope guard_scope;
-        if (guard_scope.call(lookup_static_cached(c, pc, thumb))) {
+        // Same construction order and same operations as the former
+        // `guard_scope.call(lookup_static_cached(c, pc, thumb))`: the guard
+        // scope is built first, then the lookup runs, then the guard is
+        // prepared. Only the hand-off to guest code is split out, so the
+        // cost region can close before it.
+        // Cache-path breakdown of this dispatch's lookup, nested inside
+        // cost_region. The outcome is only knowable after the fact, so it is
+        // read off the exact NdsDispatchStats counters the lookup itself
+        // bumps -- and only when this lookup is actually being sampled, so an
+        // unsampled dispatch pays one countdown and nothing more. Timing the
+        // lookup inside lookup_static_cached_impl instead would also time
+        // Tier 3's per-instruction poll, which outnumbers dispatch lookups
+        // ~8:1 and cost 1.7 percent of emulation time for a number that is
+        // not a dispatch cost.
+        NdsDispatchCacheRegion cache_region(g_nds_active);
+        const NdsDispatchStats& counters = g_nds_dispatch_stats[g_nds_active];
+        const uint64_t hit_before = counters.cache_hit;
+        const uint64_t absent_before = counters.cache_hit_absent;
+        const CachedStaticLookup* found = lookup_static_cached(c, pc, thumb);
+        const NdsDispatchCachePath cache_path =
+            counters.cache_hit != hit_before
+                ? NDS_DISPATCH_CACHE_HIT
+                : (counters.cache_hit_absent != absent_before
+                       ? NDS_DISPATCH_CACHE_HIT_ABSENT
+                       : NDS_DISPATCH_CACHE_SLOW);
+        ++g_nds_dispatch_timing[g_nds_active].cache_events[cache_path];
+        cache_region.close_as(cache_path);
+        const bool entering_static = guard_scope.prepare(found);
+        cost_region.close();
+        if (entering_static) {
+            guard_scope.invoke();
             if (!tail.state.pending) return;
             target_pc = tail.state.target_pc;
             continue;
@@ -1409,6 +1458,7 @@ extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
 }
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].dispatch_exchange;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCHANGE);
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;
     const uint32_t pc = target_pc & ((target_pc & 1u) ? ~1u : ~3u);
     runtime_trace_event(RUNTIME_TRACE_EXCHANGE, pc, target_pc, 0, 0);
@@ -1416,10 +1466,12 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 }
 extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_branch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_BRANCH);
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_call;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_CALL);
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
@@ -1430,6 +1482,7 @@ extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
         g_tail_dispatch->pending = true;
         return;
     }
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_FALLTHROUGH);
     runtime_dispatch(target_pc);
 }
 
@@ -1707,6 +1760,7 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
                      ? arm9_refill_cycles(base + 0x08u)
                      : arm7_refill_cycles(base + 0x08u));
     ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCEPTION);
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
@@ -1737,6 +1791,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
         runtime_tick(refill);
     }
     ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCEPTION);
     runtime_dispatch(base + 0x18u);
 }
 

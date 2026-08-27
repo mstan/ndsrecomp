@@ -35,6 +35,31 @@ GLuint g_hd_below_texture[2] = {};
 int g_texture_width = 0;
 unsigned g_present_buffer = 0;
 
+// GL identity, captured once the context is current. Fixed buffers rather
+// than std::string: this is read from the diagnostics sampler, and the
+// pointers must stay valid without imposing an allocation or a lifetime
+// question on a periodic reader.
+char g_gl_renderer[192] = {};
+char g_gl_vendor[192] = {};
+char g_gl_version[192] = {};
+
+void copy_gl_string(char* dst, std::size_t cap, GLenum name)
+{
+    const char* src = reinterpret_cast<const char*>(glGetString(name));
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    std::snprintf(dst, cap, "%s", src);
+}
+
+void capture_gl_identity()
+{
+    copy_gl_string(g_gl_renderer, sizeof(g_gl_renderer), GL_RENDERER);
+    copy_gl_string(g_gl_vendor, sizeof(g_gl_vendor), GL_VENDOR);
+    copy_gl_string(g_gl_version, sizeof(g_gl_version), GL_VERSION);
+}
+
 #if defined(NDS_HAVE_SDL3)
 bool sdl_ok(bool result)
 {
@@ -578,9 +603,10 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
         std::fprintf(stderr, "[gpu3d] OpenGL 4.3 unavailable\n");
         return fail_or_fallback("OpenGL 4.3 unavailable");
     }
+    capture_gl_identity();
     std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
-                 reinterpret_cast<const char*>(glGetString(GL_VERSION)),
-                 reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
+                 nds_compute_host_gl_version(),
+                 nds_compute_host_gl_renderer());
     // Must precede the renderer: the factor sizes every texture-array
     // allocation and the cache's free-list is derived from it. A failure here
     // resets the factor to 1 rather than aborting, so the renderer still
@@ -752,4 +778,19 @@ void nds_compute_host_stop()
 bool nds_compute_host_active()
 {
     return g_active;
+}
+
+const char* nds_compute_host_gl_renderer()
+{
+    return g_gl_renderer;
+}
+
+const char* nds_compute_host_gl_vendor()
+{
+    return g_gl_vendor;
+}
+
+const char* nds_compute_host_gl_version()
+{
+    return g_gl_version;
 }

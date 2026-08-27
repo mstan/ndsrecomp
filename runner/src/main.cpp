@@ -30,6 +30,11 @@
 #include "io.h"
 #include "debug_server.h"
 #include "diagnostics.h"
+#include "dispatch_timing.h"
+// Generated at BUILD time into the binary dir (cmake/NdsBuildIdScript.cmake),
+// so NDS_RUNNER_BUILD_ID is the commit this binary was actually compiled from
+// rather than whatever HEAD was when cmake last configured.
+#include "nds_build_id.h"
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
@@ -358,6 +363,11 @@ std::string bundled_tcc_command(const std::filesystem::path& exe_dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Calibrate the dispatch-cost tick source before anything can dispatch.
+    // It is lazily self-calibrating as a fallback, but the lazy path would
+    // spend its calibration spin inside whichever dispatch happened to be
+    // first, contaminating that one sample.
+    nds_dispatch_timing_init();
     // Wiimmfi: Winsock (Windows only) MUST be initialized before ANY
     // Winsock API call anywhere in this process -- including WSAPoll
     // inside Net_Slirp::PollHostSockets(), reached from the host
@@ -1526,6 +1536,7 @@ int main(int argc, char** argv) {
             : std::filesystem::path(rom_path).filename().string();
     nds_diagnostics_set_identity(rom_sha1.c_str(), rom_name.c_str(),
                                  NDS_RUNNER_BUILD_ID);
+    nds_diagnostics_set_versions(NDS_FRAMEWORK_VERSION, NDS_GAME_VERSION);
     std::string rom_game_code;
     uint32_t rom_revision = 0;
     if (rom.size() >= 0x20) {

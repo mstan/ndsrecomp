@@ -1361,6 +1361,32 @@ bool live_overlay_trigger_now() {
     return true;
 }
 
+void live_overlay_summary(NdsLiveOverlaySummary* out) {
+    if (!out) return;
+    *out = NdsLiveOverlaySummary{};
+    out->enabled = g_live.enabled;
+    out->active = live_overlay_active();
+    out->banks_loaded = g_live.banks_loaded;
+    out->banks_rejected = g_live.banks_rejected;
+    out->tier3[0] = g_live.tier3[0];
+    out->tier3[1] = g_live.tier3[1];
+    out->mismatch_rejects[0] = g_live.mismatch_rejects[0];
+    out->mismatch_rejects[1] = g_live.mismatch_rejects[1];
+    out->futile_runs = g_live.futile_runs;
+    out->auto_suppressed = g_live.auto_suppressed;
+    // g_live.loaded is mutated under publish_mutex when a prepared shard is
+    // adopted, so walk it under the same lock the status JSON uses.
+    std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+    for (const LoadedBank& bank : g_live.loaded) {
+        out->native_hits += bank.native_hits;
+        out->bank_rejects += bank.rejects;
+        if (!bank.registered || bank.superseded) continue;
+        ++out->registered_banks;
+        if (bank.backend_tier > out->backend_tier)
+            out->backend_tier = bank.backend_tier;
+    }
+}
+
 std::string live_overlay_status_json() {
     std::size_t preparing = 0u;
     std::size_t ready = 0u;

@@ -20,3 +20,12 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
                                   NdsComputePresentTicks* ticks);
 void nds_compute_host_stop();
 bool nds_compute_host_active();
+
+// GL identification strings, captured once when the context comes up. These
+// were previously only printed to stderr, which meant a field diagnostics
+// bundle could not say which GPU/driver produced it -- the single most
+// load-bearing fact when a performance report arrives from a machine nobody
+// has access to. Empty strings until a context has been created.
+const char* nds_compute_host_gl_renderer();
+const char* nds_compute_host_gl_vendor();
+const char* nds_compute_host_gl_version();
