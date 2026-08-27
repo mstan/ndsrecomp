@@ -50,8 +50,8 @@ function Invoke-Leg {
         Remove-Item Env:NDS_PROFILE_SCHED -ErrorAction SilentlyContinue
     }
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $args = @($Witness, $Exe, $BiosDir, "$LegPort", "$Anchor") + $extra
-    $raw = & py -3 @args 2>&1
+    $pyArgs = @($Witness, $Exe, $BiosDir, "$LegPort", "$Anchor") + $extra
+    $raw = & py -3 @pyArgs 2>&1
     $sw.Stop()
     $json = $null
     try { $json = ($raw -join "`n") | ConvertFrom-Json } catch { }
@@ -70,8 +70,7 @@ function Invoke-Leg {
 if ($Affinity -ne 0) {
     # Constrain this PowerShell process; children inherit the mask.
     (Get-Process -Id $PID).ProcessorAffinity = [IntPtr]$Affinity
-    Write-Output ("affinity mask 0x{0:X} applied to this process and children"
-        -f $Affinity)
+    Write-Output ("affinity mask 0x{0:X} applied to this process and children" -f $Affinity)
 }
 
 $results = @{}
@@ -85,9 +84,8 @@ foreach ($profiled in @($false, $true)) {
             $r = Invoke-Leg -Threaded $leg -Profiled $profiled `
                 -LegPort ($Port + $i * 4 + [int]$leg)
             $results["$tag/$leg"] += $r
-            Write-Output ("  {0} threaded={1} rep{2}: wall={3:N2}s display={4}" -f
-                $tag, $leg, $i, $r.Wall,
-                $(if ($null -ne $r.DisplayMs) { "{0:N1} ms" -f $r.DisplayMs } else { "n/a" }))
+            $d = if ($null -ne $r.DisplayMs) { "{0:N1} ms" -f $r.DisplayMs } else { "n/a" }
+            Write-Output ("  {0} threaded={1} rep{2}: wall={3:N2}s display={4}" -f $tag, $leg, $i, $r.Wall, $d)
         }
     }
 }

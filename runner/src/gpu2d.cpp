@@ -1755,7 +1755,10 @@ void worker_main(Pool* pool, LineScratch* sc) {
             if (pool->stop.load(std::memory_order_acquire)) return;
             if (pool->claim.load(std::memory_order_acquire) >=
                 pool->head.load(std::memory_order_acquire))
-                pool->work_cv.wait(lock);
+                // Bounded so that no future publish/notify ordering mistake
+                // can wedge a worker asleep with work queued; the predicate is
+                // re-checked on every wakeup.
+                pool->work_cv.wait_for(lock, std::chrono::milliseconds(2));
         }
         if (!have) continue;
         render_line_job(pool->jobs[index % kJobSlots], *sc);
@@ -1875,7 +1878,13 @@ void submit_line(int y) {
         ++g_inline_lines;
         return;
     }
-    pool->head.store(head + 1, std::memory_order_release);
+    // Publish under the mutex: a worker that has already evaluated its
+    // predicate and is between that check and its wait would otherwise miss
+    // the notification and sleep with work queued.
+    {
+        std::lock_guard<std::mutex> lock(pool->m);
+        pool->head.store(head + 1, std::memory_order_release);
+    }
     nds_gpu2d_jobs_outstanding.store(1u, std::memory_order_relaxed);
     ++g_threaded_lines;
     pool->work_cv.notify_one();

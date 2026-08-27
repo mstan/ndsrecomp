@@ -315,7 +315,85 @@ already counts capture frames as direct class 5, published as
 is located empirically by censusing the routes with that counter, and the
 serialization path (§5.4) is what the census must show being taken.
 
-## 9. What is explicitly not done
+## 9. Measured results
+
+All numbers are same-binary A/B on `NDS_GPU2D_THREADED`, anchored on guest
+`insn9` so both legs execute identical guest work, with one worker.
+
+### Correctness
+
+| Gate | Result |
+|------|--------|
+| `ctest` | 18/18, including the new `test_capture_serializes_and_matches` |
+| Byte-lock, firmware LLE, threaded vs single, 7 stops 50M..350M | **PASS** — `fb_A`, `fb_B`, `regs9`, `regs7`, full `event_counts` identical |
+| Byte-lock, baseline `cddba78` build vs this build, both legs | **PASS** — identical at all 7 stops |
+| Byte-lock, MPH direct boot, threaded vs single, 7 stops 100M..700M | **PASS** — identical at all 7 stops |
+| Witness that threading ran | firmware `threaded_lines`=181,969, `inline_lines`=0 |
+
+### Firmware route (LLE menu), insn9=100M, 866 frames, 181,969 scanlines
+
+100 % of lines are eligible for a worker on this route
+(`threaded_lines`=181,969, `inline_lines`=0), so it measures the mechanism
+itself. Interleaved min-of-3, one worker, all cores:
+
+| leg | wall (uninstrumented) | `display_ns` | `devices_ns` | `sampled_round_ns` |
+|-----|----------------------:|-------------:|-------------:|-------------------:|
+| threaded off | 5.928 s | 1603.4 ms | 2433.5 ms | 6745.3 ms |
+| threaded on  | **5.007 s** | **769.5 ms** | 1584.9 ms | 5713.7 ms |
+| delta | **−15.5 %** | **−52.0 %** | −34.9 % | −15.3 % |
+
+The wall-time column is the honest end-to-end number: profiling is off, so
+nothing is instrumented, and the two legs are the same binary reaching the
+same guest anchor.
+
+Cost of the latch when threading is off, single runs against the baseline
+`cddba78` build on the same route: `display_ns` 1346.6 ms baseline against
+1398.3 ms with the latch, i.e. roughly **+3.8 %** of display time, or
++0.06 ms per emulated frame, for the snapshot and the 3D-line copy.
+
+Fences on this route: 556 VRAM drains, 1 OAM, 0 palette, 795 frame-boundary.
+8,316 of 181,969 lines (4.6 %) were finished by the helping scheduler thread
+rather than a worker.
+
+### MPH (direct boot), insn9=400M, 2,710 frames, 524,521 scanlines
+
+**MPH runs display capture on roughly 79 % of frames at full 192-line
+height.** With threading on, `inline_lines`=413,760 against
+`threaded_lines`=110,761 — only **21 %** of scanlines are eligible for a
+worker, because capture lines serialize by construction (§5.4).
+
+Interleaved min-of-3 at insn9=200M (2,391 frames; 49,344 threaded lines
+against 413,760 inline, i.e. 10.7 % eligible at that anchor):
+
+| leg | wall (uninstrumented) | `display_ns` | `devices_ns` | `sampled_round_ns` |
+|-----|----------------------:|-------------:|-------------:|-------------------:|
+| threaded off | 16.872 s | 3676.2 ms | 6122.5 ms | 20639.2 ms |
+| threaded on  | 17.602 s | 3668.1 ms | 6090.6 ms | 20024.9 ms |
+| delta | **+4.3 %** | −0.2 % | −0.5 % | −3.0 % |
+
+**There is no MPH win.** End-to-end wall time is slightly *worse*, and the
+display delta is inside noise. Single unrepeated runs at insn9=400M appeared
+to show display −18.8 %, but they do not survive the min-of-3 and should not
+be quoted. The dev box was also running another session's PGO A/B during
+part of this, which widens the spread; that is recorded rather than hidden.
+
+**Honest conclusion.** The mechanism works, is exact, and is worth about
+half of display time and 15 % of end-to-end run time on content where lines
+are eligible. On MPH the ceiling is capture serialization, not the
+threading, and the change as it stands is **not** an MPH win — which is why
+the toggle ships default-off. Turning it on for a title is a per-title
+decision that the `threaded_lines` / `inline_lines` census answers directly.
+
+### The follow-up that unblocks MPH
+
+Let a capture line render on a worker into a staging line, and apply the
+`DoCapture` write into guest VRAM on the scheduler thread at the next
+drain. The capture unit's inputs are the composite (or the 3D line) plus an
+LCDC source bank; only the *destination write* has to be on the scheduler
+thread. That converts MPH from 21 % eligible to ~100 % and is the single
+highest-value next step.
+
+## 10. What is explicitly not done
 
 - ARM9/ARM7 threading. Out of scope by directive: shared-memory
   ordering cannot be reconciled with the byte-exact oracle gates.
