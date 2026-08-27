@@ -106,12 +106,12 @@ int CalcYFactorX(XSpanSetup span, int x)
     {
         uint numLo = uint(x) * uint(span.W0);
         uint numHi = 0U;
-        numHi |= numLo >> (32U-YFactorShift);
+        numHi |= numLo >> (32U-uint(YFactorShift));
         numLo <<= YFactorShift;
 
         uint den = uint(x) * uint(span.W0) + uint(span.X1 - span.X0 - x) * uint(span.W1);
 
-        if (den == 0)
+        if (den == 0u)
             return 0;
         else
             return int(Div64_32_32(numHi, numLo, den));
@@ -167,12 +167,12 @@ int CalcYFactorY(YSpanSetup span, int i)
     */
     uint numLo = uint(abs(i)) * uint(span.W0n);
     uint numHi = 0U;
-    numHi |= numLo >> (32U-YFactorShift);
+    numHi |= numLo >> (32U-uint(YFactorShift));
     numLo <<= YFactorShift;
 
-    uint den = uint(abs(i)) * uint(span.W0d) + uint(abs(span.I1 - span.I0 - i)) * span.W1d;
+    uint den = uint(abs(i)) * uint(span.W0d) + uint(abs(span.I1 - span.I0 - i)) * uint(span.W1d);
 
-    if (den == 0)
+    if (den == 0u)
     {
         return 0;
     }
@@ -305,8 +305,8 @@ layout (std430, binding = 7) buffer WorkDescBuffer
     uvec2 WorkDescs[];
 };
 
-const uint WorkDescsUnsortedStart = 0;
-const uint WorkDescsSortedStart = WorkDescsUnsortedStart+MaxWorkTiles;
+const uint WorkDescsUnsortedStart = 0u;
+const uint WorkDescsSortedStart = WorkDescsUnsortedStart+uint(MaxWorkTiles);
 
 )"};
 
@@ -332,9 +332,9 @@ layout (std430, binding = 5) buffer ResultBuffer
     uint ResultValue[];
 };
 
-const uint ResultColorStart = 0;
-const uint ResultDepthStart = ResultColorStart+ScreenWidth*ScreenHeight*2;
-const uint ResultAttrStart = ResultDepthStart+ScreenWidth*ScreenHeight*2;
+const uint ResultColorStart = 0u;
+const uint ResultDepthStart = ResultColorStart+uint(ScreenWidth*ScreenHeight*2);
+const uint ResultAttrStart = ResultDepthStart+uint(ScreenWidth*ScreenHeight*2);
 )"};
 
 const char* Common = R"(
@@ -395,11 +395,11 @@ const uint startTable[256] = uint[256](
 uint Div(uint x, uint y, out uint r)
 {
     // https://www.microsoft.com/en-us/research/publication/software-integer-division/
-    uint k = 31 - findMSB(y);
+    uint k = uint(31 - findMSB(y));
     uint ty = (y << k) >> (32 - 9);
-    uint t = startTable[ty - 256] + 256;
-    uint z = (t << (32 - 9)) >> (32 - k - 1);
-    uint my = 0 - y;
+    uint t = startTable[ty - 256u] + 256u;
+    uint z = (t << (32 - 9)) >> (31u - k);
+    uint my = 0u - y;
 
     z += Umulh(z, my * z);
     z += Umulh(z, my * z);
@@ -409,11 +409,11 @@ uint Div(uint x, uint y, out uint r)
     if(r >= y)
     {
         r = r - y;
-        q = q + 1;
+        q = q + 1u;
         if(r >= y)
         {
             r = r - y;
-            q = q + 1;
+            q = q + 1u;
         }
     }
 
@@ -438,7 +438,7 @@ uint Div64_32_32(uint numHi, uint numLo, uint den)
     // We also shift numer by the same amount. This cannot overflow because numHi < den.
     // The expression (-shift & 63) is the same as (64 - shift), except it avoids the UB of shifting
     // by 64. (it's also UB in GLSL!!!!)
-    uint shift = 31 - findMSB(den);
+    uint shift = uint(31 - findMSB(den));
     den <<= shift;
     numHi <<= shift;
     numHi |= (numLo >> (-shift & 31U)) & uint(-int(shift) >> 31);
@@ -458,7 +458,7 @@ uint Div64_32_32(uint numHi, uint numLo, uint den)
     uint qhat = Div(numHi, den1, rhat);
     uint c1 = qhat * den0;
     uint c2 = rhat * b + num1;
-    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
+    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2u : 1u;
     uint q1 = qhat & 0xFFFFU;
 
     // Compute the true (partial) remainder.
@@ -469,7 +469,7 @@ uint Div64_32_32(uint numHi, uint numLo, uint den)
     qhat = Div(rem, den1, rhat);
     c1 = qhat * den0;
     c2 = rhat * b + num0;
-    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
+    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2u : 1u;
 
     return bitfieldInsert(qhat, q1, 16, 16);
 }
@@ -516,7 +516,7 @@ int InterpolateAttrLinear(int y0, int y1, int i, int irecip, int idiff)
         uint offset = uint(idiff-i);
 #endif
         umulExtended(uint(y0-y1)*offset, uint(irecip), mulHi, mulLo);
-        mulLo = uaddCarry(mulLo, 3<<24, carry);
+        mulLo = uaddCarry(mulLo, 3u<<24, carry);
         mulHi += carry;
         return y1 + int((mulLo >> 30) | (mulHi << (32 - 30)));
         //return y1 + int(((int64_t(y0-y1) * int64_t(offset) * int64_t(irecip)) + int64_t(3<<24)) >> 30);
@@ -526,7 +526,7 @@ int InterpolateAttrLinear(int y0, int y1, int i, int irecip, int idiff)
 uint InterpolateZZBuffer(int z0, int z1, int i, int irecip, int idiff)
 {
     if (z0 == z1)
-        return z0;
+        return uint(z0);
 
     uint base, disp, factor;
     if (z0 < z1)
@@ -545,7 +545,7 @@ uint InterpolateZZBuffer(int z0, int z1, int i, int irecip, int idiff)
 #ifdef InterpSpans
     int shiftl = 0;
     const int shiftr = 22;
-    if (disp > 0x3FF)
+    if (disp > 0x3FFu)
     {
         shiftl = findMSB(disp) - 9;
         disp >>= shiftl;
@@ -557,7 +557,7 @@ uint InterpolateZZBuffer(int z0, int z1, int i, int irecip, int idiff)
 #endif
     uint mulLo, mulHi;
 
-    umulExtended(disp * factor, abs(irecip) >> 8, mulHi, mulLo);
+    umulExtended(disp * factor, uint(abs(irecip) >> 8), mulHi, mulLo);
 
     return base + (((mulLo >> shiftr) | (mulHi << (32 - shiftr))) << shiftl);
 /*
@@ -578,7 +578,7 @@ uint InterpolateZZBuffer(int z0, int z1, int i, int irecip, int idiff)
 #ifdef InterpSpans
     {
         int shift = 0;
-        while (disp > 0x3FF)
+        while (disp > 0x3FFu)
         {
             disp >>= 1;
             shift++;
@@ -597,7 +597,7 @@ uint InterpolateZZBuffer(int z0, int z1, int i, int irecip, int idiff)
 uint InterpolateZWBuffer(int z0, int z1, int ifactor)
 {
     if (z0 == z1)
-        return z0;
+        return uint(z0);
 
 #ifdef Rasterise
     // since the precision along x spans is only 8 bit the result will always fit in 32-bit
@@ -613,13 +613,13 @@ uint InterpolateZWBuffer(int z0, int z1, int ifactor)
     uint mulLo, mulHi;
     if (z0 < z1)
     {
-        umulExtended(z1-z0, ifactor, mulHi, mulLo);
+        umulExtended(uint(z1-z0), uint(ifactor), mulHi, mulLo);
         // 64-bit shift
         return uint(z0) + ((mulLo >> YFactorShift) | (mulHi << (32-YFactorShift)));
     }
     else
     {
-        umulExtended(z0-z1, (1<<YFactorShift)-ifactor, mulHi, mulLo);
+        umulExtended(uint(z0-z1), uint((1<<YFactorShift)-ifactor), mulHi, mulLo);
         return uint(z1) + ((mulLo >> YFactorShift) | (mulHi << (32-YFactorShift)));
     }
 #endif
@@ -716,7 +716,7 @@ void main()
         xspan.InsideEnd = xspan.X1;
 
     bool isShadowMask = ((polygon.Attr & 0x3F000030U) == 0x00000030U);
-    bool fillAllEdges = polyalpha < 31 || (DispCnt & (3U<<4)) != 0U;
+    bool fillAllEdges = polyalpha < 31u || (DispCnt & (3U<<4)) != 0U;
 
     if (fillAllEdges || spanL.X1 < spanL.X0 || spanL.Increment <= 0x40000)
         xspan.Flags |= XSpanSetup_FillLeft;
@@ -945,7 +945,7 @@ void main()
     ivec2 coarseBotRight = coarseTopLeft + ivec2(CoarseTileW-1, CoarseTileH-1);
 
     bool binned = false;
-    if (polygonIdx < NumPolygons)
+    if (polygonIdx < int(NumPolygons))
     {
         binned = BinPolygon(Polygons[polygonIdx], coarseTopLeft, coarseBotRight);
     }
@@ -988,7 +988,7 @@ void main()
         uint workOffset = atomicAdd(VariantWorkCount[0].w, uint(bitCount(binnedMask)));
         BinningMaskAndOffset[BinningWorkOffsetsStart + linearTile * BinStride + groupIdx] = workOffset;
 
-        uint tilePositionCombined = bitfieldInsert(fineTileTopLeft.x, fineTileTopLeft.y, 16, 16);
+        uint tilePositionCombined = uint(bitfieldInsert(fineTileTopLeft.x, fineTileTopLeft.y, 16, 16));
 
         int idx = 0;
         while (binnedMask != 0U)
@@ -999,8 +999,8 @@ void main()
             int polygonIdx = groupIdx * 32 + bit;
             int variantIdx = Polygons[polygonIdx].Variant;
 
-            int inVariantOffset = int(atomicAdd(VariantWorkCount[variantIdx].z, 1));
-            WorkDescs[WorkDescsUnsortedStart + workOffset + idx] = uvec2(tilePositionCombined, bitfieldInsert(polygonIdx, inVariantOffset, 11, 21));
+            int inVariantOffset = int(atomicAdd(VariantWorkCount[variantIdx].z, 1u));
+            WorkDescs[WorkDescsUnsortedStart + workOffset + uint(idx)] = uvec2(tilePositionCombined, bitfieldInsert(polygonIdx, inVariantOffset, 11, 21));
 
             idx++;
         }
