@@ -346,6 +346,25 @@ The wall-time column is the honest end-to-end number: profiling is off, so
 nothing is instrumented, and the two legs are the same binary reaching the
 same guest anchor.
 
+#### Core scaling
+
+Same route, same binary, same min-of-3, with both legs pinned to the same
+core mask (`-Affinity`) so the comparison is fair at each width:
+
+| cores | wall off | wall on | Δ wall | `display_ns` off | on | Δ display |
+|-------|--------:|--------:|-------:|-----------------:|---:|----------:|
+| all (dev box) | 5.928 s | 5.007 s | **−15.5 %** | 1603.4 ms | 769.5 ms | −52.0 % |
+| 4 (`0xF`) | 6.010 s | 5.111 s | **−15.0 %** | 1771.5 ms | 784.0 ms | −55.7 % |
+| 2 (`0x3`) | 5.990 s | 5.867 s | **−2.1 %** | 1710.5 ms | 921.2 ms | −46.1 % |
+
+The emu thread's display cost roughly halves at every width — that part is
+the mechanism working. End-to-end wall time only follows when there is a
+spare core to absorb the work: at two cores the worker competes with the
+emu thread and the GPU3D render thread for the same two CPUs, so the win
+collapses to ~2 %. **This is a latency-hiding change, not a work-reduction
+change**, and it needs a core to hide the work on. A genuinely dual-core
+field machine gains almost nothing; a four-core one gains ~15 %.
+
 Cost of the latch when threading is off, single runs against the baseline
 `cddba78` build on the same route: `display_ns` 1346.6 ms baseline against
 1398.3 ms with the latch, i.e. roughly **+3.8 %** of display time, or
