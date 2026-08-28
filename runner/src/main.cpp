@@ -357,7 +357,13 @@ std::string bundled_tcc_command(const std::filesystem::path& exe_dir) {
         " --runtime-include " + q(include) +
         " --runner-exe " + q(runner) +
         " --compiler tcc --tcc " + q(tcc) +
-        " --max-pages 6 --min-hits 8";
+        // No --max-pages here on purpose. The batch cap is queue policy and
+        // belongs to the runner, which raises it while a backlog is draining
+        // and returns it to the conservative base when the queue empties; it
+        // reaches the child in NDS_LIVE_OVERLAY_MAX_PAGES alongside the other
+        // NDS_LIVE_OVERLAY_* variables. Hard-coding it here would pin every
+        // player at the 6-per-run ceiling that never converged.
+        " --min-hits 8";
 }
 
 }  // namespace

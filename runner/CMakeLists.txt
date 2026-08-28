@@ -858,6 +858,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_index_lock_test.py"
                 --work "${CMAKE_CURRENT_BINARY_DIR}/live-index-lock-work")
+    # beads-yjp.51: the pending-work queue is what makes a player's backlog
+    # converge across runs and across sessions. Its format is schema-versioned
+    # and must tolerate every corruption, its order must be hottest-first by
+    # execution weight, and it must survive a hard kill of the writer.
+    add_test(
+        NAME live_queue_persist_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_queue_persist_test.py")
     if(WIN32)
       # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
       # what the runner cross-checks against the bank's metadata CPU.

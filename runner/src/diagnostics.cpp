@@ -305,7 +305,13 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         "\"banks_loaded\":%llu,\"banks_rejected\":%llu,"
         "\"registered_banks\":%u,\"native_hits\":%llu,"
         "\"bank_rejects\":%llu,\"futile_runs\":%llu,"
-        "\"auto_suppressed\":%s},"
+        "\"auto_suppressed\":%s,"
+        // Queue policy as it stands at session start: how much work the
+        // persisted queue is carrying, and the cap/cooldown the next batch
+        // will actually use. Without these a field bundle cannot tell a
+        // converged install from one that never got a second batch.
+        "\"pending_candidates\":%llu,\"batch_cap\":%u,"
+        "\"cooldown_ms\":%u,\"persisted_backlog\":%s},"
         "\"renderer\":{\"policy\":\"%s\",\"effective\":\"%s\","
         "\"compute_built\":%s,\"compute_preferred\":%s,"
         "\"compute_required\":%s,\"direct_present\":%s},\"settings\":{"
@@ -348,6 +354,9 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         (unsigned long long)overlay.bank_rejects,
         (unsigned long long)overlay.futile_runs,
         overlay.auto_suppressed ? "true" : "false",
+        (unsigned long long)overlay.pending_candidates,
+        overlay.batch_cap, overlay.cooldown_ms,
+        overlay.persisted_backlog ? "true" : "false",
         nds_gpu3d_renderer_policy_name(renderer_policy),
         compute_active ? "compute" : "soft",
         compute_built ? "true" : "false",
@@ -538,7 +547,15 @@ void nds_diagnostics_maybe_write_performance_sample(
         "\"live_overlay\":{\"active\":%s,\"backend_tier\":%u,"
         "\"banks_loaded\":%llu,\"banks_rejected\":%llu,"
         "\"registered_banks\":%u,\"native_hits\":%llu,"
-        "\"bank_rejects\":%llu,\"tier3_arm9\":%llu,\"tier3_arm7\":%llu}}\n",
+        "\"bank_rejects\":%llu,\"tier3_arm9\":%llu,\"tier3_arm7\":%llu,"
+        // Per-interval so the drain rate is directly measurable from a
+        // bundle: pending_candidates falling across intervals IS the queue
+        // converging, and batch_cap/cooldown_ms show the policy that did it.
+        "\"pending_candidates\":%llu,\"batch_cap\":%u,\"cooldown_ms\":%u,"
+        // busy says a compiler child was running when this interval was
+        // sampled. Splitting a session's intervals on it is the whole
+        // frame-time-theft check, self-contained in one log.
+        "\"busy\":%s,\"runs_started\":%llu}}\n",
         (unsigned long long)sched_profile.sampled_rounds,
         (unsigned long long)sched_profile.rounds,
         (unsigned long long)sched_profile.arm9_ns,
@@ -571,7 +588,11 @@ void nds_diagnostics_maybe_write_performance_sample(
         (unsigned long long)overlay.native_hits,
         (unsigned long long)overlay.bank_rejects,
         (unsigned long long)overlay.tier3[0],
-        (unsigned long long)overlay.tier3[1]);
+        (unsigned long long)overlay.tier3[1],
+        (unsigned long long)overlay.pending_candidates,
+        overlay.batch_cap, overlay.cooldown_ms,
+        overlay.busy ? "true" : "false",
+        (unsigned long long)overlay.runs_started);
     std::fflush(g_perf);
 
     g_last_ticks = stats.now_ticks;
