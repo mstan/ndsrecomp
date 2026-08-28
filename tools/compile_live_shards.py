@@ -11,6 +11,7 @@ candidate lookup.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import collections
 import hashlib
@@ -652,20 +653,210 @@ def compiler_identity(args: argparse.Namespace) -> dict:
     return {"compiler": "gcc", "gcc_machine": machine, "gcc_version": version}
 
 
+def recompiler_codegen_identity(args: argparse.Namespace) -> str:
+    """What the recompiler says about its own generated-C emission.
+
+    NOT a hash of the executable. A PE carries a link timestamp and build-path
+    residue, so hashing its bytes made a no-op rebuild of the recompiler a new
+    provider identity and discarded every player's accumulated shard cache;
+    v0.6.5 could not carry the v0.6.4 prebuilt cache forward for exactly that
+    reason (beads-yjp.56).
+
+    The binary reports a declared version instead
+    (recompiler/src/codegen_identity.h), pinned by recompiler/tests/
+    codegen_golden_test.cpp so emission cannot move without the version moving.
+
+    Fails closed. A recompiler that does not answer this question is not one
+    whose shards may share a cache namespace with one that does -- silently
+    substituting a default would let two different code generators publish
+    under one identity, and a live shard links straight into the runner's
+    data symbols, so that is memory corruption rather than a bad frame.
+    """
+    try:
+        result = subprocess.run([str(args.recompiler), "--codegen-identity"],
+                                capture_output=True, text=True)
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot ask {args.recompiler} for its codegen identity: {error}")
+    value = (result.stdout or "").strip().splitlines()
+    value = value[0].strip() if value else ""
+    if result.returncode != 0 or not re.fullmatch(r"nds-codegen-v[0-9]+",
+                                                  value):
+        raise RuntimeError(
+            f"{args.recompiler} did not report a codegen identity "
+            f"(exit {result.returncode}, output {value!r}). It is too old for "
+            "this shard pipeline: rebuild the recompiler.")
+    return value
+
+
+# Bump when THIS script's contribution to a shard's compiled output changes in
+# a way codegen_fingerprint() cannot see -- for example when a recompiler flag
+# emitted below keeps its spelling but changes meaning in the recompiler. The
+# fingerprint already covers every edit to the emission functions themselves,
+# so this is the escape hatch, not the mechanism.
+SHARD_CODEGEN_VERSION = 1
+
+# The emission surface: everything whose behaviour can change a byte of a
+# compiled shard. The fingerprint is the transitive closure of module-level
+# names reachable from these, computed from the AST rather than declared, so a
+# helper extracted out of one of them is covered automatically instead of
+# silently escaping the hash.
+#
+# Deliberately NOT here, because they select WHAT is compiled and never HOW:
+# candidate discovery and ordering, the pending-work queue, snapshot merging,
+# the cache index, futility accounting, and main()'s orchestration. Whatever
+# they select reaches the output only as `entries`, and work_identity() folds
+# the selected entries directly -- so two runs that pick different work already
+# get different candidates without the provider identity moving.
+CODEGEN_ENTRY_POINTS = (
+    "shard_bank_name",
+    "recompiler_command",
+    "write_config",
+    "write_wrapper",
+    "shard_source_set",
+    "generated_bank_sources",
+    "generated_identity",
+    "compile_shard_dll",
+    "find_import_lib",
+)
+
+
+def _module_members(tree: ast.Module) -> dict[str, list[ast.stmt]]:
+    members: dict[str, list[ast.stmt]] = {}
+    for node in tree.body:
+        names: list[str] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            names.append(node.name)
+        elif isinstance(node, ast.Assign):
+            names.extend(target.id for target in node.targets
+                         if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
+                                                            ast.Name):
+            names.append(node.target.id)
+        for name in names:
+            members.setdefault(name, []).append(node)
+    return members
+
+
+def _normalized_source(source_lines: list[str], node: ast.stmt) -> str:
+    """The node's own source, minus what cannot change behaviour.
+
+    Comment lines, blank lines, trailing whitespace and a leading docstring are
+    dropped. Everything else is kept VERBATIM: normalizing further (ast.unparse
+    or ast.dump) would make the fingerprint depend on the Python version that
+    computed it, and the packager, the dev box and a player's bundled toolchain
+    do not run the same interpreter. Keeping raw text costs an occasional
+    invalidation for a renamed local; folding an interpreter version into the
+    identity would cost every player their cache on a Python upgrade.
+    """
+    start = node.lineno
+    for decorator in getattr(node, "decorator_list", []):
+        start = min(start, decorator.lineno)
+    end = node.end_lineno or start
+    skip: set[int] = set()
+    body = getattr(node, "body", None)
+    if body and isinstance(body[0], ast.Expr) and isinstance(
+            body[0].value, ast.Constant) and isinstance(
+                body[0].value.value, str):
+        skip.update(range(body[0].lineno, (body[0].end_lineno or
+                                           body[0].lineno) + 1))
+    kept = []
+    for number in range(start, end + 1):
+        if number in skip:
+            continue
+        line = source_lines[number - 1].rstrip()
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def codegen_closure() -> list[tuple[str, str]]:
+    """(name, normalized source) for the whole reachable emission surface.
+
+    Reachability is COMPUTED from the AST, which is the point: a comment
+    convention or a hand-kept list rots on the first refactor, and a rotted
+    list means an emission change that no longer moves the identity.
+    """
+    # utf-8-sig, and rstrip() per line below: a byte-order mark or a CRLF flip
+    # is a checkout artifact on this repo (PowerShell writes both), never a
+    # semantic change, and neither may move a player's cache.
+    source = Path(__file__).read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    members = _module_members(tree)
+    missing = [name for name in CODEGEN_ENTRY_POINTS if name not in members]
+    if missing:
+        raise RuntimeError(
+            "CODEGEN_ENTRY_POINTS names things this module does not define: "
+            + ", ".join(missing))
+    reached: set[str] = set()
+    pending = list(CODEGEN_ENTRY_POINTS)
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        for node in members[name]:
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Name) and inner.id in members
+                        and inner.id not in reached):
+                    pending.append(inner.id)
+    return [
+        (name, "\n".join(_normalized_source(lines, node)
+                         for node in members[name]))
+        for name in sorted(reached)
+    ]
+
+
+def codegen_fingerprint() -> str:
+    digest = hashlib.sha256(b"nds-shard-codegen-1\0")
+    digest.update(f"{SHARD_CODEGEN_VERSION}\0".encode("ascii"))
+    for name, text in codegen_closure():
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(text.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def provider_identity(args: argparse.Namespace) -> str:
+    """Everything that can change a shard's compiled output -- and nothing else.
+
+    A shard is a native DLL that binds directly to runner data symbols and is
+    compiled against the runtime struct layouts, so loading one whose codegen
+    assumptions differ is silent memory corruption. That is why every field
+    below is here. It is equally why the fields that USED to be here are gone:
+    an identity that moves for reasons unrelated to the output throws away
+    every player's accumulated cache on a rebuild or a logging tweak, which is
+    what happened between v0.6.4 and v0.6.5 (beads-yjp.52, beads-yjp.56).
+
+    Removed, with cause:
+      * the whole-script SHA -- replaced by codegen_fingerprint(), the closure
+        of emission code reachable from CODEGEN_ENTRY_POINTS.
+      * the recompiler executable's SHA -- replaced by the semantic version the
+        binary reports, because a PE's bytes move on every rebuild.
+      * include_roots / merge_cache_snapshots -- RUN-MODE flags. They select
+        which observations become candidates; the observations themselves land
+        in work_identity() and in the emitted config, so different selections
+        already produce different candidates. Folding them here only meant a
+        --merge-cache-snapshots re-warm run published under an identity the
+        packager could not compute, which defeated the one supported way to
+        re-warm a release cache.
+    """
     headers = runtime_headers(args)
     value = {
-        "schema": 2,
+        "schema": 3,
         "abi": ABI_VERSION,
-        "provider_sha256": file_sha256(Path(__file__)),
-        "recompiler_sha256": file_sha256(args.recompiler),
+        "shard_codegen": codegen_fingerprint(),
+        "recompiler_codegen": recompiler_codegen_identity(args),
         "runtime_header_sha256": {
             path.name: file_sha256(path) for path in headers
         },
         "generated_opt": args.generated_opt,
         "max_function_bytes": args.max_function_bytes,
-        "include_roots": args.include_roots,
-        "merge_cache_snapshots": args.merge_cache_snapshots,
         **compiler_identity(args),
     }
     return hashlib.sha256(json.dumps(
@@ -692,6 +883,41 @@ def work_identity(cpu: int, addr: int, page_sha1: str,
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:20]
+
+
+def shard_bank_name(cpu: int, addr: int) -> str:
+    """The bank name, which namespaces every emitted symbol in the shard.
+
+    Part of the emission surface, not orchestration: change it and every
+    generated body, the dispatch table symbol and the wrapper's bank_id all
+    change with it.
+    """
+    return f"nds_live_{'arm9' if cpu == 9 else 'arm7'}_{addr:08x}"
+
+
+def recompiler_command(args: argparse.Namespace, config: Path, image: Path,
+                       src_dir: Path, bank: str) -> list[str]:
+    """The exact recompiler invocation every live shard is generated by.
+
+    Each flag here selects emission semantics -- one shard per page keyed by
+    source address, a split threshold, live-byte validation, the validated
+    dependency closure that permits direct transfers inside it, and
+    fallthrough coalescing. Dropping or adding one changes the generated C,
+    so this list is part of the codegen fingerprint.
+    """
+    return [
+        str(args.recompiler),
+        "--config", str(config),
+        "--bin", str(image),
+        "--out", str(src_dir),
+        "--bank", bank,
+        "--shards", "1",
+        "--stable-address-shards",
+        "--max-function-bytes", str(args.max_function_bytes),
+        "--validate-live-bytes",
+        "--validated-live-direct-calls",
+        "--coalesce-fallthroughs",
+    ]
 
 
 def write_config(path: Path, cpu: int, addr: int, digest: str,
@@ -753,6 +979,20 @@ def generated_bank_sources(src_dir: Path, bank: str) -> list[Path]:
     if dispatch.is_file():
         sources.append(dispatch)
     return sources
+
+
+def shard_wrapper_path(src_dir: Path, bank: str) -> Path:
+    return src_dir / f"{bank}_live.c"
+
+
+def shard_source_set(src_dir: Path, bank: str) -> list[Path]:
+    """Every translation unit linked into the shard DLL, in link order.
+
+    Emission surface, not orchestration: this is the exact set of C the
+    backend compiles. Adding or dropping one changes the DLL.
+    """
+    return [*generated_bank_sources(src_dir, bank),
+            shard_wrapper_path(src_dir, bank)]
 
 
 def write_wrapper(path: Path, bank: str, candidate_id: str,
@@ -994,8 +1234,7 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
             print(f"capture {key}: already compiled as {dll}", flush=True)
             return "skipped", dll
 
-    cpu_name = "arm9" if cpu == 9 else "arm7"
-    bank = f"nds_live_{cpu_name}_{addr:08x}"
+    bank = shard_bank_name(cpu, addr)
     work = args.cache / "work" / key
     src_dir = work / "src"
     if src_dir.exists():
@@ -1006,20 +1245,8 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
     image.write_bytes(raw)
     write_config(config, cpu, addr, page_sha1, entries)
 
-    command = [
-        str(args.recompiler),
-        "--config", str(config),
-        "--bin", str(image),
-        "--out", str(src_dir),
-        "--bank", bank,
-        "--shards", "1",
-        "--stable-address-shards",
-        "--max-function-bytes", str(args.max_function_bytes),
-        "--validate-live-bytes",
-        "--validated-live-direct-calls",
-        "--coalesce-fallthroughs",
-    ]
-    if run(command).returncode != 0:
+    if run(recompiler_command(args, config, image, src_dir,
+                              bank)).returncode != 0:
         return "failed", None
 
     candidate_id = generated_identity(
@@ -1045,11 +1272,10 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
     dll_dir.mkdir(parents=True, exist_ok=True)
     dll = dll_dir / f"{bank}_{candidate_id}.dll"
     if not dll.is_file():
-        wrapper = src_dir / f"{bank}_live.c"
-        write_wrapper(wrapper, bank, candidate_id, page_sha1,
-                      args.rom_sha1, cpu)
+        write_wrapper(shard_wrapper_path(src_dir, bank), bank, candidate_id,
+                      page_sha1, args.rom_sha1, cpu)
         bank_sources = generated_bank_sources(src_dir, bank)
-        sources = [*bank_sources, wrapper]
+        sources = shard_source_set(src_dir, bank)
         if len(bank_sources) < 2 or not all(path.is_file() for path in sources):
             raise RuntimeError(f"generated source set is incomplete for {bank}")
         stage = dll.with_suffix(".stage.dll")

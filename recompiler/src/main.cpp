@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "codegen_identity.h"
 #include "config.h"
 #include "function_finder.h"
 #include "reloc_scan.h"
@@ -962,6 +963,16 @@ int main(int argc, char** argv) {
     bool stable_address_shards = false;
     unsigned shards = 1u;
     uint32_t max_function_bytes = 0u;
+    // Answered before anything else is parsed and before any input is
+    // required: the live-shard provider identity asks a bare recompiler
+    // binary what its emission semantics are, with no config and no image.
+    // See codegen_identity.h for the contract this string carries.
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--codegen-identity") {
+            std::printf("%s%u\n", kCodegenIdentityPrefix, kCodegenVersion);
+            return 0;
+        }
+    }
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]{ return (i+1 < argc) ? argv[++i] : ""; };
