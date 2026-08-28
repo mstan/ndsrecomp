@@ -171,8 +171,10 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   `-falign-loops` for bank TUs. SIZE UP / SPEED UP, free semantics.
 - **C2. PGO** (`-fprofile-generate` → play the scenario → `-fprofile-use`):
   the strongest whole-binary layout knob; build-time cost is high and
-  profile freshness must be maintained. Worth one measured experiment
-  after A1/B1 land.
+  profile freshness must be maintained. Implemented as `NDS_PGO_MODE`,
+  runner-core only, with a scripted training pipeline — see
+  [PGO release pipeline](pgo_release_pipeline.md) for the exact sequence,
+  the mingw-gcc constraints, and the measured result.
 - **C3. `-mtune=native`** for local builds (keep generic for release).
 - (Rejected precedent: whole-runner GCC LTO produced a 663 MB archive
   and no linked binary — do not retry blindly; scoped LTO of the
