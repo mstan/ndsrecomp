@@ -552,11 +552,13 @@ int main() {
                     2u, wide_rows_p, 2u),
                 "a gcc-tier bank should be adopted"))
         return 1;
-    // beads-lqa.40 interaction: the dispatch index selects the LAST live row
-    // for a PC, so co-registering the weaker backend must not hand it the
-    // addresses both banks share. Adopting it re-registers the better bank so
-    // it lands last: one register for the newcomer, then one unregister and
-    // one register for the gcc bank it must not shadow.
+    // beads-lqa.40: the dispatch index now ranks co-validating rows by owned
+    // span and breaks ties by FIRST-registered, and two shards of one
+    // generation are the same guest bytes over the same owners -- so every row
+    // the two banks share is a tie the already-resident gcc bank wins. Adopting
+    // the weaker newcomer is therefore ONE plain registration: the
+    // unregister/re-register dance that used to push the better bank to the end
+    // of the index is gone, and its absence is what this delta pins.
     const unsigned reg_before = g_registrations;
     const unsigned unreg_before = g_unregistrations;
     if (!expect(live_overlay_commit_bank_for_test(
@@ -568,10 +570,11 @@ int main() {
                 "a lower-tier shard covering a row the better backend lacks "
                 "must be kept, not declined"))
         return 1;
-    if (!expect(g_registrations == reg_before + 2u &&
-                g_unregistrations == unreg_before + 1u,
-                "the better same-generation bank must be re-registered LAST "
-                "so it keeps the addresses it shares with the newcomer"))
+    if (!expect(g_registrations == reg_before + 1u &&
+                g_unregistrations == unreg_before,
+                "co-registering the weaker backend must be a single plain "
+                "registration; span ranking keeps the shared addresses with "
+                "the better bank without touching the index"))
         return 1;
     live_overlay_shutdown();
 #endif

@@ -114,20 +114,125 @@ uint64_t function_key(uint32_t addr, CpuMode mode) {
         (mode == CpuMode::Thumb ? 1u : 0u);
 }
 
-bool read_dispatch_keys(const std::string& path,
-                        std::unordered_set<uint64_t>& keys) {
+// What a bank registered BEFORE this one already owns at a dispatch key: the
+// [addr, size) region its NdsStaticValidation proves, plus the exact bytes it
+// expects there. Only the largest owning span per key is kept -- that is the
+// row the runtime's selection contract (runner/src/dispatch_lookup.h) picks
+// among co-validating candidates.
+struct PrecedingOwner {
+    uint32_t addr = 0u;
+    uint32_t size = 0u;
+    const std::vector<uint8_t>* expected = nullptr;
+};
+
+struct PrecedingDispatch {
+    // Every row key any preceding bank holds. Used by the superblock pass,
+    // which only asks "does someone ahead of me own this address".
+    std::unordered_set<uint64_t> keys;
+    // Keys whose owner carries a content validation, with the largest span.
+    std::unordered_map<uint64_t, PrecedingOwner> owners;
+    // Node-based so PrecedingOwner::expected stays valid as parsing continues.
+    std::unordered_map<std::string, std::vector<uint8_t>> byte_pools;
+};
+
+std::string trimmed(const std::string& s) {
+    std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1u);
+}
+
+// Parse a generated <bank>_dispatch.c. Its shape is fixed by
+// write_bank_dispatch() below: per-function `static const uint8_t <sym>_bytes[]`
+// arrays, then `static const NdsStaticValidation <sym> = {addr, size, ...}`,
+// then the row table `{0xADDRu, Tu, <fn>, &<sym>}` (or `, 0}` for an
+// unvalidated immutable bank). Reading the emitted table rather than a sidecar
+// keeps the pruner honest: it consumes exactly what the runner will link.
+bool read_preceding_dispatch(const std::string& path, PrecedingDispatch& out) {
     std::ifstream f(path);
     if (!f) {
         std::fprintf(stderr, "cannot read preceding dispatch %s\n",
                      path.c_str());
         return false;
     }
+    struct ValidationInfo { uint32_t addr; uint32_t size; std::string bytes; };
+    std::unordered_map<std::string, ValidationInfo> validations;
     std::string line;
+    std::vector<uint8_t>* collecting = nullptr;
+    // A dependency-closure bank also emits `{addr, size, bytes}` range
+    // initializers that look exactly like dispatch rows. Only lines after the
+    // table's own `const NdsDispatchEntry g_dispatch_<bank>[] = {` are rows.
+    bool in_table = false;
     while (std::getline(f, line)) {
+        if (collecting) {
+            if (line.find("};") != std::string::npos) {
+                collecting = nullptr;
+                continue;
+            }
+            for (std::size_t i = line.find("0x"); i != std::string::npos;
+                 i = line.find("0x", i)) {
+                unsigned value = 0u;
+                if (std::sscanf(line.c_str() + i, "0x%2xu", &value) != 1) break;
+                collecting->push_back(static_cast<uint8_t>(value));
+                i += 2u;
+            }
+            continue;
+        }
+        constexpr const char* kBytesPrefix = "static const uint8_t ";
+        if (line.rfind(kBytesPrefix, 0u) == 0u &&
+            line.find("[] = {") != std::string::npos) {
+            const std::size_t begin = std::strlen(kBytesPrefix);
+            const std::size_t end = line.find("[] = {");
+            const std::string symbol = line.substr(begin, end - begin);
+            collecting = &out.byte_pools[symbol];
+            collecting->clear();
+            continue;
+        }
+        constexpr const char* kValidationPrefix =
+            "static const NdsStaticValidation ";
+        if (line.rfind(kValidationPrefix, 0u) == 0u) {
+            const std::size_t begin = std::strlen(kValidationPrefix);
+            const std::size_t space = line.find(' ', begin);
+            if (space == std::string::npos) continue;
+            const std::string symbol = line.substr(begin, space - begin);
+            unsigned addr = 0u, size = 0u;
+            const std::size_t brace = line.find('{', space);
+            if (brace == std::string::npos) continue;
+            if (std::sscanf(line.c_str() + brace, "{0x%Xu, %uu,",
+                            &addr, &size) != 2)
+                continue;
+            validations[symbol] = ValidationInfo{addr, size, symbol + "_bytes"};
+            continue;
+        }
+        if (line.rfind("const NdsDispatchEntry ", 0u) == 0u) {
+            in_table = true;
+            continue;
+        }
+        if (!in_table) continue;
         unsigned addr = 0u, thumb = 0u;
-        if (std::sscanf(line.c_str(), " {0x%Xu, %uu,", &addr, &thumb) == 2)
-            keys.insert((static_cast<uint64_t>(addr) << 1u) |
-                        uint64_t{thumb != 0u});
+        if (std::sscanf(line.c_str(), " {0x%Xu, %uu,", &addr, &thumb) != 2)
+            continue;
+        const uint64_t key = (static_cast<uint64_t>(addr) << 1u) |
+            uint64_t{thumb != 0u};
+        out.keys.insert(key);
+        const std::size_t close = line.rfind('}');
+        if (close == std::string::npos) continue;
+        const std::size_t comma = line.rfind(',', close);
+        if (comma == std::string::npos) continue;
+        const std::string tail = trimmed(line.substr(comma + 1u,
+                                                     close - comma - 1u));
+        if (tail.empty() || tail[0] != '&') continue;
+        auto found = validations.find(tail.substr(1u));
+        if (found == validations.end()) continue;
+        auto pool = out.byte_pools.find(found->second.bytes);
+        if (pool == out.byte_pools.end() ||
+            pool->second.size() != found->second.size)
+            continue;
+        PrecedingOwner& owner = out.owners[key];
+        if (owner.expected && owner.size >= found->second.size) continue;
+        owner.addr = found->second.addr;
+        owner.size = found->second.size;
+        owner.expected = &pool->second;
     }
     return true;
 }
@@ -643,7 +748,8 @@ void write_bank_dispatch(const std::string& dir,
                          bool validate_live_bytes,
                          bool dependency_closure,
                          const SuperblockPlan& superblocks,
-                         const std::vector<ResolvedHleRoutine>& hle_routines) {
+                         const std::vector<ResolvedHleRoutine>& hle_routines,
+                         const std::unordered_set<uint64_t>& pruned_keys) {
     std::FILE* f = std::fopen((dir + "/" + names.dispatch).c_str(), "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", names.dispatch.c_str()); return; }
     std::fprintf(f,
@@ -822,6 +928,11 @@ void write_bank_dispatch(const std::string& dir,
         const auto& host_fn = funcs[superblocks.leader[index]];
         const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
         for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
+            // beads-lqa.40: a preceding bank already owns this address with an
+            // equal-or-larger proven span over identical bytes.
+            if (!pruned_keys.empty() &&
+                pruned_keys.count(function_key(pc, fn.mode)) != 0u)
+                continue;
             rows.push_back({pc, fn.mode == CpuMode::Thumb ? uint8_t{1}
                                                          : uint8_t{0},
                             names.fn_prefix + host_fn.name,
@@ -958,6 +1069,7 @@ int main(int argc, char** argv) {
     bool unsafe_live_direct_calls = false;
     bool validated_live_direct_calls = false;
     bool coalesce_fallthroughs = false;
+    bool prune_preceding_owned = false;
     bool dispatch_only = false;
     bool stable_address_shards = false;
     unsigned shards = 1u;
@@ -980,6 +1092,8 @@ int main(int argc, char** argv) {
             validated_live_direct_calls = true;
         else if (a == "--coalesce-fallthroughs")
             coalesce_fallthroughs = true;
+        else if (a == "--prune-preceding-owned")
+            prune_preceding_owned = true;
         else if (a == "--dispatch-only") dispatch_only = true;
         else if (a == "--stable-address-shards") stable_address_shards = true;
         else if (a == "--shards") shards = static_cast<unsigned>(
@@ -1006,6 +1120,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "--coalesce-fallthroughs requires --validate-live-bytes and "
             "does not support --hle-manifest\n");
+        return 2;
+    }
+    if (prune_preceding_owned &&
+        (!validate_live_bytes || coalesce_fallthroughs)) {
+        // Pruning compares the span THIS bank's rows will prove against the
+        // span a preceding bank already proves, so the rows must be validated
+        // at all, and their spans must be final. --coalesce-fallthroughs
+        // enlarges a leader's span after the fact, which would invalidate every
+        // comparison made here; the two passes are not combined.
+        std::fprintf(stderr,
+            "--prune-preceding-owned requires --validate-live-bytes and is "
+            "incompatible with --coalesce-fallthroughs\n");
         return 2;
     }
     if (validated_live_direct_calls && !validate_live_bytes) {
@@ -1158,6 +1284,86 @@ int main(int argc, char** argv) {
         std::vector<Function> funcs = split_functions_for_emission(
             finder.functions(), max_function_bytes, bin.data(), bin.size(),
             cfg.program.load_address);
+
+        BankNames names = bank_names(bank);
+        PrecedingDispatch preceding;
+        for (const std::string& path : preceding_dispatch_paths)
+            if (!read_preceding_dispatch(path, preceding)) return 1;
+
+        // beads-lqa.40: drop rows a preceding bank already owns.
+        //
+        // A capture-derived bank is seeded from addresses the interpreter was
+        // observed branching to, so it re-translates code a bank registered
+        // ahead of it already covers -- as two-instruction landing pads whose
+        // expected bytes come from an image that agrees with the earlier bank's
+        // byte for byte. Both rows then validate at the same instant, the
+        // runtime selects the larger owned span, and this bank's row is dead
+        // weight in the index, the binary and the build.
+        //
+        // A row is dropped only when a preceding row at the same (addr, thumb)
+        // key proves a span that CONTAINS this row's whole function and this
+        // bank's own image holds exactly the bytes that row expects across it.
+        // The pruned row is then unreachable under the runtime's selection
+        // contract in every state except one: the guest holding this function's
+        // bytes while the surrounding bytes of the preceding row's larger span
+        // differ. That state means the guest rewrote the code AROUND a
+        // still-matching fragment, and the cost of being wrong about it is a
+        // Tier-3 fall, never a wrong body -- both rows are byte-proven before
+        // anything executes.
+        std::size_t pruned_rows = 0u, pruned_functions = 0u;
+        std::unordered_set<uint64_t> pruned_keys;
+        if (prune_preceding_owned) {
+            const uint64_t image_begin = cfg.program.load_address;
+            const uint64_t image_end = image_begin + bin.size();
+            auto owned_by_preceding = [&](const Function& fn, uint32_t pc) {
+                const uint64_t key = function_key(pc, fn.mode);
+                auto found = preceding.owners.find(key);
+                if (found == preceding.owners.end()) return false;
+                const PrecedingOwner& owner = found->second;
+                if (!owner.expected || owner.size == 0u) return false;
+                // The comparison reads this bank's image at the owner's guest
+                // addresses, which is only meaningful where the two agree on
+                // what a guest address means. Relocated bodies (source_addr set)
+                // are never pruned.
+                if (fn.source_addr && fn.source_addr != fn.addr) return false;
+                if (owner.addr > fn.addr || fn.end_addr <= fn.addr) return false;
+                if (uint64_t{owner.addr} + owner.size < fn.end_addr) return false;
+                if (owner.addr < image_begin ||
+                    uint64_t{owner.addr} + owner.size > image_end)
+                    return false;
+                return std::memcmp(bin.data() + (owner.addr - image_begin),
+                                   owner.expected->data(), owner.size) == 0;
+            };
+            std::vector<Function> kept;
+            kept.reserve(funcs.size());
+            for (const Function& fn : funcs) {
+                const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+                std::vector<uint64_t> shadowed;
+                std::size_t total = 0u;
+                for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
+                    ++total;
+                    if (owned_by_preceding(fn, pc))
+                        shadowed.push_back(function_key(pc, fn.mode));
+                }
+                pruned_rows += shadowed.size();
+                for (uint64_t key : shadowed) pruned_keys.insert(key);
+                // Nothing but dispatch reaches a body in a content-validated
+                // bank (direct calls are off without --validated-live-direct-
+                // calls), so a function with no surviving row is unreachable
+                // and is not emitted at all.
+                if (!shadowed.empty() && shadowed.size() == total) {
+                    ++pruned_functions;
+                    continue;
+                }
+                kept.push_back(fn);
+            }
+            funcs.swap(kept);
+            std::printf("[emit] pruned %zu dispatch rows and %zu functions "
+                        "owned by %zu preceding rows\n",
+                        pruned_rows, pruned_functions,
+                        preceding.owners.size());
+        }
+
         std::vector<ResolvedHleRoutine> hle_routines;
         if (!hle_manifest_path.empty() &&
             !resolve_hle_routines(hle_manifest, cfg, bank,
@@ -1196,16 +1402,12 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        BankNames names = bank_names(bank);
-        std::unordered_set<uint64_t> preceding_rows;
-        for (const std::string& path : preceding_dispatch_paths)
-            if (!read_dispatch_keys(path, preceding_rows)) return 1;
         const SuperblockPlan superblocks = build_superblocks(
-            funcs, preceding_rows, coalesce_fallthroughs);
+            funcs, preceding.keys, coalesce_fallthroughs);
         if (coalesce_fallthroughs)
             std::printf("[emit] coalesced %zu fallthrough edges; "
                         "preceding rows=%zu\n",
-                        superblocks.merged_edges, preceding_rows.size());
+                        superblocks.merged_edges, preceding.keys.size());
         unsigned emitted_shards = 0u;
         if (!dispatch_only) {
             write_bank_header(out_dir, funcs, names);
@@ -1281,7 +1483,7 @@ int main(int argc, char** argv) {
         write_bank_dispatch(out_dir, funcs, bin.data(), bin.size(),
                             cfg.program.load_address, names,
                             validate_live_bytes, validated_live_direct_calls,
-                            superblocks, hle_routines);
+                            superblocks, hle_routines, pruned_keys);
         std::printf("\n[emit] bank '%s': %zu functions (%u body shard%s%s) -> %s/{%s,%s,%s}\n",
                     bank.c_str(), funcs.size(), emitted_shards,
                     emitted_shards == 1u ? "" : "s",
