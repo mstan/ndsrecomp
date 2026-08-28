@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -32,6 +33,47 @@ constexpr uint64_t kFirstTriggerTier3 = 100000u;
 constexpr uint64_t kRetriggerTier3 = 250000u;
 constexpr uint64_t kNoProgressRetriggerTier3 = 5000000u;
 constexpr uint32_t kDiagRingSize = 4096u;
+
+// ---- Adaptive queue policy (beads-yjp.51) ---------------------------------
+//
+// The conservative cadence (6 pages per run, one run per 30-60 s cooldown) is
+// a hard 12-pages-per-minute ceiling, and field bundles show players ending a
+// 7.5-minute session with dozens of hot pages still uncompiled -- exactly the
+// pages driving their interpreter storms. The cadence was conservative because
+// compiling was assumed to cost the player frame time; it measurably does not
+// (39.0 fps during batch intervals vs 38.0 outside, with the child at
+// IDLE_PRIORITY inside a kill-on-close job object).
+//
+// So while a backlog exists, spend the headroom: shorten the cooldown to a
+// floor and ramp the per-batch cap. The ramp is driven by the CHILD'S OWN WALL
+// TIME rather than a fixed schedule, which is what keeps this bounded on a
+// slow machine: a box where a batch of 6 already takes half a minute never
+// earns a bigger batch, while a box that finishes in seconds does. Exactly one
+// child process at a time, always; none of this changes that.
+constexpr uint32_t kBaseBatchPages = 6u;
+// Measured bound, not a guessed one. On a contended host, a 24-page batch is a
+// big enough burst that IDLE_PRIORITY stops shielding the emulator: an A/B on
+// the same binary over the same 300 s MPH route showed 55.6 fps mean with the
+// ramp reaching 24 (-5.5 fps during compile intervals, and -7.8 on intervals
+// with NO interpreter pressure at all, so it was the child and not a tier-3
+// confound) against 59.5 fps mean with the cap pinned at 6 (+0.3 fps during
+// compiles -- noise). The large batch also bought nothing: 50 shards in 8 runs
+// at cap 24 versus 51 shards in 12 runs at cap 6, because the shortened
+// cooldown is what actually raises throughput. 12 keeps a bounded amount of
+// the per-run overhead amortization the ramp is for without the burst that
+// costs frames.
+constexpr uint32_t kMaxBatchPages = 12u;
+// Cooldown floor while draining. Short enough that a fast box gets many
+// batches per minute, long enough that the runner still commits banks and
+// re-snapshots coverage between runs.
+constexpr uint32_t kBacklogCooldownMs = 5000u;
+// A backlog run that finishes inside this budget has proven there is headroom
+// for a bigger batch; one that takes more than twice it gives the batch back.
+constexpr uint32_t kBacklogTargetRunMs = 20000u;
+// Bound on how long the runner will wait for the shared live-index lock when
+// reading the persisted queue at startup. Missing the read costs one run's
+// worth of cadence, never correctness, so it must never stall the launch.
+constexpr uint32_t kQueueLockWaitMs = 2000u;
 
 enum class DiagKind : uint8_t {
     Transfer,
@@ -137,6 +179,15 @@ struct State {
     uint64_t futile_runs = 0;
     bool auto_suppressed = false;
     std::string futility_reason;
+    // Queue policy state. pending_candidates is the compiler's own count of
+    // work it could not fit in the last batch; at startup it is seeded from
+    // the persisted queue so the very first decision of the session already
+    // knows a backlog exists.
+    uint64_t pending_candidates = 0;
+    uint32_t batch_cap = kBaseBatchPages;
+    bool persisted_backlog = false;
+    bool queue_reloaded = false;
+    uint64_t last_run_duration_ms = 0;
     uint32_t next_bank_serial = 1u;
     uint64_t publication_generation = 0;
     std::string last_error;
@@ -514,12 +565,150 @@ bool live_overlay_active() {
     return g_live.enabled && activation_delay_elapsed();
 }
 
+bool draining_backlog() {
+    return g_live.pending_candidates != 0u;
+}
+
+// The cooldown the NEXT run will use. Empty backlog keeps the configured
+// conservative cadence untouched; a non-empty one drops to the floor, and
+// never below whatever the configuration already asked for if that is shorter.
+uint32_t effective_cooldown_ms() {
+    if (!draining_backlog()) return g_live.auto_cooldown_ms;
+    if (g_live.auto_cooldown_ms == 0u) return 0u;
+    return std::min(g_live.auto_cooldown_ms, kBacklogCooldownMs);
+}
+
+uint32_t effective_batch_cap() {
+    return draining_backlog() ? g_live.batch_cap : kBaseBatchPages;
+}
+
+// Re-rate the batch after a run whose duration is known. Only backlog runs
+// move the ramp: a run with nothing left to do says nothing about headroom.
+void update_batch_ramp(uint64_t pending, uint64_t duration_ms) {
+    g_live.last_run_duration_ms = duration_ms;
+    if (pending == 0u) {
+        g_live.batch_cap = kBaseBatchPages;
+        return;
+    }
+    if (duration_ms <= kBacklogTargetRunMs) {
+        g_live.batch_cap = std::min(kMaxBatchPages, g_live.batch_cap * 2u);
+    } else if (duration_ms > 2ull * kBacklogTargetRunMs) {
+        g_live.batch_cap = std::max(kBaseBatchPages, g_live.batch_cap / 2u);
+    }
+}
+
+// The persisted queue is a small JSON document written by the compiler under
+// live-index.lock. The runner needs exactly one scalar out of it -- how much
+// work is waiting -- so it reads the "pending_count" field the writer puts
+// there for this purpose rather than carrying a JSON parser. Anything
+// unreadable, mismatched, or contended reads as "no backlog": the queue is
+// scheduling advice, and a bad one must never be able to block a launch.
+uint64_t read_persisted_pending_count() {
+#if defined(_WIN32)
+    if (g_live.cache_dir.empty() || g_live.rom_sha1.empty()) return 0u;
+    std::error_code ec;
+    const auto queue_path = g_live.cache_dir / "live-queue.json";
+    if (!std::filesystem::is_regular_file(queue_path, ec)) return 0u;
+
+    // Same lock file and same exclusive byte-range discipline the compiler
+    // uses (tools/compile_live_shards.py::exclusive_file_lock): one permanent
+    // lock file, byte 0, released by the kernel if the holder dies.
+    const std::string lock_name =
+        path_string(g_live.cache_dir / "live-index.lock");
+    HANDLE lock = CreateFileA(lock_name.c_str(), GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (lock == INVALID_HANDLE_VALUE) return 0u;
+    bool held = false;
+    const uint64_t deadline = steady_ms() + kQueueLockWaitMs;
+    for (;;) {
+        OVERLAPPED ov{};
+        if (LockFileEx(lock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                       0, 1u, 0u, &ov)) {
+            held = true;
+            break;
+        }
+        if (steady_ms() >= deadline) break;
+        Sleep(25);
+    }
+    if (!held) {
+        CloseHandle(lock);
+        return 0u;
+    }
+
+    std::string text;
+    {
+        std::ifstream f(queue_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << f.rdbuf();
+        text = buffer.str();
+    }
+    OVERLAPPED unlock_ov{};
+    UnlockFileEx(lock, 0, 1u, 0u, &unlock_ov);
+    CloseHandle(lock);
+
+    // Refuse a queue that belongs to another ROM. Sharing one cache directory
+    // between titles is supported for the index, so it must be checked here.
+    if (text.find("\"" + g_live.rom_sha1 + "\"") == std::string::npos)
+        return 0u;
+    constexpr const char* kKey = "\"pending_count\"";
+    std::size_t pos = text.find(kKey);
+    if (pos == std::string::npos) return 0u;
+    pos = text.find(':', pos + std::strlen(kKey));
+    if (pos == std::string::npos) return 0u;
+    ++pos;
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(
+               text[pos]))) {
+        ++pos;
+    }
+    uint64_t value = 0u;
+    bool any = false;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+        if (value > (~0ull) / 10ull) return 0u;
+        value = value * 10ull + static_cast<uint64_t>(text[pos] - '0');
+        ++pos;
+        any = true;
+    }
+    return any ? value : 0u;
+#else
+    return 0u;
+#endif
+}
+
+void reload_persisted_queue() {
+    if (g_live.queue_reloaded) return;
+    g_live.queue_reloaded = true;
+    const uint64_t pending = read_persisted_pending_count();
+    if (pending == 0u) return;
+    g_live.pending_candidates = pending;
+    g_live.persisted_backlog = true;
+    std::fprintf(stderr,
+                 "[live-overlay] resuming a persisted backlog of %llu "
+                 "candidate(s); the launch delay is waived for it\n",
+                 static_cast<unsigned long long>(pending));
+    // Work that was already discovered and is already waiting does not need
+    // to be rediscovered by watching the guest interpret it again.
+    if (g_live.auto_trigger) g_live.generation_pending = true;
+}
+
+// Whether compiling may start at all. A persisted backlog waives the launch
+// delay for ITSELF only: the delay exists so a cold session is not competing
+// with menu/asset loading over work nobody has proven is needed yet, and the
+// backlog is precisely work already proven needed in an earlier session.
+// Fresh discovery in this session still serves the full delay.
+bool compile_activation_elapsed() {
+    return g_live.persisted_backlog || activation_delay_elapsed();
+}
+
 bool compile_delay_elapsed() {
     const uint64_t now = steady_ms();
-    return (!g_live.auto_start_delay_ms ||
-            now - g_live.configured_ms >= g_live.auto_start_delay_ms) &&
-           (!g_live.last_compile_start_ms || !g_live.auto_cooldown_ms ||
-            now - g_live.last_compile_start_ms >= g_live.auto_cooldown_ms);
+    const uint32_t cooldown = effective_cooldown_ms();
+    const bool start_delay_done =
+        g_live.persisted_backlog || !g_live.auto_start_delay_ms ||
+        now - g_live.configured_ms >= g_live.auto_start_delay_ms;
+    return start_delay_done &&
+           (!g_live.last_compile_start_ms || !cooldown ||
+            now - g_live.last_compile_start_ms >= cooldown);
 }
 
 void request_generation_compile() {
@@ -959,6 +1148,39 @@ std::vector<std::filesystem::path> published_paths_from_log() {
     return out;
 }
 
+// The backlog the finished run reported. Absent marker (an older provider, or
+// a run that died before printing) leaves the previous count in place: the
+// caller passes it in as `fallback` so a crashed batch does not silently look
+// like a drained queue and collapse the cadence back to conservative.
+uint64_t pending_from_log(uint64_t fallback) {
+    std::ifstream f(g_live.log_path);
+    std::string line;
+    constexpr const char* marker = "NDS_SHARD_PENDING ";
+    const std::size_t marker_len = std::strlen(marker);
+    uint64_t value = fallback;
+    bool found = false;
+    while (std::getline(f, line)) {
+        const std::size_t pos = line.find(marker);
+        if (pos == std::string::npos) continue;
+        const char* p = line.c_str() + pos + marker_len;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(p, &end, 10);
+        if (end == p) continue;
+        value = parsed;
+        found = true;  // last marker in the log wins
+    }
+    (void)found;
+    return value;
+}
+
+unsigned long current_process_id() {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    return 0ul;
+#endif
+}
+
 bool write_snapshot_manifest() {
     std::error_code ec;
     std::filesystem::create_directories(g_live.cache_dir / "snapshots", ec);
@@ -966,8 +1188,14 @@ bool write_snapshot_manifest() {
         g_live.last_error = "cannot create live overlay snapshot directory";
         return false;
     }
-    char name[64];
-    std::snprintf(name, sizeof(name), "manifest-%06llu.json",
+    // Qualify the name with the process id. The run index alone restarts at 1
+    // every launch, so a resumed session would OVERWRITE the very snapshots
+    // the persisted queue points at, replacing the page payloads a queued
+    // candidate needs and silently turning every cross-session resume into a
+    // rediscovery. Names stay glob-compatible with manifest-*.json.
+    char name[80];
+    std::snprintf(name, sizeof(name), "manifest-%08lx-%06llu.json",
+                  static_cast<unsigned long>(current_process_id()),
                   static_cast<unsigned long long>(g_live.runs_started + 1u));
     const auto path = g_live.cache_dir / "snapshots" / name;
     char error[256] = {};
@@ -995,8 +1223,9 @@ bool start_child() {
         ++g_live.runs_failed;
         return false;
     }
-    char log_name[64];
-    std::snprintf(log_name, sizeof(log_name), "compile-%06llu.log",
+    char log_name[80];
+    std::snprintf(log_name, sizeof(log_name), "compile-%08lx-%06llu.log",
+                  current_process_id(),
                   static_cast<unsigned long long>(g_live.runs_started + 1u));
     const auto log_path = g_live.cache_dir / "logs" / log_name;
     g_live.log_path = path_string(log_path);
@@ -1017,6 +1246,11 @@ bool start_child() {
     SetEnvironmentVariableA("NDS_LIVE_OVERLAY_CACHE", cache.c_str());
     SetEnvironmentVariableA("NDS_LIVE_OVERLAY_ROM_SHA1",
                             g_live.rom_sha1.c_str());
+    // The batch cap for THIS run. The provider reads it as the default for
+    // --max-pages, so the runner owns the throughput policy in one place and
+    // the shipped command string does not have to hard-code a number.
+    const std::string cap = std::to_string(effective_batch_cap());
+    SetEnvironmentVariableA("NDS_LIVE_OVERLAY_MAX_PAGES", cap.c_str());
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
@@ -1152,11 +1386,22 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
     g_live.futile_runs = 0;
     g_live.auto_suppressed = false;
     g_live.futility_reason.clear();
+    g_live.pending_candidates = 0;
+    g_live.batch_cap = kBaseBatchPages;
+    g_live.persisted_backlog = false;
+    g_live.queue_reloaded = false;
+    g_live.last_run_duration_ms = 0;
     if (g_live.enabled &&
         (g_live.cache_dir.empty() || g_live.rom_sha1.empty())) {
         g_live.enabled = false;
         g_live.last_error = "live overlay provider needs cache and ROM SHA-1";
     }
+    // Read the persisted queue HERE, during configuration, and not from the
+    // first poll. The read takes the shared live-index lock and can therefore
+    // wait; live_overlay_poll() runs on the emulation thread, where a wait of
+    // any length is a dropped frame. Configuration happens before emulation
+    // starts, so the same wait costs nothing anyone can see.
+    if (g_live.enabled) reload_persisted_queue();
 }
 
 void live_overlay_shutdown() {
@@ -1289,6 +1534,11 @@ void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
 void live_overlay_poll() {
 #if defined(_WIN32)
     if (!g_live.enabled) return;
+    // The persisted queue was read at configure time, off the emulation
+    // thread. This is only the belt-and-braces path for a caller that
+    // enabled the overlay without going through live_overlay_configure; it
+    // is a no-op in every normal session.
+    reload_persisted_queue();
     if (!g_live.initial_cache_scan_done)
         live_overlay_register_cached_banks();
     // Publication is an emulation-thread operation. The worker may prepare
@@ -1307,6 +1557,17 @@ void live_overlay_poll() {
                 g_live.child_job = nullptr;
             }
             ++g_live.runs_finished;
+            const uint64_t duration_ms =
+                g_live.last_compile_start_ms
+                    ? steady_ms() - g_live.last_compile_start_ms
+                    : 0u;
+            // Read the backlog BEFORE re-rating the batch: the ramp decision
+            // is "did this run leave work behind, and how fast was it".
+            const uint64_t pending =
+                pending_from_log(g_live.pending_candidates);
+            g_live.pending_candidates = pending;
+            if (pending == 0u) g_live.persisted_backlog = false;
+            update_batch_ramp(pending, duration_ms);
             if (exit_code != 0) {
                 ++g_live.runs_failed;
                 g_live.last_error = "live overlay compiler exited with code " +
@@ -1323,6 +1584,13 @@ void live_overlay_poll() {
             for (const auto& path : published)
                 if (queue_bank_dll(path)) ++g_live.run_queued;
             g_live.run_watch = !published.empty();
+            // Keep draining. Conditioned on the run having actually PUBLISHED
+            // something so the no-progress backoff below still owns the case
+            // where the batch produced nothing: a provider that can see work
+            // but never emit a shard for it must not be re-commissioned every
+            // cooldown just because its queue file says work remains.
+            if (exit_code == 0 && pending != 0u && !published.empty())
+                request_generation_compile();
             if (exit_code == 0 && published.empty()) {
                 for (int cpu = 0; cpu < 2; ++cpu) {
                     g_live.next_trigger[cpu] = std::max(
@@ -1333,7 +1601,7 @@ void live_overlay_poll() {
             rescan_cache();
         }
     }
-    if (!activation_delay_elapsed()) return;
+    if (!compile_activation_elapsed()) return;
     schedule_pending_compile();
     if (!g_live.child && g_live.trigger_requests > g_live.runs_started) {
         if (!start_child())
@@ -1361,6 +1629,102 @@ bool live_overlay_trigger_now() {
     return true;
 }
 
+void live_overlay_note_backlog_for_test(uint64_t pending,
+                                        uint64_t run_duration_ms) {
+    g_live.pending_candidates = pending;
+    if (pending == 0u) g_live.persisted_backlog = false;
+    update_batch_ramp(pending, run_duration_ms);
+    // Mirror the real drain path, which asks for another run while work
+    // remains. Without this a test could assert "no child was started" for
+    // the trivial reason that nothing had ever been requested.
+    if (pending != 0u) request_generation_compile();
+}
+
+uint32_t live_overlay_batch_cap_for_test() { return effective_batch_cap(); }
+
+uint32_t live_overlay_cooldown_for_test() { return effective_cooldown_ms(); }
+
+void live_overlay_suppress_for_test(const char* reason) {
+    g_live.auto_suppressed = true;
+    g_live.futility_reason = reason ? reason : "test";
+}
+
+bool live_overlay_suppressed_for_test() { return g_live.auto_suppressed; }
+
+uint64_t live_overlay_runs_started_for_test() { return g_live.runs_started; }
+
+bool live_overlay_commit_bank_for_test(int cpu, const char* bank_id,
+                                       const char* candidate_id,
+                                       const char* generation_id,
+                                       unsigned backend_tier,
+                                       const NdsDispatchEntry* dispatch,
+                                       unsigned dispatch_len) {
+    LoadedBank bank{};
+    bank.bank_id = bank_id ? bank_id : "";
+    bank.candidate_id = candidate_id ? candidate_id : "";
+    bank.generation_id = generation_id && *generation_id
+        ? generation_id : bank.candidate_id;
+    bank.backend_tier = backend_tier;
+    bank.cpu = cpu;
+    bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
+    bank.dispatch = dispatch;
+    bank.dispatch_len = dispatch_len;
+    // Distinct per candidate so the same-candidate-identity short circuit in
+    // commit_prepared_bank does not absorb a tie-break case.
+    bank.content_identity = hash_bytes(1469598103934665603ull,
+                                       bank.candidate_id.data(),
+                                       bank.candidate_id.size());
+    return commit_prepared_bank(std::move(bank));
+}
+
+bool live_overlay_generation_registered_for_test(const char* generation_id,
+                                                 unsigned* backend_tier_out) {
+    const std::string wanted = generation_id ? generation_id : "";
+    for (const LoadedBank& bank : g_live.loaded) {
+        if (!bank.registered || bank.superseded) continue;
+        if (bank.generation_id != wanted) continue;
+        if (backend_tier_out) *backend_tier_out = bank.backend_tier;
+        return true;
+    }
+    return false;
+}
+
+void live_overlay_summary(NdsLiveOverlaySummary* out) {
+    if (!out) return;
+    *out = NdsLiveOverlaySummary{};
+    out->enabled = g_live.enabled;
+    out->active = live_overlay_active();
+    out->banks_loaded = g_live.banks_loaded;
+    out->banks_rejected = g_live.banks_rejected;
+    out->tier3[0] = g_live.tier3[0];
+    out->tier3[1] = g_live.tier3[1];
+    out->mismatch_rejects[0] = g_live.mismatch_rejects[0];
+    out->mismatch_rejects[1] = g_live.mismatch_rejects[1];
+    out->futile_runs = g_live.futile_runs;
+    out->auto_suppressed = g_live.auto_suppressed;
+    out->pending_candidates = g_live.pending_candidates;
+    out->batch_cap = effective_batch_cap();
+    out->cooldown_ms = effective_cooldown_ms();
+    out->persisted_backlog = g_live.persisted_backlog;
+    out->runs_started = g_live.runs_started;
+#if defined(_WIN32)
+    out->busy = g_live.child != nullptr;
+#else
+    out->busy = false;
+#endif
+    // g_live.loaded is mutated under publish_mutex when a prepared shard is
+    // adopted, so walk it under the same lock the status JSON uses.
+    std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+    for (const LoadedBank& bank : g_live.loaded) {
+        out->native_hits += bank.native_hits;
+        out->bank_rejects += bank.rejects;
+        if (!bank.registered || bank.superseded) continue;
+        ++out->registered_banks;
+        if (bank.backend_tier > out->backend_tier)
+            out->backend_tier = bank.backend_tier;
+    }
+}
+
 std::string live_overlay_status_json() {
     std::size_t preparing = 0u;
     std::size_t ready = 0u;
@@ -1378,6 +1742,12 @@ std::string live_overlay_status_json() {
         << (g_live.initial_cache_scan_done ? "true" : "false")
         << ",\"auto_start_delay_ms\":" << g_live.auto_start_delay_ms
         << ",\"auto_cooldown_ms\":" << g_live.auto_cooldown_ms
+        << ",\"pending_candidates\":" << g_live.pending_candidates
+        << ",\"batch_cap\":" << effective_batch_cap()
+        << ",\"cooldown_ms\":" << effective_cooldown_ms()
+        << ",\"persisted_backlog\":"
+        << (g_live.persisted_backlog ? "true" : "false")
+        << ",\"last_run_ms\":" << g_live.last_run_duration_ms
         << ",\"busy\":";
 #if defined(_WIN32)
     out << (g_live.child ? "true" : "false");

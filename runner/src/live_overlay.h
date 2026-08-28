@@ -48,3 +48,68 @@ void live_overlay_poll();
 bool live_overlay_trigger_now();
 std::string live_overlay_status_json();
 std::string live_overlay_diagnostics_json(uint32_t max_entries);
+
+// Flat snapshot of the live-bank state for the diagnostics record. The full
+// status JSON is a nested document built through an ostringstream and carries
+// a per-bank array; a periodic perf sample wants a handful of scalars, and
+// the fields below (notably backend_tier, which the status JSON does not emit
+// at all) are the ones that distinguish "player is running native gcc-built
+// banks" from "player is running the interpreter" in a field bundle.
+struct NdsLiveOverlaySummary {
+    bool enabled;
+    bool active;
+    uint64_t banks_loaded;
+    uint64_t banks_rejected;
+    uint64_t native_hits;       // summed over every loaded bank
+    uint64_t bank_rejects;      // per-bank guard rejects, summed
+    uint32_t registered_banks;  // loaded AND registered, not superseded
+    // Best backend that actually has a registered bank: 0 = untiered/none,
+    // 1 = tcc (embedded fallback compiler), 2 = gcc (shipped shard cache).
+    uint32_t backend_tier;
+    uint64_t tier3[2];
+    uint64_t mismatch_rejects[2];
+    uint64_t futile_runs;
+    bool auto_suppressed;
+    // Queue policy, as it stands right now. pending_candidates is the backlog
+    // the compiler last reported (or the count reloaded from the persisted
+    // queue at startup, before any run of this session has finished);
+    // batch_cap and cooldown_ms are the values the NEXT run will actually use,
+    // not the configured base, so a field bundle shows whether the adaptive
+    // path engaged rather than only what was configured.
+    uint64_t pending_candidates;
+    uint32_t batch_cap;
+    uint32_t cooldown_ms;
+    bool persisted_backlog;  // a backlog was reloaded at launch
+    // Whether a compiler child is running RIGHT NOW. Emitted per diagnostics
+    // interval so "did background compiling cost frame time" is answerable by
+    // splitting a session's own intervals on this flag, instead of inferring
+    // the compile windows from log file timestamps after the fact.
+    bool busy;
+    uint64_t runs_started;
+};
+void live_overlay_summary(NdsLiveOverlaySummary* out);
+
+// Test-only: drive the queue policy without a compiler child. Reports the
+// pending backlog the same way a finished run's log would, so the adaptive
+// cadence and batch ramp can be pinned at the unit layer.
+void live_overlay_note_backlog_for_test(uint64_t pending,
+                                        uint64_t run_duration_ms);
+uint32_t live_overlay_batch_cap_for_test();
+uint32_t live_overlay_cooldown_for_test();
+
+// Test-only: latch the futility suppression the way a proven-futile run does,
+// so the queue-policy paths can be shown NOT to bypass it.
+void live_overlay_suppress_for_test(const char* reason);
+bool live_overlay_suppressed_for_test();
+uint64_t live_overlay_runs_started_for_test();
+// Test-only: put a prepared bank through the REAL adoption path, including
+// the same-generation backend tie-break, without compiling a shard DLL.
+// Returns whether the bank was accepted into the resident set.
+bool live_overlay_commit_bank_for_test(int cpu, const char* bank_id,
+                                       const char* candidate_id,
+                                       const char* generation_id,
+                                       unsigned backend_tier,
+                                       const NdsDispatchEntry* dispatch,
+                                       unsigned dispatch_len);
+bool live_overlay_generation_registered_for_test(const char* generation_id,
+                                                 unsigned* backend_tier_out);

@@ -3,6 +3,7 @@
 #include "profile_report.h"
 
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "scheduler.h"
@@ -35,8 +36,73 @@ void nds_profile_report(std::FILE* out) {
                 static_cast<double>((d.crs_hit + d.crs_miss)
                                         ? (d.crs_hit + d.crs_miss) : 1));
     }
+    // Per-class dispatch COST. ns/event is the mean over the sampled subset;
+    // total is that mean extrapolated over every event of the class. The
+    // sample count is printed so a bucket built from a handful of samples is
+    // visibly weak rather than silently trusted.
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        const NdsDispatchTiming& t = g_nds_dispatch_timing[cpu];
+        uint64_t any = 0;
+        for (int i = 0; i < NDS_DISPATCH_CLASS_COUNT; ++i)
+            any += t.class_samples[i];
+        if (!any) continue;
+        std::fprintf(out, "  Dispatch cost %s (1-in-%llu sampled):",
+                     cpu == 0 ? "arm9" : "arm7",
+                     (unsigned long long)nds_dispatch_timing_modulus());
+        for (int i = 0; i < NDS_DISPATCH_CLASS_COUNT; ++i) {
+            if (!t.class_samples[i]) continue;
+            const double mean = static_cast<double>(t.class_ns[i]) /
+                                static_cast<double>(t.class_samples[i]);
+            std::fprintf(out, " %s=%.1f ns/ev x%llu ev (%llu smp, %.3f s)",
+                         nds_dispatch_class_name(
+                             static_cast<NdsDispatchClass>(i)),
+                         mean,
+                         (unsigned long long)t.class_events[i],
+                         (unsigned long long)t.class_samples[i],
+                         mean * static_cast<double>(t.class_events[i]) / 1.0e9);
+        }
+        std::fputc('\n', out);
+        // Dispatcher-only lookup population, matching the sampled subset.
+        // The all-consumers totals (which include Tier 3's per-instruction
+        // poll) are on the "Dispatch <cpu>" line above.
+        std::fprintf(out, "  Dispatch cost %s cache (nested in the above):",
+                     cpu == 0 ? "arm9" : "arm7");
+        for (int i = 0; i < NDS_DISPATCH_CACHE_PATH_COUNT; ++i) {
+            if (!t.cache_samples[i]) continue;
+            const double mean = static_cast<double>(t.cache_ns[i]) /
+                                static_cast<double>(t.cache_samples[i]);
+            std::fprintf(out, " %s=%.1f ns/ev x%llu ev (%llu smp)",
+                         nds_dispatch_cache_path_name(
+                             static_cast<NdsDispatchCachePath>(i)),
+                         mean,
+                         (unsigned long long)t.cache_events[i],
+                         (unsigned long long)t.cache_samples[i]);
+        }
+        std::fputc('\n', out);
+    }
     NdsGpu2dProfile gpu_profile{};
     nds_gpu2d_profile(&gpu_profile);
+    // Threaded-render accounting is maintained on every run, not only under
+    // NDS_PROFILE_GPU: fence frequency is the whole performance question.
+    if (gpu_profile.threaded_lines || gpu_profile.inline_lines) {
+        std::fprintf(out,
+            "  GPU2D threading: threaded=%llu inline=%llu helped=%llu "
+            "captures_applied=%llu fence_wait=%.3f ms\n",
+            (unsigned long long)gpu_profile.threaded_lines,
+            (unsigned long long)gpu_profile.inline_lines,
+            (unsigned long long)gpu_profile.fence_helped_lines,
+            (unsigned long long)gpu_profile.staged_captures,
+            static_cast<double>(gpu_profile.fence_wait_ns) / 1.0e6);
+        std::fprintf(out, "  GPU2D fences:");
+        for (uint32_t i = 0; i < NDS_GPU2D_FENCE_CAUSE_COUNT; ++i) {
+            if (!gpu_profile.fence_drains[i]) continue;
+            std::fprintf(out, " %s=%llu/%llu",
+                         nds_gpu2d_fence_cause_name(i),
+                         (unsigned long long)gpu_profile.fence_drains[i],
+                         (unsigned long long)gpu_profile.fenced_lines[i]);
+        }
+        std::fprintf(out, "   (drains/lines)\n");
+    }
     if (gpu_profile.scanlines) {
         std::fprintf(out,
             "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "

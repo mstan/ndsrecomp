@@ -57,6 +57,16 @@ NdsLiveBankInfo bank_info(const char* candidate_id,
     return info;
 }
 
+// live_overlay_configure() deliberately does NOT reset the lifetime run
+// counters, so anything asserted about them has to be a delta.
+unsigned long long status_number(const char* key) {
+    const std::string json = live_overlay_status_json();
+    const std::string needle = std::string("\"") + key + "\":";
+    const std::size_t pos = json.find(needle);
+    if (pos == std::string::npos) return ~0ull;
+    return std::strtoull(json.c_str() + pos + needle.size(), nullptr, 10);
+}
+
 bool preflight(const NdsLiveBankInfo& info, char* error, uint32_t error_len) {
     std::memset(error, 0, error_len);
     return live_overlay_preflight_for_test(&info, error, error_len);
@@ -278,6 +288,161 @@ int main() {
 #endif
     live_overlay_shutdown();
 
-    std::puts("PASS: live overlay preflight rejects malformed bundles");
+    // ---- beads-yjp.51: adaptive queue policy ----------------------------
+    //
+    // Cadence is a pure function of the reported backlog plus the last run's
+    // wall time, so it pins at the unit layer without a compiler child.
+    live_overlay_configure(true, true, 0u, 0u, 60000u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    if (!expect(live_overlay_batch_cap_for_test() == 6u &&
+                    live_overlay_cooldown_for_test() == 60000u,
+                "an empty backlog must keep the conservative cadence"))
+        return 1;
+
+    // A backlog run that finishes well inside the budget has proven headroom:
+    // the batch doubles, and the cooldown drops to the drain floor.
+    live_overlay_note_backlog_for_test(40u, 3000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 12u,
+                "a fast backlog run should double the batch cap"))
+        return 1;
+    if (!expect(live_overlay_cooldown_for_test() == 5000u,
+                "a pending backlog should drop to the drain cooldown floor"))
+        return 1;
+    live_overlay_note_backlog_for_test(30u, 3000u);
+    live_overlay_note_backlog_for_test(20u, 3000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 12u,
+                "the batch ramp should saturate at its measured bound"))
+        return 1;
+    live_overlay_note_backlog_for_test(10u, 3000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 12u,
+                "the batch ramp must not exceed its bound"))
+        return 1;
+    // A machine that cannot keep up gives the batch back.
+    live_overlay_note_backlog_for_test(10u, 90000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 6u,
+                "a slow backlog run should halve the batch cap"))
+        return 1;
+    live_overlay_note_backlog_for_test(10u, 90000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 6u,
+                "the batch cap must not fall below the conservative base"))
+        return 1;
+    // Drained: straight back to the configured conservative cadence.
+    live_overlay_note_backlog_for_test(0u, 3000u);
+    if (!expect(live_overlay_batch_cap_for_test() == 6u &&
+                    live_overlay_cooldown_for_test() == 60000u,
+                "a drained queue must restore the conservative cadence"))
+        return 1;
+    // A configured cooldown SHORTER than the drain floor is already more
+    // aggressive than the floor and must not be lengthened by it.
+    live_overlay_configure(true, true, 0u, 0u, 1000u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    live_overlay_note_backlog_for_test(5u, 1000u);
+    if (!expect(live_overlay_cooldown_for_test() == 1000u,
+                "the drain floor must never slow a faster configured cadence"))
+        return 1;
+
+    if (!expect(live_overlay_status_json().find("\"pending_candidates\":5") !=
+                    std::string::npos &&
+                live_overlay_status_json().find("\"batch_cap\":12") !=
+                    std::string::npos &&
+                live_overlay_status_json().find("\"cooldown_ms\":1000") !=
+                    std::string::npos,
+                "the queue state must be visible in diagnostics"))
+        return 1;
+    NdsLiveOverlaySummary summary{};
+    live_overlay_summary(&summary);
+    if (!expect(summary.pending_candidates == 5u && summary.batch_cap == 12u &&
+                    summary.cooldown_ms == 1000u,
+                "the diagnostics summary must carry the queue state"))
+        return 1;
+    live_overlay_shutdown();
+
+    // ---- futility guard is UNCHANGED by the queue policy ----------------
+    //
+    // The drain path exists to commission more work sooner. A provider proven
+    // unable to produce a loadable bank must still stay uncommissioned, no
+    // matter how large the backlog says it is: otherwise the guard's whole
+    // purpose (not re-running identical rejected work forever) is inverted
+    // into re-running it FASTER.
+#if defined(_WIN32)
+    // Control first, so the suppressed case cannot pass for the wrong reason.
+    // A backlog on an UNsuppressed provider does reach start_child (which
+    // fails here only because this unit build stubs the manifest writer, and
+    // that failure is itself the observable that the attempt happened).
+    live_overlay_configure(true, true, 0u, 0u, 0u, "some-provider-command",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    live_overlay_note_backlog_for_test(500u, 1000u);
+    const unsigned long long control_before = status_number("runs_failed");
+    live_overlay_poll();
+    if (!expect(status_number("runs_failed") > control_before,
+                "an unsuppressed backlog should reach the provider"))
+        return 1;
+    live_overlay_shutdown();
+
+    live_overlay_configure(true, true, 0u, 0u, 0u, "some-provider-command",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    live_overlay_suppress_for_test("test ABI mismatch");
+    live_overlay_note_backlog_for_test(500u, 1000u);
+    const unsigned long long failed_before = status_number("runs_failed");
+    const uint64_t started_before = live_overlay_runs_started_for_test();
+    for (int i = 0; i < 8; ++i) live_overlay_poll();
+    if (!expect(live_overlay_suppressed_for_test(),
+                "a backlog must not clear the futility suppression"))
+        return 1;
+    if (!expect(status_number("runs_failed") == failed_before &&
+                live_overlay_runs_started_for_test() == started_before,
+                "a suppressed provider must not be commissioned by the drain, "
+                "however large the backlog says it is"))
+        return 1;
+    // And an explicit trigger still lifts it, exactly as before.
+    live_overlay_trigger_now();
+    if (!expect(!live_overlay_suppressed_for_test(),
+                "an explicit trigger must still lift futility suppression"))
+        return 1;
+    live_overlay_shutdown();
+#endif
+
+#if defined(_WIN32)
+    // ---- gcc-wins tie-break is UNCHANGED -------------------------------
+    //
+    // Reordering and enlarging batches changes WHICH shard arrives when, so
+    // the arrival-order-independent rule that a better backend keeps a
+    // generation is exactly the thing a queue-policy change could regress.
+    live_overlay_configure(true, false, 0u, 0u, 0u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "tiebreak_bank", "cand-gcc", "generation-1", 2u,
+                    interior_rows, 2u),
+                "a gcc-tier bank should be adopted"))
+        return 1;
+    unsigned tier = 0u;
+    if (!expect(live_overlay_generation_registered_for_test("generation-1",
+                                                            &tier) &&
+                    tier == 2u,
+                "the gcc-tier bank should hold the generation"))
+        return 1;
+    // The tcc shard for the same generation arrives LATER and must be
+    // declined rather than superseding -- and declining is a success, not a
+    // rejection, so the futility guard must not see it as one.
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "tiebreak_bank", "cand-tcc", "generation-1", 1u,
+                    interior_rows, 2u),
+                "a declined lower-tier shard is not a rejection"))
+        return 1;
+    tier = 0u;
+    if (!expect(live_overlay_generation_registered_for_test("generation-1",
+                                                            &tier) &&
+                    tier == 2u,
+                "the gcc-tier bank must still own the generation"))
+        return 1;
+    if (!expect(live_overlay_status_json().find("\"candidate_id\":\"cand-tcc\"")
+                    == std::string::npos,
+                "the declined tcc shard must not have become resident"))
+        return 1;
+    live_overlay_shutdown();
+#endif
+
+    std::puts("PASS: live overlay preflight rejects malformed bundles; "
+              "adaptive queue policy, futility guard and gcc tie-break hold");
     return 0;
 }

@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-ABI_VERSION = 5
+ABI_VERSION = 6
 PAGE_SIZE = 4096
 
 # Backends that can build a live shard. "gcc" is the dev/CI toolchain; "tcc" is
@@ -50,6 +50,24 @@ def atomic_json(path: Path, value: object) -> None:
 
 
 INDEX_LOCK_NAME = "live-index.lock"
+
+# Pending-work queue, persisted next to live-index.json and guarded by the SAME
+# live-index.lock. One lock for both files is deliberate: the queue is derived
+# from the index (a candidate is pending exactly while the index does not
+# satisfy it), so a reader that took them under two different locks could see a
+# candidate as both compiled and pending, or as neither.
+#
+# Why this file exists at all: candidate discovery used to be redone from
+# scratch every run out of the coverage snapshots, and the runner's snapshot is
+# a RECENCY window (coverage_manifest_write_live_snapshot keeps the 64
+# most-recently-seen pages). A hot page that stops being touched for a few
+# seconds falls out of the window and its queued work is forgotten, so a player
+# session could end with dozens of hot pages never compiled even though they
+# had been observed. The queue makes pending work durable across both runs and
+# process lifetimes, and carries each candidate's accumulated execution weight
+# forward so ordering does not reset with the window.
+QUEUE_NAME = "live-queue.json"
+QUEUE_SCHEMA = 1
 
 
 @contextmanager
@@ -101,6 +119,140 @@ def exclusive_file_lock(lock_path: Path, timeout: float | None = 120.0):
 
 def empty_index(rom_sha1: str) -> dict:
     return {"schema": 2, "rom_sha1": rom_sha1, "captures": {}}
+
+
+def empty_queue(rom_sha1: str, provider_id: str) -> dict:
+    return {
+        "schema": QUEUE_SCHEMA,
+        "rom_sha1": rom_sha1,
+        "provider_id": provider_id,
+        "pending_count": 0,
+        "pending": [],
+    }
+
+
+def queue_is_usable(value: object, rom_sha1: str, provider_id: str) -> bool:
+    """Every reason to distrust a persisted queue, in one place.
+
+    Tolerance is the requirement here, not strictness: the queue is pure
+    scheduling advice. Anything unreadable, from another ROM, from another
+    provider identity (different compiler or recompiler, so the work identities
+    would not match anyway), or from a schema this build does not know, is
+    discarded and rebuilt from the manifests. A corrupt queue must never be
+    able to stop a player's shards from being compiled.
+    """
+    if not isinstance(value, dict):
+        return False
+    if int(value.get("schema", 0)) != QUEUE_SCHEMA:
+        return False
+    if str(value.get("rom_sha1", "")).lower() != rom_sha1.lower():
+        return False
+    if str(value.get("provider_id", "")) != provider_id:
+        return False
+    return isinstance(value.get("pending"), list)
+
+
+def _sanitize_queue_entry(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        cpu = int(raw["cpu"])
+        addr = int(raw["addr"], 16) if isinstance(raw["addr"], str) \
+            else int(raw["addr"])
+        page_sha1 = str(raw["page_sha1"]).lower()
+        executions = int(raw.get("executions", 0))
+        hits = int(raw.get("hits", 0))
+        manifest = str(raw.get("manifest", ""))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if cpu not in (7, 9) or not (0 <= addr < 0x1_0000_0000):
+        return None
+    if len(page_sha1) != 40 or any(c not in "0123456789abcdef"
+                                   for c in page_sha1):
+        return None
+    return {
+        "cpu": cpu,
+        "addr": addr,
+        "page_sha1": page_sha1,
+        "executions": max(0, executions),
+        "hits": max(0, hits),
+        "manifest": manifest,
+    }
+
+
+def load_queue(args: argparse.Namespace) -> list[dict]:
+    """Read the persisted pending queue. Never raises; empty on any doubt."""
+    try:
+        with exclusive_file_lock(args.cache / INDEX_LOCK_NAME):
+            value = load_json(args.queue) if args.queue.is_file() else None
+    except (OSError, json.JSONDecodeError, TimeoutError, ValueError):
+        return []
+    if not queue_is_usable(value, args.rom_sha1, args.provider_id):
+        return []
+    out = []
+    for raw in value["pending"]:
+        entry = _sanitize_queue_entry(raw)
+        if entry is not None:
+            out.append(entry)
+    return out
+
+
+def store_queue(args: argparse.Namespace, pending: list[dict]) -> None:
+    value = empty_queue(args.rom_sha1, args.provider_id)
+    value["pending_count"] = len(pending)
+    value["pending"] = [{
+        "cpu": entry["cpu"],
+        "addr": f"0x{entry['addr']:08X}",
+        "page_sha1": entry["page_sha1"],
+        "executions": entry["executions"],
+        "hits": entry["hits"],
+        "manifest": entry["manifest"],
+    } for entry in pending]
+    try:
+        with exclusive_file_lock(args.cache / INDEX_LOCK_NAME):
+            atomic_json(args.queue, value)
+    except (OSError, TimeoutError):
+        # Losing the queue costs a rediscovery, never correctness.
+        pass
+
+
+def prune_snapshots(args: argparse.Namespace, pending: list[dict]) -> int:
+    """Keep only the snapshots the queue still needs, plus the current one.
+
+    The runner writes one ~400 KiB snapshot per compiler run and nothing ever
+    removed them. That was tolerable at one run per 30 s; it is not once the
+    adaptive cadence runs many times a minute. The safe keep-set is exactly
+    what resume depends on: the manifest this run was handed, and every
+    manifest a still-pending candidate names. Anything else can only be
+    re-derived work that is already either compiled or dropped.
+
+    Skipped entirely under --merge-cache-snapshots, which deliberately mines
+    the whole accumulated history.
+    """
+    if args.merge_cache_snapshots:
+        return 0
+    snapshots = args.cache / "snapshots"
+    if not snapshots.is_dir():
+        return 0
+    keep: set[Path] = set()
+    for candidate in [args.manifest, *(Path(e["manifest"]) for e in pending
+                                       if e.get("manifest"))]:
+        try:
+            keep.add(Path(candidate).resolve())
+        except OSError:
+            continue
+    removed = 0
+    for path in snapshots.glob("manifest-*.json"):
+        try:
+            if path.resolve() in keep:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            # Another runner sharing this cache may hold it open. Leaving a
+            # snapshot behind costs disk, never correctness.
+            continue
+    return removed
 
 
 def record_capture(args: argparse.Namespace, index: dict, key: str,
@@ -271,11 +423,11 @@ def merge_entries(left: list[dict], right: list[dict]) -> list[dict]:
 
 
 def collect_candidates(
-        args: argparse.Namespace, manifests: list[dict],
-        allowed_cpus: set[int]
-) -> list[tuple[int, int, dict, list[dict]]]:
+        args: argparse.Namespace, manifests: list[tuple[Path, dict]],
+        allowed_cpus: set[int], carried: dict[tuple[int, int, str], dict]
+) -> list[tuple[int, int, dict, list[dict], str]]:
     by_page: dict[tuple[int, int, str], dict] = {}
-    for manifest in manifests:
+    for manifest_path, manifest in manifests:
         if str(manifest.get("rom_sha1", "")).lower() != args.rom_sha1.lower():
             continue
         for page in manifest.get("pages", {}).get("entries", []):
@@ -291,24 +443,45 @@ def collect_candidates(
                 "page": page,
                 "entries": [],
                 "executions": 0,
+                # Where the 4 KiB payload can be read back from on a later
+                # run. Snapshots are permanent under <cache>/snapshots, so
+                # this is what makes a queued candidate resumable rather than
+                # merely remembered.
+                "manifest": str(manifest_path),
             })
             current["entries"] = merge_entries(current["entries"], entries)
             current["executions"] += int(page.get("executions", 0))
 
     candidates = []
-    for current in by_page.values():
+    for key, current in by_page.items():
         entries = current["entries"]
         hits = sum(entry["hits"] for entry in entries)
+        # Weight carried forward from the persisted queue. A page that was hot
+        # in an earlier session but has just aged out of the recency window
+        # must not sink to the bottom of the order; the queue is the only place
+        # that accumulated evidence survives.
+        carry = carried.get(key)
+        if carry:
+            hits = max(hits, carry["hits"])
+            current["executions"] = max(current["executions"],
+                                        carry["executions"])
         if hits >= args.min_hits:
             candidates.append((hits, current["executions"],
-                               current["page"], entries))
+                               current["page"], entries, current["manifest"]))
+    # Hottest FIRST, by execution weight. Execution count is the page's share
+    # of guest work; entry-point hit count is how many distinct observations
+    # landed on it. The old order made hits primary, which ranks a page with
+    # many lightly-used entry points above a page whose single entry point
+    # carries the frame. The field evidence (beads-6vqh) is that uncovered HOT
+    # pages are what drive the interpreter storms, so execution weight leads
+    # and hits stays as the tie-break.
     candidates.sort(
-        key=lambda item: (-item[0], -item[1], int(item[2]["addr"], 16),
+        key=lambda item: (-item[1], -item[0], int(item[2]["addr"], 16),
                           item[2]["sha1"]))
     return candidates
 
 
-def cache_manifests(cache: Path, current: Path) -> list[dict]:
+def cache_manifests(cache: Path, current: Path) -> list[tuple[Path, dict]]:
     snapshots = cache / "snapshots"
     if not snapshots.is_dir():
         return []
@@ -322,8 +495,42 @@ def cache_manifests(cache: Path, current: Path) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(manifest, dict):
-            manifests.append(manifest)
+            manifests.append((path, manifest))
     return manifests
+
+
+def resume_manifests(queued: list[dict],
+                     already: set[Path]) -> list[tuple[Path, dict]]:
+    """Load exactly the snapshots the persisted queue still depends on.
+
+    This is what turns the queue from a memo into a resume: the payload for a
+    queued candidate is re-read from the manifest that produced it, so the next
+    process starts compiling the same work rather than waiting for the guest to
+    re-execute those pages and rediscover them.
+    """
+    out: list[tuple[Path, dict]] = []
+    seen: set[Path] = set()
+    for entry in queued:
+        raw = entry.get("manifest") or ""
+        if not raw:
+            continue
+        path = Path(raw)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in already or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            manifest = load_json(path)
+        except (OSError, json.JSONDecodeError):
+            # A pruned or truncated snapshot drops only its own candidates;
+            # they come back the next time the guest executes those pages.
+            continue
+        if isinstance(manifest, dict):
+            out.append((path, manifest))
+    return out
 
 
 def file_sha256(path: Path) -> str:
@@ -858,8 +1065,14 @@ def main() -> int:
     parser.add_argument("--tcc", default="tcc")
     parser.add_argument("--generated-opt", default="-O2")
     parser.add_argument("--max-function-bytes", type=int, default=512)
-    parser.add_argument("--max-pages", type=int, default=6,
-                        help="maximum new page candidates compiled per run")
+    # No literal default: the runner decides the batch cap per run and passes
+    # it in NDS_LIVE_OVERLAY_MAX_PAGES, raising it while a backlog is pending
+    # and dropping back to the conservative base once the queue drains. An
+    # explicit --max-pages still wins, for dev/CI callers that drive the tool
+    # directly.
+    parser.add_argument("--max-pages", type=int, default=None,
+                        help="maximum new page candidates compiled per run "
+                             "(default: $NDS_LIVE_OVERLAY_MAX_PAGES, else 6)")
     parser.add_argument("--min-hits", type=int, default=1)
     parser.add_argument("--cpu", type=int, choices=(7, 9), action="append")
     parser.add_argument("--include-roots", action="store_true",
@@ -907,8 +1120,16 @@ def main() -> int:
                 f"whose exports the shards import); got {args.runner_exe}")
     elif not args.runner_build:
         raise SystemExit("the gcc backend needs --runner-build")
+    if args.max_pages is None:
+        try:
+            args.max_pages = int(
+                os.environ.get("NDS_LIVE_OVERLAY_MAX_PAGES", "") or 6)
+        except ValueError:
+            args.max_pages = 6
+    args.max_pages = max(1, args.max_pages)
     args.cache.mkdir(parents=True, exist_ok=True)
     args.index = args.cache / "live-index.json"
+    args.queue = args.cache / QUEUE_NAME
     args.runner_import_lib = (
         find_import_lib(args.runner_build) if args.compiler == "gcc" else None)
     if args.compiler == "tcc":
@@ -933,18 +1154,52 @@ def main() -> int:
     index["schema"] = 2
 
     allowed_cpus = set(args.cpu or (7, 9))
-    manifests = [manifest]
+    manifests: list[tuple[Path, dict]] = [(args.manifest, manifest)]
     for path in args.merge_manifest:
         loaded = load_json(path)
         if not isinstance(loaded, dict):
             raise SystemExit(f"merge manifest is not an object: {path}")
-        manifests.append(loaded)
+        manifests.append((path, loaded))
     if args.merge_cache_snapshots:
         manifests.extend(cache_manifests(args.cache, args.manifest))
-    candidates = collect_candidates(args, manifests, allowed_cpus)
+
+    # Resume before discovering. Anything the previous run left pending is
+    # brought back with its payload and its accumulated weight, so a fresh
+    # process picks the backlog up where it stopped instead of waiting for the
+    # guest to re-execute the same pages.
+    queued = load_queue(args)
+    known: set[Path] = set()
+    for path, _ in manifests:
+        try:
+            known.add(Path(path).resolve())
+        except OSError:
+            continue
+    manifests.extend(resume_manifests(queued, known))
+    carried = {
+        (entry["cpu"], entry["addr"], entry["page_sha1"]): entry
+        for entry in queued
+    }
+    if queued:
+        print(f"resumed {len(queued)} pending candidate(s) from "
+              f"{args.queue}", flush=True)
+
+    candidates = collect_candidates(args, manifests, allowed_cpus, carried)
 
     ok = failed = skipped = attempted = 0
-    for _hits, _executions, page, entries in candidates:
+    pending: list[dict] = []
+
+    def remember(page: dict, hits: int, executions: int,
+                 manifest_path: str) -> None:
+        pending.append({
+            "cpu": int(page["cpu"]),
+            "addr": int(page["addr"], 16),
+            "page_sha1": str(page["sha1"]).lower(),
+            "executions": executions,
+            "hits": hits,
+            "manifest": manifest_path,
+        })
+
+    for hits, executions, page, entries, manifest_path in candidates:
         key = work_identity(int(page["cpu"]), int(page["addr"], 16),
                             str(page["sha1"]).lower(), entries,
                             args.provider_id)
@@ -955,6 +1210,10 @@ def main() -> int:
             skipped += 1
             continue
         if attempted >= args.max_pages:
+            # Over the batch cap: this is the backlog, and it is what the
+            # queue exists to carry. Candidates stay in the order decided
+            # above, so the next batch takes the next-hottest work.
+            remember(page, hits, executions, manifest_path)
             continue
         attempted += 1
         try:
@@ -965,12 +1224,25 @@ def main() -> int:
         if outcome == "ok":
             ok += 1
         elif outcome == "skipped":
+            # Either already published or permanently recorded as unsupported
+            # / compile-failed in the index. Both are terminal: not pending.
             skipped += 1
         else:
+            # A transient failure (the recompiler itself errored) leaves no
+            # index record, so keep it queued rather than dropping the work.
             failed += 1
+            remember(page, hits, executions, manifest_path)
 
-    print(f"NDS_SHARD_RESULT ok={ok} failed={failed} skipped={skipped}",
-          flush=True)
+    store_queue(args, pending)
+    pruned = prune_snapshots(args, pending)
+    if pruned:
+        print(f"pruned {pruned} snapshot manifest(s) no longer referenced by "
+              "the pending queue", flush=True)
+    print(f"NDS_SHARD_RESULT ok={ok} failed={failed} skipped={skipped} "
+          f"pending={len(pending)} cap={args.max_pages}", flush=True)
+    # Emitted separately as well so the runner's log scanner reads one scalar
+    # off a stable marker instead of parsing the human-facing result line.
+    print(f"NDS_SHARD_PENDING {len(pending)}", flush=True)
     return 2 if failed else 0
 
 

@@ -188,11 +188,16 @@ int main(int argc, char** argv) {
     std::ostringstream closure_dispatch_text;
     closure_dispatch_text << closure_dispatch_file.rdbuf();
     const std::string closure_dispatch = closure_dispatch_text.str();
-    if (!expect(safe.find("runtime_dispatch_literal_call(0x02000020u)") !=
-                    std::string::npos,
+    // B2: a validated transfer now goes out through a per-callsite link
+    // slot instead of a bare literal-dispatch call. The slot carries the
+    // same compile-time target (bit 0 = THUMB) and the runtime resolves it
+    // through the very same candidate lookup, so the property under test is
+    // unchanged: no direct C call to another native body.
+    if (!expect(safe.find("= {0, 0u, 0x02000020u, 0};") != std::string::npos &&
+                    safe.find("runtime_link_call(&") != std::string::npos,
                 "validated BL must dispatch through candidate lookup") ||
-        !expect(safe.find("runtime_dispatch_literal_branch(0x02000040u)") !=
-                    std::string::npos,
+        !expect(safe.find("= {0, 0u, 0x02000040u, 0};") != std::string::npos &&
+                    safe.find("runtime_link_branch(&") != std::string::npos,
                 "validated tail B must dispatch through candidate lookup") ||
         !expect(safe.find("live_edge_afunc_02000020();") ==
                     std::string::npos,
@@ -200,8 +205,7 @@ int main(int argc, char** argv) {
         !expect(unsafe.find("live_edge_afunc_02000020();") !=
                     std::string::npos,
                 "unsafe diagnostic mode must isolate direct-call behavior") ||
-        !expect(safe.find("runtime_dispatch_literal_branch(0x020000A0u)") !=
-                    std::string::npos,
+        !expect(safe.find("= {0, 0u, 0x020000A1u, 0};") != std::string::npos,
                 "validated Thumb tail branch must dispatch") ||
         !expect(safe.find("live_edge_tfunc_020000A0();") ==
                     std::string::npos,

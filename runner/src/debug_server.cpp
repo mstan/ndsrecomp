@@ -23,6 +23,7 @@
 #include "gpu3d.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
@@ -1241,6 +1242,16 @@ std::string handle(const std::string& line) {
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
+    // Cost companion to dispatch_stats: same snapshot-twice-and-subtract
+    // model, answering how expensive each class is rather than how often it
+    // ran. Cache-path `events` here is the dispatcher-only population; the
+    // all-consumers lookup totals are in dispatch_stats.
+    if (cmd == "dispatch_timing") return nds_dispatch_timing_json();
+    // B2 direct linking: whether the per-callsite link slots are live
+    // right now (they are gated off under deep trace) and how the
+    // literal transfers actually resolved. Snapshot-twice-and-subtract
+    // like its two neighbours.
+    if (cmd == "direct_link") return nds_direct_link_json();
     if (cmd == "cart_save_info") {
         const uint8_t* data = nullptr;
         uint32_t size = 0;
@@ -1294,7 +1305,23 @@ std::string handle(const std::string& line) {
         const std::string direct_extra_master_bright_frames =
             indexed_profile_json(gpu.direct_extra_master_bright_frames,
                                  NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT);
-        return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
+        const std::string fence_drains =
+            indexed_profile_json(gpu.fence_drains,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        const std::string fenced_lines =
+            indexed_profile_json(gpu.fenced_lines,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        return "{\"gpu2d\":{\"threaded_lines\":" +
+               std::to_string(gpu.threaded_lines) +
+               ",\"inline_lines\":" + std::to_string(gpu.inline_lines) +
+               ",\"fence_wait_ns\":" + std::to_string(gpu.fence_wait_ns) +
+               ",\"fence_helped_lines\":" +
+               std::to_string(gpu.fence_helped_lines) +
+               ",\"staged_captures\":" +
+               std::to_string(gpu.staged_captures) +
+               ",\"fence_drains\":" + fence_drains +
+               ",\"fenced_lines\":" + fenced_lines +
+               ",\"render_ns\":" + std::to_string(gpu.render_ns) +
                ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
                ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +

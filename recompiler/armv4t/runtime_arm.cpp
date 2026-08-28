@@ -603,6 +603,22 @@ extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
     runtime_dispatch(target_pc);
 }
 
+// B2 link slots. This single-CPU reference runtime has no bank registry
+// and no lookup cache to bypass, so the slots stay permanently unresolved
+// and every transfer takes the ordinary dispatcher. Keeping the entry
+// points here lets generated bodies build against either runtime.
+extern "C" void runtime_link_branch(NdsLinkSlot* slot) {
+    runtime_dispatch(slot->target_pc & ~1u);
+}
+
+extern "C" void runtime_link_call(NdsLinkSlot* slot) {
+    runtime_dispatch(slot->target_pc & ~1u);
+}
+
+extern "C" void runtime_link_fallthrough(NdsLinkSlot* slot) {
+    runtime_dispatch(slot->target_pc & ~1u);
+}
+
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;

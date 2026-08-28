@@ -12,10 +12,11 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <deque>
 #if defined(NDS_PROFILE_HLE_HEAT)
 #include <chrono>
-#include <string>
 #endif
+#include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,7 @@
 #include "dispatch_lookup.h"
 #include "hle_profile.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 
@@ -298,6 +300,10 @@ bool configured_cycle_fast_limit() {
 struct TailDispatchState {
     TailDispatchState* saved = nullptr;
     uint32_t target_pc = 0u;
+    // Link slot carried across the tail hand-off so the enclosing dispatch
+    // loop can take the linked fast path for the fall-through target
+    // instead of re-probing the 8 MiB lookup cache.
+    NdsLinkSlot* linked = nullptr;
     int cpu = 0;
     bool pending = false;
 };
@@ -629,6 +635,20 @@ bool active_static_code_changed() {
     return g_static_guard && g_static_guard->invalidated;
 }
 
+struct LinkGuard {
+    const NdsStaticValidation* validation = nullptr;
+    // Mirrors CachedStaticLookup::live_bank_serial so a link hit keeps
+    // live_overlay's native_hits accounting identical to a cache hit.
+    // A serial is only ever nonzero for a live shard, which is always
+    // content validated, so it can live in the guard record and stay out
+    // of the 24-byte slot.
+    uint32_t serial = 0u;
+    uint32_t page_count = 0u;
+    uint32_t page_addr[4]{};
+    uint32_t generation[4]{};
+    const uint32_t* generation_ptr[4]{};
+};
+
 struct StaticGuardScope {
     StaticExecutionGuard active;
     StaticExecutionGuard* saved;
@@ -644,15 +664,193 @@ struct StaticGuardScope {
         g_static_guard = saved;
         if (saved && saved->invalidated) request_yield_poll();
     }
-    bool call(const CachedStaticLookup* hit) {
+    // Split in two so the dispatch-cost sampler can close its region between
+    // the machinery (guard construction) and the guest code (fn()). Timing
+    // fn() would make literal_call inclusive of the entire callee and every
+    // dispatch nested inside it, so the per-class buckets would nest and
+    // their sum would exceed wall time. prepare() does exactly what call()'s
+    // first half did, in the same order and with the same side effects.
+    bool prepare(const CachedStaticLookup* hit) {
         if (!hit || !hit->fn ||
             !cached_static_guard(*hit, active))
             return false;
         g_static_guard = &active;
-        hit->fn();
+        ready = hit->fn;
         return true;
     }
+    // B2 linked entry. Identical to prepare() with the same resolution, but
+    // sourced from a link slot's own snapshot instead of a cache slot's, so
+    // the hot path never has to materialize a 128-byte CachedStaticLookup.
+    // guard == null is the immutable-target case, whose guard is empty --
+    // exactly what cached_static_guard() produces for a null validation.
+    bool prepare_linked(void (*fn)(void), const LinkGuard* guard) {
+        if (!fn) return false;
+        if (guard) {
+            active.validation = guard->validation;
+            active.page_count = guard->page_count;
+            for (uint32_t i = 0u; i < guard->page_count; ++i) {
+                active.page_addr[i] = guard->page_addr[i];
+                active.generation[i] = guard->generation[i];
+                active.generation_ptr[i] = guard->generation_ptr[i];
+            }
+        }
+        g_static_guard = &active;
+        ready = fn;
+        return true;
+    }
+    void invoke() { ready(); }
+    bool call(const CachedStaticLookup* hit) {
+        if (!prepare(hit)) return false;
+        invoke();
+        return true;
+    }
+    void (*ready)(void) = nullptr;
 };
+
+// ── B2 validated direct linking ──────────────────────────────────────
+// A link slot holds one literal transfer's already-resolved target in the
+// CALLER's data. It replaces the g_dispatch_cache probe (a direct-mapped
+// 8 MiB-per-CPU table, i.e. a near-certain cache + TLB miss pair on every
+// hot dispatch) with a compare against storage the callsite has just
+// touched. It replaces NOTHING else: the guest-visible sequence -- LR/R15
+// publication by the emitted code, the content guard, the generation
+// revalidation, ordered overlapping-bank selection, and the slice-yield
+// preemption point for tail transfers -- is preserved exactly.
+//
+// SAFETY ARGUMENT, in the order the checks run:
+//  1. `key` pins a resolution to one (link epoch, CPU). The link epoch
+//     bumps on every nds_register_dispatch, every nds_unregister_dispatch,
+//     and every runtime_init, so any change to the set of candidate banks
+//     invalidates every slot in the program at once, with no walk over
+//     emitted code and no registry of slots. This is the same invalidation
+//     event the dispatch cache uses, taken globally instead of per CPU
+//     (an ARM7 bank load also drops ARM9 slots; bank loads are rare).
+//  2. CPSR.T must still agree with the mode the target was resolved in.
+//     B/BL never interwork, so this normally holds, but the runtime, not
+//     the emitter, gets to decide.
+//  3. A content-validated target revalidates its backing-page generations
+//     on EVERY use from the snapshot taken at resolve time -- byte for
+//     byte what cached_lookup_live() does for a cache hit. A guest write
+//     to the target's pages therefore downgrades the slot to the full
+//     dispatcher on the very next transfer, which re-resolves through
+//     lookup_static_cached() and so re-runs the full byte-identity proof.
+//  4. Resolution itself always goes through lookup_static_cached(), never
+//     a private search, so registration priority and newest-live-identity
+//     selection are inherited rather than reimplemented.
+//
+// The slot is pure cache: clearing one at any point is always correct.
+// Stable addresses: a slot stores a raw pointer to one of these. Cleared
+// whenever the link epoch bumps, at which point no slot can reach one.
+std::deque<LinkGuard> g_link_guards;
+constexpr std::size_t kLinkGuardCap = 1u << 16u;
+uint32_t g_link_epoch = 1u;
+uint64_t g_link_hits[2]{};
+uint64_t g_link_resolves[2]{};
+uint64_t g_link_falls[2]{};
+
+bool configured_direct_link() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_DIRECT_LINK");
+        if (!value || (value[0] == '1' && value[1] == '\0')) return true;
+        if (value[0] == '0' && value[1] == '\0') return false;
+        std::fprintf(stderr,
+                     "invalid NDS_DIRECT_LINK value (expected 0 or 1); "
+                     "using the unlinked dispatcher\n");
+        return false;
+    }();
+    return enabled;
+}
+bool g_direct_link = true;
+
+// DEEP-TRACE POLICY, decided explicitly and deliberately NOT the bus fast
+// path's policy. The bus fast path gates on g_runtime_deep_trace because it
+// SKIPS the per-access ring recording, so a fast hit is invisible to a
+// query surface that would otherwise have seen it. A link hit skips nothing
+// observable: it enters the very same dispatch loop and emits the very same
+// RUNTIME_TRACE_DISPATCH event, the same slice-yield decision, the same
+// dispatch_total, and (below) the same live-overlay native-hit accounting.
+// The only diagnostic that moves is the cache_hit / cache_slow_lookup
+// split, which is the measurement of this feature, not a casualty of it.
+//
+// Gating on deep trace would also make the feature UNTESTABLE at the level
+// that matters: --serve keeps deep trace on, so the byte-exact checkpoint
+// probe would have compared two identical unlinked legs and reported a
+// meaningless pass. Linking is therefore live in every mode, and
+// NDS_DIRECT_LINK=0 remains the single, total off switch for oracle probes
+// and debugging.
+inline bool link_enabled() { return g_direct_link; }
+
+inline uint32_t link_key() {
+    return (g_link_epoch << 1u) | static_cast<uint32_t>(g_nds_active);
+}
+
+void link_epoch_bump() {
+    if (++g_link_epoch == 0u) g_link_epoch = 1u;
+    g_link_guards.clear();
+}
+
+// Fast admission test for an already-resolved slot. Deliberately does not
+// touch the guard: the generation check is a separate, colder step.
+inline bool link_slot_ready(const NdsLinkSlot* slot) {
+    return slot->key == link_key() && slot->fn != nullptr &&
+        (((g_cpu.cpsr & CPSR_T_BIT) != 0u) ==
+         ((slot->target_pc & 1u) != 0u));
+}
+
+inline bool link_guard_live(const LinkGuard* guard) {
+    for (uint32_t i = 0u; i < guard->page_count; ++i) {
+        const uint32_t live = guard->generation_ptr[i]
+            ? *guard->generation_ptr[i]
+            : bus_exec_page_generation(guard->page_addr[i]);
+        if (live != guard->generation[i]) return false;
+    }
+    return true;
+}
+
+// Publish a resolved lookup into a slot. Mirrors the exact snapshot the
+// dispatch cache would have held, so the two paths cannot disagree.
+void link_slot_fill(NdsLinkSlot* slot, const CachedStaticLookup* hit) {
+    slot->fn = nullptr;
+    slot->guard = nullptr;
+    slot->key = 0u;
+    if (!hit || !hit->fn) return;
+    if (hit->validation) {
+        // Only the complete snapshot is linkable. A cache entry that could
+        // not record its pages falls back to the dispatcher forever, which
+        // is correct and rare.
+        if (hit->page_count == 0u || hit->page_count > 4u) return;
+        // A validated target re-resolves every time the guest writes its
+        // backing pages, and each resolve wants a fresh snapshot. Cap the
+        // pool so a churning overlay cannot grow it without bound between
+        // epoch bumps; past the cap validated targets simply stay on the
+        // dispatcher until the next bank event clears the pool.
+        if (g_link_guards.size() >= kLinkGuardCap) return;
+        g_link_guards.emplace_back();
+        LinkGuard& guard = g_link_guards.back();
+        guard.validation = hit->validation;
+        guard.serial = hit->live_bank_serial;
+        guard.page_count = hit->page_count;
+        for (uint32_t i = 0u; i < hit->page_count; ++i) {
+            guard.page_addr[i] = hit->page_addr[i];
+            guard.generation[i] = hit->generation[i];
+            guard.generation_ptr[i] = hit->generation_ptr[i];
+        }
+        slot->guard = &guard;
+    }
+    slot->fn = hit->fn;
+    slot->key = link_key();
+}
+
+// Admit an already-resolved slot for this transfer. Returns the slot's
+// guard record through `guard` (null for an immutable target, which needs
+// none) and false whenever the slot must fall back to the dispatcher.
+bool link_slot_admit(const NdsLinkSlot* slot, const LinkGuard** guard) {
+    if (!link_slot_ready(slot)) return false;
+    const LinkGuard* g = static_cast<const LinkGuard*>(slot->guard);
+    if (g && !link_guard_live(g)) return false;
+    *guard = g;
+    return true;
+}
 
 // Bracket the static function range containing `pc` in a dispatch table
 // (sorted by addr): [*start, *end). Returns false if the table is empty or
@@ -763,6 +961,10 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
     nds_dispatch_index_add(ctx.dispatch_index, t, len);
     ctx.exc_base = exc_base;
     // A PC cached as absent before a newly registered bank may now resolve.
+    // Direct-link slots are invalidated wholesale by the same event: the
+    // upgrade from dispatcher to native for a target this bank now owns is
+    // the slot's next resolve.
+    link_epoch_bump();
     if (++ctx.dispatch_epoch == 0u) {
         g_dispatch_cache[cpu & 1] = {};
         ctx.dispatch_epoch = 1u;
@@ -788,6 +990,9 @@ extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                            return removed.count(entry) != 0u;
                        }),
         ctx.dispatch_index.end());
+    // Downgrade every slot back to the dispatcher; any that pointed into
+    // this bank's bodies can no longer be reached without re-resolving.
+    link_epoch_bump();
     if (++ctx.dispatch_epoch == 0u) {
         g_dispatch_cache[cpu & 1] = {};
         ctx.dispatch_epoch = 1u;
@@ -1323,10 +1528,21 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t ci, uint32_t r
 }
 
 // ── Dispatch ────────────────────────────────────────────────────────────
-extern "C" void runtime_dispatch(uint32_t target_pc) {
+// `linked`, when non-null, is a resolved literal-transfer slot offered for
+// the FIRST loop iteration only. It short-circuits the lookup-cache probe
+// and nothing else; a slot that is stale, mode-mismatched, or whose backing
+// pages moved simply is not used, and the ordinary lookup then refills it.
+namespace {
+void runtime_dispatch_impl(uint32_t target_pc, NdsLinkSlot* linked) {
     TailDispatchScope tail;
     for (;;) {
+        // One exclusive dispatch-machinery region per loop iteration: opened
+        // here, closed the instant before guest code runs (see
+        // dispatch_timing.h). The destructor is the backstop for the early
+        // returns that never reach the close.
+        NdsDispatchRegion cost_region(g_nds_active);
         tail.state.pending = false;
+        tail.state.linked = nullptr;
         const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
         // CPSR.T, not stale low bits left by the producer, owns the current
         // instruction set. ARM-state BX/BLX targets are word aligned;
@@ -1350,9 +1566,66 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
         const CpuCtx& c = g_ctx[g_nds_active];
         StaticGuardScope guard_scope;
-        if (guard_scope.call(lookup_static_cached(c, pc, thumb))) {
+        // Same construction order and same operations as the former
+        // `guard_scope.call(lookup_static_cached(c, pc, thumb))`: the guard
+        // scope is built first, then the lookup runs, then the guard is
+        // prepared. Only the hand-off to guest code is split out, so the
+        // cost region can close before it.
+        // Cache-path breakdown of this dispatch's lookup, nested inside
+        // cost_region. The outcome is only knowable after the fact, so it is
+        // read off the exact NdsDispatchStats counters the lookup itself
+        // bumps -- and only when this lookup is actually being sampled, so an
+        // unsampled dispatch pays one countdown and nothing more. Timing the
+        // lookup inside lookup_static_cached_impl instead would also time
+        // Tier 3's per-instruction poll, which outnumbers dispatch lookups
+        // ~8:1 and cost 1.7 percent of emulation time for a number that is
+        // not a dispatch cost.
+        const CachedStaticLookup* found = nullptr;
+        const LinkGuard* link_guard = nullptr;
+        bool entering_static = false;
+        NdsLinkSlot* const offered = linked;
+        linked = nullptr;   // the offer is for this iteration only
+        if (offered && link_enabled() &&
+            link_slot_admit(offered, &link_guard)) {
+            ++g_link_hits[g_nds_active];
+            live_overlay_note_cached_hit(link_guard ? link_guard->serial : 0u);
+            entering_static =
+                guard_scope.prepare_linked(offered->fn, link_guard);
+        } else {
+            NdsDispatchCacheRegion cache_region(g_nds_active);
+            const NdsDispatchStats& counters =
+                g_nds_dispatch_stats[g_nds_active];
+            const uint64_t hit_before = counters.cache_hit;
+            const uint64_t absent_before = counters.cache_hit_absent;
+            found = lookup_static_cached(c, pc, thumb);
+            const NdsDispatchCachePath cache_path =
+                counters.cache_hit != hit_before
+                    ? NDS_DISPATCH_CACHE_HIT
+                    : (counters.cache_hit_absent != absent_before
+                           ? NDS_DISPATCH_CACHE_HIT_ABSENT
+                           : NDS_DISPATCH_CACHE_SLOW);
+            ++g_nds_dispatch_timing[g_nds_active].cache_events[cache_path];
+            cache_region.close_as(cache_path);
+            // Refill the offered slot from the authoritative resolution.
+            // Only when the slot's own target is the PC actually resolved
+            // here: the tail hand-off can carry a slot whose fall-through
+            // target the loop has since replaced.
+            if (offered && link_enabled() &&
+                (offered->target_pc & ~1u) == pc &&
+                ((offered->target_pc & 1u) != 0u) == thumb) {
+                ++g_link_resolves[g_nds_active];
+                link_slot_fill(offered, found);
+            } else if (offered) {
+                ++g_link_falls[g_nds_active];
+            }
+            entering_static = guard_scope.prepare(found);
+        }
+        cost_region.close();
+        if (entering_static) {
+            guard_scope.invoke();
             if (!tail.state.pending) return;
             target_pc = tail.state.target_pc;
+            linked = tail.state.linked;
             continue;
         }
         if (g_discover_static_misses && static_bios_pc(pc)) {
@@ -1383,6 +1656,11 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         return;
     }
 }
+}  // namespace
+
+extern "C" void runtime_dispatch(uint32_t target_pc) {
+    runtime_dispatch_impl(target_pc, nullptr);
+}
 
 extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
     pc &= ~1u;
@@ -1409,6 +1687,7 @@ extern "C" void runtime_discovery_note_static(uint32_t pc, uint32_t thumb) {
 }
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].dispatch_exchange;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCHANGE);
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;
     const uint32_t pc = target_pc & ((target_pc & 1u) ? ~1u : ~3u);
     runtime_trace_event(RUNTIME_TRACE_EXCHANGE, pc, target_pc, 0, 0);
@@ -1416,10 +1695,12 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 }
 extern "C" void runtime_dispatch_literal_branch(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_branch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_BRANCH);
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_call(uint32_t target_pc) {
     ++g_nds_dispatch_stats[g_nds_active].literal_call;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_CALL);
     runtime_dispatch(target_pc);
 }
 extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
@@ -1430,7 +1711,72 @@ extern "C" void runtime_dispatch_literal_fallthrough(uint32_t target_pc) {
         g_tail_dispatch->pending = true;
         return;
     }
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_FALLTHROUGH);
     runtime_dispatch(target_pc);
+}
+
+// ── B2 linked literal transfers ─────────────────────────────────────────
+// These are the linked twins of the three runtime_dispatch_literal_*
+// entries above and are deliberately NOT shortcuts around them. Each keeps
+// the identical guest-visible sequence -- the class counter, the class tag,
+// dispatch_total, the slice-yield preemption point, the R15 publication,
+// the trace event, the tail-dispatch hand-off, and the nested static guard
+// -- and offers the dispatcher a pre-resolved target so the only work that
+// disappears is the g_dispatch_cache probe.
+//
+// The tempting further step, calling slot->fn() straight from here the way
+// an intra-shard direct call does, was REJECTED: it deletes the slice-yield
+// point that every cross-shard literal transfer performs today, which moves
+// scheduler preemption to different guest instructions and is guest
+// visible. For a literal BRANCH it would additionally turn a guest tail
+// transfer into a host call, growing the stack without bound around a
+// cross-function guest loop -- the hazard docs/host_optimization_strategy.md
+// B2 names explicitly.
+extern "C" void runtime_link_branch(NdsLinkSlot* slot) {
+    ++g_nds_dispatch_stats[g_nds_active].literal_branch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_BRANCH);
+    runtime_dispatch_impl(slot->target_pc & ~1u, slot);
+}
+
+extern "C" void runtime_link_call(NdsLinkSlot* slot) {
+    ++g_nds_dispatch_stats[g_nds_active].literal_call;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_CALL);
+    runtime_dispatch_impl(slot->target_pc & ~1u, slot);
+}
+
+extern "C" void runtime_link_fallthrough(NdsLinkSlot* slot) {
+    const uint32_t target_pc = slot->target_pc & ~1u;
+    ++g_nds_dispatch_stats[g_nds_active].literal_fallthrough;
+    if (g_nds_active == NDS_ARM9 && g_tail_dispatch &&
+        g_tail_dispatch->cpu == static_cast<int>(g_nds_active)) {
+        g_tail_dispatch->target_pc = target_pc;
+        g_tail_dispatch->linked = slot;
+        g_tail_dispatch->pending = true;
+        return;
+    }
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_LITERAL_FALLTHROUGH);
+    runtime_dispatch_impl(target_pc, slot);
+}
+
+extern "C" const char* nds_direct_link_json(void) {
+    static std::string out;
+    char buf[320];
+    std::snprintf(buf, sizeof buf,
+        "{\"enabled\":%s,\"deep_trace\":%s,\"epoch\":%u,"
+        "\"guards\":%zu,"
+        "\"arm9\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu},"
+        "\"arm7\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu}}",
+        g_direct_link ? "true" : "false",
+        g_runtime_deep_trace ? "true" : "false",
+        g_link_epoch, g_link_guards.size(),
+        static_cast<unsigned long long>(g_link_hits[0]),
+        static_cast<unsigned long long>(g_link_resolves[0]),
+        static_cast<unsigned long long>(g_link_falls[0]),
+        static_cast<unsigned long long>(g_link_hits[1]),
+        static_cast<unsigned long long>(g_link_resolves[1]),
+        static_cast<unsigned long long>(g_link_falls[1]));
+    out = buf;
+    return out.c_str();
 }
 
 extern "C" void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
@@ -1707,6 +2053,7 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
                      ? arm9_refill_cycles(base + 0x08u)
                      : arm7_refill_cycles(base + 0x08u));
     ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCEPTION);
     runtime_dispatch(base + 0x08u);
 }
 extern "C" void runtime_irq(uint32_t return_address) {
@@ -1737,6 +2084,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
         runtime_tick(refill);
     }
     ++g_nds_dispatch_stats[g_nds_active].exception_dispatch;
+    nds_dispatch_tag(NDS_DISPATCH_CLASS_EXCEPTION);
     runtime_dispatch(base + 0x18u);
 }
 
@@ -1762,6 +2110,14 @@ extern "C" void runtime_init(void*) {
     }
     g_static_guard = nullptr;
     g_dispatch_cache = {};
+    // dispatch_epoch restarts at 1 on reset, so the per-CPU epoch alone
+    // cannot distinguish a pre-reset slot from a post-reset one. The link
+    // epoch is monotonic across resets and closes that hole.
+    g_direct_link = configured_direct_link();
+    link_epoch_bump();
+    g_link_hits[0] = g_link_hits[1] = 0u;
+    g_link_resolves[0] = g_link_resolves[1] = 0u;
+    g_link_falls[0] = g_link_falls[1] = 0u;
 #if defined(NDS_PROFILE_HLE_HEAT)
     g_hle_heat.clear();
     g_hle_irq_epoch[0] = 0u;

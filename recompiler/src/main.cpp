@@ -602,12 +602,19 @@ void emit_function_body(std::FILE* f, const Function& fn,
             "    goto L_%08X;\n",
             fn.end_addr, fn.end_addr);
     } else {
+        // B2 validated direct linking; see arm_codegen.cpp's literal
+        // branch/call slots. A body fall-through has the same
+        // compile-time-constant target and the same repeat rate, so it
+        // gets the same per-callsite resolution storage.
         std::fprintf(f,
             "    /* fall-through to 0x%08X */\n"
             "    g_cpu.R[15] = 0x%08Xu;\n"
-            "    runtime_dispatch_literal_fallthrough(0x%08Xu);\n"
+            "    { static NdsLinkSlot _lnk_%08X_f = {0, 0u, 0x%08Xu, 0};\n"
+            "      runtime_link_fallthrough(&_lnk_%08X_f); }\n"
             "    return;\n",
-            fn.end_addr, fn.end_addr, fn.end_addr);
+            fn.end_addr, fn.end_addr,
+            fn.end_addr, fn.end_addr | (fn.mode == CpuMode::Thumb ? 1u : 0u),
+            fn.end_addr);
     }
 }
 

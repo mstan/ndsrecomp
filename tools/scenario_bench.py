@@ -271,16 +271,28 @@ def profile_snapshot(client: Any) -> dict[str, Any]:
     """One merged snapshot of every always-on attribution counter.
 
     profile is the GPU/scheduler bucket set (zeros unless NDS_PROFILE_* armed
-    the sampling at process start); dispatch_stats and static_coverage are
-    always live. Merging them into one dict is what lets subtract() emit
-    per-phase dispatch composition and tier-3 deltas from the same diff.
+    the sampling at process start); the rest are always live. Merging them
+    into one dict is what lets subtract() emit per-phase dispatch
+    composition, per-class dispatch COST, direct-link behaviour, and tier-3
+    deltas from the same diff -- subtract() is recursive, so a nested
+    counter surface needs nothing here but its name.
+
+    dispatch_stats answers how OFTEN each class ran; dispatch_timing
+    (beads-yjp.44) answers what each one COST; direct_link (beads-yjp.45)
+    answers how those transfers actually resolved. A phase delta that
+    carries only the first cannot tell a real speedup from a shifted
+    composition, which is why all three are captured together.
     """
     snapshot = client.cmd("profile")
-    for name in ("dispatch", "static_coverage"):
-        command = "dispatch_stats" if name == "dispatch" else name
+    for name, command in (("dispatch", "dispatch_stats"),
+                          ("dispatch_timing", "dispatch_timing"),
+                          ("direct_link", "direct_link"),
+                          ("static_coverage", "static_coverage")):
         try:
             snapshot[name] = client.cmd(command)
         except RuntimeError as error:
+            # An older runner simply does not have the command. Skip it
+            # rather than fail the whole measurement.
             if not str(error).endswith("unknown cmd"):
                 raise
     return snapshot

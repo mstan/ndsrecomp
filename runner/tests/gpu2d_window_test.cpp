@@ -1,7 +1,9 @@
 #include "gpu2d_window.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 
 // Compile the production implementation into this focused test with device
 // stubs below. This keeps the OBJ-window and compose assertions on the exact
@@ -15,6 +17,7 @@ std::array<uint8_t, 0x400> g_oam{};
 NdsVramRendererView g_view{};
 std::array<uint32_t, 448> g_3d_line{};
 std::array<uint8_t, 0x20000> g_capture_bank{};
+bool g_lcdc_mapped = false;
 uint16_t g_3d_output_width = 256;
 uint16_t g_3d_render_xpos = 0;
 uint32_t g_3d_render_polygon_count = 0;
@@ -270,7 +273,7 @@ bool test_obj_window_coverage() {
     // Index zero is transparent and produces neither output nor coverage.
     reset_obj_fixture(obj_vram);
     set_obj(0, 2u << 10u, 0, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 0)) return false;
 
@@ -278,13 +281,13 @@ bool test_obj_window_coverage() {
     reset_obj_fixture(obj_vram);
     set_4bpp_index(obj_vram, 0, 0, 1);
     set_obj(0, 2u << 10u, 0x1000u, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[7] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
     set_4bpp_index(obj_vram, 0, 0, 1);
     set_obj(0, 2u << 10u, 0x2000u, 0);
-    render_obj_line(0, 7, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 7, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
 
@@ -295,7 +298,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0100u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0x0100u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
@@ -303,7 +306,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0100u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0xFF00u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[1] && coverage_count(coverage) == 1)) return false;
     reset_obj_fixture(obj_vram);
@@ -311,7 +314,7 @@ bool test_obj_window_coverage() {
     set_obj(0, 0x0300u | (2u << 10u), 0, 0);
     write16(g_oam, 6, 0x0100u); write16(g_oam, 14, 0);
     write16(g_oam, 22, 0); write16(g_oam, 30, 0x0100u);
-    render_obj_line(0, 4, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 4, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[4] && coverage[11] && coverage_count(coverage) == 8))
         return false;
@@ -320,14 +323,14 @@ bool test_obj_window_coverage() {
     reset_obj_fixture(obj_vram);
     for (int x = 0; x < 8; ++x) set_4bpp_index(obj_vram, x, 0, 1);
     set_obj(0, 2u << 10u, 0x01FCu, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 4 && coverage[0] && coverage[3]))
         return false;
     reset_obj_fixture(obj_vram);
     for (int x = 0; x < 8; ++x) set_4bpp_index(obj_vram, x, 0, 1);
     set_obj(0, 2u << 10u, 0x01FFu, 0);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage_count(coverage) == 7 && coverage[0] && coverage[6]))
         return false;
@@ -336,7 +339,7 @@ bool test_obj_window_coverage() {
     // tile zero. The scanline below wraps from Y=250 to source row 8.
     obj_vram[0x400] = 1;
     set_obj(0, 250u | (2u << 10u), 0x4000u, 0);  // 16x16 OBJ at Y=250.
-    render_obj_line(0, 2, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 2, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     if (!require(coverage[0] && coverage_count(coverage) == 1)) return false;
 
@@ -346,12 +349,119 @@ bool test_obj_window_coverage() {
     set_4bpp_index(obj_vram, 1, 0, 1);
     set_obj(0, 2u << 10u, 0, 3u << 10u);
     set_obj(1, 2u << 10u, 0, 0u << 10u);
-    render_obj_line(0, 0, pixels.data(), 256, g_oam.data(),
+    render_obj_line(g_unit[0], 0, 0, pixels.data(), 256, g_oam.data(),
                     g_palette.data(), g_view, coverage.data());
     return require(coverage[0] && coverage[1]);
 }
 
 }  // namespace
+
+// DISPCAPCNT display capture writes back into guest-visible VRAM and bumps the
+// texture generation the 3D engine reads, so capture lines must be rendered on
+// the scheduler thread even when threaded scanline rendering is on. This pins
+// both halves: the captured bytes and the framebuffers must be identical to
+// the single-threaded path, and the classification counters must show the
+// capture lines going inline while the non-capture lines go to a worker.
+struct CaptureRun {
+    std::array<uint8_t, 0x20000> bank{};
+    std::array<uint32_t, 256 * 192> top{};
+    std::array<uint32_t, 256 * 192> bottom{};
+    uint64_t threaded_lines = 0;
+    uint64_t inline_lines = 0;
+    uint64_t staged_captures = 0;
+};
+
+void run_capture_frame(uint32_t capture_size, CaptureRun& out) {
+    nds_gpu2d_reset();
+    g_capture_bank.fill(0);
+    g_palette.fill(0);
+    g_oam.fill(0);
+    g_view = {};
+    g_lcdc_mapped = true;
+    // A non-black backdrop so the composite the capture unit reads is not all
+    // zero, and a distinguishable per-line 3D source.
+    write16(g_palette, 0, 0x3DEFu);
+    for (size_t i = 0; i < g_3d_line.size(); ++i)
+        g_3d_line[i] = static_cast<uint32_t>((i * 0x00010203u) | 0x1F000000u);
+
+    Unit& u = g_unit[0];
+    u.dispcnt = 0x00010000u;   // display mode 1 (composite), BG mode 0
+    u.master_bright = 0;
+    // Enable + size + source A = composite, dest bank 0, no offsets.
+    u.capture = 0x80000000u | (capture_size << 20);
+    g_unit[1].dispcnt = 0x00010000u;
+
+    nds_gpu2d_start_frame();
+    for (int y = 0; y < 192; ++y) nds_gpu2d_render_scanline(y);
+
+    NdsGpu2dProfile prof{};
+    nds_gpu2d_profile(&prof);
+    out.threaded_lines = prof.threaded_lines;
+    out.inline_lines = prof.inline_lines;
+    out.staged_captures = prof.staged_captures;
+    out.bank = g_capture_bank;
+    // Rasterization targets the back buffer; the front flip happens at the
+    // frame wrap, which this fixture does not reach.
+    std::copy_n(g_fb[g_front ^ 1][0].data(), 256 * 192, out.top.data());
+    std::copy_n(g_fb[g_front ^ 1][1].data(), 256 * 192, out.bottom.data());
+}
+
+bool test_capture_serializes_and_matches() {
+    // size 3 = 256x192: every line captures.
+    // size 0 = 128x128: lines 0..127 capture, 128..191 do not.
+    for (const uint32_t size : {3u, 0u}) {
+        CaptureRun single{};
+        nds_gpu2d_set_threaded(false, 1);
+        run_capture_frame(size, single);
+
+        CaptureRun threaded{};
+        nds_gpu2d_set_threaded(true, 2);
+        run_capture_frame(size, threaded);
+        nds_gpu2d_set_threaded(false, 1);
+
+        std::fprintf(stderr,
+            "[capture size %u] single inline=%llu threaded=%llu | "
+            "threaded inline=%llu threaded=%llu | bank_eq=%d top_eq=%d "
+            "bot_eq=%d nonzero=%d\n",
+            size,
+            (unsigned long long)single.inline_lines,
+            (unsigned long long)single.threaded_lines,
+            (unsigned long long)threaded.inline_lines,
+            (unsigned long long)threaded.threaded_lines,
+            (int)(single.bank == threaded.bank),
+            (int)(single.top == threaded.top),
+            (int)(single.bottom == threaded.bottom),
+            (int)std::any_of(single.bank.begin(), single.bank.end(),
+                             [](uint8_t v) { return v != 0u; }));
+        std::fprintf(stderr,
+            "[capture size %u] applied single=%llu threaded=%llu\n",
+            size, (unsigned long long)single.staged_captures,
+            (unsigned long long)threaded.staged_captures);
+        if (!require(single.bank == threaded.bank)) return false;
+        if (!require(single.top == threaded.top)) return false;
+        if (!require(single.bottom == threaded.bottom)) return false;
+        // The capture must actually have written something, or the comparison
+        // is vacuous.
+        if (!require(std::any_of(single.bank.begin(), single.bank.end(),
+                                 [](uint8_t v) { return v != 0u; })))
+            return false;
+        // Single-threaded: every line inline, none threaded.
+        if (!require(single.threaded_lines == 0u)) return false;
+        if (!require(single.inline_lines == 192u)) return false;
+        // Threaded: capture no longer forces a line inline. The pixels are
+        // produced on a worker and only the VRAM write is applied by the
+        // scheduler thread at the drain, so every line is threaded.
+        if (!require(threaded.inline_lines == 0u)) return false;
+        if (!require(threaded.threaded_lines == 192u)) return false;
+        // And every capturing line must actually have had its write applied.
+        const uint64_t expected_applied = size == 3u ? 192u : 128u;
+        if (!require(threaded.staged_captures == expected_applied))
+            return false;
+        if (!require(single.staged_captures == expected_applied))
+            return false;
+    }
+    return true;
+}
 
 // Minimal device implementations required by the production renderer object.
 uint16_t nds_powercontrol9() { return 0x8002u; }
@@ -362,7 +472,7 @@ uint32_t nds_vram_read_bg(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_obj(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_bg_extpal(int, uint32_t, uint32_t) { return 0; }
 uint32_t nds_vram_read_obj_extpal(int, uint32_t, uint32_t) { return 0; }
-bool nds_vram_lcdc_mapped(unsigned) { return false; }
+bool nds_vram_lcdc_mapped(unsigned) { return g_lcdc_mapped; }
 uint8_t* nds_vram_bank_data(unsigned) { return g_capture_bank.data(); }
 void nds_vram_note_capture_write() {}
 uint32_t nds_video_read(int, uint32_t, uint32_t) { return 0; }
@@ -385,5 +495,6 @@ int main() {
     if (!test_direct_scene_centers_low_polygon_frames()) return 7;
     if (!test_compose_window_effects()) return 8;
     if (!test_obj_window_coverage()) return 9;
+    if (!test_capture_serializes_and_matches()) return 10;
     return 0;
 }

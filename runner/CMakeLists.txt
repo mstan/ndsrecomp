@@ -41,6 +41,14 @@ option(NDS_PROFILE_MEM_TIMING
 set(NDS_PGO_MODE "OFF" CACHE STRING
     "Runner-only GCC PGO mode: OFF, GENERATE, or USE")
 set_property(CACHE NDS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+option(NDS_PGO_PARTIAL_TRAINING
+    "Keep functions the training route never executed on normal optimization \
+instead of letting -fprofile-use size-optimize them as cold"
+    ON)
+option(NDS_PGO_REQUIRE_PROFILE
+    "Fail configuration when NDS_PGO_MODE=USE and no .gcda profile data is \
+present, instead of silently producing an unoptimized binary"
+    ON)
 set(NDS_GENERATED_DIR "" CACHE PATH
     "Optional ignored generated directory override for worktree builds")
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
@@ -397,6 +405,8 @@ add_executable(nds_runner
     src/tier3.cpp
     src/coverage_manifest.cpp
     src/diagnostics.cpp
+    src/dispatch_timing.cpp
+    src/host_info.cpp
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
@@ -426,19 +436,91 @@ ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
         message(FATAL_ERROR "NDS_PGO_MODE currently supports GCC/MinGW only")
-    elseif(NDS_PGO_MODE STREQUAL "GENERATE")
+    endif()
+    if(NOT NDS_PGO_MODE STREQUAL "GENERATE" AND
+       NOT NDS_PGO_MODE STREQUAL "USE")
+        message(FATAL_ERROR "NDS_PGO_MODE must be OFF, GENERATE, or USE")
+    endif()
+
+    # A compiler cache must not stand between the profile data and the
+    # optimized objects. ccache's handling of -fprofile-use inputs is not
+    # something a release artifact should depend on, so PGO builds always
+    # compile directly.
+    if(NOT NDSRECOMP_COMPILER_CACHE STREQUAL "OFF")
+        message(FATAL_ERROR
+            "NDS_PGO_MODE=${NDS_PGO_MODE} requires "
+            "-DNDSRECOMP_COMPILER_CACHE=OFF so profile data, not a cache "
+            "hit, decides each object")
+    endif()
+
+    # Deliberately no -fprofile-dir. On mingw-gcc 15.2 it mangles the object
+    # directory into a nested path under the profile directory (prof/C~/Users/
+    # .../objdir/x.gcda); for this tree's path depth gcc cannot create it and
+    # reports "Cannot create directory ... Skip", writing no profile at all.
+    # Verified empirically 2026-08-27. So profiles stay beside the object
+    # files, which makes the build directory the profile store: the GENERATE
+    # and USE phases MUST run in the same build directory. That is also the
+    # cheap path, because PGO flags are private to nds_runner and switching
+    # modes in place never recompiles a generated bank TU.
+    #
+    # gcc derives the profile name from the object file name, so the two
+    # phases must also produce identically named objects. Reconfiguring one
+    # build directory satisfies that automatically.
+
+    if(NDS_PGO_MODE STREQUAL "GENERATE")
         # Instrument only runner-owned host code. Generated ARM banks and
-        # portable support libraries remain byte-for-byte baseline objects.
+        # portable support libraries remain byte-for-byte baseline objects,
+        # so switching modes in place never recompiles a bank TU.
+        # -fprofile-update=atomic is required: the runner counts from the
+        # emulation, audio and presentation threads at once, and mingw-gcc's
+        # non-atomic counters lose and corrupt updates under that.
         target_compile_options(nds_runner PRIVATE
             -fprofile-generate -fprofile-update=atomic)
         target_link_options(nds_runner PRIVATE -fprofile-generate)
-    elseif(NDS_PGO_MODE STREQUAL "USE")
-        target_compile_options(nds_runner PRIVATE
-            -fprofile-use -fprofile-correction)
-        target_link_options(nds_runner PRIVATE -fprofile-use)
     else()
-        message(FATAL_ERROR
-            "NDS_PGO_MODE must be OFF, GENERATE, or USE")
+        # -fprofile-use with no profile data present is not an error: gcc
+        # warns under -Wmissing-profile and still exits 0, so an untrained
+        # tree would quietly produce a binary with none of the optimization
+        # the release is being labelled with. Verified empirically on
+        # mingw-gcc 15.2. Refuse to configure instead.
+        file(GLOB_RECURSE _nds_pgo_probe
+            "${CMAKE_CURRENT_BINARY_DIR}/*.gcda")
+        list(LENGTH _nds_pgo_probe _nds_pgo_count)
+        if(_nds_pgo_count EQUAL 0)
+            if(NDS_PGO_REQUIRE_PROFILE)
+                message(FATAL_ERROR
+                    "NDS_PGO_MODE=USE found no .gcda profile data under "
+                    "${CMAKE_CURRENT_BINARY_DIR}. Configure this same build "
+                    "directory with NDS_PGO_MODE=GENERATE, build it, run the "
+                    "training route, then reconfigure with USE. Set "
+                    "-DNDS_PGO_REQUIRE_PROFILE=OFF only to deliberately "
+                    "accept an untrained binary.")
+            endif()
+            message(WARNING
+                "NDS_PGO_MODE=USE with no profile data: this binary will not "
+                "actually be profile-optimized")
+        else()
+            message(STATUS
+                "ndsrecomp: PGO USE with ${_nds_pgo_count} profile file(s)")
+        endif()
+        # -fprofile-correction is required, not defensive: the runner updates
+        # counters from the emulation, audio and presentation threads, and
+        # mingw-gcc profile output under threads is inconsistent often enough
+        # that gcc would otherwise reject the profile outright.
+        # -Wmissing-profile keeps per-TU training gaps visible in the log
+        # rather than silent.
+        target_compile_options(nds_runner PRIVATE
+            -fprofile-use -fprofile-correction -Wmissing-profile)
+        if(NDS_PGO_PARTIAL_TRAINING)
+            # The training routes cover attract, FMV and one adventure route.
+            # Without this, every function they never reach - multiplayer,
+            # wifi, the settings menus - is treated as cold and size-
+            # optimized, so a narrow training set would pessimize everything
+            # it did not visit.
+            target_compile_options(nds_runner PRIVATE
+                -fprofile-partial-training)
+        endif()
+        target_link_options(nds_runner PRIVATE -fprofile-use)
     endif()
 endif()
 if(NDS_PROFILE_MEM_TIMING)
@@ -487,25 +569,40 @@ if(NDS_ENABLE_PCAP_BACKEND)
 endif()
 # beads-yjp.28: stamped into the coverage manifest so an ingested playthrough
 # can be tied to the build whose static coverage it was measured against.
-# Resolved at configure time; a source tree without git still builds, it just
-# reports "unknown".
-set(NDS_RUNNER_BUILD_ID "unknown")
-find_package(Git QUIET)
-if(GIT_FOUND)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        OUTPUT_VARIABLE _nds_runner_git_id
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(_nds_runner_git_id)
-        set(NDS_RUNNER_BUILD_ID "${_nds_runner_git_id}")
-    endif()
-endif()
-target_compile_definitions(nds_runner PRIVATE
-    NDS_RUNNER_BUILD_ID="${NDS_RUNNER_BUILD_ID}")
+# beads-yjp.44: re-read at BUILD time, not configure time. The old
+# execute_process froze the id at `cmake -B`, so every incremental build after
+# that reported a stale commit -- a shipped v0.6.3 runner reported 12ee1b9
+# while containing 8de5d86-only behaviour, which made its field diagnostics
+# bundle lie about what code the player ran. The script writes the header only
+# when the id actually changes, so an unchanged HEAD costs no recompile, and it
+# still degrades to "unknown" with no git or outside a work tree.
+set(NDS_BUILD_ID_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/nds_build_id.h")
+set(NDS_BUILD_ID_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/NdsBuildIdScript.cmake")
+# Seed at configure time so the header exists before the first compile even if
+# the custom target has not run yet.
+execute_process(COMMAND "${CMAKE_COMMAND}"
+    "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+    "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+    "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+    "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+    -P "${NDS_BUILD_ID_SCRIPT}")
+add_custom_target(nds_build_id ALL
+    BYPRODUCTS "${NDS_BUILD_ID_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+        "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+        "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+        "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+        -P "${NDS_BUILD_ID_SCRIPT}"
+    COMMENT "Stamping git HEAD into nds_build_id.h"
+    VERBATIM)
+add_dependencies(nds_runner nds_build_id)
 
 target_include_directories(nds_runner PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"   # nds_build_id.h (build-time)
     $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
     $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
     src
@@ -761,6 +858,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_index_lock_test.py"
                 --work "${CMAKE_CURRENT_BINARY_DIR}/live-index-lock-work")
+    # beads-yjp.51: the pending-work queue is what makes a player's backlog
+    # converge across runs and across sessions. Its format is schema-versioned
+    # and must tolerate every corruption, its order must be hottest-first by
+    # execution weight, and it must survive a hard kill of the writer.
+    add_test(
+        NAME live_queue_persist_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_queue_persist_test.py")
     if(WIN32)
       # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
       # what the runner cross-checks against the bank's metadata CPU.
