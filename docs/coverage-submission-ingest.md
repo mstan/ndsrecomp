@@ -186,6 +186,24 @@ it names a concrete instruction the manifest watched retire. On the four
 2026-08-28 MPH parts, 186 of 316 distinct callers appear in no root bitmap at
 all, so this is real coverage rather than a restatement.
 
+**Pass the last build's dispatch tables and the pipeline converges.**
+`--owned-rows-arm9 generated/recomp` (and `--owned-rows-arm7`) removes every
+interpreted address the build already owns a row for *before* the runs are cut.
+Two things follow, and both matter:
+
+* a span start is never re-declared once it is covered, so a re-ingest cannot
+  split the body that now owns it;
+* a run the finder only walked *halfway* into is cut at the stop, and its
+  uncovered tail becomes a seed of its own.
+
+That second one is not hypothetical. Seeding MPH's span
+`0x0208AD50..0x0208ADD0` extended `mph_arm9_afunc_0208ACEC` by exactly two
+instructions and then the finder stopped, leaving `0x0208ADCC` — reached only
+by a computed branch — as uncovered as before. One seed per span is the right
+*first* answer; the owned-row remainder is what closes the rest, and
+`interpreted_addresses_already_owned` in the report is how you read the
+convergence between two consecutive ingests.
+
 Knobs: `--no-promote-ranges` reproduces the pre-yjp.55 policy exactly,
 `--no-promote-callers` drops just the caller fold-in, `--min-span-hits` and
 `--max-span-seeds` bound the seed budget (spans are ranked by cost, so a bound

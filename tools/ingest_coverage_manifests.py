@@ -41,6 +41,7 @@ import base64
 import collections
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -222,6 +223,19 @@ def main() -> int:
     parser.add_argument("--max-span-seeds", type=int, default=0,
                         help="promote at most this many span starts per CPU, "
                              "hottest span first (0 = every qualifying span)")
+    parser.add_argument("--owned-rows-arm9", type=Path, action="append",
+                        default=[], metavar="PATH",
+                        help="a generated *_dispatch.c (or a directory of "
+                             "them) whose rows the ARM9 build already owns. "
+                             "Repeatable. Interpreted addresses that already "
+                             "have a row are removed BEFORE the runs are cut, "
+                             "so the seeds are the honest remainder: no seed "
+                             "is spent re-declaring covered code, and a run "
+                             "that a finder stop left half-covered is split "
+                             "and its uncovered part seeded on its own")
+    parser.add_argument("--owned-rows-arm7", type=Path, action="append",
+                        default=[], metavar="PATH",
+                        help="the same, for the ARM7 banks")
     parser.set_defaults(promote_ranges=True, promote_callers=True)
     args = parser.parse_args()
 
@@ -366,6 +380,24 @@ def main() -> int:
             for key, hits in observed.items():
                 interpreted[cpu][key] = interpreted[cpu].get(key, 0) + hits
 
+    # An address the build already owns a dispatch row for is not a seed: the
+    # interpreter cannot be entered there, and re-declaring it would split the
+    # body that owns it. Removing them first is also what makes the pipeline
+    # CONVERGE -- what is left is exactly the code the last build failed to
+    # reach, so a run the finder walked halfway into is cut at the stop and its
+    # uncovered tail becomes a seed of its own.
+    owned = {9: read_dispatch_rows(args.owned_rows_arm9),
+             7: read_dispatch_rows(args.owned_rows_arm7)}
+    already_owned = 0
+    for cpu, rows in owned.items():
+        if not rows:
+            continue
+        for key in list(interpreted[cpu]):
+            addr, mode = key
+            if (addr, 1 if mode == "thumb" else 0) in rows:
+                del interpreted[cpu][key]
+                already_owned += 1
+
     hot = hot_ranges(interpreted)
     promoted, span_stats = select_span_seeds(
         hot, promote=args.promote_ranges, min_hits=args.min_span_hits,
@@ -481,6 +513,9 @@ def main() -> int:
             "enabled": args.promote_ranges,
             "callers_folded_in": args.promote_callers,
             "distinct_callers": sum(len(v) for v in callers.values()),
+            "dispatch_rows_read": {f"arm{cpu}": len(rows)
+                                   for cpu, rows in sorted(owned.items())},
+            "interpreted_addresses_already_owned": already_owned,
             "min_span_hits": args.min_span_hits,
             "max_span_seeds": args.max_span_seeds,
             "seeds": len(promoted),
@@ -581,6 +616,33 @@ def assemble_runs(versions, unresolved_keys, session_entries=None):
                 if start <= pc < start + len(blob))
             runs.append((cpu, start, blob, ordered))
     return runs
+
+
+DISPATCH_ROW = re.compile(r"\{0x([0-9A-Fa-f]+)u,\s*(\d+)u,")
+
+
+def read_dispatch_rows(paths) -> set[tuple[int, int]]:
+    """Every (addr, thumb) a generated dispatch table already owns.
+
+    Same row syntax the recompiler's own --preceding-dispatch reader parses.
+    A path may be a generated *_dispatch.c or a directory of them, because a
+    title's coverage banks number in the hundreds and naming each one on the
+    command line is how a caller ends up quietly omitting some.
+    """
+    files: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files.extend(sorted(path.glob("*_dispatch.c")))
+        elif path.is_file():
+            files.append(path)
+    rows: set[tuple[int, int]] = set()
+    for path in files:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                found = DISPATCH_ROW.search(line)
+                if found:
+                    rows.add((int(found.group(1), 16), int(found.group(2))))
+    return rows
 
 
 def note_caller(callers, cpu: int, entry: dict, hits: int) -> None:

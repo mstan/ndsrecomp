@@ -184,6 +184,34 @@ def main() -> int:
         check((HOLE[0], "arm") in ranked and (LONE, "arm") not in ranked,
               "--max-span-seeds keeps the hottest span and drops the tail")
 
+        # Convergence: an address the build already owns a row for is not a
+        # seed, and a run the finder only walked halfway into is cut at the
+        # stop so its uncovered tail gets a seed of its own. Without this the
+        # span start is re-declared every ingest (splitting the body that owns
+        # it) and the code past a finder stop is never reachable at all --
+        # which is exactly how MPH's 0x0208ADCC stayed uncovered.
+        (work / "dispatch.c").write_text(
+            "const NdsDispatchEntry t[] = {\n"
+            + "".join(f"    {{0x{addr:08X}u, 0u, fn, &v}},\n"
+                      for addr in HOLE[:2])
+            + "};\n", encoding="utf-8", newline="\n")
+        residual = seeds_of(run(work, "residual", "--no-promote-callers",
+                                "--owned-rows-arm9", str(work / "dispatch.c")))
+        check((HOLE[0], "arm") not in residual,
+              "a span start the build already owns a row for is NOT re-seeded")
+        check((HOLE[2], "arm") in residual,
+              "the uncovered remainder of that span is seeded at its own "
+              "start, so a finder stop cannot hide the code behind it")
+        check((LONE, "arm") in residual,
+              "an untouched span is unaffected by the owned-row filter")
+        report_residual = json.loads(
+            (work / "residual" / "ingest-report.json")
+            .read_text(encoding="utf-8"))
+        check(report_residual["span_promotion"][
+                  "interpreted_addresses_already_owned"] == 2,
+              "the report counts the interpreted addresses already covered, "
+              "which is how convergence between two ingests is read")
+
     print("coverage span promotion: all assertions hold")
     return 0
 
