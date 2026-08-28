@@ -310,16 +310,16 @@ int main() {
         return 1;
     live_overlay_note_backlog_for_test(30u, 3000u);
     live_overlay_note_backlog_for_test(20u, 3000u);
-    if (!expect(live_overlay_batch_cap_for_test() == 24u,
-                "the batch ramp should saturate at its bound"))
+    if (!expect(live_overlay_batch_cap_for_test() == 12u,
+                "the batch ramp should saturate at its measured bound"))
         return 1;
     live_overlay_note_backlog_for_test(10u, 3000u);
-    if (!expect(live_overlay_batch_cap_for_test() == 24u,
+    if (!expect(live_overlay_batch_cap_for_test() == 12u,
                 "the batch ramp must not exceed its bound"))
         return 1;
     // A machine that cannot keep up gives the batch back.
     live_overlay_note_backlog_for_test(10u, 90000u);
-    if (!expect(live_overlay_batch_cap_for_test() == 12u,
+    if (!expect(live_overlay_batch_cap_for_test() == 6u,
                 "a slow backlog run should halve the batch cap"))
         return 1;
     live_overlay_note_backlog_for_test(10u, 90000u);

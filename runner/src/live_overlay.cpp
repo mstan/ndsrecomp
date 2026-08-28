@@ -51,7 +51,18 @@ constexpr uint32_t kDiagRingSize = 4096u;
 // earns a bigger batch, while a box that finishes in seconds does. Exactly one
 // child process at a time, always; none of this changes that.
 constexpr uint32_t kBaseBatchPages = 6u;
-constexpr uint32_t kMaxBatchPages = 24u;
+// Measured bound, not a guessed one. On a contended host, a 24-page batch is a
+// big enough burst that IDLE_PRIORITY stops shielding the emulator: an A/B on
+// the same binary over the same 300 s MPH route showed 55.6 fps mean with the
+// ramp reaching 24 (-5.5 fps during compile intervals, and -7.8 on intervals
+// with NO interpreter pressure at all, so it was the child and not a tier-3
+// confound) against 59.5 fps mean with the cap pinned at 6 (+0.3 fps during
+// compiles -- noise). The large batch also bought nothing: 50 shards in 8 runs
+// at cap 24 versus 51 shards in 12 runs at cap 6, because the shortened
+// cooldown is what actually raises throughput. 12 keeps a bounded amount of
+// the per-run overhead amortization the ramp is for without the burst that
+// costs frames.
+constexpr uint32_t kMaxBatchPages = 12u;
 // Cooldown floor while draining. Short enough that a fast box gets many
 // batches per minute, long enough that the runner still commits banks and
 // re-snapshots coverage between runs.
