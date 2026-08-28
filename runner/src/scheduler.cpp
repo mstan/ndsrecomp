@@ -12,6 +12,7 @@
 #include "runtime_arm.h"
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
+#include "emu_profile.h"
 #include "io.h"
 #include "gpu3d.h"
 #include "live_overlay.h"
@@ -138,6 +139,9 @@ void save_current() {
 
 void switch_to(int cpu) {
     if (g_cur == cpu) return;
+    // Placed after the same-CPU early-out: the no-op call is the common case
+    // and must not be charged a region boundary.
+    NdsEmuScope emu_region(NDS_EMU_CTXSW);
     const auto t0 = g_sample_active ? ProfileClock::now()
                                     : ProfileClock::time_point{};
     ++g_profile.switches;
@@ -167,7 +171,7 @@ void run_slice(int cpu, uint32_t quantum) {
         switch_to(cpu);
         g_runtime_cycles = g_slot[cpu].cycles;
         const uint64_t cap = g_slot[cpu].cycles + quantum;
-        nds_dma_run(cpu, cap);
+        nds_dma_run(cpu, cap);   // timed inside (io.cpp), like every device
         g_slot[cpu].cycles = g_runtime_cycles;
         return;
     }
@@ -183,6 +187,14 @@ void run_slice(int cpu, uint32_t quantum) {
     switch_to(cpu);
     g_runtime_cycles = g_slot[cpu].cycles;
     const uint64_t cap = g_slot[cpu].cycles + quantum;
+    // GUEST CODE EXECUTION. This region is the single largest consumer of emu
+    // time and the one the old scheduler_arm9_ns conflated with the geometry
+    // engine and the ARM9 timer tick. Everything the guest does is inside it:
+    // native recompiled bank bodies, the dispatch machinery, the inline bus
+    // fast path, and any Tier-3 stretch. TIER3_* and the DISPATCH/BUS
+    // breakdowns carve those back out (the first exclusively, the other two as
+    // non-additive samples), so what remains is native execution.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_EXEC_ARM9 : NDS_EMU_EXEC_ARM7);
     nds_slice_begin(cap);
     if (nds_cpu_halted(cpu)) {
         nds_cpu_wake(cpu);
@@ -311,6 +323,11 @@ void scheduler_run_round() {
     // cyc/insn) the ARM9 still retires too many instructions per iteration, so
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
+    // Opens the emu-attribution round (emu_profile.h). Its self time is
+    // NDS_EMU_SCHED_OTHER -- the interleave machinery below that is not one of
+    // the named phases. RAII because of the power-off early return further
+    // down, which must not leave the round region open.
+    NdsEmuRound emu_round;
     const uint64_t modulus = profile_modulus();
     const bool sample = modulus && ((g_profile_rounds++ % modulus) == 0u);
     g_sample_active = sample;
@@ -319,7 +336,13 @@ void scheduler_run_round() {
     auto phase_start = round_start;
 
     uint64_t planned = g_sys_timestamp + kIterCap;
-    const uint64_t ev = next_scheduled_event_time();
+    // Five deadline computations, one of them a 64-bit divide pair with a
+    // fixup loop, every round. Cheap per call and expensive per second: the
+    // exact kind of cost that only a partition makes visible.
+    const uint64_t ev = [] {
+        NdsEmuScope emu_region(NDS_EMU_NEXTEV);
+        return next_scheduled_event_time();
+    }();
     // Idle fast-forward: with both CPUs guest-halted, no wake pending and no
     // DMA owning a bus, no instruction can retire before the next scheduled
     // event — jump the rendezvous straight to it instead of grinding
@@ -371,6 +394,12 @@ void scheduler_run_round() {
                 static_cast<uint64_t>(nds_gpu3d_cycles_to_run())
                 << kArm9ClockShift;
             g_slot[0].cycles = std::min(arm9_target, g_slot[0].cycles + debt);
+            // Exact count, no timing: the branch itself is two loads and a
+            // min. What it means is that this round retired NO ARM9
+            // instruction because the geometry engine owed cycles, so a rise
+            // here explains an EXEC_ARM9 fall without a workload change --
+            // the confound that would otherwise read as "the CPU got faster".
+            nds_emu_note_gxstall_round();
         } else {
             run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
         }

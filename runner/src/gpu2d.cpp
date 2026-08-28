@@ -18,6 +18,7 @@
 #include "io.h"
 #include "title_patches.h"
 #include "vram.h"
+#include "emu_profile.h"
 
 namespace {
 
@@ -2064,6 +2065,17 @@ void nds_gpu2d_shutdown_workers() { stop_pool(); }
 
 void nds_gpu2d_render_scanline(int line) {
     if (line < 0 || line >= 192) return;
+    // MAIN-THREAD cost of one 2D scanline: the raster itself in inline mode,
+    // or the job submit plus any pool fence wait in threaded mode. EXACT: 192
+    // calls a frame, and in threaded mode a fence drain is a heavy tail.
+    //
+    // This is deliberately NOT the same number as gpu2d_render_ns, which is
+    // measured inside render_line_job and in threaded mode accumulates on
+    // WORKER threads -- so it is not emu wall time at all. That mismatch is
+    // why gpu2d could read as ~1 ms/frame while contributing far less to the
+    // emu budget. Placed past the range guard so the out-of-range call, which
+    // nds_gpu2d_render_frame makes for non-visible lines, pays nothing.
+    NdsEmuScope emu_region(NDS_EMU_RASTER2D);
     submit_line(line);
 }
 void nds_gpu2d_render_frame(){

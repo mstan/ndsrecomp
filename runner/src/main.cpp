@@ -31,6 +31,7 @@
 #include "debug_server.h"
 #include "diagnostics.h"
 #include "dispatch_timing.h"
+#include "emu_profile.h"
 // Generated at BUILD time into the binary dir (cmake/NdsBuildIdScript.cmake),
 // so NDS_RUNNER_BUILD_ID is the commit this binary was actually compiled from
 // rather than whatever HEAD was when cmake last configured.
@@ -374,6 +375,9 @@ int main(int argc, char** argv) {
     // spend its calibration spin inside whichever dispatch happened to be
     // first, contaminating that one sample.
     nds_dispatch_timing_init();
+    // Shares dispatch_timing's tick calibration; called here so the first
+    // measured scheduler round is not the one paying for it.
+    nds_emu_profile_init();
     // Wiimmfi: Winsock (Windows only) MUST be initialized before ANY
     // Winsock API call anywhere in this process -- including WSAPoll
     // inside Net_Slirp::PollHostSockets(), reached from the host

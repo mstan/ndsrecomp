@@ -26,6 +26,7 @@
 #include "mem_timing_profile.h"
 #include "wifi.h"
 #include "vram.h"
+#include "emu_profile.h"
 
 namespace {
 
@@ -761,6 +762,13 @@ uint32_t bus_debug_watch_copy(BusWatchEvent* out, uint32_t max_entries) {
 // â”€â”€ C ABI: the generated banks call these â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 extern "C" uint32_t bus_read_u32_slow(uint32_t addr) {
+    // Guest memory SLOW path: the inline B3 window in runtime_arm.h missed
+    // (or deep trace forced it here). Independently gated, NOT on the
+    // scheduler round sampler -- these fire thousands of times inside one
+    // round, so riding that gate would time every one of them on a sampled
+    // round and inflate the round total. A non-additive breakdown of
+    // NDS_EMU_EXEC_*, exactly as cache_ns is of class_ns.
+    NdsEmuBusRegion emu_bus(addr);
     uint32_t v;
     if (uint8_t* p = resolve(addr, 4)) { std::memcpy(&v, p, 4); }
     else if (nds_video_address(addr)) v = nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 4);
@@ -774,6 +782,7 @@ extern "C" uint32_t bus_read_u32_slow(uint32_t addr) {
 }
 
 extern "C" uint16_t bus_read_u16_slow(uint32_t addr) {
+    NdsEmuBusRegion emu_bus(addr);
     uint16_t v;
     if (uint8_t* p = resolve(addr, 2)) { std::memcpy(&v, p, 2); }
     else { uint32_t x; if (nds_video_address(addr)) v = static_cast<uint16_t>(nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 2));
@@ -787,6 +796,7 @@ extern "C" uint16_t bus_read_u16_slow(uint32_t addr) {
 }
 
 extern "C" uint8_t bus_read_u8_slow(uint32_t addr) {
+    NdsEmuBusRegion emu_bus(addr);
     uint8_t v;
     if (uint8_t* p = resolve(addr, 1)) { v = *p; }
     else { uint32_t x; if (nds_video_address(addr)) v = static_cast<uint8_t>(nds_video_read(g_nds_active == NDS_ARM7 ? 7 : 9, addr, 1));
@@ -800,6 +810,7 @@ extern "C" uint8_t bus_read_u8_slow(uint32_t addr) {
 }
 
 extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val) {
+    NdsEmuBusRegion emu_bus(addr);
     ring_push(1, 4, addr, val);
     if (uint8_t* p = resolve(addr, 4)) {
         if (addr + 4u > 0x027E0000u && addr < 0x027E0040u) {
@@ -819,6 +830,7 @@ extern "C" void bus_write_u32_slow(uint32_t addr, uint32_t val) {
 }
 
 extern "C" void bus_write_u16_slow(uint32_t addr, uint16_t val) {
+    NdsEmuBusRegion emu_bus(addr);
     ring_push(1, 2, addr, val);
     if (uint8_t* p = resolve(addr, 2)) {
         if (addr + 2u > 0x027E0000u && addr < 0x027E0040u) {
@@ -838,6 +850,7 @@ extern "C" void bus_write_u16_slow(uint32_t addr, uint16_t val) {
 }
 
 extern "C" void bus_write_u8_slow(uint32_t addr, uint8_t val) {
+    NdsEmuBusRegion emu_bus(addr);
     ring_push(1, 1, addr, val);
     if (uint8_t* p = resolve(addr, 1)) {
         if (addr >= 0x027E0000u && addr < 0x027E0040u)

@@ -20,6 +20,7 @@
 #include "spu.h"
 #include "title_patches.h"
 #include "vram.h"
+#include "emu_profile.h"
 
 // Runner-only rare-condition hint owned by runtime_arm.cpp. Generated banks
 // keep calling the unchanged runtime_should_yield ABI.
@@ -2220,6 +2221,11 @@ uint64_t nds_debug_spi_deadline() { return g_spi_deadline; }
 uint64_t nds_debug_card_deadline() { return g_card_deadline; }
 
 void nds_run_system_events(uint64_t timestamp) {
+    // Region at function entry, not past an early-out: there is none. The five
+    // deadline compares below run unconditionally on every scheduler round, so
+    // the cost being attributed here is exactly the polling, whether or not
+    // any handler fires.
+    NdsEmuScope emu_region(NDS_EMU_SYSEV);
     // These events are one-shot. A handler may schedule its successor only
     // after a guest data-port read, matching melonDS's card-ready handshake.
     if (g_auxspi_deadline <= timestamp) {
@@ -2445,6 +2451,7 @@ void nds_rtc_debug_state(NdsRtcDebugState* out) {
 }
 
 void nds_tick_rtc(unsigned long long system_cycles) {
+    NdsEmuScope emu_region(NDS_EMU_RTC);
     // melonDS schedules event N at floor(N*33513982/32768), starting at N=1.
     // Deriving the due ordinal preserves its fractional phase exactly.
     constexpr uint64_t numerator = 33513982u;
@@ -2535,6 +2542,12 @@ void nds_dma_trigger(int cpu, uint32_t start_mode) {
 
 void nds_dma_run(int cpu, unsigned long long target_cycles) {
     cpu &= 1;
+    // EXACT, not round-sampled. The scheduler only calls this after
+    // nds_dma_cpu_stalled() proved a channel is running, so the region opens
+    // only when a burst really is moving -- and a burst can be thousands of
+    // units, which is exactly the heavy tail a 1-in-N round sampler turns into
+    // a lottery ticket.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_DMA_ARM9 : NDS_EMU_DMA_ARM7);
     for (int ch = 0; ch < 4; ++ch) {
         DmaChannel& d = g_dma[cpu][ch];
         // While the GXFIFO stall is asserted only ARM9 channel 0 keeps its
@@ -2607,6 +2620,12 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
 // numbers land with the melonDS oracle. VBlank (IF bit 0) fires once per
 // frame. Both cores see it (a display event).
 void nds_tick_display(unsigned long long cyc) {
+    // Exclusive of the 2D scanline raster and the 3D frame boundaries this
+    // drives: both open their own EXACT regions (nds_gpu2d_render_scanline,
+    // nds_gpu3d_start_frame / vcount144 / vcount215), so what accumulates
+    // here is the timeline advance itself -- VCOUNT, HBlank/VBlank edges, IRQ
+    // raising -- and not the pixel or geometry work hanging off it.
+    NdsEmuScope emu_region(NDS_EMU_DISPLAY);
     // The raster advances on the 33.51 MHz system clock
     // (2130 cycles/scanline, 263 physical lines = 560190 cyc/frame). VCOUNT is
     // normally incremented at each scanline start, but is independently
@@ -2706,6 +2725,12 @@ void nds_tick_timers(int cpu, unsigned long long cpu_cycles) {
     unsigned long long delta = cyc - g_timer_last[cpu];
     g_timer_last[cpu] = cyc;
     if (delta == 0) return;
+    // Placed PAST the delta==0 early-out, so the very common no-op call pays
+    // nothing. Covers the MMIO-write call sites in this file as well as the
+    // scheduler's, which is why the region lives here and not at the two
+    // scheduler call sites.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_TIMERS_ARM9
+                                    : NDS_EMU_TIMERS_ARM7);
     unsigned long long carry = 0;  // overflows from timer N-1 (cascade)
     for (int t = 0; t < 4; ++t) {
         Timer& T = g_timer[cpu][t];

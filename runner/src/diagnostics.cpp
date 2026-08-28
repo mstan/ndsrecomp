@@ -12,6 +12,7 @@
 
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
+#include "emu_profile.h"
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
@@ -45,6 +46,16 @@ Tier3Stats g_prev_tier3{};
 NdsDispatchStats g_prev_dispatch[2]{};
 NdsDispatchTiming g_prev_timing[2]{};
 NdsLocalMpStats g_prev_local_mp{};
+// profile_totals shipped only CUMULATIVE run totals while every other block in
+// the record ships a per-interval delta. Dividing a monotonically-growing run
+// total by one interval's frame_delta is what made gpu2d/gpu3d/scheduler read
+// as "flat" during the 2026-08-28 MPH dip analysis (beads-yjp.54). These
+// snapshots let profile_totals_delta and emu_attrib be real deltas; the
+// cumulative block stays for consumers that already parse it.
+NdsSchedulerProfile g_prev_sched{};
+NdsGpu2dProfile g_prev_gpu2d{};
+NdsGpu3dProfile g_prev_gpu3d{};
+NdsEmuProfile g_prev_emu{};
 
 std::string json_escape(const char* text) {
     std::string out;
@@ -134,6 +145,172 @@ double per_frame_ms(uint64_t ticks, uint64_t frames, uint64_t freq) {
 
 uint64_t sub_u64(uint64_t now, uint64_t before) {
     return now >= before ? now - before : 0u;
+}
+
+// Per-interval delta of the fields that profile_totals already ships as run
+// totals. Same names, same order, so a consumer can read either block and a
+// diff of the two is a self-check.
+void write_profile_totals_delta(const NdsSchedulerProfile& sched,
+                                const NdsGpu2dProfile& gpu2d,
+                                const NdsGpu3dProfile& gpu3d) {
+    std::fprintf(g_perf,
+        "{\"scheduler_sampled_rounds\":%llu,\"scheduler_rounds\":%llu,"
+        "\"scheduler_arm9_ns\":%llu,\"scheduler_arm7_ns\":%llu,"
+        "\"scheduler_devices_ns\":%llu,\"scheduler_display_ns\":%llu,"
+        "\"scheduler_spu_ns\":%llu,\"scheduler_wifi_ns\":%llu,"
+        "\"scheduler_rtc_ns\":%llu,\"scheduler_sysev_ns\":%llu,"
+        "\"scheduler_switch_ns\":%llu,\"scheduler_switches\":%llu,"
+        "\"scheduler_crs_words\":%llu,\"scheduler_next_event_ns\":%llu,"
+        "\"scheduler_sampled_round_ns\":%llu,\"gpu2d_render_ns\":%llu,"
+        "\"gpu2d_fence_wait_ns\":%llu,\"gpu2d_threaded_lines\":%llu,"
+        "\"gpu2d_inline_lines\":%llu,\"gpu2d_hd_frames\":%llu,"
+        "\"gpu2d_hd_presented\":%llu,\"gpu3d_vcount215_ns\":%llu,"
+        "\"gpu3d_vcount144_ns\":%llu,\"gpu3d_getline_ns\":%llu,"
+        "\"gpu3d_compute_sync_ns\":%llu,\"gpu3d_compute_sync_calls\":%llu,"
+        "\"gpu3d_compute_submit_ns\":%llu,"
+        "\"gpu3d_compute_submit_calls\":%llu,"
+        "\"gpu3d_compute_map_ns\":%llu,\"gpu3d_compute_map_calls\":%llu}",
+        (unsigned long long)sub_u64(sched.sampled_rounds,
+                                    g_prev_sched.sampled_rounds),
+        (unsigned long long)sub_u64(sched.rounds, g_prev_sched.rounds),
+        (unsigned long long)sub_u64(sched.arm9_ns, g_prev_sched.arm9_ns),
+        (unsigned long long)sub_u64(sched.arm7_ns, g_prev_sched.arm7_ns),
+        (unsigned long long)sub_u64(sched.devices_ns, g_prev_sched.devices_ns),
+        (unsigned long long)sub_u64(sched.display_ns, g_prev_sched.display_ns),
+        (unsigned long long)sub_u64(sched.spu_ns, g_prev_sched.spu_ns),
+        (unsigned long long)sub_u64(sched.wifi_ns, g_prev_sched.wifi_ns),
+        (unsigned long long)sub_u64(sched.rtc_ns, g_prev_sched.rtc_ns),
+        (unsigned long long)sub_u64(sched.sysev_ns, g_prev_sched.sysev_ns),
+        (unsigned long long)sub_u64(sched.switch_ns, g_prev_sched.switch_ns),
+        (unsigned long long)sub_u64(sched.switches, g_prev_sched.switches),
+        (unsigned long long)sub_u64(sched.crs_words, g_prev_sched.crs_words),
+        (unsigned long long)sub_u64(sched.next_event_ns,
+                                    g_prev_sched.next_event_ns),
+        (unsigned long long)sub_u64(sched.sampled_round_ns,
+                                    g_prev_sched.sampled_round_ns),
+        (unsigned long long)sub_u64(gpu2d.render_ns, g_prev_gpu2d.render_ns),
+        (unsigned long long)sub_u64(gpu2d.fence_wait_ns,
+                                    g_prev_gpu2d.fence_wait_ns),
+        (unsigned long long)sub_u64(gpu2d.threaded_lines,
+                                    g_prev_gpu2d.threaded_lines),
+        (unsigned long long)sub_u64(gpu2d.inline_lines,
+                                    g_prev_gpu2d.inline_lines),
+        (unsigned long long)sub_u64(gpu2d.hd_frames, g_prev_gpu2d.hd_frames),
+        (unsigned long long)sub_u64(gpu2d.hd_presented,
+                                    g_prev_gpu2d.hd_presented),
+        (unsigned long long)sub_u64(gpu3d.vcount215_ns,
+                                    g_prev_gpu3d.vcount215_ns),
+        (unsigned long long)sub_u64(gpu3d.vcount144_ns,
+                                    g_prev_gpu3d.vcount144_ns),
+        (unsigned long long)sub_u64(gpu3d.getline_ns,
+                                    g_prev_gpu3d.getline_ns),
+        (unsigned long long)sub_u64(gpu3d.compute_sync_ns,
+                                    g_prev_gpu3d.compute_sync_ns),
+        (unsigned long long)sub_u64(gpu3d.compute_sync_calls,
+                                    g_prev_gpu3d.compute_sync_calls),
+        (unsigned long long)sub_u64(gpu3d.compute_submit_ns,
+                                    g_prev_gpu3d.compute_submit_ns),
+        (unsigned long long)sub_u64(gpu3d.compute_submit_calls,
+                                    g_prev_gpu3d.compute_submit_calls),
+        (unsigned long long)sub_u64(gpu3d.compute_map_ns,
+                                    g_prev_gpu3d.compute_map_ns),
+        (unsigned long long)sub_u64(gpu3d.compute_map_calls,
+                                    g_prev_gpu3d.compute_map_calls));
+}
+
+// The emu-time partition for this interval (emu_profile.h). Every bucket is
+// reported three ways so no consumer has to re-derive the estimator:
+//
+//   ns             the raw accumulated delta (sampled buckets: sampled rounds
+//                  only, so NOT comparable across buckets on its own)
+//   ms_per_frame   the estimate -- sampled buckets scaled by
+//                  rounds/sampled_rounds, exact buckets as-is -- divided by
+//                  the interval's presented frames, which is the unit
+//                  ms_per_frame.emu is already in
+//   entries        the population the ns was drawn from
+//
+// and the header carries the residual against the EXACT emu measurement, so
+// "how much of emu time is still unexplained" is a number in the log rather
+// than something a reader has to compute and get wrong.
+void write_emu_attrib(const NdsEmuProfile& now, uint64_t frame_delta,
+                      double emu_ms_per_frame) {
+    const uint64_t rounds = sub_u64(now.rounds, g_prev_emu.rounds);
+    const uint64_t sampled =
+        sub_u64(now.sampled_rounds, g_prev_emu.sampled_rounds);
+    // Unbiased extrapolation of the sampled buckets. Both denominators are in
+    // the record too, so the scaling is auditable and not an assumption.
+    const double scale = sampled ? static_cast<double>(rounds) /
+                                       static_cast<double>(sampled)
+                                 : 0.0;
+    const double ns_per_tick = nds_dispatch_timing_ns_per_tick();
+    const double frames = frame_delta ? static_cast<double>(frame_delta) : 1.0;
+    double accounted_ms = 0.0;
+    std::fprintf(g_perf,
+        "{\"modulus\":%llu,\"rounds\":%llu,\"sampled_rounds\":%llu,"
+        "\"scale\":%.4f,\"gxstall_rounds\":%llu,\"reads\":%llu,"
+        "\"buckets\":{",
+        (unsigned long long)nds_emu_modulus(),
+        (unsigned long long)rounds,
+        (unsigned long long)sampled,
+        scale,
+        (unsigned long long)sub_u64(now.gxstall_rounds,
+                                    g_prev_emu.gxstall_rounds),
+        (unsigned long long)sub_u64(now.reads, g_prev_emu.reads));
+    for (int i = 0; i < NDS_EMU_BUCKET_COUNT; ++i) {
+        const NdsEmuBucket bucket = static_cast<NdsEmuBucket>(i);
+        const bool exact = nds_emu_bucket_is_exact(bucket);
+        const uint64_t ticks = sub_u64(now.ticks[i], g_prev_emu.ticks[i]);
+        const double ns = static_cast<double>(ticks) * ns_per_tick;
+        const double ms = (ns * (exact ? 1.0 : scale)) / 1e6 / frames;
+        accounted_ms += ms;
+        std::fprintf(g_perf,
+            "%s\"%s\":{\"ns\":%llu,\"ms_per_frame\":%.4f,"
+            "\"entries\":%llu,\"exact\":%s}",
+            i ? "," : "", nds_emu_bucket_name(bucket),
+            (unsigned long long)ns, ms,
+            (unsigned long long)sub_u64(now.entries[i], g_prev_emu.entries[i]),
+            exact ? "true" : "false");
+    }
+    // Non-additive: a breakdown of exec_arm9/exec_arm7, never an addend. Kept
+    // out of accounted_ms deliberately -- adding it would double-count the
+    // guest-execution time it is a subdivision of.
+    const uint64_t bus_events =
+        sub_u64(now.bus_events, g_prev_emu.bus_events);
+    uint64_t bus_samples_total = 0;
+    for (int i = 0; i < NDS_EMU_BUS_PATH_COUNT; ++i)
+        bus_samples_total +=
+            sub_u64(now.bus_samples[i], g_prev_emu.bus_samples[i]);
+    std::fprintf(g_perf, "},\"bus\":{\"events\":%llu,\"paths\":{",
+                 (unsigned long long)bus_events);
+    for (int i = 0; i < NDS_EMU_BUS_PATH_COUNT; ++i) {
+        const uint64_t samples =
+            sub_u64(now.bus_samples[i], g_prev_emu.bus_samples[i]);
+        const uint64_t ticks =
+            sub_u64(now.bus_ticks[i], g_prev_emu.bus_ticks[i]);
+        const double ns = static_cast<double>(ticks) * ns_per_tick;
+        // Whole-interval estimate: mean cost of this path times the share of
+        // the exact event total the path's samples represent.
+        const double est_ms = (bus_samples_total && samples)
+            ? (ns / static_cast<double>(samples)) *
+                  (static_cast<double>(samples) /
+                   static_cast<double>(bus_samples_total)) *
+                  static_cast<double>(bus_events) / 1e6 / frames
+            : 0.0;
+        std::fprintf(g_perf,
+            "%s\"%s\":{\"ns\":%llu,\"samples\":%llu,"
+            "\"est_ms_per_frame\":%.4f}",
+            i ? "," : "",
+            nds_emu_bus_path_name(static_cast<NdsEmuBusPath>(i)),
+            (unsigned long long)ns, (unsigned long long)samples, est_ms);
+    }
+    const double residual_ms = emu_ms_per_frame - accounted_ms;
+    const double residual_pct = emu_ms_per_frame > 0.0
+        ? 100.0 * residual_ms / emu_ms_per_frame
+        : 0.0;
+    std::fprintf(g_perf,
+        "}},\"accounted_ms_per_frame\":%.4f,\"emu_ms_per_frame\":%.4f,"
+        "\"residual_ms_per_frame\":%.4f,\"residual_pct\":%.2f}",
+        accounted_ms, emu_ms_per_frame, residual_ms, residual_pct);
 }
 
 void write_dispatch_delta(const NdsDispatchStats& now,
@@ -416,6 +593,13 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
     g_prev_timing[0] = g_nds_dispatch_timing[0];
     g_prev_timing[1] = g_nds_dispatch_timing[1];
     nds_wifi_local_mp_stats(&g_prev_local_mp);
+    // Prime the profile_totals_delta / emu_attrib baselines from the same
+    // instant as every other prev-state snapshot, so the first emitted
+    // interval is a real delta and not the whole run so far.
+    scheduler_profile(&g_prev_sched);
+    nds_gpu2d_profile(&g_prev_gpu2d);
+    nds_gpu3d_profile(&g_prev_gpu3d);
+    nds_emu_profile(&g_prev_emu);
 }
 
 void nds_diagnostics_maybe_write_performance_sample(
@@ -433,6 +617,10 @@ void nds_diagnostics_maybe_write_performance_sample(
         g_prev_timing[0] = g_nds_dispatch_timing[0];
         g_prev_timing[1] = g_nds_dispatch_timing[1];
         nds_wifi_local_mp_stats(&g_prev_local_mp);
+        scheduler_profile(&g_prev_sched);
+        nds_gpu2d_profile(&g_prev_gpu2d);
+        nds_gpu3d_profile(&g_prev_gpu3d);
+        nds_emu_profile(&g_prev_emu);
         return;
     }
     if (g_last_ticks != 0) {
@@ -461,6 +649,8 @@ void nds_diagnostics_maybe_write_performance_sample(
     nds_gpu2d_profile(&gpu2d);
     NdsGpu3dProfile gpu3d{};
     nds_gpu3d_profile(&gpu3d);
+    NdsEmuProfile emu{};
+    nds_emu_profile(&emu);
 
     std::fprintf(g_perf,
         "{\"kind\":\"perf\",\"frames\":%llu,\"frame_delta\":%llu,"
@@ -574,6 +764,10 @@ void nds_diagnostics_maybe_write_performance_sample(
         "\"gpu3d_compute_submit_calls\":%llu,"
         "\"gpu3d_compute_map_ns\":%llu,"
         "\"gpu3d_compute_map_calls\":%llu},"
+        // NOTE: everything in profile_totals above is a CUMULATIVE run total.
+        // profile_totals_delta and emu_attrib, emitted after live_overlay, are
+        // the per-interval numbers -- use those to compare against
+        // ms_per_frame, which is itself per-interval.
         "\"live_overlay\":{\"active\":%s,\"backend_tier\":%u,"
         "\"banks_loaded\":%llu,\"banks_rejected\":%llu,"
         "\"registered_banks\":%u,\"native_hits\":%llu,"
@@ -585,7 +779,7 @@ void nds_diagnostics_maybe_write_performance_sample(
         // busy says a compiler child was running when this interval was
         // sampled. Splitting a session's intervals on it is the whole
         // frame-time-theft check, self-contained in one log.
-        "\"busy\":%s,\"runs_started\":%llu%s}}\n",
+        "\"busy\":%s,\"runs_started\":%llu%s}",
         (unsigned long long)sched_profile.sampled_rounds,
         (unsigned long long)sched_profile.rounds,
         (unsigned long long)sched_profile.arm9_ns,
@@ -624,6 +818,13 @@ void nds_diagnostics_maybe_write_performance_sample(
         overlay.busy ? "true" : "false",
         (unsigned long long)overlay.runs_started,
         overlay_reject_json(overlay).c_str());
+    std::fprintf(g_perf, ",\"profile_totals_delta\":");
+    write_profile_totals_delta(sched_profile, gpu2d, gpu3d);
+    std::fprintf(g_perf, ",\"emu_attrib\":");
+    write_emu_attrib(emu, frame_delta,
+                     per_frame_ms(sub_u64(stats.emu_ticks, before.emu_ticks),
+                                  frame_delta, stats.freq));
+    std::fprintf(g_perf, "}\n");
     std::fflush(g_perf);
 
     g_last_ticks = stats.now_ticks;
@@ -634,6 +835,10 @@ void nds_diagnostics_maybe_write_performance_sample(
     g_prev_timing[0] = g_nds_dispatch_timing[0];
     g_prev_timing[1] = g_nds_dispatch_timing[1];
     g_prev_local_mp = local_mp;
+    g_prev_sched = sched_profile;
+    g_prev_gpu2d = gpu2d;
+    g_prev_gpu3d = gpu3d;
+    g_prev_emu = emu;
 }
 
 void nds_diagnostics_stop_performance_log() {

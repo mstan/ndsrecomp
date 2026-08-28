@@ -22,6 +22,7 @@
 #include "state.h"
 #include "vram.h"
 #include "net/net_ring.h"
+#include "emu_profile.h"
 
 #include "NDS.h"
 #include "GPU3D_Soft.h"
@@ -698,7 +699,30 @@ void nds_gpu3d_run(unsigned long long arm9_cycles) {
     auto& g3 = g_nds.GPU.GPU3D;
     const uint32_t stat_before = g3.GXStat;
     const int32_t cc_before = g3.CycleCount;
+    // CPU-SIDE GEOMETRY ENGINE. Called once per scheduler round (~600k/s), so
+    // an unconditional region would cost two tick reads per round for a bucket
+    // that is usually zero. Instead the predicate replicates GPU3D::Run's own
+    // early-out (GPU3D.cpp:2407-2414) from the bridge, which is the same idea
+    // as placing a region past a callee's early-out -- here the callee's guard
+    // is not reachable from outside, so it is mirrored.
+    //
+    // EXACT, not round-sampled: a command drain is rare per round but does
+    // per-vertex 64-bit matrix transforms, per-vertex lighting, backface
+    // culling and Sutherland-Hodgman clipping when it fires
+    // (ExecuteCommand -> SubmitVertex / SubmitPolygon / CalculateLighting),
+    // which is precisely the heavy-tailed shape a round sampler mis-estimates.
+    //
+    // This bucket is why the module exists: MPH's dip frames correlate with
+    // ARM9 dispatch volume, and geometry submission is what a busy game frame
+    // does more of. It was previously inside scheduler_arm9_ns with no way to
+    // separate it from guest instruction execution.
+    const bool geometry_work =
+        g3.GeometryEnabled && !g3.FlushRequest &&
+        (!g3.CmdPIPE.IsEmpty() || (g3.GXStat & (1u << 27)) != 0u);
+    {
+    NdsEmuScopeIf emu_region(NDS_EMU_GEOM, geometry_work);
     g3.Run();
+    }
     ++g_gx_run_trace_count;
     g_gx_run_trace[(g_gx_run_trace_count - 1) % kGxRunTraceSize] = {
         g_gx_run_trace_count, arm9_cycles,
@@ -719,6 +743,10 @@ void nds_gpu3d_check_fifo_irq() {
 }
 
 void nds_gpu3d_vcount144() {
+    // 3D frame boundary reached from the display tick. EXACT: three calls a
+    // frame, each potentially a full renderer barrier, so sampling them at
+    // 1-in-N would be a lottery ticket on a ~1 ms cost.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount144(g_nds.GPU);
         return;
@@ -734,6 +762,9 @@ void nds_gpu3d_vblank() {
 }
 
 void nds_gpu3d_vcount215() {
+    // See nds_gpu3d_vcount144. The compute submit/sync/map buckets in
+    // NdsGpu3dProfile are a breakdown of this region, not an addend to it.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -891,6 +922,10 @@ uint16_t nds_gpu3d_render_xpos() {
 }
 
 void nds_gpu3d_start_frame() {
+    // See nds_gpu3d_vcount144. This is where the compute renderer pays its
+    // readback stall (compute_finish_readback), the single largest per-call
+    // cost anywhere in the emu phase.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
     if (g_nds.GPU.GPU3D.AbortFrame) {
         g_nds.GPU.GPU3D.RestartFrame(g_nds.GPU);
         g_nds.GPU.GPU3D.AbortFrame = false;
