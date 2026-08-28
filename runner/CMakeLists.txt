@@ -406,6 +406,7 @@ add_executable(nds_runner
     src/coverage_manifest.cpp
     src/diagnostics.cpp
     src/dispatch_timing.cpp
+    src/emu_profile.cpp
     src/host_info.cpp
     src/profile_report.cpp
     src/scheduler.cpp
@@ -820,7 +821,11 @@ ndsrecomp_link_tomlpp(frontend_config_test)
 
   add_executable(live_overlay_preflight_test
       tests/live_overlay_preflight_test.cpp
-      src/live_overlay.cpp)
+      src/live_overlay.cpp
+      # live_overlay_poll() opens an NDS_EMU_OVERLAY region, whose accumulators
+      # and tick calibration live in these two translation units.
+      src/emu_profile.cpp
+      src/dispatch_timing.cpp)
   target_include_directories(live_overlay_preflight_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
@@ -837,7 +842,12 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
   add_executable(gpu2d_window_test
-      tests/gpu2d_window_test.cpp)
+      tests/gpu2d_window_test.cpp
+      # The test #includes src/gpu2d.cpp wholesale, so it inherits the
+      # NDS_EMU_RASTER2D region in nds_gpu2d_render_scanline and needs the
+      # accumulators and tick calibration those two units define.
+      src/emu_profile.cpp
+      src/dispatch_timing.cpp)
   target_include_directories(gpu2d_window_test PRIVATE src)
   add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
 
@@ -851,6 +861,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         NAME machinery_perf_guards_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_machinery_perf_guards.py")
+    # beads-yjp.54: the emu-time partition's value is WHERE its regions sit,
+    # not any value it computes. Deleting one region still builds, still runs,
+    # and silently folds that cost back into an enclosing bucket.
+    add_test(
+        NAME emu_attrib_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_emu_attrib_guards.py")
     # Two runners may share one live-overlay cache directory, so the shard
     # index read-modify-write has to survive concurrent writers.
     add_test(

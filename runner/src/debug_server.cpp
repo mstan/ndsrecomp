@@ -24,6 +24,7 @@
 #include "hle_profile.h"
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
+#include "emu_profile.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
@@ -1247,6 +1248,14 @@ std::string handle(const std::string& line) {
     // ran. Cache-path `events` here is the dispatcher-only population; the
     // all-consumers lookup totals are in dispatch_stats.
     if (cmd == "dispatch_timing") return nds_dispatch_timing_json();
+    // The emu-time partition (emu_profile.h): where the host time inside
+    // NdsFrontendLiveStats::emu_ticks actually goes -- guest execution per
+    // CPU, the CPU-side geometry engine, Tier 3, DMA, the 2D raster, the 3D
+    // frame boundaries, each device tick, and the round machinery. Exclusive
+    // buckets, so they sum; `exact` says whether a bucket needs scaling by
+    // rounds/sampled_rounds. Snapshot twice and subtract, like its
+    // neighbours -- there is no arm/reset.
+    if (cmd == "emu_attrib") return nds_emu_profile_json();
     // B2 direct linking: whether the per-callsite link slots are live
     // right now (they are gated off under deep trace) and how the
     // literal transfers actually resolved. Snapshot-twice-and-subtract

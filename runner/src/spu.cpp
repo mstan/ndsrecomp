@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "state.h"
+#include "emu_profile.h"
 
 namespace {
 
@@ -505,6 +506,11 @@ void nds_spu_write(uint32_t addr, uint32_t value, uint32_t width) {
 
 void nds_tick_spu(uint64_t system_cycles) {
     const uint64_t due = system_cycles / 1024u;
+    // Placed past the due-count compare so a round with nothing to mix pays
+    // nothing: the SPU deadline is every 1024 system cycles, so at the ~64
+    // cycle rendezvous grid the overwhelming majority of calls are no-ops.
+    if (g_mix_count >= due) return;
+    NdsEmuScope emu_region(NDS_EMU_SPU);
     while (g_mix_count < due) { mix(); ++g_mix_count; }
 }
 

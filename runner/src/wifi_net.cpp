@@ -18,6 +18,7 @@
 
 #include "wifi_net.h"
 #include "wifi.h"
+#include "emu_profile.h"
 
 #include <atomic>
 #include <chrono>
@@ -2154,6 +2155,11 @@ uint64_t nds_wifi_next_event_time() {
 
 void nds_wifi_run_events(uint64_t timestamp) {
     if (!g_bridge || !g_bridge->wifi) return;
+    // Past the null-bridge early-out, so an offline session pays nothing.
+    // While powered on the Wi-Fi US timer schedules a deadline every 8 us,
+    // which both does work here and fragments the 64-cycle rounds -- the two
+    // costs were previously indistinguishable inside one devices_ns bucket.
+    NdsEmuScope emu_region(NDS_EMU_WIFI);
     g_bridge->nds.CurrentSystemTimestamp = timestamp;
     // Drains every event due at or before this guest-cycle rendezvous,
     // exactly mirroring the retired wifi.cpp's

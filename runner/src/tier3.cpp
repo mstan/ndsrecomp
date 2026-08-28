@@ -23,6 +23,7 @@
 #include "io.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
+#include "emu_profile.h"
 
 using armv4t::CPUState;
 using armv4t::Interpreter;
@@ -231,6 +232,15 @@ void sync_out(const CPUState& c) {
 
 void tier3_run(uint32_t /*entry*/) {
     const uint32_t cpu_index = g_nds_active == NDS_ARM7 ? 1u : 0u;
+    // TIER-3 INTERPRETER, carved exclusively out of NDS_EMU_EXEC_*. Before
+    // this the interpreter had instruction and entry COUNTS but no host-time
+    // measurement at all, so "is this title slow because of Tier 3" could only
+    // be argued from counts. EXACT, not round-sampled: one entry runs until a
+    // bank entry, a vector, or the slice cap, so entries are few per round and
+    // each is heavy -- and in a firmware or menu workload this bucket is the
+    // whole cost, which a sampler would report with useless variance.
+    NdsEmuScope emu_region(cpu_index == 0 ? NDS_EMU_TIER3_ARM9
+                                          : NDS_EMU_TIER3_ARM7);
     // Every native-to-Tier3 boundary is a static-coverage root. Recording
     // only the first boundary per CPU forced an otherwise deterministic
     // traversal to reveal one missing dispatch entry per rebuild. The

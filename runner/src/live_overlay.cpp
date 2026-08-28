@@ -21,6 +21,7 @@
 #include "coverage_manifest.h"
 #include "runtime_arm.h"
 #include "state.h"
+#include "emu_profile.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -1534,6 +1535,12 @@ void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
 void live_overlay_poll() {
 #if defined(_WIN32)
     if (!g_live.enabled) return;
+    // Past the enabled gate, so a session without live sharding pays nothing.
+    // When it IS enabled this runs a queue reload, a bank publication, a
+    // futility evaluation and a GetExitCodeProcess syscall EVERY scheduler
+    // round, and it sits after the old sampled block closed at
+    // scheduler.cpp:471 -- so it was outside every existing bucket.
+    NdsEmuScope emu_region(NDS_EMU_OVERLAY);
     // The persisted queue was read at configure time, off the emulation
     // thread. This is only the belt-and-braces path for a caller that
     // enabled the overlay without going through live_overlay_configure; it
