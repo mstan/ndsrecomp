@@ -28,7 +28,14 @@ void     nds_set_debug_turbo(bool enabled);
 bool     nds_debug_turbo();
 uint64_t nds_next_system_event_time();
 uint64_t nds_next_timer_overflow_time();
-uint64_t nds_next_timer_overflow_time_for_cpu(int cpu);
+// NOTE: there is deliberately no per-CPU variant. One existed (62dbbc7) for the
+// sole purpose of shortening the scheduler's ARM7 catch-up target to a halted
+// core's next timer overflow, which delivered that overflow's IRQ inside the
+// round instead of at the rendezvous and desynced the ARM7 timeline from the
+// oracle (beads-yjp.48). Per-timer deadlines are observable through
+// nds_timer_debug_state(); they must not become a scheduling deadline for one
+// CPU. The whole-console overflow above is a scheduling deadline only because
+// the idle fast-forward snaps it back onto the rendezvous grid.
 uint64_t nds_debug_spi_deadline();
 uint64_t nds_debug_card_deadline();
 void     nds_run_system_events(uint64_t timestamp);
