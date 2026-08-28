@@ -13,6 +13,10 @@ number of people, across any number of sessions -- into:
     compiled at the header address 0x02380000, so all of it was interpreted.
   * a merged entry-point TOML for the call and indirect-branch targets, which
     are the addresses that behave like function entries, and
+  * a seed at the START of every contiguous interpreted span, which is the only
+    output that can reach code the finder never discovered at all (computed
+    branches and jump tables stop it, so the span sits in a hole BETWEEN
+    compiled functions and no call-target seed can ever name it).
   * one content-validated bank per captured code generation, with the bytes
     written alongside it, for genuinely runtime-materialized code (patched
     pages, decompressed-in-place regions) that exists nowhere in the ROM.
@@ -50,9 +54,23 @@ from rom_alias import RomImages, resolve, undeclared  # noqa: E402
 # interrupted, so over a long session roots accumulate at nearly every
 # instruction of every hot interpreted function. Measured on the first real
 # submission, 92% of root addresses have another root exactly one instruction
-# away and the longest unbroken run is 415 instructions. They are an execution
-# map, not a seed list, and are reported as ranges below instead of promoted.
+# away and the longest unbroken run is 415 instructions.
+#
+# So roots are an execution map, not a seed list -- but exactly ONE address per
+# contiguous run of them IS a seed, and it is the only seed that can reach the
+# code the interpreter is actually running (beads-yjp.55). See select_span_seeds.
 PROMOTABLE_KINDS = ("call", "indirect")
+
+# The interpreter's own PC while it executed an observed call. By construction
+# an address no bank owned, so it is an interpreted-code observation exactly
+# like a root -- and a better-attributed one, because it is bound to a concrete
+# instruction the manifest saw retire rather than to a bitmap bit. The runner
+# folds every caller past kMaxCallersPerEntry into this sentinel.
+CALLER_SENTINEL = 0xFFFFFFFF
+
+# Stride of one instruction, per mode. Roots are recorded at this granularity,
+# so two roots one stride apart are consecutive instructions of one run.
+MODE_STRIDE = {"arm": 4, "thumb": 2}
 
 ARRAY_KEYS = ("entry_points_arm9", "entry_points_arm7", "pages.entries",
               "root_map")
@@ -188,15 +206,37 @@ def main() -> int:
     parser.add_argument("--min-hits", type=int, default=1,
                         help="drop entry points seen fewer than this many "
                              "times across all manifests")
+    parser.add_argument("--no-promote-ranges", dest="promote_ranges",
+                        action="store_false",
+                        help="reproduce the pre-yjp.55 policy: report the "
+                             "interpreted spans but promote nothing from them, "
+                             "so only call/indirect targets become seeds")
+    parser.add_argument("--no-promote-callers", dest="promote_callers",
+                        action="store_false",
+                        help="ignore the caller field of call/indirect records "
+                             "instead of treating it as an interpreted-code "
+                             "observation")
+    parser.add_argument("--min-span-hits", type=int, default=1,
+                        help="only promote a span start whose span carries at "
+                             "least this many interpreter entries")
+    parser.add_argument("--max-span-seeds", type=int, default=0,
+                        help="promote at most this many span starts per CPU, "
+                             "hottest span first (0 = every qualifying span)")
+    parser.set_defaults(promote_ranges=True, promote_callers=True)
     args = parser.parse_args()
 
     problems: list[str] = []
     rom_sha1 = args.rom_sha1.lower() if args.rom_sha1 else None
 
     entries: dict[tuple[int, int, str], dict] = {}
-    # (cpu, addr, sha1) -> {"bytes", "entries": {(pc, mode): slot}, "executions"}
+    # (cpu, addr, sha1) -> {"bytes", "entries": {(pc, mode): slot},
+    #                       "roots": {(pc, mode): hits}, "executions"}
     versions: dict[tuple[int, int, str], dict] = {}
-    roots: dict[int, dict[int, int]] = {9: {}, 7: {}}
+    # cpu -> (addr, mode) -> interpreter entries. Mode is carried because a
+    # span start becomes a seed and a seed without a mode cannot be compiled;
+    # keying on the address alone silently merged ARM and Thumb runs.
+    roots: dict[int, dict[tuple[int, str], int]] = {9: {}, 7: {}}
+    callers: dict[int, dict[tuple[int, str], int]] = {9: {}, 7: {}}
     rejected: collections.Counter = collections.Counter()
     accepted = 0
     build_ids: set[str] = set()
@@ -226,8 +266,9 @@ def main() -> int:
         for record in manifest_roots:
             cpu = int(record["cpu"])
             base = int(record["addr"], 16)
-            for addr, _mode, hits in root_addresses(record, base):
-                roots[cpu][addr] = roots[cpu].get(addr, 0) + hits
+            for addr, mode, hits in root_addresses(record, base):
+                key = (addr, mode)
+                roots[cpu][key] = roots[cpu].get(key, 0) + hits
 
         page_size = int(header.get("pages.page_size", 4096))
         for page in manifest_pages:
@@ -244,8 +285,20 @@ def main() -> int:
             addr = int(page["addr"], 16)
             slot = versions.setdefault(
                 (cpu, addr, actual),
-                {"bytes": raw, "entries": {}, "executions": 0})
+                {"bytes": raw, "entries": {}, "roots": {}, "executions": 0})
             slot["executions"] += int(page.get("executions", 0))
+            # Schema 4 repeats the root bitmap per captured page version, which
+            # is the only GENERATION-BOUND root attribution in the manifest --
+            # the session-wide root_map is keyed by page base alone, so it
+            # cannot say which overlay body was resident. A bank assembled from
+            # this version needs the former; the span report needs the latter.
+            # Nothing read this before, so a bank could only ever be seeded
+            # with call targets even when the manifest knew exactly which of
+            # its own instructions the interpreter had been entered at.
+            for root_pc, root_mode, root_hits in root_addresses(page, addr):
+                root_key = (root_pc, root_mode)
+                slot["roots"][root_key] = (
+                    slot["roots"].get(root_key, 0) + root_hits)
             # schema 3 associates each entry with the exact page generation it
             # was observed under. schema 2 carried no such association, which
             # is why the old assembler had to guess by pairing equal version
@@ -254,25 +307,33 @@ def main() -> int:
                 kind = entry.get("kind")
                 pc = int(entry["addr"], 16)
                 hits = int(entry.get("hits", 0))
+                mode = entry["mode"]
                 if kind == "root":
-                    roots[cpu][pc] = roots[cpu].get(pc, 0) + hits
+                    root_key = (pc, mode)
+                    roots[cpu][root_key] = roots[cpu].get(root_key, 0) + hits
+                    slot["roots"][root_key] = (
+                        slot["roots"].get(root_key, 0) + hits)
                     continue
                 if kind not in PROMOTABLE_KINDS:
                     rejected[f"page entry: kind={kind}"] += 1
                     continue
-                key = (pc, entry["mode"])
+                key = (pc, mode)
                 held = slot["entries"].setdefault(
                     key, {"hits": 0, "kinds": set()})
                 held["hits"] += hits
                 held["kinds"].add(kind)
+                note_caller(callers, cpu, entry, hits)
 
         for cpu, entry in manifest_entries:
             kind = entry.get("kind")
             pc = int(entry["addr"], 16)
             hits = int(entry.get("hits", 0))
             if kind == "root":
-                roots[cpu][pc] = max(roots[cpu].get(pc, 0), hits)
-                rejected["entry: kind=root (reported as a range instead)"] += 1
+                # Schema 2/3 carried roots one JSON record per address here;
+                # schema 4 moved them to root_map. Either way they now feed the
+                # span promoter rather than being counted as a refusal.
+                root_key = (pc, entry["mode"])
+                roots[cpu][root_key] = max(roots[cpu].get(root_key, 0), hits)
                 continue
             if kind not in PROMOTABLE_KINDS:
                 rejected[f"entry: kind={kind}"] += 1
@@ -281,6 +342,7 @@ def main() -> int:
                 (cpu, pc, entry["mode"]), {"hits": 0, "kinds": set()})
             slot["hits"] += hits
             slot["kinds"].add(kind)
+            note_caller(callers, cpu, entry, hits)
 
     if not accepted:
         for problem in problems:
@@ -293,6 +355,38 @@ def main() -> int:
         if entries[key]["hits"] < args.min_hits:
             del entries[key]
             dropped_low_hits += 1
+
+    # ---- interpreted spans -> seeds (beads-yjp.55) ------------------------
+    # A caller is an address the interpreter was executing, so it belongs in
+    # the same map as the roots: folded in BEFORE the runs are cut, it either
+    # extends a run it is adjacent to (costing no extra seed) or forms its own.
+    interpreted = {cpu: dict(hits) for cpu, hits in roots.items()}
+    if args.promote_callers:
+        for cpu, observed in callers.items():
+            for key, hits in observed.items():
+                interpreted[cpu][key] = interpreted[cpu].get(key, 0) + hits
+
+    hot = hot_ranges(interpreted)
+    promoted, span_stats = select_span_seeds(
+        hot, promote=args.promote_ranges, min_hits=args.min_span_hits,
+        limit=args.max_span_seeds)
+    for (cpu, addr, mode), hits in sorted(promoted.items()):
+        slot = entries.setdefault((cpu, addr, mode),
+                                  {"hits": 0, "kinds": set()})
+        slot["hits"] += hits
+        slot["kinds"].add("span")
+    # A span start on a page whose bytes exist nowhere in the ROM is a seed for
+    # the assembled bank rather than for a module, and the manifest says which
+    # page GENERATION it was interpreted under -- so attribute it there instead
+    # of letting the run fall back to address containment.
+    for (cpu, _page_addr, _sha), slot in versions.items():
+        for (pc, mode), hits in slot["roots"].items():
+            if (cpu, pc, mode) not in promoted:
+                continue
+            held = slot["entries"].setdefault(
+                (pc, mode), {"hits": 0, "kinds": set()})
+            held["hits"] += hits
+            held["kinds"].add("span")
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -360,7 +454,6 @@ def main() -> int:
         write_entry_toml(seeds_dir / f"{name}.toml", items, rom_sha1,
                          accepted, sorted(build_ids))
 
-    hot = hot_ranges(roots)
     (args.out / "interpreted-ranges.json").write_text(
         json.dumps(hot, indent=2), encoding="utf-8", newline="\n")
 
@@ -383,6 +476,15 @@ def main() -> int:
         "interpreted_ranges": {
             "arm9": len(hot.get("arm9", [])),
             "arm7": len(hot.get("arm7", [])),
+        },
+        "span_promotion": {
+            "enabled": args.promote_ranges,
+            "callers_folded_in": args.promote_callers,
+            "distinct_callers": sum(len(v) for v in callers.values()),
+            "min_span_hits": args.min_span_hits,
+            "max_span_seeds": args.max_span_seeds,
+            "seeds": len(promoted),
+            "by_cpu": span_stats,
         },
         "rejected": dict(rejected),
         "problems": problems,
@@ -481,41 +583,122 @@ def assemble_runs(versions, unresolved_keys, session_entries=None):
     return runs
 
 
-def hot_ranges(roots):
-    """Merge root addresses into contiguous interpreted spans, hottest first.
+def note_caller(callers, cpu: int, entry: dict, hits: int) -> None:
+    """Record the interpreted call site behind one call/indirect record.
 
-    Roots are where the interpreter was entered. Individually they are poor
-    seeds, but merged they are the honest answer to "which code is still being
-    interpreted, and how much does it cost", which is the question a coverage
-    submission exists to answer. Nothing here is thrown away silently: what the
-    seed path refuses shows up in this file instead.
+    The runner stores the interpreter's own PC alongside every transfer it
+    observed. That address is by construction code no bank owned -- the
+    interpreter was executing it -- so it is an interpreted-code observation of
+    exactly the same kind as a root, and a better-attributed one: it names a
+    concrete instruction the manifest watched retire instead of a bitmap bit.
+    Every promoter in both repos read the target and dropped this field.
+
+    The mode recorded on the record is the TARGET's. That is the caller's mode
+    too for a plain BL, and can differ for BLX/BX; a seed carrying the wrong
+    mode is inert rather than wrong, because dispatch keys on (pc, thumb) and
+    such a row is simply never looked up, and the bytes are still validated.
+    """
+    raw = entry.get("caller")
+    if raw is None:
+        return
+    addr = int(raw, 16)
+    # kMaxCallersPerEntry overflow is folded into one record under this
+    # sentinel; its hit count is exact but its address is not an address.
+    if addr == CALLER_SENTINEL or addr == 0:
+        return
+    mode = entry["mode"]
+    if addr % MODE_STRIDE.get(mode, 4):
+        return
+    callers[cpu][(addr, mode)] = callers[cpu].get((addr, mode), 0) + hits
+
+
+def select_span_seeds(hot, *, promote: bool, min_hits: int, limit: int):
+    """Choose one seed per contiguous interpreted span: its START address.
+
+    This is the promotion that reaches code no call-target seed can (yjp.55).
+    A call/indirect target is by definition an address some compiled function
+    branched to, so the finder had already discovered it; the code the
+    interpreter is actually RUNNING sits in the holes between compiled
+    functions, where a computed branch or jump table stopped discovery, and the
+    only record of it is the root map.
+
+    Exactly one seed per span, not one per root, and the reason is structural
+    rather than a size preference: `write_bank_dispatch` emits one dispatch row
+    per INSTRUCTION across [fn.addr, fn.end_addr), so a single seed at a span
+    start already yields an owning row for every instruction the finder walks
+    from there. Seeding the interior roots as well would be strictly harmful --
+    the finder gives each seed its own independent Function record and then
+    trims the previous one's `end_addr` down to meet it, so every extra seed
+    chops the body into a shorter one and suppresses the fallthrough coalescing
+    the dispatch cost depends on.
+
+    Ranking is by span cost, so a bounded `limit` spends the seed budget on the
+    spans that carry the interpretation rather than on the long tail.
+    """
+    seeds: dict[tuple[int, int, str], int] = {}
+    stats: dict[str, dict] = {}
+    for name, spans in sorted(hot.items()):
+        cpu = int(name[3:])
+        qualifying = [s for s in spans if s["entries"] >= min_hits]
+        chosen = qualifying[:limit] if limit > 0 else qualifying
+        if promote:
+            for span in chosen:
+                key = (cpu, int(span["start"], 16), span["mode"])
+                seeds[key] = seeds.get(key, 0) + span["entries"]
+        stats[name] = {
+            "spans": len(spans),
+            "spans_above_min_hits": len(qualifying),
+            "spans_promoted": len(chosen) if promote else 0,
+            "entries_promoted": sum(s["entries"] for s in chosen) if promote
+                                else 0,
+            "entries_total": sum(s["entries"] for s in spans),
+        }
+    return seeds, stats
+
+
+def hot_ranges(interpreted):
+    """Merge interpreted addresses into contiguous spans, hottest first.
+
+    Roots are where the interpreter was entered, and callers are where it was
+    running. Individually they are poor seeds, but merged they are the honest
+    answer to "which code is still being interpreted, and how much does it
+    cost", which is the question a coverage submission exists to answer -- and
+    each run's START is the one address in it worth seeding.
+
+    Runs are cut per MODE and at instruction stride. Merging an ARM run with a
+    Thumb one because their addresses interleave would produce a span whose
+    start has no single answer to "which mode do I compile this as".
     """
     out: dict[str, list] = {}
-    for cpu, hits in roots.items():
+    for cpu, hits in interpreted.items():
         spans = []
-        run_start = None
-        previous = None
-        total = 0
-        for addr in sorted(hits):
-            if previous is not None and addr - previous <= 4:
-                total += hits[addr]
+        for mode in sorted({mode for _addr, mode in hits}):
+            stride = MODE_STRIDE.get(mode, 4)
+            run_start = None
+            previous = None
+            total = 0
+            for addr in sorted(a for a, m in hits if m == mode):
+                if previous is not None and addr - previous <= stride:
+                    total += hits[(addr, mode)]
+                    previous = addr
+                    continue
+                if run_start is not None:
+                    spans.append(_span(run_start, previous, total, mode,
+                                       stride))
+                run_start = addr
                 previous = addr
-                continue
+                total = hits[(addr, mode)]
             if run_start is not None:
-                spans.append(_span(run_start, previous, total))
-            run_start = addr
-            previous = addr
-            total = hits[addr]
-        if run_start is not None:
-            spans.append(_span(run_start, previous, total))
-        spans.sort(key=lambda span: -span["entries"])
+                spans.append(_span(run_start, previous, total, mode, stride))
+        spans.sort(key=lambda span: (-span["entries"], span["start"]))
         out[f"arm{cpu}"] = spans
     return out
 
 
-def _span(start: int, last: int, entries: int) -> dict:
-    return {"start": f"0x{start:08X}", "end": f"0x{last + 4:08X}",
-            "bytes": last + 4 - start, "entries": entries}
+def _span(start: int, last: int, entries: int, mode: str,
+          stride: int) -> dict:
+    return {"start": f"0x{start:08X}", "end": f"0x{last + stride:08X}",
+            "bytes": last + stride - start, "mode": mode, "entries": entries}
 
 
 def write_bank_toml(path: Path, bank_id: str, cpu: int, isa: str,
@@ -565,8 +748,10 @@ def write_entry_toml(path: Path, addressed, rom_sha1, manifest_count,
         f"# ROM SHA-1: {rom_sha1}",
         f"# Runner build(s): {', '.join(build_ids) if build_ids else 'unknown'}",
         "#",
-        "# Every Tier-3 call and indirect-branch target observed. An address",
-        "# here is a seed only for the bank whose image actually holds these",
+        "# Every Tier-3 call and indirect-branch target observed, plus the",
+        "# START of every contiguous interpreted span (seen as `span`), which",
+        "# is the only seed that reaches code the finder never discovered. An",
+        "# address here is a seed only for the bank whose image actually holds",
         "# bytes at this address; see ingest-report.json for which module and",
         "# load base each captured page resolved to.",
         "",
