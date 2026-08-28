@@ -71,3 +71,6 @@ Thumbs.db
 # Tier-2 toolchain downloads and test scratch
 /tools/_toolchain_cache/
 /runner/tests/live-index-lock-work/
+
+# Runtime-generated per-install identity (written by the runner when profile dir = repo root)
+runner/freebios/

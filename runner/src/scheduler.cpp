@@ -390,7 +390,14 @@ void scheduler_run_round() {
     while (g_slot[1].started && !g_slot[1].halted &&
            !nds_event_break_hit() && g_slot[1].cycles < rendezvous) {
         const uint64_t before = g_slot[1].cycles;
-        if (nds_cpu_halted(1) && !nds_halt_wake_pending(1)) {
+        // A DMA-stalled ARM7 is NOT idle: its wake source is the DMA/SPI
+        // completion event, not a timer overflow. Fast-forwarding its clock
+        // to the timer deadline skips that event entirely, so the guest halt
+        // never wakes (authentic-firmware boot dies with IE=SPI, IF=0). The
+        // deadline planner above already guards on nds_dma_cpu_stalled();
+        // this catch-up loop must too.
+        if (nds_cpu_halted(1) && !nds_halt_wake_pending(1) &&
+            !nds_dma_cpu_stalled(1)) {
             uint64_t target = rendezvous;
             const uint64_t timer_wake = nds_next_timer_overflow_time_for_cpu(1);
             if (timer_wake > g_slot[1].cycles && timer_wake < target)
