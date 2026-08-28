@@ -156,6 +156,30 @@ def main() -> int:
     assert "g_validation_closure_" in generated
     assert "nds_live_generation_id" in generated
 
+    # beads-yjp.53: a later capture of an ALREADY published generation only
+    # sees the roots still reaching Tier 3, so its observed set can be
+    # SMALLER than the shard in the cache. Compiling that set produced a
+    # same-generation candidate that the runtime then let supersede the larger
+    # one, dropping rows and sending that code back to the interpreter -- where
+    # the next capture rediscovered it. The published roots are merged back in,
+    # so the work identity matches the expanded candidate already in the cache
+    # and nothing is compiled at all.
+    gen_a_shrunk = args.work / "generation-a-shrunk.json"
+    manifest(gen_a_shrunk, arm_program(1), [BASE + 0x40])
+    before = {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    result = run_tool(args, gen_a_shrunk)
+    assert "NDS_SHARD_RESULT ok=0 failed=0" in result.stdout, result.stdout
+    assert len(dlls(args.cache)) == 3
+    assert before == {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    index = json.loads((args.cache / "live-index.json").read_text(
+        encoding="utf-8"))
+    published_roots = {
+        tuple(sorted(int(root["addr"])
+                     for root in item.get("entry_roots", [])))
+        for item in index["captures"].values()
+    }
+    assert (BASE, BASE + 0x40) in published_roots, published_roots
+
     # A toolchain/options change is a new provider identity even when the
     # guest bytes and roots are unchanged. It must produce a distinct DLL,
     # then reuse that exact provider candidate on the next run.
