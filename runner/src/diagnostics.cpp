@@ -72,6 +72,35 @@ std::string json_escape(const char* text) {
     return out;
 }
 
+// beads-yjp.53: the reject-cause breakdown, emitted in BOTH the session and
+// the per-interval record so a bundle carries the absolute totals at launch
+// and the deltas across the session. Always on, Release included -- the whole
+// point is that a player's log explains where their shards went without
+// anyone having to reproduce the session first.
+//
+// The names come from the runtime, not from a copy here, so appending a cause
+// to the table in live_overlay.cpp needs no change in this file and no change
+// in any ingest that reads the object as a name->count map.
+std::string overlay_reject_json(const NdsLiveOverlaySummary& overlay) {
+    std::string out;
+    out.reserve(96u + static_cast<std::size_t>(overlay.reason_count) * 40u);
+    out += ",\"rows_superseded\":";
+    out += std::to_string(overlay.rows_superseded);
+    out += ",\"rows_superseding\":";
+    out += std::to_string(overlay.rows_superseding);
+    out += ",\"reject_reasons\":{";
+    for (uint32_t i = 0u; i < overlay.reason_count; ++i) {
+        if (i) out += ',';
+        out += '"';
+        out += json_escape(overlay.reason_names ? overlay.reason_names[i]
+                                                : "unnamed");
+        out += "\":";
+        out += std::to_string(overlay.reason_counts[i]);
+    }
+    out += '}';
+    return out;
+}
+
 std::string run_stamp() {
     if (!g_run_stamp.empty()) return g_run_stamp;
     const std::time_t now = std::time(nullptr);
@@ -311,7 +340,7 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         // will actually use. Without these a field bundle cannot tell a
         // converged install from one that never got a second batch.
         "\"pending_candidates\":%llu,\"batch_cap\":%u,"
-        "\"cooldown_ms\":%u,\"persisted_backlog\":%s},"
+        "\"cooldown_ms\":%u,\"persisted_backlog\":%s%s},"
         "\"renderer\":{\"policy\":\"%s\",\"effective\":\"%s\","
         "\"compute_built\":%s,\"compute_preferred\":%s,"
         "\"compute_required\":%s,\"direct_present\":%s},\"settings\":{"
@@ -357,6 +386,7 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         (unsigned long long)overlay.pending_candidates,
         overlay.batch_cap, overlay.cooldown_ms,
         overlay.persisted_backlog ? "true" : "false",
+        overlay_reject_json(overlay).c_str(),
         nds_gpu3d_renderer_policy_name(renderer_policy),
         compute_active ? "compute" : "soft",
         compute_built ? "true" : "false",
@@ -555,7 +585,7 @@ void nds_diagnostics_maybe_write_performance_sample(
         // busy says a compiler child was running when this interval was
         // sampled. Splitting a session's intervals on it is the whole
         // frame-time-theft check, self-contained in one log.
-        "\"busy\":%s,\"runs_started\":%llu}}\n",
+        "\"busy\":%s,\"runs_started\":%llu%s}}\n",
         (unsigned long long)sched_profile.sampled_rounds,
         (unsigned long long)sched_profile.rounds,
         (unsigned long long)sched_profile.arm9_ns,
@@ -592,7 +622,8 @@ void nds_diagnostics_maybe_write_performance_sample(
         (unsigned long long)overlay.pending_candidates,
         overlay.batch_cap, overlay.cooldown_ms,
         overlay.busy ? "true" : "false",
-        (unsigned long long)overlay.runs_started);
+        (unsigned long long)overlay.runs_started,
+        overlay_reject_json(overlay).c_str());
     std::fflush(g_perf);
 
     g_last_ticks = stats.now_ticks;

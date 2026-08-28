@@ -30,6 +30,9 @@ void body_b() {}
 
 const uint8_t bytes_a[8] = {};
 const uint8_t bytes_b[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+// A wider owner so beads-yjp.53 can build row sets that genuinely diverge:
+// four ARM slots instead of two.
+const uint8_t bytes_wide[16] = {};
 
 bool expect(bool condition, const char* message) {
     if (condition) return true;
@@ -67,6 +70,18 @@ unsigned long long status_number(const char* key) {
     return std::strtoull(json.c_str() + pos + needle.size(), nullptr, 10);
 }
 
+// How many times a literal appears in the status JSON. Used to assert that
+// two banks are BOTH resident, which no single-value probe can express.
+unsigned status_count(const char* needle) {
+    const std::string json = live_overlay_status_json();
+    unsigned found = 0u;
+    for (std::size_t pos = json.find(needle); pos != std::string::npos;
+         pos = json.find(needle, pos + 1u)) {
+        ++found;
+    }
+    return found;
+}
+
 bool preflight(const NdsLiveBankInfo& info, char* error, uint32_t error_len) {
     std::memset(error, 0, error_len);
     return live_overlay_preflight_for_test(&info, error, error_len);
@@ -87,6 +102,24 @@ int main() {
     const NdsDispatchEntry interior_rows[] = {
         {0x02000000u, 0u, body_a, &owner_a},
         {0x02000004u, 0u, body_a, &owner_a},
+    };
+
+    // beads-yjp.53 row sets over one 16-byte owner. p and q each hold a row
+    // the other lacks, so neither covers the other; super covers both.
+    static const NdsStaticValidation owner_wide{
+        0x02000000u, sizeof(bytes_wide), bytes_wide};
+    const NdsDispatchEntry wide_rows_p[] = {
+        {0x02000000u, 0u, body_a, &owner_wide},
+        {0x02000004u, 0u, body_a, &owner_wide},
+    };
+    const NdsDispatchEntry wide_rows_q[] = {
+        {0x02000000u, 0u, body_b, &owner_wide},
+        {0x02000008u, 0u, body_b, &owner_wide},
+    };
+    const NdsDispatchEntry wide_rows_super[] = {
+        {0x02000000u, 0u, body_b, &owner_wide},
+        {0x02000004u, 0u, body_b, &owner_wide},
+        {0x02000008u, 0u, body_b, &owner_wide},
     };
     if (!expect(preflight(bank_info("candidate-a", interior_rows, 2u),
                           error, sizeof(error)),
@@ -438,6 +471,107 @@ int main() {
     if (!expect(live_overlay_status_json().find("\"candidate_id\":\"cand-tcc\"")
                     == std::string::npos,
                 "the declined tcc shard must not have become resident"))
+        return 1;
+    live_overlay_shutdown();
+#endif
+
+#if defined(_WIN32)
+    // ---- beads-yjp.53: supersede must never LOSE a row -----------------
+    //
+    // Two candidates for the same page byte generation are two translations
+    // of identical guest bytes that differ only in which entry roots the
+    // capture behind them observed, and those root sets are not monotone: an
+    // entry already served natively stops appearing in Tier-3 coverage, so
+    // the next capture of the same page carries a SMALLER set. Replacing the
+    // resident bank with it deleted rows and sent that code back to the
+    // interpreter, where the next capture rediscovered it. Field evidence:
+    // a player's own cache index recorded page 0x0205B000 with 4 roots and
+    // then 3, and 0x02034000 with 3 and then 2.
+    live_overlay_configure(true, false, 0u, 0u, 0u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    // banks_rejected is a lifetime counter that configure() deliberately does
+    // not clear, so the "no drop inflates it" claim has to be a delta.
+    const unsigned long long rejected_before = status_number("banks_rejected");
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_bank", "cand-p", "generation-D", 2u,
+                    wide_rows_p, 2u),
+                "the first candidate for a generation should be adopted"))
+        return 1;
+    // Divergent: cand-q has 0x02000008, which cand-p lacks, and lacks
+    // 0x02000004, which cand-p has. Neither may evict the other.
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_bank", "cand-q", "generation-D", 2u,
+                    wide_rows_q, 2u),
+                "a divergent same-generation candidate should be adopted"))
+        return 1;
+    if (!expect(status_count("\"candidate_id\":\"cand-p\"") == 1u &&
+                status_count("\"candidate_id\":\"cand-q\"") == 1u &&
+                status_count("\"superseded\":true") == 0u,
+                "two divergent same-generation candidates must BOTH stay "
+                "registered; neither covers the other's rows"))
+        return 1;
+    if (!expect(status_number("kept_divergent_generation") >= 1ull,
+                "keeping a divergent candidate must be counted"))
+        return 1;
+    if (!expect(status_number("rows_superseded") == 0ull,
+                "no rows may be retired while no candidate is a superset"))
+        return 1;
+    // A true superset arrives: NOW retiring the two partial banks is safe,
+    // and the retirement is accounted for in rows.
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_bank", "cand-super", "generation-D", 2u,
+                    wide_rows_super, 3u),
+                "a superset candidate should be adopted"))
+        return 1;
+    if (!expect(status_count("\"superseded\":true") == 2u,
+                "a superset candidate must retire both partial banks"))
+        return 1;
+    if (!expect(status_number("rows_superseded") == 4ull &&
+                status_number("drop_superseded_generation") == 2ull,
+                "retiring two 2-row banks must report 4 superseded rows"))
+        return 1;
+    // A strict subset of what is already resident adds nothing but index
+    // rows, so it is dropped -- and dropping it is a success, not a reject.
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_bank", "cand-sub", "generation-D", 2u,
+                    wide_rows_super, 1u),
+                "a redundant subset candidate is not a rejection"))
+        return 1;
+    if (!expect(live_overlay_status_json().find("\"candidate_id\":\"cand-sub\"")
+                    == std::string::npos &&
+                status_number("drop_redundant_subset") >= 1ull,
+                "a redundant subset must be dropped, and counted"))
+        return 1;
+    if (!expect(status_number("banks_rejected") == rejected_before,
+                "none of the drop family may inflate banks_rejected"))
+        return 1;
+    // The backend tie-break may not cost coverage either: a tcc shard that
+    // carries a root the resident gcc shard lacks has to be kept.
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_tier", "cand-gcc-partial", "generation-E",
+                    2u, wide_rows_p, 2u),
+                "a gcc-tier bank should be adopted"))
+        return 1;
+    // beads-lqa.40 interaction: the dispatch index selects the LAST live row
+    // for a PC, so co-registering the weaker backend must not hand it the
+    // addresses both banks share. Adopting it re-registers the better bank so
+    // it lands last: one register for the newcomer, then one unregister and
+    // one register for the gcc bank it must not shadow.
+    const unsigned reg_before = g_registrations;
+    const unsigned unreg_before = g_unregistrations;
+    if (!expect(live_overlay_commit_bank_for_test(
+                    NDS_ARM9, "yjp53_tier", "cand-tcc-extra", "generation-E",
+                    1u, wide_rows_q, 2u),
+                "a lower-tier candidate with extra rows should be adopted"))
+        return 1;
+    if (!expect(status_count("\"candidate_id\":\"cand-tcc-extra\"") == 1u,
+                "a lower-tier shard covering a row the better backend lacks "
+                "must be kept, not declined"))
+        return 1;
+    if (!expect(g_registrations == reg_before + 2u &&
+                g_unregistrations == unreg_before + 1u,
+                "the better same-generation bank must be re-registered LAST "
+                "so it keeps the addresses it shares with the newcomer"))
         return 1;
     live_overlay_shutdown();
 #endif

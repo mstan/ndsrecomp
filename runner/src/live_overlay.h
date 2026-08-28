@@ -7,6 +7,12 @@ struct NdsDispatchEntry;
 struct NdsStaticValidation;
 struct NdsLiveBankInfo;
 
+// Upper bound on the reject-cause table in live_overlay.cpp. The summary
+// carries the counters as a flat array plus their names, so a consumer never
+// has to be rebuilt when a cause is appended; only this cap does, and a
+// static_assert in live_overlay.cpp fails the build if the table outgrows it.
+constexpr uint32_t kNdsLiveRejectReasonCap = 64u;
+
 void live_overlay_configure(bool enabled, bool auto_trigger,
                             uint32_t activation_delay_ms,
                             uint32_t auto_start_delay_ms,
@@ -86,6 +92,28 @@ struct NdsLiveOverlaySummary {
     // the compile windows from log file timestamps after the fact.
     bool busy;
     uint64_t runs_started;
+    // beads-yjp.53: per-cause breakdown of every outcome that costs a shard
+    // (or a resident bank's rows) its place in the dispatch index. Always on,
+    // Release included. reason_count is the live table size; reason_names[i]
+    // names reason_counts[i], so an ingest reads the pairs and never needs to
+    // carry a copy of the table.
+    //
+    // The three families and the aggregate each belongs to:
+    //   load_*   -> summed into banks_rejected (the shard never became a bank)
+    //   drop_*   -> NOT in banks_rejected: the shard loaded and then lost its
+    //              rows to another candidate for the same generation. This
+    //              family is why a field bundle could show 58 loaded, 0
+    //              rejected and only 33 registered with nothing to explain it.
+    //   guard_*  -> summed into bank_rejects (a resident row refused at
+    //              dispatch time), split by which half of the guard failed.
+    uint32_t reason_count;
+    const char* const* reason_names;
+    uint64_t reason_counts[kNdsLiveRejectReasonCap];
+    // Dispatch rows unregistered by the supersede path, and rows that the
+    // replacements brought. A negative delta is coverage LOST mid-session,
+    // which is invisible in any bank count.
+    uint64_t rows_superseded;
+    uint64_t rows_superseding;
 };
 void live_overlay_summary(NdsLiveOverlaySummary* out);
 

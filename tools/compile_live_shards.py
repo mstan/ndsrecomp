@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Compile generation-bound NDS RAM code pages into persistent live DLLs.
 
 The coverage manifest associates each dispatch/resume observation with the
@@ -422,9 +422,58 @@ def merge_entries(left: list[dict], right: list[dict]) -> list[dict]:
     } for item in merged.values()), key=lambda item: (item["addr"], item["mode"]))
 
 
+def generation_entries(index: dict) -> dict[tuple[int, int, str], list[dict]]:
+    """Entry roots already compiled into a shard, per page BYTE GENERATION.
+
+    beads-yjp.53. A page's candidate set is built from the roots that are
+    still reaching Tier 3, and an entry already served natively stops
+    appearing there -- so the next capture of the SAME page bytes carries a
+    SMALLER root set than the shard already in the cache. The runtime keyed
+    supersede on the generation, so that smaller candidate replaced the larger
+    one and its extra rows went back to the interpreter, where the next
+    capture rediscovered them: an oscillation, visible in a player's own index
+    (page 0x0205B000 recorded 4 entries and then 3; 0x02034000 3 and then 2)
+    and in the shipped release cache (ten same-generation candidates for
+    0x02115000 with alternating root sets).
+
+    Folding the already-published roots back in makes every new candidate a
+    superset of the resident one, so coverage for a generation only ever
+    grows. It also removes the recompile entirely when the merged set is
+    unchanged: work_identity() folds the entry set, so the key then matches
+    the index record and the page is skipped.
+    """
+    out: dict[tuple[int, int, str], list[dict]] = {}
+    for record in index.get("captures", {}).values():
+        if not isinstance(record, dict):
+            continue
+        roots = record.get("entry_roots")
+        if not isinstance(roots, list) or not roots:
+            continue
+        try:
+            key = (int(record["cpu"]), int(str(record["page"]), 16),
+                   str(record["page_sha1"]).lower())
+        except (KeyError, TypeError, ValueError):
+            continue
+        merged = out.setdefault(key, [])
+        for root in roots:
+            if not isinstance(root, dict):
+                continue
+            try:
+                addr = int(root["addr"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            mode = str(root.get("mode", "arm"))
+            if mode not in ("arm", "thumb"):
+                continue
+            merged.append({"addr": addr, "mode": mode, "hits": 0,
+                           "kinds": ["published"]})
+    return out
+
+
 def collect_candidates(
         args: argparse.Namespace, manifests: list[tuple[Path, dict]],
-        allowed_cpus: set[int], carried: dict[tuple[int, int, str], dict]
+        allowed_cpus: set[int], carried: dict[tuple[int, int, str], dict],
+        published: dict[tuple[int, int, str], list[dict]] | None = None
 ) -> list[tuple[int, int, dict, list[dict], str]]:
     by_page: dict[tuple[int, int, str], dict] = {}
     for manifest_path, manifest in manifests:
@@ -456,6 +505,13 @@ def collect_candidates(
     for key, current in by_page.items():
         entries = current["entries"]
         hits = sum(entry["hits"] for entry in entries)
+        # beads-yjp.53: never regress the root set for a generation already
+        # published. Hits are summed BEFORE the merge so a page does not clear
+        # --min-hits on the strength of roots nobody executed this session.
+        if published:
+            already = published.get(key)
+            if already:
+                entries = merge_entries(entries, already)
         # Weight carried forward from the persisted queue. A page that was hot
         # in an earlier session but has just aged out of the recency window
         # must not sink to the bottom of the order; the queue is the only place
@@ -746,7 +802,7 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
     ]), encoding="utf-8", newline="\n")
 
 
-# ---- TinyCC (tcc) backend — the toolchain-free player fallback -------------
+# ---- TinyCC (tcc) backend â€” the toolchain-free player fallback -------------
 #
 # tcc bundles its own headers and linker, so it is self-contained: a player box
 # needs no gcc, no binutils and no MSYS. Two accommodations are required, and
@@ -760,7 +816,7 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
 #      "undefined symbol 'g_cpu', missing __declspec(dllimport)?". Marking the
 #      extern declarations dllimport in the copied headers is what makes the
 #      import thunks get emitted. Functions are marked too, which is both
-#      harmless and correct — they all come from the runner image as well.
+#      harmless and correct â€” they all come from the runner image as well.
 #
 # NOTE the transform is applied ONLY to the runtime include dirs, never to the
 # generated shard's own source dir: that one declares symbols the shard itself
@@ -1025,6 +1081,15 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
         "page": f"0x{addr:08X}",
         "page_sha1": page_sha1,
         "entries": len(entries),
+        # beads-yjp.53: the roots this shard actually translated, so a later
+        # capture of the same page bytes can be forced to be a superset of it
+        # instead of replacing it with a smaller set. `entries` above stays as
+        # the count it always was; this is an additive field an older reader
+        # ignores.
+        "entry_roots": [
+            {"addr": int(entry["addr"]), "mode": str(entry["mode"])}
+            for entry in entries
+        ],
         "dll": dll.resolve().as_posix(),
     })
     print(f"NDS_SHARD_PUBLISHED {dll.resolve().as_posix()}", flush=True)
@@ -1183,7 +1248,8 @@ def main() -> int:
         print(f"resumed {len(queued)} pending candidate(s) from "
               f"{args.queue}", flush=True)
 
-    candidates = collect_candidates(args, manifests, allowed_cpus, carried)
+    candidates = collect_candidates(args, manifests, allowed_cpus, carried,
+                                    generation_entries(index))
 
     ok = failed = skipped = attempted = 0
     pending: list[dict] = []

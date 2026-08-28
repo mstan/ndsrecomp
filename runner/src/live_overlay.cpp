@@ -1,4 +1,4 @@
-#include "live_overlay.h"
+﻿#include "live_overlay.h"
 
 #include <algorithm>
 #include <array>
@@ -81,6 +81,86 @@ enum class DiagKind : uint8_t {
     Write,
 };
 
+// ---- Reject-cause taxonomy (beads-yjp.53) ---------------------------------
+//
+// Before this existed a field bundle carried two aggregate numbers -- one
+// count of shards that failed to load (banks_rejected) and one count of
+// dispatch-time guard rejections (bank_rejects) -- and the REASON survived
+// only in `last_error`, a single string the next failure overwrites. That is
+// not enough to diagnose anything: beads-yjp.53 started from a field bundle
+// showing 58 shards loaded, 0 rejected, and only 33 registered, and NOTHING
+// in the record said where the other 25 went. They had been silently
+// unregistered by the same-generation supersede path, which had no counter at
+// all.
+//
+// So every distinct outcome that costs a bank (or a bank's rows) its place in
+// the dispatch index now has its own always-on counter, emitted in the perf
+// jsonl and the status JSON in Release exactly as in a debug build. Three
+// families:
+//
+//   load_*   the shard never became a resident bank      (banks_rejected)
+//   drop_*   the shard loaded but lost its rows to another candidate
+//   guard_*  a resident row was refused at dispatch time (bank_rejects)
+//
+// The list is append-only: a consumer keys on the NAME, and the names are
+// emitted with the counters so an older ingest never has to know this table.
+#define NDS_LIVE_REJECT_REASONS(X)                                            \
+    /* prepare_bank_dll: the file itself */                                   \
+    X(LoadPathOutsideCache,        "load_path_outside_cache")                 \
+    X(LoadNotPublishedDll,         "load_not_published_dll")                  \
+    X(LoadCanonicalizeFailed,      "load_canonicalize_failed")                \
+    X(LoadLibraryFailed,           "load_library_failed")                     \
+    X(LoadNoBankInfo,              "load_no_bank_info")                       \
+    X(LoadUnsupportedPlatform,     "load_unsupported_platform")               \
+    /* validate_live_bank_info: identity and linkage */                       \
+    X(LoadAbiMismatch,             "load_abi_mismatch")                       \
+    X(LoadRomMismatch,             "load_rom_mismatch")                       \
+    X(LoadCpuInvalid,              "load_cpu_invalid")                        \
+    X(LoadImportsUnbound,          "load_imports_unbound")                    \
+    /* preflight_live_bank: bank shape and dispatch-table safety */           \
+    X(LoadUnknownFlags,            "load_unknown_flags")                      \
+    X(LoadStaticCpuMismatch,       "load_static_cpu_mismatch")                \
+    X(LoadMissingBankId,           "load_missing_bank_id")                    \
+    X(LoadMissingCandidateId,      "load_missing_candidate_id")               \
+    X(LoadNoDispatchRows,          "load_no_dispatch_rows")                   \
+    X(LoadDispatchTooLarge,        "load_dispatch_too_large")                 \
+    X(LoadRowNullFn,               "load_row_null_fn")                        \
+    X(LoadRowNotOwned,             "load_row_not_owned")                      \
+    X(LoadDependencyInsane,        "load_dependency_insane")                  \
+    X(LoadClosureNotShared,        "load_closure_not_shared")                 \
+    X(LoadRowsUnsorted,            "load_rows_unsorted")                      \
+    X(LoadRowsDuplicate,           "load_rows_duplicate")                     \
+    /* commit_prepared_bank */                                                \
+    X(LoadContentConflict,         "load_content_conflict")                   \
+    X(DropDuplicateCandidate,      "drop_duplicate_candidate")                \
+    X(DropDeclinedLowerTier,       "drop_declined_lower_tier")                \
+    X(DropSupersededGeneration,    "drop_superseded_generation")              \
+    X(DropRedundantSubset,         "drop_redundant_subset")                   \
+    X(KeptDivergentGeneration,     "kept_divergent_generation")               \
+    /* dispatch_validation_live, classified where ++bank->rejects happens */  \
+    X(GuardRowNotOwned,            "guard_row_not_owned")                     \
+    X(GuardRangeMalformed,         "guard_range_malformed")                   \
+    X(GuardNoProvenance,           "guard_no_provenance")                     \
+    X(GuardBytesDiffer,            "guard_bytes_differ")
+
+enum class RejectReason : uint8_t {
+#define NDS_LIVE_REJECT_ENUM(id, name) id,
+    NDS_LIVE_REJECT_REASONS(NDS_LIVE_REJECT_ENUM)
+#undef NDS_LIVE_REJECT_ENUM
+    Count,
+};
+
+constexpr uint32_t kRejectReasonCount =
+    static_cast<uint32_t>(RejectReason::Count);
+static_assert(kRejectReasonCount <= kNdsLiveRejectReasonCap,
+              "grow kNdsLiveRejectReasonCap in live_overlay.h");
+
+const char* const kRejectReasonNames[kRejectReasonCount] = {
+#define NDS_LIVE_REJECT_NAME(id, name) name,
+    NDS_LIVE_REJECT_REASONS(NDS_LIVE_REJECT_NAME)
+#undef NDS_LIVE_REJECT_NAME
+};
+
 struct CandidateDesc {
     const char* bank_id = nullptr;
     const char* candidate_id = nullptr;
@@ -132,7 +212,7 @@ struct LoadedBank {
     uint64_t rejects = 0u;
     uint64_t content_identity = 0u;
     // Which backend namespace the DLL was scanned out of. Consumption is
-    // backend-blind — a bank is a bank — but when two of them cover the exact
+    // backend-blind â€” a bank is a bank â€” but when two of them cover the exact
     // same generation the better code generator must win. See backend_tier().
     uint32_t backend_tier = 0u;
     bool registered = false;
@@ -140,6 +220,14 @@ struct LoadedBank {
 #if defined(_WIN32)
     HMODULE handle = nullptr;
 #endif
+};
+
+// A load failure crosses from the prepare worker to the emulation thread. The
+// reason code travels with the message so the counter is still owned by one
+// thread; the string alone would force the drain side to re-parse text.
+struct PreparedError {
+    std::string text;
+    RejectReason reason = RejectReason::LoadNoBankInfo;
 };
 
 struct State {
@@ -164,6 +252,13 @@ struct State {
     uint64_t runs_failed = 0;
     uint64_t banks_loaded = 0;
     uint64_t banks_rejected = 0;
+    // beads-yjp.53 reject-cause breakdown. Written from the emulation thread
+    // for every cause except the prepare-worker's load failures, which are
+    // carried across on the PreparedError below and counted here when the
+    // emulation thread drains them -- so this array has exactly one writer.
+    std::array<uint64_t, kRejectReasonCount> reject_reasons = {};
+    uint64_t rows_superseded = 0;
+    uint64_t rows_superseding = 0;
     // Futility guard. A compile run that published shards and had EVERY one of
     // them rejected has proven this provider cannot produce loadable banks for
     // this runner -- an ABI mismatch or a failed preflight is a property of the
@@ -202,7 +297,7 @@ struct State {
     std::condition_variable publish_cv;
     std::deque<std::filesystem::path> prepare_queue;
     std::deque<LoadedBank> ready_queue;
-    std::deque<std::string> prepare_errors;
+    std::deque<PreparedError> prepare_errors;
     // Shards the prepare worker has taken off prepare_queue but not yet
     // resolved onto ready_queue/prepare_errors. Without this the three
     // containers are all momentarily empty mid-load, which would let the
@@ -218,6 +313,14 @@ struct State {
 };
 
 State g_live;
+
+// Always-on: no build-type guard, no sampling. Callers are all cold paths
+// (a shard load, a bank adoption, a slow-path dispatch reject), so the cost is
+// one increment per event that a player would otherwise never hear about.
+void note_reject(RejectReason reason) {
+    const uint32_t index = static_cast<uint32_t>(reason);
+    if (index < kRejectReasonCount) ++g_live.reject_reasons[index];
+}
 
 uint64_t steady_ms() {
     using Clock = std::chrono::steady_clock;
@@ -452,13 +555,64 @@ bool validation_has_provenance(const NdsStaticValidation* validation) {
         bus_range_has_write_provenance(validation->addr, validation->size);
 }
 
+// Why did the dispatcher refuse this row? Mirrors the order of the guard in
+// runtime_arm.cpp dispatch_validation_live() exactly -- ownership first, then
+// each range's shape, provenance, and bytes -- and reports the FIRST check
+// that failed, so the counters partition the rejects instead of overlapping.
+RejectReason classify_guard_reject(const NdsStaticValidation* validation,
+                                   uint32_t pc, bool thumb) {
+    if (!validation) return RejectReason::GuardRangeMalformed;
+    if (!validation->expected || validation->size == 0u)
+        return RejectReason::GuardRangeMalformed;
+    {
+        const uint32_t step = thumb ? 2u : 4u;
+        const uint64_t begin = validation->addr;
+        const uint64_t end = begin + validation->size;
+        if (end > 0x1'0000'0000ull || pc < begin ||
+            uint64_t{pc} + step > end) {
+            return RejectReason::GuardRowNotOwned;
+        }
+    }
+    const NdsStaticValidationRange owner{
+        validation->addr, validation->size, validation->expected};
+    const uint32_t count = validation->dependency_count;
+    if (count != 0u && !validation->dependencies)
+        return RejectReason::GuardRangeMalformed;
+    for (uint32_t i = 0u; i < (count ? count : 1u); ++i) {
+        const NdsStaticValidationRange& range =
+            count ? validation->dependencies[i] : owner;
+        if (!range.expected || range.size == 0u ||
+            uint64_t{range.addr} + range.size > 0x1'0000'0000ull) {
+            return RejectReason::GuardRangeMalformed;
+        }
+        if (!bus_range_has_write_provenance(range.addr, range.size))
+            return RejectReason::GuardNoProvenance;
+        if (!bus_live_bytes_equal(range.addr, range.expected, range.size))
+            return RejectReason::GuardBytesDiffer;
+    }
+    // Every range passes now. The lookup that rejected the row saw a
+    // transiently different memory image (a guest write landed between the
+    // lookup and this classification); count it as the bytes case, which is
+    // what it was.
+    return RejectReason::GuardBytesDiffer;
+}
+
 bool preflight_live_bank(const NdsLiveBankInfo& info,
-                         std::string& error) {
+                         std::string& error,
+                         RejectReason* reason = nullptr) {
+    // Every early return records WHICH check refused the bank, not just that
+    // one did. `error` remains the human string; `reason` is the counter key
+    // the field bundle carries (beads-yjp.53).
+    const auto fail = [&](RejectReason code, const char* message) {
+        error = message;
+        if (reason) *reason = code;
+        return false;
+    };
     constexpr uint32_t kKnownFlags =
         NDS_LIVE_BANK_FLAG_DEPENDENCY_CLOSURE;
     if (info.flags & ~kKnownFlags) {
-        error = "live bank has unknown safety flags";
-        return false;
+        return fail(RejectReason::LoadUnknownFlags,
+                    "live bank has unknown safety flags");
     }
     // The shard build passes the CPU identity twice: as metadata `cpu` and
     // as -DNDS_STATIC_CPU, which folds the ARM9/ARM7 timing ternaries into
@@ -467,24 +621,24 @@ bool preflight_live_bank(const NdsLiveBankInfo& info,
     // the wrapper reports what it was actually compiled with and this is a
     // fail-closed cross-check, not an advisory.
     if (info.static_cpu != static_cast<uint32_t>(info.cpu)) {
-        error = "live bank static CPU build identity does not match its CPU";
-        return false;
+        return fail(RejectReason::LoadStaticCpuMismatch,
+                    "live bank static CPU build identity does not match its CPU");
     }
     if (!info.bank_id || !*info.bank_id) {
-        error = "live bank missing bank_id";
-        return false;
+        return fail(RejectReason::LoadMissingBankId,
+                    "live bank missing bank_id");
     }
     if (!info.candidate_id || !*info.candidate_id) {
-        error = "live bank missing candidate_id";
-        return false;
+        return fail(RejectReason::LoadMissingCandidateId,
+                    "live bank missing candidate_id");
     }
     if (!info.dispatch || info.dispatch_len == 0u) {
-        error = "live bank has no dispatch rows";
-        return false;
+        return fail(RejectReason::LoadNoDispatchRows,
+                    "live bank has no dispatch rows");
     }
     if (info.dispatch_len > (1u << 20u)) {
-        error = "live bank dispatch table exceeds the safety limit";
-        return false;
+        return fail(RejectReason::LoadDispatchTooLarge,
+                    "live bank dispatch table exceeds the safety limit");
     }
     const bool closure =
         (info.flags & NDS_LIVE_BANK_FLAG_DEPENDENCY_CLOSURE) != 0u;
@@ -493,18 +647,18 @@ bool preflight_live_bank(const NdsLiveBankInfo& info,
     for (unsigned i = 0; i < info.dispatch_len; ++i) {
         const NdsDispatchEntry& row = info.dispatch[i];
         if (!row.fn) {
-            error = "live bank dispatch row has null function";
-            return false;
+            return fail(RejectReason::LoadRowNullFn,
+                        "live bank dispatch row has null function");
         }
         if (!validation_owns_row(row.validation, row)) {
-            error = "live bank dispatch row is not owned by its validation";
-            return false;
+            return fail(RejectReason::LoadRowNotOwned,
+                        "live bank dispatch row is not owned by its validation");
         }
         if (!validation_dependencies_sane(row.validation, closure)) {
-            error = closure
-                ? "live bank has an incomplete dependency closure"
-                : "live bank has unflagged dependency ranges";
-            return false;
+            return fail(RejectReason::LoadDependencyInsane,
+                        closure
+                            ? "live bank has an incomplete dependency closure"
+                            : "live bank has unflagged dependency ranges");
         }
         if (closure) {
             if (!closure_ranges) {
@@ -512,20 +666,22 @@ bool preflight_live_bank(const NdsLiveBankInfo& info,
                 closure_count = row.validation->dependency_count;
             } else if (closure_ranges != row.validation->dependencies ||
                        closure_count != row.validation->dependency_count) {
-                error = "live bank rows do not share one atomic dependency closure";
-                return false;
+                return fail(
+                    RejectReason::LoadClosureNotShared,
+                    "live bank rows do not share one atomic dependency closure");
             }
         }
         if (i == 0u) continue;
         const NdsDispatchEntry& prev = info.dispatch[i - 1u];
         if (prev.addr > row.addr ||
             (prev.addr == row.addr && prev.thumb > row.thumb)) {
-            error = "live bank dispatch rows are not sorted";
-            return false;
+            return fail(RejectReason::LoadRowsUnsorted,
+                        "live bank dispatch rows are not sorted");
         }
         if (prev.addr == row.addr && prev.thumb == row.thumb) {
-            error = "live bank has duplicate dispatch rows inside one candidate";
-            return false;
+            return fail(
+                RejectReason::LoadRowsDuplicate,
+                "live bank has duplicate dispatch rows inside one candidate");
         }
     }
     return true;
@@ -533,27 +689,33 @@ bool preflight_live_bank(const NdsLiveBankInfo& info,
 
 bool validate_live_bank_info(const NdsLiveBankInfo& info,
                              const std::string& expected_rom_sha1,
-                             std::string& error) {
-    if (info.abi_version != NDS_LIVE_BANK_ABI_VERSION) {
-        error = "live bank ABI version mismatch";
+                             std::string& error,
+                             RejectReason* reason = nullptr) {
+    const auto fail = [&](RejectReason code, const char* message) {
+        error = message;
+        if (reason) *reason = code;
         return false;
+    };
+    if (info.abi_version != NDS_LIVE_BANK_ABI_VERSION) {
+        return fail(RejectReason::LoadAbiMismatch,
+                    "live bank ABI version mismatch");
     }
     if (!info.title_sha1 || expected_rom_sha1 != info.title_sha1) {
-        error = "live bank ROM identity mismatch";
-        return false;
+        return fail(RejectReason::LoadRomMismatch,
+                    "live bank ROM identity mismatch");
     }
     if (info.cpu != NDS_ARM9 && info.cpu != NDS_ARM7) {
-        error = "live bank CPU identity is invalid";
-        return false;
+        return fail(RejectReason::LoadCpuInvalid,
+                    "live bank CPU identity is invalid");
     }
     if (info.linked_g_cpu != &g_cpu ||
         info.linked_busf_main != &g_busf_main ||
         info.linked_busf_itcm != &g_busf_itcm ||
         info.linked_runtime_cycles != &g_runtime_cycles) {
-        error = "live bank data imports are not bound to runner storage";
-        return false;
+        return fail(RejectReason::LoadImportsUnbound,
+                    "live bank data imports are not bound to runner storage");
     }
-    return preflight_live_bank(info, error);
+    return preflight_live_bank(info, error, reason);
 }
 
 bool activation_delay_elapsed() {
@@ -861,15 +1023,20 @@ uint32_t backend_tier(const std::filesystem::path& path) {
     return 0u;
 }
 
+// Runs on the prepare worker thread, so it must NOT touch the counters
+// directly: it reports the cause through `reason` and the emulation thread
+// records it when it drains prepare_errors.
 bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
-                      std::string& error) {
+                      std::string& error, RejectReason& reason) {
 #if defined(_WIN32)
     if (!path_under_cache(path)) {
+        reason = RejectReason::LoadPathOutsideCache;
         error = "published DLL outside live overlay cache: " +
             path_string(path);
         return false;
     }
     if (!is_final_dll_path(path)) {
+        reason = RejectReason::LoadNotPublishedDll;
         error = "live bank is not an atomically published DLL: " +
             path_string(path);
         return false;
@@ -878,6 +1045,7 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     std::error_code ec;
     const auto canon_path = std::filesystem::weakly_canonical(path, ec);
     if (ec) {
+        reason = RejectReason::LoadCanonicalizeFailed;
         error = "cannot canonicalize published DLL: " +
             path_string(path);
         return false;
@@ -885,6 +1053,7 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     const std::string canon = path_string(canon_path);
     HMODULE handle = LoadLibraryA(canon.c_str());
     if (!handle) {
+        reason = RejectReason::LoadLibraryFailed;
         error = "LoadLibrary failed: " + canon;
         return false;
     }
@@ -897,11 +1066,13 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     const NdsLiveBankInfo* info = info_fn ? info_fn() : nullptr;
     if (!info) {
         FreeLibrary(handle);
+        reason = RejectReason::LoadNoBankInfo;
         error = "live DLL does not export bank metadata: " + canon;
         return false;
     }
     std::string preflight_error;
-    if (!validate_live_bank_info(*info, g_live.rom_sha1, preflight_error)) {
+    if (!validate_live_bank_info(*info, g_live.rom_sha1, preflight_error,
+                                 &reason)) {
         FreeLibrary(handle);
         error = preflight_error + ": " + canon;
         return false;
@@ -934,6 +1105,7 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
 #else
     (void)path;
     (void)bank;
+    reason = RejectReason::LoadUnsupportedPlatform;
     error = "live overlay loading is implemented for Windows only";
     return false;
 #endif
@@ -942,6 +1114,47 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
 bool same_candidate_key(const LoadedBank& a, const LoadedBank& b) {
     return a.cpu == b.cpu && a.bank_id == b.bank_id &&
         a.candidate_id == b.candidate_id;
+}
+
+// Does `super` cover every (addr, thumb) row `sub` covers?
+//
+// beads-yjp.53: two candidates for the SAME byte generation of a page are two
+// translations of the identical guest bytes, differing only in which entry
+// roots the capture that produced them happened to observe. Those root sets
+// are NOT monotone in practice -- the live compiler only sees the roots that
+// are still reaching Tier 3, so an entry already served natively drops out of
+// the next capture of the same page. The player's own cache index shows it:
+// page 0x0205B000 went from a 4-entry candidate to a 3-entry one, and
+// 0x02034000 from 3 to 2. Replacing the resident bank with such a candidate
+// DELETES the rows only the resident one had, which sends that code straight
+// back to the interpreter and makes the next capture "discover" it again.
+//
+// So supersede is allowed only when it cannot lose a row. Anything else keeps
+// both banks registered: the dispatch index already chains multiple rows for
+// one PC and picks the newest whose validation is live, and both bodies were
+// generated from byte-identical guest code, so either is a faithful
+// translation of it.
+bool dispatch_rows_cover(const LoadedBank& super, const LoadedBank& sub) {
+    if (!super.dispatch || !sub.dispatch) return false;
+    if (super.dispatch_len < sub.dispatch_len) return false;
+    // Both tables are sorted by (addr, thumb) -- preflight_live_bank refuses a
+    // bank whose rows are not -- so this is a linear merge, not a search.
+    unsigned i = 0u;
+    for (unsigned j = 0u; j < sub.dispatch_len; ++j) {
+        const NdsDispatchEntry& want = sub.dispatch[j];
+        while (i < super.dispatch_len &&
+               (super.dispatch[i].addr < want.addr ||
+                (super.dispatch[i].addr == want.addr &&
+                 (super.dispatch[i].thumb != 0u) < (want.thumb != 0u)))) {
+            ++i;
+        }
+        if (i >= super.dispatch_len ||
+            super.dispatch[i].addr != want.addr ||
+            (super.dispatch[i].thumb != 0u) != (want.thumb != 0u)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool commit_prepared_bank(LoadedBank bank) {
@@ -953,46 +1166,82 @@ bool commit_prepared_bank(LoadedBank bank) {
                 "conflicting live bank content for candidate identity " +
                 bank.bank_id + "/" + bank.candidate_id;
             ++g_live.banks_rejected;
+            note_reject(RejectReason::LoadContentConflict);
+        } else {
+            note_reject(RejectReason::DropDuplicateCandidate);
         }
         if (bank.handle) FreeLibrary(bank.handle);
         return loaded.content_identity == bank.content_identity;
     }
-    // Never demote a generation that a better backend already covers. A dev
-    // box (or a player whose shipped cache was built by CI) can hold a gcc
-    // shard for exactly this generation while the local tcc tier independently
-    // compiles its own; without this the arrival order alone would decide, and
-    // an unoptimized shard could evict an optimized one for the rest of the
-    // session. The incoming bank is simply dropped — the generation stays
-    // covered natively, so nothing falls back to the interpreter.
+    // ---- one decision per same-generation resident ----------------------
+    //
+    // Three outcomes, and the ONLY one that may unregister anything is the
+    // one that provably cannot lose a row:
+    //
+    //   resident covers the newcomer  -> drop the newcomer (adds nothing).
+    //                                    Also the original "never demote a
+    //                                    generation a better backend already
+    //                                    covers" rule: a dev box, or a player
+    //                                    whose shipped cache was built by CI,
+    //                                    can hold a gcc shard for exactly this
+    //                                    generation while the local tcc tier
+    //                                    compiles its own, and arrival order
+    //                                    alone must not decide.
+    //   newcomer covers the resident
+    //     and is not a worse backend  -> retire the resident (supersede).
+    //   anything else                 -> keep BOTH registered.
+    //
+    // The last case is the beads-yjp.53 fix and covers two real situations:
+    // genuinely divergent root sets, and a newcomer that is a superset but
+    // built by a weaker compiler -- there the optimized bodies stay resident
+    // and the newcomer contributes only the rows nobody else has.
+    //
+    // Nothing is mutated in the first pass: a decision taken while already
+    // unregistering could leave the generation momentarily uncovered.
+    const LoadedBank* covering_resident = nullptr;
     for (const LoadedBank& loaded : g_live.loaded) {
         if (!loaded.registered || loaded.cpu != bank.cpu ||
             loaded.bank_id != bank.bank_id ||
             loaded.generation_id != bank.generation_id) {
             continue;
         }
-        if (loaded.backend_tier > bank.backend_tier) {
+        if (dispatch_rows_cover(loaded, bank)) {
+            covering_resident = &loaded;
+            break;
+        }
+    }
+    if (covering_resident) {
+        if (covering_resident->backend_tier > bank.backend_tier) {
             std::fprintf(stderr,
                          "[live-overlay] kept tier-%u %s for generation %s; "
                          "declined tier-%u candidate %s\n",
-                         loaded.backend_tier, loaded.bank_id.c_str(),
-                         loaded.generation_id.c_str(), bank.backend_tier,
-                         bank.candidate_id.c_str());
-            if (bank.handle) FreeLibrary(bank.handle);
-            return true;
+                         covering_resident->backend_tier,
+                         covering_resident->bank_id.c_str(),
+                         covering_resident->generation_id.c_str(),
+                         bank.backend_tier, bank.candidate_id.c_str());
+            note_reject(RejectReason::DropDeclinedLowerTier);
+        } else {
+            note_reject(RejectReason::DropRedundantSubset);
         }
+        if (bank.handle) FreeLibrary(bank.handle);
+        return true;
     }
-    // A compiler pass may discover additional resume roots for a generation
-    // already cached at this page. Replace that revision at a scheduler
-    // boundary; do not leave two differently owned bodies both eligible for
-    // the same exact generation. Other generation IDs remain chained.
     for (LoadedBank& loaded : g_live.loaded) {
         if (!loaded.registered || loaded.cpu != bank.cpu ||
             loaded.bank_id != bank.bank_id ||
             loaded.generation_id != bank.generation_id) {
             continue;
         }
+        if (!dispatch_rows_cover(bank, loaded) ||
+            bank.backend_tier < loaded.backend_tier) {
+            note_reject(RejectReason::KeptDivergentGeneration);
+            continue;
+        }
         nds_unregister_dispatch(loaded.cpu, loaded.dispatch,
                                 loaded.dispatch_len);
+        note_reject(RejectReason::DropSupersededGeneration);
+        g_live.rows_superseded += loaded.dispatch_len;
+        g_live.rows_superseding += bank.dispatch_len;
         loaded.registered = false;
         loaded.superseded = true;
         loaded.dispatch = nullptr;
@@ -1001,11 +1250,37 @@ bool commit_prepared_bank(LoadedBank bank) {
             loaded.handle = nullptr;
         }
     }
+    const int bank_cpu = bank.cpu;
+    const std::string bank_id = bank.bank_id;
+    const std::string bank_generation = bank.generation_id;
+    const uint32_t bank_tier = bank.backend_tier;
     bank.serial = g_live.next_bank_serial++;
     bank.generation = static_cast<uint32_t>(++g_live.publication_generation);
     g_live.loaded.push_back(std::move(bank));
     register_loaded_bank(g_live.loaded.back());
     ++g_live.banks_loaded;
+    // beads-lqa.40 interaction: nds_dispatch_lookup_index() walks the whole
+    // run of rows at a PC and selects the LAST live one, so registration order
+    // decides which body serves an address two banks share. Co-registering a
+    // divergent candidate (above) therefore hands the shared addresses to
+    // whoever arrived last -- fine between two banks of the same backend, which
+    // are the same recompiler over the same bytes, but NOT when the newcomer is
+    // the weaker compiler. Put every strictly better same-generation bank back
+    // at the end of the index so it keeps the addresses it shares, while the
+    // newcomer still contributes the rows nobody else has.
+    for (std::size_t i = 0u; i + 1u < g_live.loaded.size(); ++i) {
+        LoadedBank& loaded = g_live.loaded[i];
+        if (!loaded.registered || loaded.superseded ||
+            loaded.cpu != bank_cpu || loaded.bank_id != bank_id ||
+            loaded.generation_id != bank_generation ||
+            loaded.backend_tier <= bank_tier) {
+            continue;
+        }
+        nds_unregister_dispatch(loaded.cpu, loaded.dispatch,
+                                loaded.dispatch_len);
+        nds_register_dispatch(loaded.cpu, loaded.dispatch,
+                              loaded.dispatch_len, loaded.exc_base);
+    }
     std::fprintf(stderr,
                  "[live-overlay] published %s candidate %s (%u rows, generation %u)\n",
                  g_live.loaded.back().bank_id.c_str(),
@@ -1034,11 +1309,13 @@ void prepare_worker_main() {
         }
         LoadedBank bank{};
         std::string error;
-        const bool ok = prepare_bank_dll(path, bank, error);
+        RejectReason reason = RejectReason::LoadNoBankInfo;
+        const bool ok = prepare_bank_dll(path, bank, error, reason);
         {
             std::lock_guard<std::mutex> lock(g_live.publish_mutex);
             if (ok) g_live.ready_queue.push_back(std::move(bank));
-            else    g_live.prepare_errors.push_back(std::move(error));
+            else    g_live.prepare_errors.push_back(
+                        PreparedError{std::move(error), reason});
             --g_live.prepare_in_flight;
         }
     }
@@ -1071,7 +1348,7 @@ bool queue_bank_dll(const std::filesystem::path& path) {
 
 void commit_one_ready_bank() {
     LoadedBank bank{};
-    std::string error;
+    PreparedError error;
     bool have_bank = false;
     {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
@@ -1085,9 +1362,10 @@ void commit_one_ready_bank() {
             have_bank = true;
         }
     }
-    if (!error.empty()) {
-        g_live.last_error = std::move(error);
+    if (!error.text.empty()) {
+        g_live.last_error = std::move(error.text);
         ++g_live.banks_rejected;
+        note_reject(error.reason);
     }
     if (have_bank) commit_prepared_bank(std::move(bank));
 }
@@ -1391,6 +1669,9 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
     g_live.persisted_backlog = false;
     g_live.queue_reloaded = false;
     g_live.last_run_duration_ms = 0;
+    g_live.reject_reasons.fill(0u);
+    g_live.rows_superseded = 0;
+    g_live.rows_superseding = 0;
     if (g_live.enabled &&
         (g_live.cache_dir.empty() || g_live.rom_sha1.empty())) {
         g_live.enabled = false;
@@ -1488,6 +1769,14 @@ void live_overlay_note_lookup(int cpu, uint32_t pc, uint32_t target_pc,
         if (LoadedBank* bank = find_loaded_bank(cpu, inactive))
             ++bank->rejects;
         const NdsStaticValidation* validation = inactive->validation;
+        // beads-yjp.53: bank_rejects alone cannot tell "the guest has not
+        // written this page yet" from "the page holds a different overlay
+        // generation" from "the shard's rows do not actually own this PC".
+        // Those three want three different responses, so the cause is counted
+        // here, on the slow path that already re-derives both halves of the
+        // guard for the diagnostics ring.
+        note_reject(classify_guard_reject(validation, pc,
+                                          inactive->thumb != 0u));
         if (validation && validation_has_provenance(validation) &&
             !validation_identity_live(validation)) {
             if (live_overlay_active()) {
@@ -1707,6 +1996,12 @@ void live_overlay_summary(NdsLiveOverlaySummary* out) {
     out->cooldown_ms = effective_cooldown_ms();
     out->persisted_backlog = g_live.persisted_backlog;
     out->runs_started = g_live.runs_started;
+    out->reason_count = kRejectReasonCount;
+    out->reason_names = kRejectReasonNames;
+    for (uint32_t i = 0u; i < kRejectReasonCount; ++i)
+        out->reason_counts[i] = g_live.reject_reasons[i];
+    out->rows_superseded = g_live.rows_superseded;
+    out->rows_superseding = g_live.rows_superseding;
 #if defined(_WIN32)
     out->busy = g_live.child != nullptr;
 #else
@@ -1768,6 +2063,14 @@ std::string live_overlay_status_json() {
         << ",\"runs_failed\":" << g_live.runs_failed
         << ",\"banks_loaded\":" << g_live.banks_loaded
         << ",\"banks_rejected\":" << g_live.banks_rejected
+        << ",\"rows_superseded\":" << g_live.rows_superseded
+        << ",\"rows_superseding\":" << g_live.rows_superseding
+        << ",\"reject_reasons\":{";
+    for (uint32_t i = 0u; i < kRejectReasonCount; ++i) {
+        out << (i ? "," : "") << "\"" << kRejectReasonNames[i] << "\":"
+            << g_live.reject_reasons[i];
+    }
+    out << "}"
         << ",\"live_bank_abi\":" << NDS_LIVE_BANK_ABI_VERSION
         << ",\"futile_runs\":" << g_live.futile_runs
         << ",\"auto_suppressed\":"

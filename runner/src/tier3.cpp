@@ -251,6 +251,29 @@ void tier3_run(uint32_t /*entry*/) {
     if (trace_this_entry) trace_push(ic, 0, ic.R[15], 0, ic.R[15], 0);
 
     long guard = 0;
+    // beads-yjp.53: a transfer the interpreter executes is only a Tier-3
+    // coverage observation if the TARGET has no bank. The note used to be
+    // written the moment the branch retired, one iteration before the loop
+    // asks nds_has_bank() about that same target -- so every Tier-3 -> native
+    // hand-off was recorded as an uncovered entry point. The consequences were
+    // not cosmetic: the coverage manifest is the live compiler's work list, so
+    // the compiler spent whole batches re-covering pages that were ALREADY
+    // running natively (field logs from v0.6.4 show runs 1 and 2 of a session
+    // recompiling exactly the pages the shipped cache already served), and a
+    // field bundle read as "the hot pages never leave Tier 3" when 93% of the
+    // recorded entry hits were at addresses a registered shard owned.
+    //
+    // So hold the observation for one iteration and let the takeover check
+    // that already runs decide. Zero extra dispatch probes: the answer is the
+    // one the loop needs anyway. An observation held when the loop exits at a
+    // scheduler boundary is dropped -- the same call is observed again on
+    // re-entry, and inventing a gap at a boundary is exactly the error being
+    // fixed.
+    bool pending_entry = false;
+    uint32_t pending_pc = 0u;
+    uint32_t pending_caller = 0u;
+    uint8_t pending_kind = 0u;
+    bool pending_thumb = false;
     while (true) {
         uint32_t pc = ic.R[15];
         bool thumb = ic.cpsr.t;
@@ -306,7 +329,20 @@ void tier3_run(uint32_t /*entry*/) {
 
         // Tier-1 takeover: a static bank covers this PC — hand back to the
         // dispatcher (it will call the recompiled function).
-        if (nds_has_bank(pc & ~1u, thumb ? 1 : 0)) {
+        const bool covered = nds_has_bank(pc & ~1u, thumb ? 1 : 0) != 0;
+        if (pending_entry) {
+            // Resolve the transfer observation held from the previous
+            // iteration against the takeover answer for its own target.
+            if (!covered && (pending_pc & ~1u) == (pc & ~1u)) {
+                coverage_note(pending_pc, pending_thumb, pending_kind,
+                              pending_caller);
+                coverage_note_generation_entry(
+                    g_nds_active == NDS_ARM7 ? 1 : 0, pending_pc,
+                    pending_thumb, pending_kind, pending_caller);
+            }
+            pending_entry = false;
+        }
+        if (covered) {
             nds_preserve_unwind_state();
             break;
         }
@@ -438,10 +474,11 @@ void tier3_run(uint32_t /*entry*/) {
         // its push and eventually overflows the stack.
         if (r == Interpreter::Result::Branched && in.is_call &&
             in.op != armv4t::IrOp::BL_prefix) {
-            coverage_note(ic.R[15], ic.cpsr.t, TIER3_COVERAGE_CALL, pc);
-            coverage_note_generation_entry(
-                g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
-                TIER3_COVERAGE_CALL, pc);
+            pending_entry = true;
+            pending_pc = ic.R[15];
+            pending_thumb = ic.cpsr.t;
+            pending_kind = TIER3_COVERAGE_CALL;
+            pending_caller = pc;
             runtime_call_push_return(pc + (thumb ? 2u : 4u));
         } else if (r == Interpreter::Result::Branched && !in.is_call) {
             // A BX/LDM/POP return may interwork.  The call was pushed in the
@@ -453,11 +490,11 @@ void tier3_run(uint32_t /*entry*/) {
             const bool matched_return =
                 runtime_call_should_return(ic.R[15] & ~1u) != 0;
             if (!matched_return && in.op != armv4t::IrOp::B) {
-                coverage_note(ic.R[15], ic.cpsr.t,
-                              TIER3_COVERAGE_INDIRECT, pc);
-                coverage_note_generation_entry(
-                    g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
-                    TIER3_COVERAGE_INDIRECT, pc);
+                pending_entry = true;
+                pending_pc = ic.R[15];
+                pending_thumb = ic.cpsr.t;
+                pending_kind = TIER3_COVERAGE_INDIRECT;
+                pending_caller = pc;
             }
         }
 
