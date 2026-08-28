@@ -82,6 +82,27 @@ void nds_profile_report(std::FILE* out) {
     }
     NdsGpu2dProfile gpu_profile{};
     nds_gpu2d_profile(&gpu_profile);
+    // Threaded-render accounting is maintained on every run, not only under
+    // NDS_PROFILE_GPU: fence frequency is the whole performance question.
+    if (gpu_profile.threaded_lines || gpu_profile.inline_lines) {
+        std::fprintf(out,
+            "  GPU2D threading: threaded=%llu inline=%llu helped=%llu "
+            "captures_applied=%llu fence_wait=%.3f ms\n",
+            (unsigned long long)gpu_profile.threaded_lines,
+            (unsigned long long)gpu_profile.inline_lines,
+            (unsigned long long)gpu_profile.fence_helped_lines,
+            (unsigned long long)gpu_profile.staged_captures,
+            static_cast<double>(gpu_profile.fence_wait_ns) / 1.0e6);
+        std::fprintf(out, "  GPU2D fences:");
+        for (uint32_t i = 0; i < NDS_GPU2D_FENCE_CAUSE_COUNT; ++i) {
+            if (!gpu_profile.fence_drains[i]) continue;
+            std::fprintf(out, " %s=%llu/%llu",
+                         nds_gpu2d_fence_cause_name(i),
+                         (unsigned long long)gpu_profile.fence_drains[i],
+                         (unsigned long long)gpu_profile.fenced_lines[i]);
+        }
+        std::fprintf(out, "   (drains/lines)\n");
+    }
     if (gpu_profile.scanlines) {
         std::fprintf(out,
             "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "

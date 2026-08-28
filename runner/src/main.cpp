@@ -1375,6 +1375,38 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[gpu3d] threaded soft renderer: %s\n",
                  gpu3d_threaded ? "on" : "off");
 
+    // GPU2D per-scanline rendering on worker threads, driven from a per-line
+    // latch. Off by default until the byte-lock and scenario gates have run
+    // on it; the inline path is the identical latch/execute sequence with the
+    // execute taken immediately, so 0 is not a separate code path.
+    // See docs/device_work_parallelization.md.
+    bool gpu2d_threaded = false;
+    if (const char* value = std::getenv("NDS_GPU2D_THREADED")) {
+        if (value[0] == '0' && value[1] == '\0') {
+            gpu2d_threaded = false;
+        } else if (value[0] == '1' && value[1] == '\0') {
+            gpu2d_threaded = true;
+        } else {
+            std::fprintf(stderr,
+                         "invalid NDS_GPU2D_THREADED value (expected 0 or 1)\n");
+            return 2;
+        }
+    }
+    unsigned gpu2d_workers = 1;
+    if (const char* value = std::getenv("NDS_GPU2D_WORKERS")) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (!end || *end || parsed < 1ul || parsed > 16ul) {
+            std::fprintf(stderr,
+                         "invalid NDS_GPU2D_WORKERS value (expected 1..16)\n");
+            return 2;
+        }
+        gpu2d_workers = static_cast<unsigned>(parsed);
+    }
+    std::fprintf(stderr,
+                 "[gpu2d] threaded scanline render: %s (workers: %u)\n",
+                 gpu2d_threaded ? "on" : "off", gpu2d_workers);
+
     if (cli_generated_firmware) frontend_options.generated_firmware = true;
     if (cli_freebios) frontend_options.freebios = true;
     if (frontend_options.freebios &&
@@ -2019,6 +2051,7 @@ int main(int argc, char** argv) {
                                  "executed\n");
         }
         nds_gpu3d_set_threaded(gpu3d_threaded);
+        nds_gpu2d_set_threaded(gpu2d_threaded, gpu2d_workers);
     };
     boot();
 
