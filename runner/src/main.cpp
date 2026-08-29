@@ -1982,24 +1982,28 @@ int main(int argc, char** argv) {
                                   g_dispatch_sm64ds_arm7_len, 0x00000000u);
 #ifdef NDS_HAVE_SM64DS_RAM_BANKS
             // Content-validated runtime-RAM bank (relocated sound engine +
-            // services); registered after the ROM-derived closure so the
-            // immutable payload rows win for their own address range.
+            // services). Registration order no longer decides anything but a
+            // rank tie (dispatch_lookup.h): where this bank and the ROM-derived
+            // closure both validate an address, the row proving the larger
+            // owned span wins.
             nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
                                   g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_RAM_BANKS
             // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
-            // overlays loaded over/past the static image); registered after
-            // the ROM-derived closure so the closure's rows win where the
-            // live bytes still match the static image.
+            // overlays loaded over/past the static image). Where the live
+            // bytes still match the static image both validate, and the
+            // closure's whole-function rows outrank this bank's capture-derived
+            // fragments on owned span (beads-lqa.40).
             nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
                                   g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
             // A later gameplay capture carries different overlay generations
             // at many of the same virtual addresses. Keep it in a separate
-            // content-validated bank: boot/title bytes above win when present,
-            // then this generation becomes eligible after the guest swaps it.
+            // content-validated bank: the two generations' expected bytes
+            // differ, so at most one of them validates at any instant and the
+            // selection between them is content, never order.
             nds_register_dispatch(NDS_ARM9,
                                   g_dispatch_sm64ds_arm9_ram_gameplay,
                                   g_dispatch_sm64ds_arm9_ram_gameplay_len,

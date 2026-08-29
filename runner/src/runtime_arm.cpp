@@ -735,8 +735,9 @@ struct StaticGuardScope {
 //     dispatcher on the very next transfer, which re-resolves through
 //     lookup_static_cached() and so re-runs the full byte-identity proof.
 //  4. Resolution itself always goes through lookup_static_cached(), never
-//     a private search, so registration priority and newest-live-identity
-//     selection are inherited rather than reimplemented.
+//     a private search, so the ranked winner among co-validating candidates
+//     (largest owned span, first-registered on a tie; dispatch_lookup.h) is
+//     inherited rather than reimplemented.
 //
 // The slot is pure cache: clearing one at any point is always correct.
 // Stable addresses: a slot stores a raw pointer to one of these. Cleared
