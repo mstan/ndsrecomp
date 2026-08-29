@@ -1,0 +1,8 @@
+# nds_recompile generated-C emission golden.
+# Regenerate: build codegen_golden_test and run it with --update.
+# See recompiler/src/codegen_identity.h for the contract.
+# corpus_digest covers the test's INPUTS (cases, flags,
+# configs, page bytes); digest covers the C they emit.
+codegen_version 1
+corpus_digest c39baee994e302ec7c0021ed0b9743a5bea67b34
+digest fe38abb07ec0da744effc093245d83be077ea60e
