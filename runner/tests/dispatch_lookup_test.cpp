@@ -81,14 +81,28 @@ int main() {
         {old_rows, 1u},
         {new_rows, 1u},
     };
+    // beads-lqa.40: two candidates that co-validate and own the SAME span are
+    // a rank tie, and a tie keeps the FIRST-registered row. The old contract
+    // (last registered wins) is gone: it made bank registration order, not the
+    // proven span, decide which body serves an address.
     ValidationState state{{&old_validation, &new_validation}, 2u};
     NdsDispatchLookupResult result = nds_dispatch_lookup_chain(
         chain, 2u, 0x02000000u, false, validation_live, &state);
-    if (!expect(result.selected == &new_rows[0],
-                "newest matching duplicate candidate should win"))
+    if (!expect(result.selected == &old_rows[0],
+                "co-validating candidates of equal span keep the "
+                "first-registered row"))
         return 1;
     if (!expect(result.candidate_count == 2u,
                 "duplicate candidates across banks should be counted"))
+        return 1;
+    const NdsDispatchBankView reversed_chain[] = {
+        {new_rows, 1u},
+        {old_rows, 1u},
+    };
+    result = nds_dispatch_lookup_chain(
+        reversed_chain, 2u, 0x02000000u, false, validation_live, &state);
+    if (!expect(result.selected == &new_rows[0],
+                "the tie-break must follow registration order, not identity"))
         return 1;
 
     state = ValidationState{{&old_validation}, 1u};
@@ -200,6 +214,116 @@ int main() {
                 result.candidate_count == 0u,
                 "bogus unmapped target should not resolve to a candidate"))
         return 1;
+
+    // ---- beads-lqa.40: rank by owned span, not by registration order -------
+    //
+    // MPH's capture-derived runtime banks hold two-instruction landing pads
+    // whose expected bytes are copied from the same guest image as the main
+    // closure's whole-function rows. Both validate at the same instant on
+    // ~88k addresses, and under the old last-registered-wins walk the FRAGMENT
+    // won: execution left through the dispatcher every two instructions.
+    static const uint8_t function_bytes[64] = {};
+    static const uint8_t fragment_bytes[8] = {};
+    static const NdsStaticValidation function_validation{
+        0x02010000u, sizeof(function_bytes), function_bytes};
+    static const NdsStaticValidation fragment_validation{
+        0x02010020u, sizeof(fragment_bytes), fragment_bytes};
+    const NdsDispatchEntry function_rows[] = {
+        {0x02010020u, 0u, root_body, &function_validation},
+    };
+    const NdsDispatchEntry fragment_rows[] = {
+        {0x02010020u, 0u, callee_body, &fragment_validation},
+    };
+    ValidationState both{{&function_validation, &fragment_validation}, 2u};
+
+    const NdsDispatchBankView fragment_last[] = {
+        {function_rows, 1u}, {fragment_rows, 1u},
+    };
+    result = nds_dispatch_lookup_chain(
+        fragment_last, 2u, 0x02010020u, false, validation_live, &both);
+    if (!expect(result.selected == &function_rows[0],
+                "a co-validating fragment registered LAST must not shadow the "
+                "whole function"))
+        return 1;
+    const NdsDispatchBankView fragment_first[] = {
+        {fragment_rows, 1u}, {function_rows, 1u},
+    };
+    result = nds_dispatch_lookup_chain(
+        fragment_first, 2u, 0x02010020u, false, validation_live, &both);
+    if (!expect(result.selected == &function_rows[0],
+                "a co-validating fragment registered FIRST must not shadow the "
+                "whole function either"))
+        return 1;
+
+    // The runner resolves through the flat index, so pin it there too, in the
+    // exact MPH registration order (main closure, then the capture bank).
+    std::vector<const NdsDispatchEntry*> span_index;
+    nds_dispatch_index_add(span_index, function_rows, 1u);
+    nds_dispatch_index_add(span_index, fragment_rows, 1u);
+    result = nds_dispatch_lookup_index(
+        span_index, 0x02010020u, false, validation_live, &both);
+    if (!expect(result.selected == &function_rows[0] &&
+                    result.candidate_count == 2u,
+                "the flat index must select the largest owned span"))
+        return 1;
+    // ... and the fragment is still the answer when the function's identity is
+    // stale, so ranking costs no coverage.
+    ValidationState fragment_only{{&fragment_validation}, 1u};
+    result = nds_dispatch_lookup_index(
+        span_index, 0x02010020u, false, validation_live, &fragment_only);
+    if (!expect(result.selected == &fragment_rows[0] &&
+                    result.inactive == &function_rows[0],
+                "a fragment must still run when the larger span is not live"))
+        return 1;
+
+    // ---- beads-lqa.40: an unvalidated row is live but proves nothing -------
+    //
+    // Immutable BIOS/ROM banks leave validation null. Such a row is
+    // unconditionally live yet declares no span, so it ranks below every live
+    // validating candidate and wins only when none of them is live.
+    const NdsDispatchEntry immutable_rows[] = {
+        {0x02010020u, 0u, old_body, nullptr},
+    };
+    std::vector<const NdsDispatchEntry*> null_index;
+    nds_dispatch_index_add(null_index, immutable_rows, 1u);
+    nds_dispatch_index_add(null_index, function_rows, 1u);
+    result = nds_dispatch_lookup_index(
+        null_index, 0x02010020u, false, validation_live, &both);
+    if (!expect(result.selected == &function_rows[0],
+                "a live validating candidate must outrank an unvalidated row"))
+        return 1;
+    ValidationState none{{}, 0u};
+    result = nds_dispatch_lookup_index(
+        null_index, 0x02010020u, false, validation_live, &none);
+    if (!expect(result.selected == &immutable_rows[0] &&
+                    result.inactive == &function_rows[0],
+                "an unvalidated row must serve the address when nothing "
+                "validates"))
+        return 1;
+    // Registration order must not change that verdict either way.
+    std::vector<const NdsDispatchEntry*> null_last_index;
+    nds_dispatch_index_add(null_last_index, function_rows, 1u);
+    nds_dispatch_index_add(null_last_index, immutable_rows, 1u);
+    result = nds_dispatch_lookup_index(
+        null_last_index, 0x02010020u, false, validation_live, &both);
+    if (!expect(result.selected == &function_rows[0],
+                "an unvalidated row registered last must not shadow a live "
+                "validating candidate"))
+        return 1;
+
+    // ---- beads-lqa.40: equal spans resolve deterministically ---------------
+    ValidationState tie_state{{&old_validation, &new_validation}, 2u};
+    std::vector<const NdsDispatchEntry*> tie_index;
+    nds_dispatch_index_add(tie_index, old_rows, 1u);
+    nds_dispatch_index_add(tie_index, new_rows, 1u);
+    for (unsigned repeat = 0u; repeat < 4u; ++repeat) {
+        result = nds_dispatch_lookup_index(
+            tie_index, 0x02000000u, false, validation_live, &tie_state);
+        if (!expect(result.selected == &old_rows[0],
+                    "an equal-span tie must resolve to the first-registered "
+                    "row on every lookup"))
+            return 1;
+    }
 
     if (!expect(nds_dispatch_miss_decision(true, true) ==
                     NdsDispatchMissDecision::Tier3,

@@ -1251,37 +1251,20 @@ bool commit_prepared_bank(LoadedBank bank) {
             loaded.handle = nullptr;
         }
     }
-    const int bank_cpu = bank.cpu;
-    const std::string bank_id = bank.bank_id;
-    const std::string bank_generation = bank.generation_id;
-    const uint32_t bank_tier = bank.backend_tier;
     bank.serial = g_live.next_bank_serial++;
     bank.generation = static_cast<uint32_t>(++g_live.publication_generation);
     g_live.loaded.push_back(std::move(bank));
     register_loaded_bank(g_live.loaded.back());
     ++g_live.banks_loaded;
-    // beads-lqa.40 interaction: nds_dispatch_lookup_index() walks the whole
-    // run of rows at a PC and selects the LAST live one, so registration order
-    // decides which body serves an address two banks share. Co-registering a
-    // divergent candidate (above) therefore hands the shared addresses to
-    // whoever arrived last -- fine between two banks of the same backend, which
-    // are the same recompiler over the same bytes, but NOT when the newcomer is
-    // the weaker compiler. Put every strictly better same-generation bank back
-    // at the end of the index so it keeps the addresses it shares, while the
-    // newcomer still contributes the rows nobody else has.
-    for (std::size_t i = 0u; i + 1u < g_live.loaded.size(); ++i) {
-        LoadedBank& loaded = g_live.loaded[i];
-        if (!loaded.registered || loaded.superseded ||
-            loaded.cpu != bank_cpu || loaded.bank_id != bank_id ||
-            loaded.generation_id != bank_generation ||
-            loaded.backend_tier <= bank_tier) {
-            continue;
-        }
-        nds_unregister_dispatch(loaded.cpu, loaded.dispatch,
-                                loaded.dispatch_len);
-        nds_register_dispatch(loaded.cpu, loaded.dispatch,
-                              loaded.dispatch_len, loaded.exc_base);
-    }
+    // beads-lqa.40: co-registering a divergent same-generation candidate no
+    // longer costs the better backend the addresses the two banks share.
+    // Selection ranks candidates by owned span and breaks ties by
+    // FIRST-registered (dispatch_lookup.h), and two shards of one generation
+    // are the same guest bytes, so their shared rows always tie: the bank that
+    // was adopted first keeps them. Ordering the cache scan best-backend-first
+    // (rescan_cache) is what makes "first" mean "best"; the previous
+    // unregister/re-register dance that pushed the better bank to the end of
+    // the index is gone with the last-registered-wins accident it worked around.
     std::fprintf(stderr,
                  "[live-overlay] published %s candidate %s (%u rows, generation %u)\n",
                  g_live.loaded.back().bank_id.c_str(),
@@ -1395,13 +1378,17 @@ void rescan_cache() {
         }
         paths.push_back({path, write_time, backend_tier(path)});
     }
-    // Weakest backend first, so that when a cold scan finds both a tcc and a
-    // gcc shard for one generation the gcc one is queued LAST and therefore
-    // supersedes. Within a tier the original oldest-first ordering stands, so
-    // the newest revision of a generation still wins on recompile.
+    // Best backend FIRST (beads-lqa.40). When a cold scan finds both a tcc and
+    // a gcc shard for one generation, the gcc one is adopted first and the tcc
+    // one is then declined outright (it covers nothing the resident lacks) or,
+    // if it carries an extra root, co-registered -- where the dispatch rank's
+    // first-registered tie-break leaves the shared addresses with the gcc bank.
+    // Queuing the weaker shard first would hand it those addresses instead.
+    // Within a tier the original oldest-first ordering stands, so the newest
+    // revision of a generation still supersedes on recompile.
     std::sort(paths.begin(), paths.end(), [](const CachedDllPath& a,
                                              const CachedDllPath& b) {
-        if (a.tier != b.tier) return a.tier < b.tier;
+        if (a.tier != b.tier) return a.tier > b.tier;
         if (a.write_time != b.write_time) return a.write_time < b.write_time;
         return lower_ascii(path_string(a.path)) <
             lower_ascii(path_string(b.path));
