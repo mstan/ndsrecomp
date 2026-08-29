@@ -19,6 +19,7 @@
 #include "bus.h"
 
 #include "runtime_arm.h"
+#include "dispatch_lookup.h"
 #include "state.h"
 #include "io.h"
 #include "coverage_manifest.h"
@@ -246,12 +247,40 @@ void tier3_run(uint32_t /*entry*/) {
     // traversal to reveal one missing dispatch entry per rebuild. The
     // coverage map already deduplicates (CPU, PC, mode, kind) and counts
     // hits, so retain the complete root surface in one discovery pass.
-    coverage_note(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0u,
-                  TIER3_COVERAGE_ROOT, g_cpu.R[14]);
-    coverage_note_generation_entry(
-        g_nds_active == NDS_ARM7 ? 1 : 0, g_cpu.R[15],
-        (g_cpu.cpsr & CPSR_T_BIT) != 0u, TIER3_COVERAGE_ROOT,
-        g_cpu.R[14]);
+    //
+    // beads-yjp.62: this entry is also the ONLY moment that proves a rewritten
+    // guest code window (ITCM, a swapped overlay, a runtime copy) is resident
+    // right now, so a live shard that failed its guard-bytes preflight in some
+    // other scene gets re-queued from here. The same answer suppresses the
+    // filing below: commissioning the compiler for a page whose shard is
+    // already sitting in the cache, unactivated, is what kept a fresh install
+    // recompiling the same pages run after run.
+    const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
+    const uint32_t entry_pc = g_cpu.R[15] & ~1u;
+    const bool entry_dormant =
+        live_overlay_note_tier3_entry(g_nds_active, entry_pc);
+    // Both withholding rules in one place (dispatch_lookup.h). The second
+    // argument is deliberately nds_has_bank(), which returns a SELECTED row --
+    // one whose validation proved byte-identical against guest memory right
+    // now -- and never a merely-present one, so an address owned by a stale
+    // overlay generation still files as the uncovered work it is.
+    //
+    // Cost: one lookup_static_cached() probe per Tier-3 ENTRY, not per
+    // interpreted instruction, and it is the same probe the dispatcher just
+    // took to decide it had to enter Tier 3 at all -- so it lands on that
+    // slot's cached-absent hit with no byte comparison. The comparison only
+    // re-runs when the dispatch epoch bumps or a guest write moves one of the
+    // validation's backing page generations, which is exactly the
+    // per-(cpu, page, generation) amortization this needs.
+    if (nds_tier3_file_decision(entry_dormant,
+                                nds_has_bank(entry_pc, entry_thumb ? 1 : 0) !=
+                                    0) == NdsTier3FileDecision::File) {
+        coverage_note(g_cpu.R[15], entry_thumb, TIER3_COVERAGE_ROOT,
+                      g_cpu.R[14]);
+        coverage_note_generation_entry(
+            g_nds_active == NDS_ARM7 ? 1 : 0, g_cpu.R[15], entry_thumb,
+            TIER3_COVERAGE_ROOT, g_cpu.R[14]);
+    }
     ++g_stats.entries[cpu_index];
     CPUState ic;
     sync_in(ic);
@@ -343,7 +372,21 @@ void tier3_run(uint32_t /*entry*/) {
         if (pending_entry) {
             // Resolve the transfer observation held from the previous
             // iteration against the takeover answer for its own target.
-            if (!covered && (pending_pc & ~1u) == (pc & ~1u)) {
+            //
+            // Same rule as the ROOT filing above, same order, one helper
+            // (dispatch_lookup.h). `covered` is nds_has_bank() for THIS pc,
+            // which the pending_pc == pc guard makes the pending target's own
+            // answer -- and it is a live-validity answer, not a presence one,
+            // so an address owned only by a stale overlay generation still
+            // files. What it does NOT catch is a page whose shard exists but
+            // is dormant; filing that one puts the page straight back on the
+            // live compiler's work list, which is how one field session spent
+            // twelve runs recompiling the pages its own cache already held.
+            if ((pending_pc & ~1u) == (pc & ~1u) &&
+                nds_tier3_file_decision(
+                    live_overlay_dormant_covers(g_nds_active,
+                                                pending_pc & ~1u),
+                    covered) == NdsTier3FileDecision::File) {
                 coverage_note(pending_pc, pending_thumb, pending_kind,
                               pending_caller);
                 coverage_note_generation_entry(

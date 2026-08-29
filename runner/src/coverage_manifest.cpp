@@ -309,6 +309,14 @@ bool any_bits(const std::array<uint8_t, N>& data) {
     return false;
 }
 
+// Does this page carry ANY interpreted-span root? The hits array is
+// deliberately not consulted: it is a per-block counter that says how often,
+// while the two bitmaps are what say whether an address was ever a root at
+// all, and a promotable observation is an address, not a count.
+bool any_roots(const RootBits& roots) {
+    return any_bits(roots.arm) || any_bits(roots.thumb);
+}
+
 void append_root_bits(std::string& out, const RootBits& roots) {
     if (any_bits(roots.arm)) {
         out += ", \"root_arm\": \"";
@@ -677,9 +685,25 @@ static void capture_manifest_snapshot(uint32_t live_max_pages,
 
     std::vector<uint32_t> page_indices;
     page_indices.reserve(g_pages.size());
+    // beads-yjp.62: a page qualifies for the LIVE snapshot on entry points OR
+    // on roots. Entry points alone was the whole starvation: since
+    // beads-yjp.53/.55 a fresh install's coverage is ROOT-ONLY -- the deferred
+    // filing rule records a call/indirect entry point only when the
+    // interpreter resolves a transfer whose target has no live bank, and a
+    // cold session spends its time in straight-line interpreted spans that
+    // produce root-map bits and nothing else. A tester's own manifest shows
+    // it: 27 captured pages, 2 with a non-empty entry_points array. Filtering
+    // the other 25 out here starves the provider no matter what the compiler
+    // is told, which is why passing --include-roots to it (main.cpp,
+    // bundled_tcc_command) is necessary but not sufficient -- the flag can
+    // only widen the selection over pages the snapshot actually carries.
+    // Recency sort and the max_pages cap below are unchanged; this only
+    // decides which pages are eligible to be sorted.
     for (uint32_t i = 0; i < g_pages.size(); ++i) {
-        if (live_max_pages == 0u || !g_pages[i].entry_indices.empty())
+        if (live_max_pages == 0u || !g_pages[i].entry_indices.empty() ||
+            any_roots(g_pages[i].roots)) {
             page_indices.push_back(i);
+        }
     }
     if (live_max_pages != 0u) {
         std::sort(page_indices.begin(), page_indices.end(),

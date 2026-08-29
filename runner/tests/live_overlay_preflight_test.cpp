@@ -38,8 +38,15 @@ bool coverage_manifest_write_captured_snapshot(const CoverageLiveSnapshot*,
 void coverage_manifest_release_snapshot(CoverageLiveSnapshot* snapshot) {
     delete snapshot;
 }
-bool bus_range_has_write_provenance(uint32_t, uint32_t) { return false; }
-bool bus_live_bytes_equal(uint32_t, const uint8_t*, uint32_t) { return false; }
+// beads-yjp.62: the guard-bytes preflight now runs before a prepared shard is
+// adopted, so "is the guest code resident right now" has to be steerable from
+// the unit layer. Default false, which is the state a fresh install is in for
+// every overlay/ITCM window that is not the scene currently on screen.
+bool g_bytes_live = false;
+bool bus_range_has_write_provenance(uint32_t, uint32_t) { return g_bytes_live; }
+bool bus_live_bytes_equal(uint32_t, const uint8_t*, uint32_t) {
+    return g_bytes_live;
+}
 
 namespace {
 
@@ -605,7 +612,176 @@ int main() {
     live_overlay_shutdown();
 #endif
 
+#if defined(_WIN32)
+    // ---- beads-yjp.62: dormant shards, woken by a Tier-3 entry ----------
+    //
+    // A shard for a per-scene guest code window (ITCM 0x01FF8000, a swapped
+    // ARM9 overlay, a runtime copy) preflights only at two moments: when a
+    // finished compile run's log is read and when the cache is rescanned. On
+    // a human's play rhythm those land in the wrong scene, so a field bundle
+    // from a fresh install showed 307 guard-bytes failures, ZERO banks, and
+    // twelve compile runs commissioned to reproduce shards the cache already
+    // held. The fix keeps such a candidate DORMANT and re-preflights it when
+    // the interpreter proves its code is resident -- without ever relaxing
+    // the rule that a shard activates only when its guard bytes match.
+    static const NdsStaticValidation dormant_owner_a{
+        0x02300000u, sizeof(bytes_a), bytes_a};
+    static const NdsStaticValidation dormant_owner_b{
+        0x02400000u, sizeof(bytes_a), bytes_a};
+    const NdsDispatchEntry dormant_rows_a[] = {
+        {0x02300000u, 0u, body_a, &dormant_owner_a},
+        {0x02300004u, 0u, body_a, &dormant_owner_a},
+    };
+    const NdsDispatchEntry dormant_rows_b[] = {
+        {0x02400000u, 0u, body_b, &dormant_owner_b},
+    };
+    constexpr const char* kDormantPathA = "C:/cache/gcc/dormant-a.dll";
+    constexpr const char* kDormantPathB = "C:/cache/gcc/dormant-b.dll";
+
+    live_overlay_configure(true, false, 0u, 0u, 0u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    const unsigned long long dormant_rejected_before =
+        status_number("banks_rejected");
+    g_bytes_live = false;
+    if (!expect(!live_overlay_admit_bank_for_test(
+                    NDS_ARM9, "yjp62_bank", "cand-dormant", "generation-F", 2u,
+                    kDormantPathA, dormant_rows_a, 2u),
+                "a shard whose guest code is not resident must NOT activate"))
+        return 1;
+    if (!expect(status_number("dormant_candidates") == 1ull &&
+                status_number("defer_dormant_guard_bytes") == 1ull,
+                "the deferred shard must be held dormant, and counted"))
+        return 1;
+    if (!expect(live_overlay_status_json().find(
+                    "\"candidate_id\":\"cand-dormant\"") == std::string::npos,
+                "a dormant candidate must not be resident"))
+        return 1;
+
+    // Fix 2: its pages stop being filed as Tier-3 coverage, so the compiler
+    // is no longer commissioned for output that already exists.
+    if (!expect(live_overlay_dormant_covers(NDS_ARM9, 0x02300004u),
+                "a dormant candidate's pages must suppress coverage filing"))
+        return 1;
+    if (!expect(!live_overlay_dormant_covers(NDS_ARM7, 0x02300004u),
+                "dormancy is per CPU; the other core must still file"))
+        return 1;
+    if (!expect(!live_overlay_dormant_covers(NDS_ARM9, 0x02500000u),
+                "an unrelated page must stay filable"))
+        return 1;
+
+    // Fix 1: the Tier-3 ENTRY is the proof of residency, and it re-queues.
+    if (!expect(!live_overlay_note_tier3_entry(NDS_ARM9, 0x02500000u) &&
+                status_number("dormant_requeues") == 0ull,
+                "a Tier-3 entry outside every dormant range must do nothing"))
+        return 1;
+    if (!expect(live_overlay_note_tier3_entry(NDS_ARM9, 0x02300000u) &&
+                status_number("dormant_requeues") == 1ull &&
+                status_number("preparing_banks") == 1ull,
+                "a Tier-3 entry inside a dormant range must re-queue the "
+                "candidate for another preflight"))
+        return 1;
+    live_overlay_note_tier3_entry(NDS_ARM9, 0x02300004u);
+    if (!expect(status_number("dormant_requeues") == 1ull &&
+                status_number("preparing_banks") == 1ull,
+                "an outstanding re-queue must not be pushed a second time"))
+        return 1;
+
+    // The re-preflight now finds the scene up: the shard activates, and only
+    // now -- the guard-bytes contract is what decides, exactly as before.
+    g_bytes_live = true;
+    if (!expect(live_overlay_admit_bank_for_test(
+                    NDS_ARM9, "yjp62_bank", "cand-dormant", "generation-F", 2u,
+                    kDormantPathA, dormant_rows_a, 2u),
+                "a re-preflighted dormant shard whose bytes now match must "
+                "activate"))
+        return 1;
+    if (!expect(status_number("dormant_candidates") == 0ull &&
+                status_number("dormant_activations") == 1ull,
+                "activation must clear the dormant record and be counted"))
+        return 1;
+    if (!expect(status_count("\"candidate_id\":\"cand-dormant\"") == 1u,
+                "the activated candidate must be resident"))
+        return 1;
+    if (!expect(!live_overlay_dormant_covers(NDS_ARM9, 0x02300004u),
+                "an activated candidate's pages are covered by a bank now, "
+                "not by a dormant record"))
+        return 1;
+
+    // Attempts are capped. A candidate that never finds its bytes is parked --
+    // and parking must leave NOTHING behind, because the two halves of the
+    // release are what keep progress possible. Releasing only the pages
+    // resumed coverage filing while the path stayed in queued_paths, so the
+    // compiler was commissioned for the page, republished a byte-identical
+    // DLL under the same content-addressed path, and enqueue_candidate refused
+    // it as already-seen: filing forever, preparing never. Seed the
+    // queued-paths set the way a real scan would, so the release is observable
+    // through the production queueing path rather than asserted about state.
+    g_bytes_live = false;
+    if (!expect(live_overlay_enqueue_path_for_test(kDormantPathB),
+                "a path the queue has not seen must be accepted"))
+        return 1;
+    if (!expect(!live_overlay_enqueue_path_for_test(kDormantPathB),
+                "queued_paths must refuse a path it already holds -- this is "
+                "the dedup that a stale parked key turns into a dead end"))
+        return 1;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (!expect(!live_overlay_admit_bank_for_test(
+                        NDS_ARM9, "yjp62_bank", "cand-parked", "generation-G",
+                        2u, kDormantPathB, dormant_rows_b, 1u),
+                    "a shard that never finds its bytes must never activate"))
+            return 1;
+    }
+    if (!expect(status_number("dormant_parked") == 1ull &&
+                status_number("defer_dormant_parked") == 1ull &&
+                status_number("dormant_candidates") == 0ull,
+                "a candidate must be parked once its attempt cap is spent"))
+        return 1;
+    if (!expect(!live_overlay_dormant_covers(NDS_ARM9, 0x02400000u) &&
+                !live_overlay_note_tier3_entry(NDS_ARM9, 0x02400000u),
+                "a parked candidate must hand its pages back to the compiler "
+                "and stop being re-queued"))
+        return 1;
+    // Half one of the release: the key is gone, so the recompiled or merely
+    // rescanned DLL can reach the prepare worker again.
+    if (!expect(live_overlay_enqueue_path_for_test(kDormantPathB),
+                "parking must release the queued-paths key, or the page is "
+                "filed forever and never prepared again"))
+        return 1;
+    // Half two: the record is gone, so the candidate that comes back gets a
+    // FRESH attempt budget instead of parking on its first miss.
+    if (!expect(!live_overlay_admit_bank_for_test(
+                    NDS_ARM9, "yjp62_bank", "cand-parked", "generation-G", 2u,
+                    kDormantPathB, dormant_rows_b, 1u),
+                "the re-prepared candidate still must not activate"))
+        return 1;
+    if (!expect(status_number("dormant_candidates") == 1ull &&
+                status_number("dormant_parked") == 1ull,
+                "a re-prepared candidate must start a fresh dormant record "
+                "with a fresh attempt budget, not park again immediately"))
+        return 1;
+    if (!expect(live_overlay_dormant_covers(NDS_ARM9, 0x02400000u),
+                "the fresh dormant record must suppress filing again"))
+        return 1;
+    if (!expect(status_number("banks_rejected") == dormant_rejected_before,
+                "deferral is NOT rejection: banks_rejected must not move, or "
+                "the futility guard would suppress a healthy provider on any "
+                "install whose scenes simply were not up at preflight time"))
+        return 1;
+
+    NdsLiveOverlaySummary dormant_summary{};
+    live_overlay_summary(&dormant_summary);
+    if (!expect(dormant_summary.dormant_candidates == 1ull &&
+                dormant_summary.dormant_activations == 1ull &&
+                dormant_summary.dormant_parked == 1ull &&
+                dormant_summary.dormant_requeues == 1ull,
+                "the diagnostics summary must carry the dormant counters"))
+        return 1;
+    live_overlay_shutdown();
+    g_bytes_live = false;
+#endif
+
     std::puts("PASS: live overlay preflight rejects malformed bundles; "
-              "adaptive queue policy, futility guard and gcc tie-break hold");
+              "adaptive queue policy, futility guard, gcc tie-break and "
+              "beads-yjp.62 dormant activation hold");
     return 0;
 }

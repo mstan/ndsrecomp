@@ -338,6 +338,65 @@ int main() {
                 "unmapped bogus miss should remain fatal"))
         return 1;
 
-    std::puts("PASS: dispatch lookup resolves live candidate chains safely");
+    // ---- beads-yjp.56 / .62: what counts as COVERED for coverage filing ----
+    //
+    // A Tier-3 observation is filed only when nobody already holds usable
+    // output for the address. "Somebody has a row here" is not that test: a
+    // row whose expected bytes belong to a different overlay generation owns
+    // the address and can execute none of what is actually resident, so an
+    // owned-but-STALE address is real work and must file. Getting this wrong
+    // hands the live compiler empty batches while the interpreter carries the
+    // whole scene -- runs that finish clean with +0 shards.
+    //
+    // The lookup already draws the line: a stale owner lands in `inactive`
+    // and never in `selected`. These cases pin that the FILING rule consumes
+    // `selected` (live-valid) and not presence, and that dormancy outranks it.
+    std::vector<const NdsDispatchEntry*> filing_index;
+    nds_dispatch_index_add(filing_index, old_rows, 1u);
+
+    // (a) The row is present and owns 0x02000000, but its bytes are not the
+    //     bytes in guest memory. Uncovered: FILE.
+    ValidationState stale_state{{}, 0u};
+    result = nds_dispatch_lookup_index(
+        filing_index, 0x02000000u, false, validation_live, &stale_state);
+    if (!expect(result.selected == nullptr &&
+                result.inactive == &old_rows[0] &&
+                result.candidate_count == 1u,
+                "an owning row whose bytes are stale must be reported "
+                "inactive, never selected"))
+        return 1;
+    if (!expect(nds_tier3_file_decision(false, result.selected != nullptr) ==
+                    NdsTier3FileDecision::File,
+                "an owned-but-STALE address is uncovered work and must file, "
+                "or the live compiler is commissioned with empty batches "
+                "while the interpreter carries the scene"))
+        return 1;
+
+    // (b) Same row, now byte-identical with what is resident. Covered: SKIP.
+    ValidationState live_state{{&old_validation}, 1u};
+    result = nds_dispatch_lookup_index(
+        filing_index, 0x02000000u, false, validation_live, &live_state);
+    if (!expect(result.selected == &old_rows[0],
+                "a live-valid owning row must be selected"))
+        return 1;
+    if (!expect(nds_tier3_file_decision(false, result.selected != nullptr) ==
+                    NdsTier3FileDecision::SkipLiveBank,
+                "an address a live-valid row serves must not be filed again"))
+        return 1;
+
+    // (c) Dormancy outranks both: compiled output already exists for the
+    //     page, it just could not be activated in the scene that was up when
+    //     it was preflighted. Filing it commissions a byte-identical shard
+    //     that will be deferred identically.
+    if (!expect(nds_tier3_file_decision(true, false) ==
+                    NdsTier3FileDecision::SkipDormant &&
+                nds_tier3_file_decision(true, true) ==
+                    NdsTier3FileDecision::SkipDormant,
+                "a dormant candidate must suppress filing whether or not a "
+                "live-valid row also covers the address"))
+        return 1;
+
+    std::puts("PASS: dispatch lookup resolves live candidate chains safely; "
+              "Tier-3 filing skips only dormant or live-valid coverage");
     return 0;
 }

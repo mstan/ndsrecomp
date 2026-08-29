@@ -190,6 +190,42 @@ inline NdsDispatchLookupResult nds_dispatch_lookup_index(
     return result;
 }
 
+// ---- Tier-3 coverage filing rule (beads-yjp.56 / beads-yjp.62) ------------
+//
+// Filing a Tier-3 observation is what puts its page on the live compiler's
+// work list, so both reasons to withhold one belong in a single rule, and
+// their ORDER is load-bearing:
+//
+//   1. DORMANT wins. Compiled output for the page already exists; it merely
+//      could not be activated in whatever scene was up when it was
+//      preflighted. Commissioning the compiler for it yields a byte-identical
+//      shard that is deferred identically -- which is how a fresh install
+//      spent twelve compile runs reproducing shards its own cache held.
+//   2. Otherwise skip only if a bank row at this address is LIVE-VALID.
+//
+// The second clause is the one that is easy to get wrong, and getting it
+// wrong is silent in both directions. "A row exists at this address" is NOT
+// coverage: a row whose expected bytes belong to a different overlay
+// generation owns the address without being able to execute one instruction
+// of what is actually resident. An owned-but-STALE address is real,
+// uncovered work and MUST file, or the compiler is handed empty batches while
+// the interpreter carries the whole scene. nds_dispatch_lookup_index()
+// already draws exactly this line -- `selected` is only ever a candidate the
+// validation predicate accepted, and `inactive` is where an owning-but-stale
+// row goes -- so the caller asks for a SELECTED row, never for presence.
+enum class NdsTier3FileDecision : uint8_t {
+    File,
+    SkipDormant,
+    SkipLiveBank,
+};
+
+inline NdsTier3FileDecision nds_tier3_file_decision(bool dormant_covered,
+                                                    bool live_valid_bank) {
+    if (dormant_covered) return NdsTier3FileDecision::SkipDormant;
+    if (live_valid_bank) return NdsTier3FileDecision::SkipLiveBank;
+    return NdsTier3FileDecision::File;
+}
+
 inline NdsDispatchMissDecision nds_dispatch_miss_decision(
         bool mapped_writable_ram, bool has_write_provenance) {
     return (mapped_writable_ram && has_write_provenance)

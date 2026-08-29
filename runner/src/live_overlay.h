@@ -23,6 +23,19 @@ void live_overlay_shutdown();
 void live_overlay_runtime_reset();
 void live_overlay_register_cached_banks();
 void live_overlay_note_tier3(int cpu, uint32_t pc);
+// Tier-3 ENTRY hook -- once per tier3_run(), NOT once per interpreted
+// instruction (beads-yjp.62). Entering the interpreter at `pc` is the proof
+// that the guest code a dormant candidate was compiled from is resident right
+// now, which is the one observation the compile-finish and cache-rescan
+// preflight moments cannot make; the entry re-queues that candidate for
+// another preflight. Returns whether `pc` is covered by a dormant candidate,
+// so the caller can suppress its coverage filing without a second lookup.
+// Costs one relaxed atomic load when the overlay is off or nothing is dormant.
+bool live_overlay_note_tier3_entry(int cpu, uint32_t pc);
+// Is `pc` inside a candidate whose compiled output we already hold but could
+// not activate yet? Filing such an address as Tier-3 coverage commissions the
+// live compiler to reproduce a shard that is already sitting in the cache.
+bool live_overlay_dormant_covers(int cpu, uint32_t pc);
 void live_overlay_note_transfer(int cpu, uint32_t source_pc, uint32_t target,
                                 uint32_t lr, uint32_t cpsr, uint32_t type);
 void live_overlay_note_lookup(int cpu, uint32_t pc, uint32_t target_pc,
@@ -114,6 +127,19 @@ struct NdsLiveOverlaySummary {
     // which is invisible in any bank count.
     uint64_t rows_superseded;
     uint64_t rows_superseding;
+    // beads-yjp.62 dormant-shard activation. A shard whose target guest code
+    // is not resident at preflight time is held rather than discarded, so a
+    // fresh install no longer burns compile runs reproducing shards it
+    // already has. dormant_candidates is the count held RIGHT NOW;
+    // dormant_activations is how many a Tier-3 entry proof later woke;
+    // dormant_parked is how many gave up after kDormantMaxAttempts, dropping
+    // both the record and its queued-paths key so the page goes back to the
+    // compiler AND a republished shard can be prepared afresh; dormant_requeues
+    // counts the entry proofs themselves.
+    uint64_t dormant_candidates;
+    uint64_t dormant_activations;
+    uint64_t dormant_parked;
+    uint64_t dormant_requeues;
 };
 void live_overlay_summary(NdsLiveOverlaySummary* out);
 
@@ -141,3 +167,20 @@ bool live_overlay_commit_bank_for_test(int cpu, const char* bank_id,
                                        unsigned dispatch_len);
 bool live_overlay_generation_registered_for_test(const char* generation_id,
                                                  unsigned* backend_tier_out);
+// Test-only: put a prepared bank through the REAL admission gate -- the
+// beads-yjp.62 guard-bytes preflight and, on failure, the dormant registry --
+// instead of straight into the adoption path. `path_key` stands in for the
+// canonical DLL path that identifies the candidate across attempts. Returns
+// whether the bank became resident; false means it went dormant (or parked).
+// Test-only: run a canonical path key through the REAL queueing path.
+// Returns whether it was newly queued; false means the queued-paths set
+// already held it and the prepare worker will never see it again. That set is
+// the seam parking has to release, so this is how the release is observed.
+bool live_overlay_enqueue_path_for_test(const char* path_key);
+bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
+                                      const char* candidate_id,
+                                      const char* generation_id,
+                                      unsigned backend_tier,
+                                      const char* path_key,
+                                      const NdsDispatchEntry* dispatch,
+                                      unsigned dispatch_len);

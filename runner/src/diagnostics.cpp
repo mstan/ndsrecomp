@@ -99,6 +99,19 @@ std::string overlay_reject_json(const NdsLiveOverlaySummary& overlay) {
     out += std::to_string(overlay.rows_superseded);
     out += ",\"rows_superseding\":";
     out += std::to_string(overlay.rows_superseding);
+    // beads-yjp.62: compiled output held back because its target guest code
+    // was not resident when it was preflighted, plus how much of it a Tier-3
+    // entry proof has since woken and how much was given up on. A bundle
+    // showing dormant_candidates climbing with dormant_activations at zero is
+    // a live-overlay that is paying for compiles it never gets to use.
+    out += ",\"dormant_candidates\":";
+    out += std::to_string(overlay.dormant_candidates);
+    out += ",\"dormant_activations\":";
+    out += std::to_string(overlay.dormant_activations);
+    out += ",\"dormant_parked\":";
+    out += std::to_string(overlay.dormant_parked);
+    out += ",\"dormant_requeues\":";
+    out += std::to_string(overlay.dormant_requeues);
     out += ",\"reject_reasons\":{";
     for (uint32_t i = 0u; i < overlay.reason_count; ++i) {
         if (i) out += ',';

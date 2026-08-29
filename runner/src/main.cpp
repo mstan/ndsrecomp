@@ -364,6 +364,24 @@ std::string bundled_tcc_command(const std::filesystem::path& exe_dir) {
         // reaches the child in NDS_LIVE_OVERLAY_MAX_PAGES alongside the other
         // NDS_LIVE_OVERLAY_* variables. Hard-coding it here would pin every
         // player at the 6-per-run ceiling that never converged.
+        //
+        // --include-roots is NOT optional for a shipped install (beads-yjp.62).
+        // Since beads-yjp.53/.55 a fresh install's coverage is ROOT-ONLY: the
+        // deferred filing rule only records a call/indirect entry point when
+        // the interpreter resolves a transfer whose target has no live bank,
+        // and a cold session spends its time in straight-line interpreted
+        // spans, which produce root-map bits and no entry_points at all. A
+        // tester's own manifest shows it exactly: 27 captured pages, 2 with a
+        // non-empty entry_points array. Without this flag canonical_entries()
+        // drops the other 25, every run finishes clean with zero shards
+        // published, and the live tier starves forever.
+        //
+        // Safe for cache identity: provider_identity() deliberately EXCLUDES
+        // the run-mode flags (see its docstring), so adding this does not
+        // move the provider id and does not orphan an existing shipped cache.
+        // The wider candidate set shows up where it belongs, in work_identity()
+        // and the emitted config.
+        " --include-roots"
         " --min-hits 8";
 }
 

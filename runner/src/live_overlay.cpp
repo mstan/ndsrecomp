@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -142,7 +143,17 @@ enum class DiagKind : uint8_t {
     X(GuardRowNotOwned,            "guard_row_not_owned")                     \
     X(GuardRangeMalformed,         "guard_range_malformed")                   \
     X(GuardNoProvenance,           "guard_no_provenance")                     \
-    X(GuardBytesDiffer,            "guard_bytes_differ")
+    X(GuardBytesDiffer,            "guard_bytes_differ")                     \
+    /* beads-yjp.62 -- a fourth family, defer_*. The shard loaded and passed  \
+       every structural check, but the guest code it was compiled from is     \
+       NOT resident at this instant, so it is held DORMANT instead of         \
+       adopted. Deliberately outside banks_rejected and deliberately not      \
+       futility evidence: nothing is wrong with the shard, the scene is       \
+       simply elsewhere. A dormant candidate is re-preflighted the moment the \
+       Tier-3 interpreter proves its code is resident again, and parked for   \
+       good after kDormantMaxAttempts fruitless tries. */                     \
+    X(DeferDormantGuardBytes,      "defer_dormant_guard_bytes")              \
+    X(DeferDormantParked,          "defer_dormant_parked")
 
 enum class RejectReason : uint8_t {
 #define NDS_LIVE_REJECT_ENUM(id, name) id,
@@ -221,6 +232,44 @@ struct LoadedBank {
 #if defined(_WIN32)
     HMODULE handle = nullptr;
 #endif
+};
+
+// ---- dormant candidates (beads-yjp.62) ------------------------------------
+//
+// A live shard targets a guest code window the game REWRITES per scene: ITCM
+// at 0x01FF8000, a swapped ARM9 overlay, a runtime copy. Its guard bytes are
+// therefore resident only while that scene is up. Preflight, however, runs at
+// exactly two moments -- when a finished compile run's log is read, and when
+// the shard cache is rescanned -- and on a human's play rhythm those moments
+// land in some other scene. A field bundle from a fresh install shows the
+// steady state that produces: 307 guard-bytes failures, zero banks adopted,
+// and twelve compile runs commissioned to recompile the very pages whose
+// shards were already sitting in the cache. All cost, no benefit, and
+// self-sustaining, because the runner kept reporting those pages as
+// uncovered.
+//
+// So a candidate that preflights against a scene that is not up is no longer
+// thrown away: it becomes DORMANT. We keep its canonical path and the 4 KB
+// pages its rows own, and the next time the Tier-3 interpreter is ENTERED
+// inside one of those pages -- which is the proof that the target code is
+// resident right now -- the candidate is re-queued for another preflight.
+// Preflight semantics are untouched: a shard still activates only when its
+// guard bytes match.
+constexpr uint32_t kDormantMaxAttempts = 8u;
+constexpr uint32_t kDormantMaxCandidates = 4096u;
+constexpr uint32_t kDormantMaxPagesPerCandidate = 64u;
+// Fail OPEN past this many distinct validation ranges in one shard: the byte
+// comparison is bounded work on the emulation thread, and adopting a bank
+// whose bytes are stale is harmless (the dispatch guard refuses its rows).
+constexpr unsigned kDormantMaxValidationProbes = 256u;
+
+struct DormantCandidate {
+    std::string key;    // lower-cased canonical path; the queued_paths key
+    std::string path;   // canonical path; empty for a test-injected candidate
+    int cpu = 0;        // 0 = ARM9, 1 = ARM7 (normalized)
+    std::vector<uint32_t> pages;  // 4 KB page bases this shard's rows own
+    uint32_t attempts = 0u;
+    bool requeued = false;  // already pushed back onto the prepare queue
 };
 
 // A load failure crosses from the prepare worker to the emulation thread. The
@@ -365,6 +414,13 @@ struct State {
     // futility check read a verdict that has not been reached yet.
     int prepare_in_flight = 0;
     std::unordered_set<std::string> queued_paths;
+    // beads-yjp.62. Guarded by publish_mutex on every write and on every
+    // rebuild of the emulation thread's page cache; the Tier-3 path itself
+    // never takes it (see g_dormant_any / g_dormant_version below).
+    std::vector<DormantCandidate> dormant;
+    uint64_t dormant_activations = 0;  // dormant -> resident
+    uint64_t dormant_parked = 0;       // gave up after kDormantMaxAttempts
+    uint64_t dormant_requeues = 0;     // Tier-3 entries that re-queued one
     std::thread prepare_thread;
     bool prepare_stop = false;
     // ---- maintenance worker (beads-yjp.59) -------------------------------
@@ -667,6 +723,230 @@ RejectReason classify_guard_reject(const NdsStaticValidation* validation,
     // lookup and this classification); count it as the bytes case, which is
     // what it was.
     return RejectReason::GuardBytesDiffer;
+}
+
+// ---- dormant registry (beads-yjp.62) --------------------------------------
+//
+// Read on the emulation thread from the Tier-3 entry and from the Tier-3
+// coverage-filing decision, both of which must stay cheap. Two levels keep
+// them so:
+//
+//   * g_dormant_any -- one relaxed atomic load. False for every session that
+//     has the overlay switched off, and for every session that has nothing
+//     dormant, which is the whole cost those paths pay in that case.
+//   * g_dormant_pages -- an emulation-thread-OWNED page hash set, rebuilt
+//     under publish_mutex only when g_dormant_version moves. Dormancy changes
+//     a handful of times per session, so the lock is never contended by the
+//     hot path; the lookup itself touches no shared state at all.
+std::atomic<bool> g_dormant_any{false};
+std::atomic<uint32_t> g_dormant_version{0u};
+uint32_t g_dormant_cache_version = 0u;
+bool g_dormant_cache_valid = false;
+std::unordered_set<uint64_t> g_dormant_pages;
+
+int dormant_cpu_index(int cpu) { return cpu == NDS_ARM7 ? 1 : 0; }
+
+uint64_t dormant_page_key(int cpu_index, uint32_t pc) {
+    return (static_cast<uint64_t>(cpu_index & 1) << 32) |
+        static_cast<uint64_t>(pc & ~0xFFFu);
+}
+
+// publish_mutex held. Republish the fast-path flag and invalidate the cache.
+void publish_dormant_state_locked() {
+    // Every record in the vector is live: parking ERASES its record rather
+    // than flagging it, so there is no tombstone state to skip here.
+    bool any = false;
+    for (const DormantCandidate& candidate : g_live.dormant) {
+        if (!candidate.pages.empty()) {
+            any = true;
+            break;
+        }
+    }
+    g_dormant_any.store(any, std::memory_order_release);
+    g_dormant_version.fetch_add(1u, std::memory_order_release);
+}
+
+// Emulation thread. A version read that races a write only costs one extra
+// rebuild on the next call, never a stale answer that persists.
+void refresh_dormant_cache() {
+    const uint32_t version = g_dormant_version.load(std::memory_order_acquire);
+    if (g_dormant_cache_valid && g_dormant_cache_version == version) return;
+    std::unordered_set<uint64_t> pages;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        for (const DormantCandidate& candidate : g_live.dormant) {
+            for (uint32_t page : candidate.pages)
+                pages.insert(dormant_page_key(candidate.cpu, page));
+        }
+    }
+    g_dormant_pages.swap(pages);
+    g_dormant_cache_version = version;
+    g_dormant_cache_valid = true;
+}
+
+bool dormant_page_resident(int cpu, uint32_t pc) {
+    if (!g_dormant_any.load(std::memory_order_relaxed)) return false;
+    refresh_dormant_cache();
+    return g_dormant_pages.find(
+               dormant_page_key(dormant_cpu_index(cpu), pc)) !=
+        g_dormant_pages.end();
+}
+
+// The 4 KB pages a prepared bank's rows own. Rows of one shard normally share
+// a single validation, so the consecutive-pointer skip makes this one pass
+// over the owner range in the common case.
+std::vector<uint32_t> bank_owned_pages(const LoadedBank& bank) {
+    std::vector<uint32_t> pages;
+    if (!bank.dispatch) return pages;
+    const auto add_page = [&pages](uint32_t base) {
+        if (pages.size() >= kDormantMaxPagesPerCandidate) return;
+        if (std::find(pages.begin(), pages.end(), base) == pages.end())
+            pages.push_back(base);
+    };
+    const NdsStaticValidation* last = nullptr;
+    for (unsigned i = 0; i < bank.dispatch_len; ++i) {
+        const NdsDispatchEntry& row = bank.dispatch[i];
+        const NdsStaticValidation* validation = row.validation;
+        if (validation && validation != last) {
+            last = validation;
+            const uint64_t end =
+                uint64_t{validation->addr} + validation->size;
+            for (uint64_t page = validation->addr & ~0xFFFull;
+                 page < end && page < 0x1'0000'0000ull; page += 0x1000ull) {
+                add_page(static_cast<uint32_t>(page));
+            }
+        }
+        add_page(row.addr & ~0xFFFu);
+    }
+    return pages;
+}
+
+// THE correctness question, asked once on the emulation thread before a
+// prepared shard is adopted: is the guest code this bank was compiled from
+// resident right now? One live row is enough -- partial residency still
+// serves that row, and the per-row dispatch guard remains the authority.
+bool bank_guard_bytes_live(const LoadedBank& bank) {
+    if (!bank.dispatch || bank.dispatch_len == 0u) return false;
+    const NdsStaticValidation* last = nullptr;
+    unsigned probes = 0u;
+    for (unsigned i = 0; i < bank.dispatch_len; ++i) {
+        const NdsStaticValidation* validation = bank.dispatch[i].validation;
+        if (!validation || validation == last) continue;
+        last = validation;
+        if (++probes > kDormantMaxValidationProbes) return true;
+        if (validation_has_provenance(validation) &&
+            validation_identity_live(validation)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Emulation thread. Hold this candidate instead of discarding it, and count
+// the deferral in its own family so banks_rejected -- and with it the futility
+// guard -- never sees a scene change as provider failure.
+void note_dormant_candidate(const LoadedBank& bank, const std::string& key) {
+    std::vector<uint32_t> pages = bank_owned_pages(bank);
+    bool parked = false;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        std::size_t index = g_live.dormant.size();
+        for (std::size_t i = 0; i < g_live.dormant.size(); ++i) {
+            if (g_live.dormant[i].key == key) {
+                index = i;
+                break;
+            }
+        }
+        if (index == g_live.dormant.size() &&
+            g_live.dormant.size() < kDormantMaxCandidates) {
+            DormantCandidate fresh;
+            fresh.key = key;
+            fresh.path = bank.path;
+            fresh.cpu = dormant_cpu_index(bank.cpu);
+            g_live.dormant.push_back(std::move(fresh));
+        }
+        if (index < g_live.dormant.size()) {
+            DormantCandidate& candidate = g_live.dormant[index];
+            candidate.pages = std::move(pages);
+            candidate.requeued = false;
+            if (++candidate.attempts >= kDormantMaxAttempts) {
+                // Parking must leave NOTHING behind, and both halves of that
+                // have to happen together.
+                //
+                // Releasing only the PAGES resumed coverage filing while the
+                // candidate's canonical path stayed in queued_paths. The
+                // compiler was then commissioned for the page, republished a
+                // byte-identical DLL under the same content-addressed path,
+                // and enqueue_candidate refused it as already-seen -- filing
+                // forever, preparing never. That is the original churn bug one
+                // level up, entered after eight unlucky scene misses.
+                //
+                // So drop the record AND the queued-paths key in one critical
+                // section. The republished (or merely rescanned) DLL re-enters
+                // prepare as a fresh candidate with a fresh attempt budget, so
+                // progress is always possible -- slow churn at worst, bounded
+                // by the compile cadence. A genuinely broken shard still
+                // cannot activate: the guard-bytes admission gate decides
+                // that, and it is untouched by any of this.
+                parked = true;
+                g_live.queued_paths.erase(key);
+                g_live.dormant.erase(g_live.dormant.begin() +
+                                     static_cast<std::ptrdiff_t>(index));
+            }
+        }
+        publish_dormant_state_locked();
+    }
+    if (parked) ++g_live.dormant_parked;
+    note_reject(parked ? RejectReason::DeferDormantParked
+                       : RejectReason::DeferDormantGuardBytes);
+}
+
+// Emulation thread. Drop the dormant record for a candidate that has just
+// been admitted (or is about to be). Returns whether it WAS dormant, which is
+// what makes an adoption an activation rather than an ordinary first load.
+bool clear_dormant_candidate(const std::string& key) {
+    bool was_dormant = false;
+    std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+    for (std::size_t i = 0; i < g_live.dormant.size(); ++i) {
+        if (g_live.dormant[i].key != key) continue;
+        was_dormant = true;
+        g_live.dormant.erase(g_live.dormant.begin() +
+                             static_cast<std::ptrdiff_t>(i));
+        publish_dormant_state_locked();
+        break;
+    }
+    return was_dormant;
+}
+
+// Emulation thread, from the Tier-3 ENTRY only. Pushes the candidate's path
+// straight onto the prepare queue rather than through enqueue_candidate: its
+// key deliberately stays in queued_paths so a cache rescan never spends one
+// of its bounded attempts, and only this proof-of-residency path may.
+bool requeue_dormant_for(int cpu, uint32_t pc) {
+    bool covered = false;
+    bool pushed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        const int cpu_index = dormant_cpu_index(cpu);
+        const uint32_t page = pc & ~0xFFFu;
+        for (DormantCandidate& candidate : g_live.dormant) {
+            if (candidate.cpu != cpu_index) continue;
+            if (std::find(candidate.pages.begin(), candidate.pages.end(),
+                          page) == candidate.pages.end()) {
+                continue;
+            }
+            covered = true;
+            if (candidate.requeued) continue;
+            candidate.requeued = true;
+            ++g_live.dormant_requeues;
+            if (candidate.path.empty()) continue;
+            g_live.prepare_queue.push_back(
+                std::filesystem::path(candidate.path));
+            pushed = true;
+        }
+    }
+    if (pushed) g_live.publish_cv.notify_one();
+    return covered;
 }
 
 bool preflight_live_bank(const NdsLiveBankInfo& info,
@@ -1349,6 +1629,26 @@ bool commit_prepared_bank(LoadedBank bank) {
 #endif
 }
 
+// The single gate every prepared shard passes through on the emulation
+// thread (beads-yjp.62). Either its guest code is resident and the bank is
+// adopted by the unchanged commit path, or it is held dormant and re-queued
+// later. Nothing else may call commit_prepared_bank on the production path.
+void admit_prepared_bank(LoadedBank bank, const std::string& key) {
+    if (!bank_guard_bytes_live(bank)) {
+        note_dormant_candidate(bank, key);
+#if defined(_WIN32)
+        if (bank.handle) {
+            FreeLibrary(bank.handle);
+            bank.handle = nullptr;
+        }
+#endif
+        return;
+    }
+    const bool was_dormant = clear_dormant_candidate(key);
+    if (commit_prepared_bank(std::move(bank)) && was_dormant)
+        ++g_live.dormant_activations;
+}
+
 void prepare_worker_main() {
     for (;;) {
         std::filesystem::path path;
@@ -1452,7 +1752,10 @@ void commit_one_ready_bank() {
         ++g_live.banks_rejected;
         note_reject(error.reason);
     }
-    if (have_bank) commit_prepared_bank(std::move(bank));
+    if (have_bank) {
+        const std::string key = lower_ascii(bank.path);
+        admit_prepared_bank(std::move(bank), key);
+    }
 }
 
 struct CachedDllPath {
@@ -1952,6 +2255,14 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
     g_live.reject_reasons.fill(0u);
     g_live.rows_superseded = 0;
     g_live.rows_superseding = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        g_live.dormant.clear();
+        g_live.dormant_activations = 0;
+        g_live.dormant_parked = 0;
+        g_live.dormant_requeues = 0;
+        publish_dormant_state_locked();
+    }
     if (g_live.enabled &&
         (g_live.cache_dir.empty() || g_live.rom_sha1.empty())) {
         g_live.enabled = false;
@@ -2014,6 +2325,10 @@ void live_overlay_shutdown() {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
         g_live.prepare_stop = true;
         g_live.prepare_queue.clear();
+        // Nothing may stay dormant across a teardown: the DLLs are gone and
+        // the Tier-3 fast path must fall straight back to its atomic load.
+        g_live.dormant.clear();
+        publish_dormant_state_locked();
     }
     g_live.publish_cv.notify_all();
     if (g_live.prepare_thread.joinable()) g_live.prepare_thread.join();
@@ -2060,6 +2375,21 @@ void live_overlay_note_tier3(int cpu, uint32_t pc) {
         request_generation_compile();
         g_live.next_trigger[index] = g_live.tier3[index] + kRetriggerTier3;
     }
+}
+
+bool live_overlay_note_tier3_entry(int cpu, uint32_t pc) {
+    // Tier-3 ENTRY, not per interpreted instruction. One relaxed atomic load
+    // is the entire cost when the overlay is off or nothing is dormant.
+    if (!g_dormant_any.load(std::memory_order_relaxed)) return false;
+    if (!dormant_page_resident(cpu, pc)) return false;
+    // Entering the interpreter here PROVES the guest code a dormant candidate
+    // was compiled from is resident at this instant -- the one thing the
+    // compile-finish and rescan preflight moments could not observe.
+    return requeue_dormant_for(cpu, pc);
+}
+
+bool live_overlay_dormant_covers(int cpu, uint32_t pc) {
+    return dormant_page_resident(cpu, pc);
 }
 
 void live_overlay_note_transfer(int cpu, uint32_t source_pc, uint32_t target,
@@ -2270,6 +2600,44 @@ bool live_overlay_commit_bank_for_test(int cpu, const char* bank_id,
     return commit_prepared_bank(std::move(bank));
 }
 
+bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
+                                      const char* candidate_id,
+                                      const char* generation_id,
+                                      unsigned backend_tier,
+                                      const char* path_key,
+                                      const NdsDispatchEntry* dispatch,
+                                      unsigned dispatch_len) {
+    LoadedBank bank{};
+    bank.bank_id = bank_id ? bank_id : "";
+    bank.candidate_id = candidate_id ? candidate_id : "";
+    bank.generation_id = generation_id && *generation_id
+        ? generation_id : bank.candidate_id;
+    bank.backend_tier = backend_tier;
+    bank.cpu = cpu;
+    bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
+    bank.dispatch = dispatch;
+    bank.dispatch_len = dispatch_len;
+    bank.path = path_key ? path_key : "";
+    bank.content_identity = hash_bytes(1469598103934665603ull,
+                                       bank.candidate_id.data(),
+                                       bank.candidate_id.size());
+    const uint64_t loaded_before = g_live.banks_loaded;
+    const std::string key = lower_ascii(bank.path);
+    admit_prepared_bank(std::move(bank), key);
+    return g_live.banks_loaded != loaded_before;
+}
+
+bool live_overlay_enqueue_path_for_test(const char* path_key) {
+    // The REAL queueing path, not a reimplementation: queued_paths is what
+    // decides whether a rescanned or republished DLL can ever reach the
+    // prepare worker again, so "parking released the key" is only observable
+    // by asking enqueue_candidate itself.
+    QueueCandidate candidate;
+    candidate.key = lower_ascii(path_key ? path_key : "");
+    candidate.path = std::filesystem::path(path_key ? path_key : "");
+    return enqueue_candidate(candidate);
+}
+
 bool live_overlay_generation_registered_for_test(const char* generation_id,
                                                  unsigned* backend_tier_out) {
     const std::string wanted = generation_id ? generation_id : "";
@@ -2306,6 +2674,9 @@ void live_overlay_summary(NdsLiveOverlaySummary* out) {
         out->reason_counts[i] = g_live.reject_reasons[i];
     out->rows_superseded = g_live.rows_superseded;
     out->rows_superseding = g_live.rows_superseding;
+    out->dormant_activations = g_live.dormant_activations;
+    out->dormant_parked = g_live.dormant_parked;
+    out->dormant_requeues = g_live.dormant_requeues;
 #if defined(_WIN32)
     out->busy = g_live.child != nullptr;
 #else
@@ -2314,6 +2685,7 @@ void live_overlay_summary(NdsLiveOverlaySummary* out) {
     // g_live.loaded is mutated under publish_mutex when a prepared shard is
     // adopted, so walk it under the same lock the status JSON uses.
     std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+    out->dormant_candidates = g_live.dormant.size();
     for (const LoadedBank& bank : g_live.loaded) {
         out->native_hits += bank.native_hits;
         out->bank_rejects += bank.rejects;
@@ -2327,10 +2699,12 @@ void live_overlay_summary(NdsLiveOverlaySummary* out) {
 std::string live_overlay_status_json() {
     std::size_t preparing = 0u;
     std::size_t ready = 0u;
+    std::size_t dormant = 0u;
     {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
         preparing = g_live.prepare_queue.size();
         ready = g_live.ready_queue.size();
+        dormant = g_live.dormant.size();
     }
     std::ostringstream out;
     out << "{\"enabled\":" << (g_live.enabled ? "true" : "false")
@@ -2369,6 +2743,14 @@ std::string live_overlay_status_json() {
         << ",\"banks_rejected\":" << g_live.banks_rejected
         << ",\"rows_superseded\":" << g_live.rows_superseded
         << ",\"rows_superseding\":" << g_live.rows_superseding
+        // beads-yjp.62: compiled output we hold but could not activate yet,
+        // how much of it the Tier-3 entry proof has since woken, and how much
+        // was given up on. dormant_candidates high with dormant_activations
+        // at zero is the field failure this was built to make visible.
+        << ",\"dormant_candidates\":" << dormant
+        << ",\"dormant_activations\":" << g_live.dormant_activations
+        << ",\"dormant_parked\":" << g_live.dormant_parked
+        << ",\"dormant_requeues\":" << g_live.dormant_requeues
         << ",\"reject_reasons\":{";
     for (uint32_t i = 0u; i < kRejectReasonCount; ++i) {
         out << (i ? "," : "") << "\"" << kRejectReasonNames[i] << "\":"
