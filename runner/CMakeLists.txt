@@ -868,6 +868,15 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         NAME emu_attrib_guards_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_emu_attrib_guards.py")
+    # beads-yjp.48: WHEN a halted core's clock may stop is a shape property of
+    # scheduler_run_round(), not a value. Shortening a halted ARM7's catch-up
+    # target to its own next timer overflow still built, still booted, still
+    # matched every frame hash -- and reddened all eight G1 firmware scenarios
+    # with an SPU mismatch 0.15 s downstream of the real defect.
+    add_test(
+        NAME scheduler_halt_fidelity_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scheduler_halt_fidelity.py")
     # Two runners may share one live-overlay cache directory, so the shard
     # index read-modify-write has to survive concurrent writers.
     add_test(

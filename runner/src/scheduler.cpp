@@ -421,24 +421,26 @@ void scheduler_run_round() {
     while (g_slot[1].started && !g_slot[1].halted &&
            !nds_event_break_hit() && g_slot[1].cycles < rendezvous) {
         const uint64_t before = g_slot[1].cycles;
-        // A DMA-stalled ARM7 is NOT idle: its wake source is the DMA/SPI
-        // completion event, not a timer overflow. Fast-forwarding its clock
-        // to the timer deadline skips that event entirely, so the guest halt
-        // never wakes (authentic-firmware boot dies with IE=SPI, IF=0). The
-        // deadline planner above already guards on nds_dma_cpu_stalled();
-        // this catch-up loop must too.
-        if (nds_cpu_halted(1) && !nds_halt_wake_pending(1) &&
-            !nds_dma_cpu_stalled(1)) {
-            uint64_t target = rendezvous;
-            const uint64_t timer_wake = nds_next_timer_overflow_time_for_cpu(1);
-            if (timer_wake > g_slot[1].cycles && timer_wake < target)
-                target = timer_wake;
-            g_slot[1].cycles = target;
-            nds_tick_timers(1, g_slot[1].cycles);
-            if (g_slot[1].cycles == before && !nds_halt_wake_pending(1))
-                break;
-            continue;
-        }
+        // A guest-halted ARM7 goes through run_slice like every other state:
+        // its halt branch consumes the whole quantum in one step, which is
+        // exactly melonDS ARMv4::Execute (ARM.cpp: `NDS.ARM7Timestamp =
+        // NDS.ARM7Target; return;` for Halted==1 with no HaltInterrupted).
+        // RunTimers(1) then runs ONCE at that target, so a timer overflow that
+        // lands mid-round becomes visible to the halted core only AT the
+        // rendezvous.
+        //
+        // beads-yjp.48: 62dbbc7 shortened this loop's target for a halted ARM7
+        // to nds_next_timer_overflow_time_for_cpu(1) and ticked the timers
+        // there, delivering the overflow IRQ at the exact overflow cycle
+        // INSIDE the round. That woke the ARM7 up to one rendezvous early and
+        // shifted its whole timeline: G1 calibration_save's first divergence
+        // was ARM7 retired-instruction ordinal 2849672 leaving HALT at
+        // cyc7=5087805 against the oracle's 5087820 (ARM7 Timer3, IE7=0x40,
+        // was the only enabled wake source), which surfaced downstream as an
+        // SPU output mismatch at audio frame 17402. The whole-console idle
+        // fast-forward above may still skip ahead because it snaps a timer
+        // overflow to the kIterCap rendezvous grid; this per-CPU catch-up loop
+        // has no such grid to snap to, so it must not shorten at all.
         const uint64_t remaining = rendezvous - g_slot[1].cycles;
         const uint32_t quantum = remaining > UINT32_MAX
             ? UINT32_MAX
