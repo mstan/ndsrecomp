@@ -906,4 +906,14 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         NAME m7_collect_two_instance_evidence_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_collect_two_instance_evidence.py")
+    # beads-yjp.55: the coverage ingest could only ever promote the TARGET of
+    # an interpreted transfer, which the finder had already discovered. The
+    # code still being interpreted lives in the holes between compiled
+    # functions and is recorded only in the root map. Promoting one seed per
+    # interpreted span is what reaches it -- and it must stay exactly ONE, per
+    # span and per mode, or the finder chops each body at every extra seed.
+    add_test(
+        NAME coverage_span_promotion_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_coverage_span_promotion.py")
   endif()

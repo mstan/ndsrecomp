@@ -121,11 +121,11 @@ nearly every instruction of every hot interpreted function:
 * 92% of root addresses have another root exactly one instruction away.
 * The longest unbroken run of consecutive-instruction roots is **415**.
 
-Roots are an execution map, not a seed list — but they are **not** disposable.
-`tools/seed_overlay_from_coverage.py` feeds them to the recompiler's
-interior-entry switch as landing pads, and their hit counts are the only exact
-cost attribution in the file. The defect was the *encoding*, not the data: a
-dense bitmap was being written one ~96-byte JSON record per set bit.
+Roots are an execution map, not a seed list — but they are **not** disposable,
+and **exactly one address per contiguous run of them is the most valuable seed
+in the whole file** (beads-yjp.55, below). Their hit counts are also the only
+exact cost attribution in the manifest. The defect was the *encoding*, not the
+data: a dense bitmap was being written one ~96-byte JSON record per set bit.
 
 Schema 4 stores them as bitmaps instead — ARM at word stride (128 B) and Thumb
 at halfword stride (256 B) per 4 KiB page, plus 16 per-256-byte-block hit
@@ -141,7 +141,73 @@ counts become a block share, and nothing consumed those. They appear twice:
   reported `captured: 166` with `replaced: 87263`).
 
 The ingest merges them into ranked interpreted spans
-(`interpreted-ranges.json`) — the honest answer to "what to recompile next".
+(`interpreted-ranges.json`) — the honest answer to "what to recompile next" —
+and promotes the START of each one as a seed.
+
+### 5. Interpreted spans — the only seed that reaches interpreted code
+
+A `call` or `indirect` target is, by construction, an address some compiled
+function branched to, so the finder had **already** discovered it. Promoting it
+re-seeds code that is usually compiled already. The code the interpreter is
+actually *running* is somewhere else entirely: in the holes **between**
+compiled functions, where a computed branch or a jump table stopped discovery
+(beads-yjp.35), and the only record of it anywhere in the manifest is the root
+map.
+
+Measured on MPH build `c6122bd` (2026-08-28 field parts): the six hottest call
+targets were all seeded, all had live dispatch rows and all matched the ROM
+byte for byte, while their *callers* — `0x0207B63C`, `0x0207B64C`,
+`0x0207B67C`, `0x02085FB8`, `0x0208ADCC`, `0x0208B1D8` — had **zero dispatch
+rows across all 251 banks**. The whole ingest that round added 0 banks and 0
+ARM9 seeds: the pipeline had converged against its own inputs and was
+structurally unable to reach the remaining 12.3 M interpreted instructions per
+session.
+
+**One seed per span, at its start.** Not one per root, and the reason is
+structural rather than a preference for fewer seeds:
+
+* `write_bank_dispatch` (`recompiler/src/main.cpp`) emits one dispatch row per
+  **instruction** across `[fn.addr, fn.end_addr)`. A single seed at a span
+  start therefore already yields an owning row for every instruction the finder
+  walks from there — which is why one seed at `0x0207B630` covers
+  `0x0207B63C`, `0x0207B64C` and `0x0207B67C` as well.
+* `FunctionFinder::discover_one` dedups on the exact `(addr, mode)` only, and
+  the boundary pass then trims the previous function's `end_addr` down to meet
+  any later start. So every *extra* seed inside a body chops that body shorter
+  and suppresses the fallthrough coalescing the dispatch cost depends on.
+
+Runs are cut per **mode** and at instruction stride, because a span start is
+compiled as one or the other and a run merged across modes has no single answer.
+
+The `caller` field of every call/indirect record is folded into the same map
+before the runs are cut: the interpreter was executing at that address, so it
+is interpreted code by construction, and it is better attributed than a root —
+it names a concrete instruction the manifest watched retire. On the four
+2026-08-28 MPH parts, 186 of 316 distinct callers appear in no root bitmap at
+all, so this is real coverage rather than a restatement.
+
+**Pass the last build's dispatch tables and the pipeline converges.**
+`--owned-rows-arm9 generated/recomp` (and `--owned-rows-arm7`) removes every
+interpreted address the build already owns a row for *before* the runs are cut.
+Two things follow, and both matter:
+
+* a span start is never re-declared once it is covered, so a re-ingest cannot
+  split the body that now owns it;
+* a run the finder only walked *halfway* into is cut at the stop, and its
+  uncovered tail becomes a seed of its own.
+
+That second one is not hypothetical. Seeding MPH's span
+`0x0208AD50..0x0208ADD0` extended `mph_arm9_afunc_0208ACEC` by exactly two
+instructions and then the finder stopped, leaving `0x0208ADCC` — reached only
+by a computed branch — as uncovered as before. One seed per span is the right
+*first* answer; the owned-row remainder is what closes the rest, and
+`interpreted_addresses_already_owned` in the report is how you read the
+convergence between two consecutive ingests.
+
+Knobs: `--no-promote-ranges` reproduces the pre-yjp.55 policy exactly,
+`--no-promote-callers` drops just the caller fold-in, `--min-span-hits` and
+`--max-span-seeds` bound the seed budget (spans are ranked by cost, so a bound
+spends it on the spans that carry the interpretation).
 
 ## How to ingest one
 
@@ -160,9 +226,14 @@ Outputs:
 
 * `ingest-report.json` — `rom_alias_findings` first; read that before anything
   else. Also counts every address refused and why.
-* `entry_points.toml` — merged call/indirect seeds.
-* `images/` — one content-validated bank per run of genuinely new code.
-* `interpreted-ranges.json` — interpreted spans, hottest first.
+* `entry_points.toml` — merged call/indirect seeds plus one seed per
+  interpreted span, each tagged with what it was `seen as`.
+* `images/` — one content-validated bank per run of genuinely new code. Span
+  seeds land in the bank for the page *generation* they were interpreted
+  under, which schema 4's per-page root bitmap is the only source of.
+* `interpreted-ranges.json` — interpreted spans, hottest first, each with the
+  mode it was recorded in. `span_promotion` in the report says how many became
+  seeds and what they cost.
 
 * `seeds/` — the merged seeds split by the module and load base their page
   resolved to. An address is only a seed for the bank whose image holds those
