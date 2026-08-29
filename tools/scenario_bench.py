@@ -287,6 +287,14 @@ def profile_snapshot(client: Any) -> dict[str, Any]:
     for name, command in (("dispatch", "dispatch_stats"),
                           ("dispatch_timing", "dispatch_timing"),
                           ("direct_link", "direct_link"),
+                          # beads-yjp.54's always-on emu-time partition. Every
+                          # bucket is a cumulative ns counter, so the same
+                          # snapshot-and-subtract gives a per-phase attribution
+                          # of where emulation time actually went -- the only
+                          # counter surface that can say whether a dispatch
+                          # change moved native execution time (exec_arm9)
+                          # rather than pixel or scheduler work.
+                          ("emu_attrib", "emu_attrib"),
                           ("static_coverage", "static_coverage")):
         try:
             snapshot[name] = client.cmd(command)
@@ -558,6 +566,13 @@ def summarize_window(
             key.removesuffix("_ns"): value / sampled_ns
             for key, value in sched.items()
             if key.endswith("_ns") and key != "sampled_round_ns" and sampled_ns
+        },
+        "emu_attrib_ms_per_frame": {
+            name: bucket["ns"] / denominator / 1.0e6
+            for name, bucket in profile.get("emu_attrib", {})
+                                       .get("buckets", {}).items()
+            if isinstance(bucket, dict)
+            and isinstance(bucket.get("ns"), (int, float))
         },
         "tier3_delta": profile.get("static_coverage", {}),
         "dispatch_delta": profile.get("dispatch", {}),
