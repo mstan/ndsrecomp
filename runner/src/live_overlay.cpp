@@ -231,6 +231,66 @@ struct PreparedError {
     RejectReason reason = RejectReason::LoadNoBankInfo;
 };
 
+// ---- maintenance worker plumbing (beads-yjp.59) ---------------------------
+//
+// Everything the poll used to do inline that touches the filesystem: two full
+// scans of the compiler log, a recursive walk of the shard cache, the three
+// weakly_canonical calls per candidate path, and the snapshot manifest's
+// base64/JSON/rename. Measured at 180-230 ms in the emu_attrib overlay_poll
+// bucket whenever a run finished, which is a visible hitch.
+enum class MaintenanceKind : uint8_t {
+    Rescan,
+    RunFinished,
+    StartChild,
+};
+
+// A published DLL that has already passed the cheap filters and been
+// canonicalized. The emulation thread only has to insert the key and push the
+// path, which is what makes the queueing decision cheap enough to keep there
+// -- and it must stay there, because the run attribution marks are counters
+// only the emulation thread owns.
+struct QueueCandidate {
+    std::string key;
+    std::filesystem::path path;
+};
+
+struct MaintenanceJob {
+    MaintenanceKind kind = MaintenanceKind::Rescan;
+    std::filesystem::path cache_dir;
+    // RunFinished
+    std::string log_path;
+    uint64_t pending_fallback = 0u;
+    uint64_t duration_ms = 0u;
+    uint32_t exit_code = 0u;
+    // StartChild
+    std::string command;
+    std::string rom_sha1;
+    uint64_t run_index = 0u;
+    uint32_t batch_cap = 0u;
+    CoverageLiveSnapshot* snapshot = nullptr;
+};
+
+struct MaintenanceResult {
+    MaintenanceKind kind = MaintenanceKind::Rescan;
+    // RunFinished
+    uint64_t pending = 0u;
+    uint64_t duration_ms = 0u;
+    uint32_t exit_code = 0u;
+    uint64_t published_total = 0u;
+    std::vector<QueueCandidate> published;
+    std::vector<QueueCandidate> rescan;
+    // StartChild
+    bool ok = false;
+    std::string error;
+    std::string manifest_path;
+    std::string log_path;
+    uint64_t started_ms = 0u;
+#if defined(_WIN32)
+    HANDLE child = nullptr;
+    HANDLE child_job = nullptr;
+#endif
+};
+
 struct State {
     bool enabled = false;
     bool auto_trigger = false;
@@ -307,6 +367,27 @@ struct State {
     std::unordered_set<std::string> queued_paths;
     std::thread prepare_thread;
     bool prepare_stop = false;
+    // ---- maintenance worker (beads-yjp.59) -------------------------------
+    //
+    // Its own queue and mutex, not the prepare worker's. The two workloads
+    // want opposite scheduling: prepare is an unordered bag of independent
+    // LoadLibrary calls, while this is a strictly ordered pipeline (scan the
+    // finished run's log -> queue what it published -> rescan the cache ->
+    // snapshot -> spawn the next child). Sharing one queue would let a slow
+    // LoadLibrary head-of-line-block the next compile start, and would lose
+    // the ordering that makes "the manifest is durable before the child that
+    // reads it exists" free.
+    std::mutex maint_mutex;
+    std::condition_variable maint_cv;
+    std::deque<MaintenanceJob> maint_jobs;
+    std::deque<MaintenanceResult> maint_results;
+    std::thread maint_thread;
+    bool maint_stop = false;
+    // Outstanding worker jobs whose results the emulation thread has not
+    // applied yet. Both gate the compile-start decision so a run's state
+    // transitions stay in the order they had when they were inline.
+    bool run_finish_pending = false;
+    bool start_pending = false;
 #if defined(_WIN32)
     HANDLE child = nullptr;
     HANDLE child_job = nullptr;
@@ -365,10 +446,11 @@ std::string path_string(const std::filesystem::path& path) {
     return path.lexically_normal().generic_string();
 }
 
-bool path_under_cache(const std::filesystem::path& path) {
-    if (g_live.cache_dir.empty()) return false;
+bool path_under_cache(const std::filesystem::path& cache_dir,
+                      const std::filesystem::path& path) {
+    if (cache_dir.empty()) return false;
     std::error_code ec;
-    const auto root = std::filesystem::weakly_canonical(g_live.cache_dir, ec);
+    const auto root = std::filesystem::weakly_canonical(cache_dir, ec);
     if (ec) return false;
     const auto child = std::filesystem::weakly_canonical(path, ec);
     if (ec) return false;
@@ -379,17 +461,6 @@ bool path_under_cache(const std::filesystem::path& path) {
          child_s.compare(0, root_s.size(), root_s) == 0 &&
          (root_s.empty() || root_s.back() == '/' ||
           child_s[root_s.size()] == '/'));
-}
-
-bool already_loaded(const std::filesystem::path& path) {
-    std::error_code ec;
-    const std::string canon =
-        path_string(std::filesystem::weakly_canonical(path, ec));
-    if (ec) return false;
-    return std::any_of(g_live.loaded.begin(), g_live.loaded.end(),
-                       [&](const LoadedBank& b) {
-                           return lower_ascii(b.path) == lower_ascii(canon);
-                       });
 }
 
 void copy_cstr(char* dst, std::size_t dst_len, const char* src) {
@@ -1030,7 +1101,7 @@ uint32_t backend_tier(const std::filesystem::path& path) {
 bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
                       std::string& error, RejectReason& reason) {
 #if defined(_WIN32)
-    if (!path_under_cache(path)) {
+    if (!path_under_cache(g_live.cache_dir, path)) {
         reason = RejectReason::LoadPathOutsideCache;
         error = "published DLL outside live overlay cache: " +
             path_string(path);
@@ -1305,27 +1376,57 @@ void prepare_worker_main() {
     }
 }
 
-void ensure_prepare_worker() {
-    if (g_live.prepare_thread.joinable()) return;
-    g_live.prepare_stop = false;
-    g_live.prepare_thread = std::thread(prepare_worker_main);
+void maintenance_worker_main();
+
+void ensure_workers() {
+    if (!g_live.prepare_thread.joinable()) {
+        g_live.prepare_stop = false;
+        g_live.prepare_thread = std::thread(prepare_worker_main);
+    }
+    if (!g_live.maint_thread.joinable()) {
+        g_live.maint_stop = false;
+        g_live.maint_thread = std::thread(maintenance_worker_main);
+    }
 }
 
-bool queue_bank_dll(const std::filesystem::path& path) {
-    if (!is_final_dll_path(path) || !path_under_cache(path) ||
-        already_loaded(path)) {
+// Worker side of queueing: the filters and the canonicalization. There is no
+// separate "is it already resident" scan any more -- queued_paths is never
+// cleared and every resident bank's canonical path went through it, so it
+// already subsumes that check without walking g_live.loaded (which only the
+// emulation thread may read) or allocating per bank.
+bool make_queue_candidate(const std::filesystem::path& cache_dir,
+                          const std::filesystem::path& path,
+                          QueueCandidate& out) {
+    if (!is_final_dll_path(path) || !path_under_cache(cache_dir, path))
         return false;
-    }
     std::error_code ec;
-    const auto canon_path = std::filesystem::weakly_canonical(path, ec);
+    auto canon_path = std::filesystem::weakly_canonical(path, ec);
     if (ec) return false;
-    const std::string key = lower_ascii(path_string(canon_path));
+    out.key = lower_ascii(path_string(canon_path));
+    out.path = std::move(canon_path);
+    return true;
+}
+
+// Shrink a worker-built candidate list to what is plausibly new. The emulation
+// thread still does the authoritative insert, so a race here costs nothing.
+void drop_already_queued(std::vector<QueueCandidate>& items) {
+    if (items.empty()) return;
+    std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+    items.erase(std::remove_if(items.begin(), items.end(),
+                               [](const QueueCandidate& item) {
+                                   return g_live.queued_paths.count(item.key) !=
+                                       0u;
+                               }),
+                items.end());
+}
+
+// Emulation thread. Cheap by construction: one set insert and one deque push.
+bool enqueue_candidate(const QueueCandidate& candidate) {
     {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
-        if (!g_live.queued_paths.insert(key).second) return false;
-        g_live.prepare_queue.push_back(canon_path);
+        if (!g_live.queued_paths.insert(candidate.key).second) return false;
+        g_live.prepare_queue.push_back(candidate.path);
     }
-    ensure_prepare_worker();
     g_live.publish_cv.notify_one();
     return true;
 }
@@ -1360,13 +1461,16 @@ struct CachedDllPath {
     uint32_t tier = 0u;
 };
 
-void rescan_cache() {
-    if (!g_live.enabled || g_live.cache_dir.empty()) return;
+// Runs on the maintenance worker (or, at startup, on the launching thread).
+std::vector<QueueCandidate> scan_cache(
+    const std::filesystem::path& cache_dir) {
+    std::vector<QueueCandidate> out;
+    if (cache_dir.empty()) return out;
     std::error_code ec;
-    if (!std::filesystem::exists(g_live.cache_dir, ec)) return;
+    if (!std::filesystem::exists(cache_dir, ec)) return out;
     std::vector<CachedDllPath> paths;
     for (const auto& entry :
-         std::filesystem::recursive_directory_iterator(g_live.cache_dir, ec)) {
+         std::filesystem::recursive_directory_iterator(cache_dir, ec)) {
         if (ec) break;
         if (!entry.is_regular_file(ec)) continue;
         const auto path = entry.path();
@@ -1393,12 +1497,20 @@ void rescan_cache() {
         return lower_ascii(path_string(a.path)) <
             lower_ascii(path_string(b.path));
     });
-    for (const CachedDllPath& item : paths) queue_bank_dll(item.path);
+    out.reserve(paths.size());
+    for (const CachedDllPath& item : paths) {
+        QueueCandidate candidate;
+        if (make_queue_candidate(cache_dir, item.path, candidate))
+            out.push_back(std::move(candidate));
+    }
+    drop_already_queued(out);
+    return out;
 }
 
-std::vector<std::filesystem::path> published_paths_from_log() {
+std::vector<std::filesystem::path> published_paths_from_log(
+    const std::string& log_path) {
     std::vector<std::filesystem::path> out;
-    std::ifstream f(g_live.log_path);
+    std::ifstream f(log_path);
     std::string line;
     constexpr const char* marker = "NDS_SHARD_PUBLISHED ";
     constexpr std::size_t marker_len = 20u;
@@ -1418,8 +1530,8 @@ std::vector<std::filesystem::path> published_paths_from_log() {
 // a run that died before printing) leaves the previous count in place: the
 // caller passes it in as `fallback` so a crashed batch does not silently look
 // like a drained queue and collapse the cadence back to conservative.
-uint64_t pending_from_log(uint64_t fallback) {
-    std::ifstream f(g_live.log_path);
+uint64_t pending_from_log(const std::string& log_path, uint64_t fallback) {
+    std::ifstream f(log_path);
     std::string line;
     constexpr const char* marker = "NDS_SHARD_PENDING ";
     const std::size_t marker_len = std::strlen(marker);
@@ -1447,12 +1559,39 @@ unsigned long current_process_id() {
 #endif
 }
 
-bool write_snapshot_manifest() {
+// ---- maintenance worker jobs ----------------------------------------------
+
+MaintenanceResult run_finished_job(const MaintenanceJob& job) {
+    MaintenanceResult result;
+    result.kind = MaintenanceKind::RunFinished;
+    result.duration_ms = job.duration_ms;
+    result.exit_code = job.exit_code;
+    // Read the backlog BEFORE anything else: the ramp decision the emulation
+    // thread makes from it is "did this run leave work behind, and how fast
+    // was it".
+    result.pending = pending_from_log(job.log_path, job.pending_fallback);
+    const auto published = published_paths_from_log(job.log_path);
+    result.published_total = published.size();
+    result.published.reserve(published.size());
+    for (const auto& path : published) {
+        QueueCandidate candidate;
+        if (make_queue_candidate(job.cache_dir, path, candidate))
+            result.published.push_back(std::move(candidate));
+    }
+    drop_already_queued(result.published);
+    result.rescan = scan_cache(job.cache_dir);
+    return result;
+}
+
+MaintenanceResult start_child_job(MaintenanceJob& job) {
+    MaintenanceResult result;
+    result.kind = MaintenanceKind::StartChild;
+#if defined(_WIN32)
     std::error_code ec;
-    std::filesystem::create_directories(g_live.cache_dir / "snapshots", ec);
+    std::filesystem::create_directories(job.cache_dir / "snapshots", ec);
     if (ec) {
-        g_live.last_error = "cannot create live overlay snapshot directory";
-        return false;
+        result.error = "cannot create live overlay snapshot directory";
+        return result;
     }
     // Qualify the name with the process id. The run index alone restarts at 1
     // every launch, so a resumed session would OVERWRITE the very snapshots
@@ -1462,60 +1601,49 @@ bool write_snapshot_manifest() {
     char name[80];
     std::snprintf(name, sizeof(name), "manifest-%08lx-%06llu.json",
                   static_cast<unsigned long>(current_process_id()),
-                  static_cast<unsigned long long>(g_live.runs_started + 1u));
-    const auto path = g_live.cache_dir / "snapshots" / name;
+                  static_cast<unsigned long long>(job.run_index));
+    const auto path = job.cache_dir / "snapshots" / name;
     char error[256] = {};
-    if (!coverage_manifest_write_live_snapshot(
-            path_string(path).c_str(), 64u, error, sizeof(error))) {
-        g_live.last_error = error;
-        return false;
+    // The child reads this file, so it has to be durably renamed into place
+    // before CreateProcess -- which is exactly why both halves live on this
+    // one serial worker rather than being handed back and forth.
+    if (!coverage_manifest_write_captured_snapshot(
+            job.snapshot, path_string(path).c_str(), error, sizeof(error))) {
+        result.error = error[0] ? error : "cannot write the live overlay "
+                                          "snapshot manifest";
+        return result;
     }
-    g_live.manifest_path = path_string(path);
-    return true;
-}
+    result.manifest_path = path_string(path);
 
-bool start_child() {
-#if defined(_WIN32)
-    if (g_live.child || g_live.command.empty()) return false;
-    if (!write_snapshot_manifest()) {
-        ++g_live.runs_failed;
-        return false;
-    }
-
-    std::error_code ec;
-    std::filesystem::create_directories(g_live.cache_dir / "logs", ec);
+    std::filesystem::create_directories(job.cache_dir / "logs", ec);
     if (ec) {
-        g_live.last_error = "cannot create live overlay log directory";
-        ++g_live.runs_failed;
-        return false;
+        result.error = "cannot create live overlay log directory";
+        return result;
     }
     char log_name[80];
     std::snprintf(log_name, sizeof(log_name), "compile-%08lx-%06llu.log",
                   current_process_id(),
-                  static_cast<unsigned long long>(g_live.runs_started + 1u));
-    const auto log_path = g_live.cache_dir / "logs" / log_name;
-    g_live.log_path = path_string(log_path);
+                  static_cast<unsigned long long>(job.run_index));
+    result.log_path = path_string(job.cache_dir / "logs" / log_name);
 
     SECURITY_ATTRIBUTES sa{sizeof(sa), NULL, TRUE};
-    HANDLE log = CreateFileA(g_live.log_path.c_str(), GENERIC_WRITE,
+    HANDLE log = CreateFileA(result.log_path.c_str(), GENERIC_WRITE,
                              FILE_SHARE_READ, &sa, CREATE_ALWAYS,
                              FILE_ATTRIBUTE_NORMAL, NULL);
     if (log == INVALID_HANDLE_VALUE) {
-        g_live.last_error = "cannot open live overlay compiler log";
-        ++g_live.runs_failed;
-        return false;
+        result.error = "cannot open live overlay compiler log";
+        return result;
     }
 
     SetEnvironmentVariableA("NDS_LIVE_OVERLAY_MANIFEST",
-                            g_live.manifest_path.c_str());
-    const std::string cache = path_string(g_live.cache_dir);
+                            result.manifest_path.c_str());
+    const std::string cache = path_string(job.cache_dir);
     SetEnvironmentVariableA("NDS_LIVE_OVERLAY_CACHE", cache.c_str());
-    SetEnvironmentVariableA("NDS_LIVE_OVERLAY_ROM_SHA1",
-                            g_live.rom_sha1.c_str());
+    SetEnvironmentVariableA("NDS_LIVE_OVERLAY_ROM_SHA1", job.rom_sha1.c_str());
     // The batch cap for THIS run. The provider reads it as the default for
     // --max-pages, so the runner owns the throughput policy in one place and
     // the shipped command string does not have to hard-code a number.
-    const std::string cap = std::to_string(effective_batch_cap());
+    const std::string cap = std::to_string(job.batch_cap);
     SetEnvironmentVariableA("NDS_LIVE_OVERLAY_MAX_PAGES", cap.c_str());
 
     STARTUPINFOA si{};
@@ -1524,19 +1652,20 @@ bool start_child() {
     si.hStdOutput = log;
     si.hStdError = log;
     PROCESS_INFORMATION pi{};
-    std::string full = "cmd.exe /C \"" + g_live.command + "\"";
+    std::string full = "cmd.exe /C \"" + job.command + "\"";
     std::vector<char> cmd(full.begin(), full.end());
     cmd.push_back('\0');
 
-    HANDLE job = CreateJobObjectA(NULL, NULL);
-    if (job) {
+    HANDLE child_job = CreateJobObjectA(NULL, NULL);
+    if (child_job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
         jeli.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                     &jeli, sizeof(jeli))) {
-            CloseHandle(job);
-            job = NULL;
+        if (!SetInformationJobObject(child_job,
+                                     JobObjectExtendedLimitInformation, &jeli,
+                                     sizeof(jeli))) {
+            CloseHandle(child_job);
+            child_job = NULL;
         }
     }
 
@@ -1546,29 +1675,192 @@ bool start_child() {
                              NULL, NULL, &si, &pi);
     CloseHandle(log);
     if (!ok) {
-        if (job) CloseHandle(job);
-        g_live.last_error = "CreateProcess failed for live overlay compiler";
-        ++g_live.runs_failed;
-        return false;
+        if (child_job) CloseHandle(child_job);
+        result.error = "CreateProcess failed for live overlay compiler";
+        return result;
     }
-    if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
-        CloseHandle(job);
-        job = NULL;
+    if (child_job && !AssignProcessToJobObject(child_job, pi.hProcess)) {
+        CloseHandle(child_job);
+        child_job = NULL;
     }
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    g_live.child = pi.hProcess;
-    g_live.child_job = job;
+    result.child = pi.hProcess;
+    result.child_job = child_job;
+    result.started_ms = steady_ms();
+    result.ok = true;
+    return result;
+#else
+    (void)job;
+    result.error = "live overlay compilation is implemented for Windows only";
+    return result;
+#endif
+}
+
+void maintenance_worker_main() {
+    for (;;) {
+        MaintenanceJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_live.maint_mutex);
+            g_live.maint_cv.wait(lock, [] {
+                return g_live.maint_stop || !g_live.maint_jobs.empty();
+            });
+            // Teardown ABANDONS queued work rather than draining it: a
+            // snapshot write or a CreateProcess started here would outlive the
+            // session it belongs to. live_overlay_shutdown() releases them.
+            if (g_live.maint_stop) return;
+            job = std::move(g_live.maint_jobs.front());
+            g_live.maint_jobs.pop_front();
+        }
+        MaintenanceResult result;
+        switch (job.kind) {
+            case MaintenanceKind::Rescan:
+                result.kind = MaintenanceKind::Rescan;
+                result.rescan = scan_cache(job.cache_dir);
+                break;
+            case MaintenanceKind::RunFinished:
+                result = run_finished_job(job);
+                break;
+            case MaintenanceKind::StartChild:
+                result = start_child_job(job);
+                break;
+        }
+        coverage_manifest_release_snapshot(job.snapshot);
+        job.snapshot = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_live.maint_mutex);
+            g_live.maint_results.push_back(std::move(result));
+        }
+    }
+}
+
+// ---- emulation-thread side of the worker ----------------------------------
+
+void push_maintenance_job(MaintenanceJob job) {
+    {
+        std::lock_guard<std::mutex> lock(g_live.maint_mutex);
+        g_live.maint_jobs.push_back(std::move(job));
+    }
+    g_live.maint_cv.notify_one();
+}
+
+void queue_rescan_job() {
+    if (g_live.cache_dir.empty()) return;
+    MaintenanceJob job;
+    job.kind = MaintenanceKind::Rescan;
+    job.cache_dir = g_live.cache_dir;
+    push_maintenance_job(std::move(job));
+}
+
+bool request_child_start() {
+    if (g_live.command.empty()) return false;
+    // The ONLY part of the snapshot that has to happen here: a bounded copy of
+    // the resident page store and the guest page payloads, both of which the
+    // emulation thread owns. base64, the sort and the file write ride along on
+    // the job.
+    CoverageLiveSnapshot* snapshot =
+        coverage_manifest_capture_live_snapshot(64u);
+    if (!snapshot) {
+        g_live.last_error = "cannot capture the live overlay coverage snapshot";
+        ++g_live.runs_failed;
+        return false;
+    }
+    MaintenanceJob job;
+    job.kind = MaintenanceKind::StartChild;
+    job.cache_dir = g_live.cache_dir;
+    job.command = g_live.command;
+    job.rom_sha1 = g_live.rom_sha1;
+    job.run_index = g_live.runs_started + 1u;
+    job.batch_cap = effective_batch_cap();
+    job.snapshot = snapshot;
+    g_live.start_pending = true;
+    push_maintenance_job(std::move(job));
+    return true;
+}
+
+void apply_run_finished(MaintenanceResult& result) {
+    g_live.run_finish_pending = false;
+    g_live.pending_candidates = result.pending;
+    if (result.pending == 0u) g_live.persisted_backlog = false;
+    update_batch_ramp(result.pending, result.duration_ms);
+    if (result.exit_code != 0u) {
+        ++g_live.runs_failed;
+        g_live.last_error = "live overlay compiler exited with code " +
+            std::to_string(result.exit_code);
+    }
+    // Watch this run's own shards through to their verdict. Note the marks are
+    // taken BEFORE queueing so nothing this run produced can be attributed to
+    // an earlier one -- which is why queueing stayed on this thread.
+    g_live.run_loaded_mark = g_live.banks_loaded;
+    g_live.run_rejected_mark = g_live.banks_rejected;
+    g_live.run_queued = 0;
+    g_live.run_published = result.published_total;
+    for (const QueueCandidate& candidate : result.published)
+        if (enqueue_candidate(candidate)) ++g_live.run_queued;
+    g_live.run_watch = result.published_total != 0u;
+    // Keep draining. Conditioned on the run having actually PUBLISHED
+    // something so the no-progress backoff below still owns the case where the
+    // batch produced nothing: a provider that can see work but never emit a
+    // shard for it must not be re-commissioned every cooldown just because its
+    // queue file says work remains.
+    if (result.exit_code == 0u && result.pending != 0u &&
+        result.published_total != 0u) {
+        request_generation_compile();
+    }
+    if (result.exit_code == 0u && result.published_total == 0u) {
+        for (int cpu = 0; cpu < 2; ++cpu) {
+            g_live.next_trigger[cpu] = std::max(
+                g_live.next_trigger[cpu],
+                g_live.tier3[cpu] + kNoProgressRetriggerTier3);
+        }
+    }
+    for (const QueueCandidate& candidate : result.rescan)
+        enqueue_candidate(candidate);
+}
+
+void apply_start_child(MaintenanceResult& result) {
+    g_live.start_pending = false;
+    if (!result.log_path.empty()) g_live.log_path = std::move(result.log_path);
+    if (!result.ok) {
+        g_live.last_error = std::move(result.error);
+        ++g_live.runs_failed;
+        // The request is spent; a fresh trigger has to ask again.
+        g_live.trigger_requests = g_live.runs_started;
+        return;
+    }
+#if defined(_WIN32)
+    g_live.child = result.child;
+    g_live.child_job = result.child_job;
+    result.child = nullptr;
+    result.child_job = nullptr;
+#endif
+    g_live.manifest_path = std::move(result.manifest_path);
     ++g_live.runs_started;
-    g_live.last_compile_start_ms = steady_ms();
+    g_live.last_compile_start_ms = result.started_ms;
     std::fprintf(stderr, "[live-overlay] compiling from %s\n",
                  g_live.manifest_path.c_str());
-    return true;
-#else
-    g_live.last_error = "live overlay compilation is implemented for Windows only";
-    ++g_live.runs_failed;
-    return false;
-#endif
+}
+
+void drain_maintenance_results() {
+    std::deque<MaintenanceResult> results;
+    {
+        std::lock_guard<std::mutex> lock(g_live.maint_mutex);
+        results.swap(g_live.maint_results);
+    }
+    for (MaintenanceResult& result : results) {
+        switch (result.kind) {
+            case MaintenanceKind::Rescan:
+                for (const QueueCandidate& candidate : result.rescan)
+                    enqueue_candidate(candidate);
+                break;
+            case MaintenanceKind::RunFinished:
+                apply_run_finished(result);
+                break;
+            case MaintenanceKind::StartChild:
+                apply_start_child(result);
+                break;
+        }
+    }
 }
 
 }  // namespace
@@ -1674,6 +1966,35 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
 }
 
 void live_overlay_shutdown() {
+    // Stop the maintenance worker FIRST: it is the only thread that can still
+    // be spawning a compiler child, and a child born after the teardown of the
+    // session it belongs to would outlive its job object.
+    {
+        std::lock_guard<std::mutex> lock(g_live.maint_mutex);
+        g_live.maint_stop = true;
+    }
+    g_live.maint_cv.notify_all();
+    if (g_live.maint_thread.joinable()) g_live.maint_thread.join();
+    {
+        std::lock_guard<std::mutex> lock(g_live.maint_mutex);
+        for (MaintenanceJob& job : g_live.maint_jobs)
+            coverage_manifest_release_snapshot(job.snapshot);
+        g_live.maint_jobs.clear();
+#if defined(_WIN32)
+        // A start that completed while we were joining still owns handles.
+        for (MaintenanceResult& result : g_live.maint_results) {
+            if (result.child_job) {
+                CloseHandle(result.child_job);
+            } else if (result.child) {
+                TerminateProcess(result.child, 1u);
+            }
+            if (result.child) CloseHandle(result.child);
+        }
+#endif
+        g_live.maint_results.clear();
+    }
+    g_live.start_pending = false;
+    g_live.run_finish_pending = false;
 #if defined(_WIN32)
     if (g_live.child) {
         // The compiler publishes through an atomic rename. Closing the job
@@ -1718,7 +2039,13 @@ void live_overlay_runtime_reset() {
 
 void live_overlay_register_cached_banks() {
     if (!g_live.enabled) return;
-    rescan_cache();
+    ensure_workers();
+    // Called from launch, before emulation starts, so the cache walk is
+    // synchronous here on purpose: the resident shards are wanted BEFORE the
+    // first frame, and nothing is losing frame time to it yet. The poll's own
+    // re-scan path (after a runtime reset) hands the same walk to the worker.
+    for (const QueueCandidate& candidate : scan_cache(g_live.cache_dir))
+        enqueue_candidate(candidate);
     for (LoadedBank& bank : g_live.loaded)
         register_loaded_bank(bank);
     g_live.initial_cache_scan_done = true;
@@ -1822,13 +2149,23 @@ void live_overlay_poll() {
     // enabled the overlay without going through live_overlay_configure; it
     // is a no-op in every normal session.
     reload_persisted_queue();
-    if (!g_live.initial_cache_scan_done)
-        live_overlay_register_cached_banks();
+    ensure_workers();
+    if (!g_live.initial_cache_scan_done) {
+        // beads-yjp.59: the cache walk is a worker job, but re-registering the
+        // resident banks after a runtime reset is not -- the dispatch index is
+        // emulation-thread-owned and lookup reads it lock-free.
+        queue_rescan_job();
+        for (LoadedBank& bank : g_live.loaded) register_loaded_bank(bank);
+        g_live.initial_cache_scan_done = true;
+    }
     // Publication is an emulation-thread operation. The worker may prepare
     // multiple candidates, but at most one complete bank becomes visible per
     // poll so lookup can never observe a partially populated bundle.
     commit_one_ready_bank();
-    evaluate_run_futility();
+    drain_maintenance_results();
+    // A finished run whose log has not been read yet has not had its shards
+    // queued, so its verdict is not in yet either.
+    if (!g_live.run_finish_pending) evaluate_run_futility();
     if (g_live.child) {
         DWORD exit_code = STILL_ACTIVE;
         if (GetExitCodeProcess(g_live.child, &exit_code) &&
@@ -1840,54 +2177,27 @@ void live_overlay_poll() {
                 g_live.child_job = nullptr;
             }
             ++g_live.runs_finished;
-            const uint64_t duration_ms =
-                g_live.last_compile_start_ms
-                    ? steady_ms() - g_live.last_compile_start_ms
-                    : 0u;
-            // Read the backlog BEFORE re-rating the batch: the ramp decision
-            // is "did this run leave work behind, and how fast was it".
-            const uint64_t pending =
-                pending_from_log(g_live.pending_candidates);
-            g_live.pending_candidates = pending;
-            if (pending == 0u) g_live.persisted_backlog = false;
-            update_batch_ramp(pending, duration_ms);
-            if (exit_code != 0) {
-                ++g_live.runs_failed;
-                g_live.last_error = "live overlay compiler exited with code " +
-                    std::to_string(exit_code);
-            }
-            const auto published = published_paths_from_log();
-            // Watch this run's own shards through to their verdict. Note the
-            // marks are taken BEFORE queueing so nothing this run produced can
-            // be attributed to an earlier one.
-            g_live.run_loaded_mark = g_live.banks_loaded;
-            g_live.run_rejected_mark = g_live.banks_rejected;
-            g_live.run_queued = 0;
-            g_live.run_published = published.size();
-            for (const auto& path : published)
-                if (queue_bank_dll(path)) ++g_live.run_queued;
-            g_live.run_watch = !published.empty();
-            // Keep draining. Conditioned on the run having actually PUBLISHED
-            // something so the no-progress backoff below still owns the case
-            // where the batch produced nothing: a provider that can see work
-            // but never emit a shard for it must not be re-commissioned every
-            // cooldown just because its queue file says work remains.
-            if (exit_code == 0 && pending != 0u && !published.empty())
-                request_generation_compile();
-            if (exit_code == 0 && published.empty()) {
-                for (int cpu = 0; cpu < 2; ++cpu) {
-                    g_live.next_trigger[cpu] = std::max(
-                        g_live.next_trigger[cpu],
-                        g_live.tier3[cpu] + kNoProgressRetriggerTier3);
-                }
-            }
-            rescan_cache();
+            MaintenanceJob job;
+            job.kind = MaintenanceKind::RunFinished;
+            job.cache_dir = g_live.cache_dir;
+            job.log_path = g_live.log_path;
+            job.pending_fallback = g_live.pending_candidates;
+            job.exit_code = static_cast<uint32_t>(exit_code);
+            job.duration_ms = g_live.last_compile_start_ms
+                ? steady_ms() - g_live.last_compile_start_ms
+                : 0u;
+            g_live.run_finish_pending = true;
+            push_maintenance_job(std::move(job));
         }
     }
     if (!compile_activation_elapsed()) return;
     schedule_pending_compile();
-    if (!g_live.child && g_live.trigger_requests > g_live.runs_started) {
-        if (!start_child())
+    // Never commission the next run past a start or a run-completion the
+    // worker still owes an answer for: the batch cap, the cooldown and the
+    // backlog all come out of that answer.
+    if (!g_live.child && !g_live.start_pending && !g_live.run_finish_pending &&
+        g_live.trigger_requests > g_live.runs_started) {
+        if (!request_child_start())
             g_live.trigger_requests = g_live.runs_started;
     }
 #endif

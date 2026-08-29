@@ -1,8 +1,10 @@
 #include "live_overlay.h"
 #include "runtime_arm.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 extern "C" ArmCpuState g_cpu = {};
 extern "C" unsigned long long g_runtime_cycles = 0;
@@ -18,8 +20,24 @@ extern "C" void nds_register_dispatch(int, const NdsDispatchEntry*, unsigned,
 extern "C" void nds_unregister_dispatch(int, const NdsDispatchEntry*,
                                          unsigned) { ++g_unregistrations; }
 bool coverage_manifest_write(const char*, char*, unsigned) { return false; }
-bool coverage_manifest_write_live_snapshot(const char*, uint32_t, char*,
-                                           unsigned) { return false; }
+
+// beads-yjp.59: the live snapshot is captured on the emulation thread and
+// written on the maintenance worker. The capture has to succeed for the unit
+// layer to exercise the async path at all; the write is what refuses.
+struct CoverageLiveSnapshot { int unused; };
+CoverageLiveSnapshot* coverage_manifest_capture_live_snapshot(uint32_t) {
+    return new CoverageLiveSnapshot{0};
+}
+bool coverage_manifest_write_captured_snapshot(const CoverageLiveSnapshot*,
+                                               const char*, char* error,
+                                               unsigned error_cap) {
+    if (error && error_cap)
+        std::snprintf(error, error_cap, "test stub refuses to write");
+    return false;
+}
+void coverage_manifest_release_snapshot(CoverageLiveSnapshot* snapshot) {
+    delete snapshot;
+}
 bool bus_range_has_write_provenance(uint32_t, uint32_t) { return false; }
 bool bus_live_bytes_equal(uint32_t, const uint8_t*, uint32_t) { return false; }
 
@@ -406,8 +424,16 @@ int main() {
                            "live-overlay-test-cache-does-not-exist", "test");
     live_overlay_note_backlog_for_test(500u, 1000u);
     const unsigned long long control_before = status_number("runs_failed");
-    live_overlay_poll();
-    if (!expect(status_number("runs_failed") > control_before,
+    // beads-yjp.59: the snapshot write and the CreateProcess are a maintenance
+    // worker job now, so the poll that commissions the run is not the poll that
+    // records its outcome. The contract is that the outcome still ARRIVES, and
+    // that it is still counted exactly once.
+    for (int i = 0; i < 500 && status_number("runs_failed") == control_before;
+         ++i) {
+        live_overlay_poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!expect(status_number("runs_failed") == control_before + 1u,
                 "an unsuppressed backlog should reach the provider"))
         return 1;
     live_overlay_shutdown();
