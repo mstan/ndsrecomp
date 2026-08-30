@@ -40,6 +40,7 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "live_overlay.h"
+#include "live_overlay_platform.h"
 #include "melonds_compute/TextureUpscale.h"
 #include "net/net_ring.h"
 #include "net/net_capture.h"
@@ -326,63 +327,6 @@ std::filesystem::path exe_dir_from_argv(const char* argv0) {
     auto dir = std::filesystem::absolute(
         std::filesystem::path(argv0), ec).parent_path();
     return ec ? std::filesystem::current_path(ec) : dir;
-}
-
-// Build the autocompile command for the bundled toolchain, or "" when this
-// install has none (a source checkout, or a package built without it). The
-// cache, manifest and ROM SHA-1 reach the child through the
-// NDS_LIVE_OVERLAY_* environment variables that live_overlay.cpp sets, so
-// they are deliberately absent here.
-std::string bundled_tcc_command(const std::filesystem::path& exe_dir) {
-    std::error_code ec;
-    const auto tk = exe_dir / "overlay_toolchain";
-    // The interpreter is ALWAYS the bundled one, addressed absolutely. Never
-    // bare `python`/`py`: whatever a player has on PATH may be a Cygwin or
-    // Store build that mangles Windows paths or dies outright, and this runs
-    // unattended behind cmd.exe with its output going only to a log file.
-    const auto python = tk / "python" / "python.exe";
-    const auto script = tk / "compile_live_shards.py";
-    const auto recompiler = tk / "nds_recompile.exe";
-    const auto tcc = tk / "tcc" / "tcc.exe";
-    const auto include = tk / "include";
-    const auto runner = exe_dir / "nds_runner.exe";
-    for (const auto& required : {python, script, recompiler, tcc, runner}) {
-        if (!std::filesystem::is_regular_file(required, ec)) return {};
-    }
-    if (!std::filesystem::is_directory(include, ec)) return {};
-    auto q = [](const std::filesystem::path& p) {
-        return "\"" + p.string() + "\"";
-    };
-    return q(python) + " " + q(script) +
-        " --recompiler " + q(recompiler) +
-        " --runtime-include " + q(include) +
-        " --runner-exe " + q(runner) +
-        " --compiler tcc --tcc " + q(tcc) +
-        // No --max-pages here on purpose. The batch cap is queue policy and
-        // belongs to the runner, which raises it while a backlog is draining
-        // and returns it to the conservative base when the queue empties; it
-        // reaches the child in NDS_LIVE_OVERLAY_MAX_PAGES alongside the other
-        // NDS_LIVE_OVERLAY_* variables. Hard-coding it here would pin every
-        // player at the 6-per-run ceiling that never converged.
-        //
-        // --include-roots is NOT optional for a shipped install (beads-yjp.62).
-        // Since beads-yjp.53/.55 a fresh install's coverage is ROOT-ONLY: the
-        // deferred filing rule only records a call/indirect entry point when
-        // the interpreter resolves a transfer whose target has no live bank,
-        // and a cold session spends its time in straight-line interpreted
-        // spans, which produce root-map bits and no entry_points at all. A
-        // tester's own manifest shows it exactly: 27 captured pages, 2 with a
-        // non-empty entry_points array. Without this flag canonical_entries()
-        // drops the other 25, every run finishes clean with zero shards
-        // published, and the live tier starves forever.
-        //
-        // Safe for cache identity: provider_identity() deliberately EXCLUDES
-        // the run-mode flags (see its docstring), so adding this does not
-        // move the provider id and does not orphan an existing shipped cache.
-        // The wider candidate set shows up where it belongs, in work_identity()
-        // and the emitted config.
-        " --include-roots"
-        " --min-hits 8";
 }
 
 }  // namespace
@@ -1723,7 +1667,7 @@ int main(int argc, char** argv) {
                                 !have_gcc_command);
         if (cli_live_overlay_enable && force_tcc) {
             const auto exe_dir = exe_dir_from_argv(argv[0]);
-            std::string bundled = bundled_tcc_command(exe_dir);
+            std::string bundled = live_overlay_bundled_tcc_command(exe_dir);
             if (!bundled.empty()) {
                 cli_live_overlay_command = std::move(bundled);
                 std::fprintf(stderr,

@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-"""Compile generation-bound NDS RAM code pages into persistent live DLLs.
+"""Compile generation-bound NDS RAM code pages into persistent live libraries.
 
 The coverage manifest associates each dispatch/resume observation with the
 exact page bytes resident at that moment. Each DLL publishes one exact
@@ -35,6 +35,9 @@ PAGE_SIZE = 4096
 # Each owns a cache namespace (<cache>/gcc, <cache>/tcc) and hashes into a
 # distinct provider identity, so their shards never alias one another.
 BACKENDS = ("gcc", "tcc")
+SHARED_LIBRARY_SUFFIX = (
+    ".dll" if os.name == "nt" else
+    ".so" if sys.platform.startswith("linux") else "")
 
 
 def load_json(path: Path) -> object:
@@ -1083,18 +1086,22 @@ def _strip_bom(data: bytes) -> bytes:
 
 
 def tcc_include_dir(args: argparse.Namespace) -> Path:
-    """Memoized BOM-stripped, dllimport-marked copy of the runtime headers.
+    """Memoized TinyCC-compatible copy of the runtime headers.
 
     Keyed by a digest of the real header contents, so it self-invalidates when
     a header changes and can safely persist in the cache across runs.
     """
     headers = runtime_headers(args)
-    digest = hashlib.sha256(b"nds-live-tcc-include-1\0")
+    digest = hashlib.sha256(
+        f"nds-live-tcc-include-2\0{os.name}\0".encode("ascii"))
     payload: list[tuple[str, bytes]] = []
     for path in headers:
         data = _strip_bom(path.read_bytes())
-        marked, count = _TCC_EXTERN_RE.subn(
-            rb"\1__declspec(dllimport) ", data)
+        if os.name == "nt":
+            marked, count = _TCC_EXTERN_RE.subn(
+                rb"\1__declspec(dllimport) ", data)
+        else:
+            marked, count = data, 0
         payload.append((path.name, marked))
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
@@ -1119,12 +1126,11 @@ def tcc_include_dir(args: argparse.Namespace) -> Path:
                 raise
     blob = b"\n".join(
         _strip_bom((out / name).read_bytes()) for name, _ in payload)
-    missing = [
+    missing = ([] if os.name != "nt" else [
         symbol for symbol in _TCC_REQUIRED_IMPORTS
-        if (b"__declspec(dllimport) " in blob and
-            re.search(rb"__declspec\(dllimport\)[^;]*?\b"
-                      + symbol.encode("ascii") + rb"\b", blob) is None)
-    ]
+        if re.search(rb"__declspec\(dllimport\)[^;]*?\b"
+                     + symbol.encode("ascii") + rb"\b", blob) is None
+    ])
     if missing:
         raise RuntimeError(
             "tcc header transform did not mark these runtime data symbols "
@@ -1181,14 +1187,16 @@ def compile_shard_dll(args: argparse.Namespace, sources: list[Path],
     defines = [f"-DNDS_STATIC_CPU={static_cpu}"]
     if args.compiler == "tcc":
         includes = [tcc_include_dir(args), src_dir]
-        import_dir = tcc_import_dir(args)
         command = [
             str(args.tcc), "-shared", *defines,
             *[f"-I{path}" for path in includes],
             "-o", str(stage),
             *[str(path) for path in sources],
-            f"-L{import_dir}", f"-l{args.runner_exe.stem}",
         ]
+        if os.name == "nt":
+            import_dir = tcc_import_dir(args)
+            command.extend(
+                [f"-L{import_dir}", f"-l{args.runner_exe.stem}"])
         ok = run(command).returncode == 0
         # tcc -shared drops an export .def beside the output. It is a build
         # artifact, not part of the published pair; leaving it behind litters
@@ -1198,11 +1206,14 @@ def compile_shard_dll(args: argparse.Namespace, sources: list[Path],
     command = [
         str(args.gcc), "-shared", args.generated_opt, "-g0", *defines,
         *[f"-I{path}" for path in [*args.runtime_include, src_dir]],
-        "-Wl,--enable-auto-import",
         "-o", str(stage),
         *[str(path) for path in sources],
-        str(args.runner_import_lib),
     ]
+    if os.name == "nt":
+        command.extend(["-Wl,--enable-auto-import",
+                        str(args.runner_import_lib)])
+    else:
+        command.insert(2, "-fPIC")
     return run(command).returncode == 0
 
 
@@ -1268,17 +1279,17 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
     # Each backend owns a cache namespace. The loader scans both and prefers
     # gcc for the same generation, so a player box still LOADS the gcc shards
     # shipped in the prebuilt cache and only fills the gaps with tcc.
-    dll_dir = args.cache / args.compiler
-    dll_dir.mkdir(parents=True, exist_ok=True)
-    dll = dll_dir / f"{bank}_{candidate_id}.dll"
-    if not dll.is_file():
+    library_dir = args.cache / args.compiler
+    library_dir.mkdir(parents=True, exist_ok=True)
+    library = library_dir / f"{bank}_{candidate_id}{SHARED_LIBRARY_SUFFIX}"
+    if not library.is_file():
         write_wrapper(shard_wrapper_path(src_dir, bank), bank, candidate_id,
                       page_sha1, args.rom_sha1, cpu)
         bank_sources = generated_bank_sources(src_dir, bank)
         sources = shard_source_set(src_dir, bank)
         if len(bank_sources) < 2 or not all(path.is_file() for path in sources):
             raise RuntimeError(f"generated source set is incomplete for {bank}")
-        stage = dll.with_suffix(".stage.dll")
+        stage = library.with_suffix(f".stage{SHARED_LIBRARY_SUFFIX}")
         stage.unlink(missing_ok=True)
         if not compile_shard_dll(args, sources, src_dir, stage, cpu):
             stage.unlink(missing_ok=True)
@@ -1297,7 +1308,7 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
             print(f"capture {key}: {args.compiler} could not build this page; "
                   "kept in Tier 3", flush=True)
             return "skipped", None
-        os.replace(stage, dll)
+        os.replace(stage, library)
 
     record_capture(args, index, key, {
         "candidate_id": candidate_id,
@@ -1316,10 +1327,10 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
             {"addr": int(entry["addr"]), "mode": str(entry["mode"])}
             for entry in entries
         ],
-        "dll": dll.resolve().as_posix(),
+        "dll": library.resolve().as_posix(),
     })
-    print(f"NDS_SHARD_PUBLISHED {dll.resolve().as_posix()}", flush=True)
-    return "ok", dll
+    print(f"NDS_SHARD_PUBLISHED {library.resolve().as_posix()}", flush=True)
+    return "ok", library
 
 
 def main() -> int:
@@ -1380,6 +1391,9 @@ def main() -> int:
                         default=[])
     args = parser.parse_args()
 
+    if not SHARED_LIBRARY_SUFFIX:
+        raise SystemExit("live shard compilation supports Windows and Linux")
+
     if not args.manifest or not args.manifest.is_file():
         raise SystemExit(f"manifest does not exist: {args.manifest}")
     if not args.cache:
@@ -1404,12 +1418,12 @@ def main() -> int:
         path for path in args.runtime_include if path.is_dir()]
     if not args.runtime_include:
         raise SystemExit("no runtime include directory exists")
-    if args.compiler == "tcc":
+    if args.compiler == "tcc" and os.name == "nt":
         if not args.runner_exe or not args.runner_exe.is_file():
             raise SystemExit(
                 "the tcc backend needs --runner-exe (the runner executable "
                 f"whose exports the shards import); got {args.runner_exe}")
-    elif not args.runner_build:
+    elif args.compiler == "gcc" and os.name == "nt" and not args.runner_build:
         raise SystemExit("the gcc backend needs --runner-build")
     if args.max_pages is None:
         try:
@@ -1422,7 +1436,8 @@ def main() -> int:
     args.index = args.cache / "live-index.json"
     args.queue = args.cache / QUEUE_NAME
     args.runner_import_lib = (
-        find_import_lib(args.runner_build) if args.compiler == "gcc" else None)
+        find_import_lib(args.runner_build)
+        if args.compiler == "gcc" and os.name == "nt" else None)
     if args.compiler == "tcc":
         (args.cache / "tcc").mkdir(parents=True, exist_ok=True)
     args.provider_id = provider_identity(args)

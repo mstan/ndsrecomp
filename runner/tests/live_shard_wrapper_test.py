@@ -16,6 +16,7 @@ import ctypes
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -73,7 +74,8 @@ def build(work: Path, gcc: str, cpu: int, static_cpu: int) -> Path:
     wrapper = src / f"{bank}_live.c"
     tool.write_wrapper(wrapper, bank, "candidate-test", "generation-test",
                        ROM_SHA1, cpu)
-    dll = src / f"{bank}.dll"
+    suffix = ".dll" if sys.platform == "win32" else ".so"
+    dll = src / f"{bank}{suffix}"
     command = [
         gcc, "-shared", "-O0", "-g0",
         f"-DNDS_STATIC_CPU={static_cpu}",
@@ -84,6 +86,8 @@ def build(work: Path, gcc: str, cpu: int, static_cpu: int) -> Path:
         "-I", str(ROOT / "external" / "arm-recomp-core" / "common"),
         "-o", str(dll), str(src / "stub.c"), str(wrapper),
     ]
+    if sys.platform != "win32":
+        command.insert(2, "-fPIC")
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT)
     if result.returncode != 0:
@@ -98,6 +102,38 @@ def info(dll: Path) -> BankInfo:
     return module.nds_live_bank_info().contents
 
 
+def check_tcc_command(work: Path) -> None:
+    commands: list[list[str]] = []
+    original_run = tool.run
+    original_include = tool.tcc_include_dir
+    original_import = tool.tcc_import_dir
+    try:
+        tool.run = lambda command: (
+            commands.append(command) or subprocess.CompletedProcess(
+                command, returncode=0))
+        tool.tcc_include_dir = lambda args: work / "tcc-include"
+        tool.tcc_import_dir = lambda args: work / "tcc-import"
+        args = SimpleNamespace(
+            compiler="tcc", tcc=Path("tcc"), runner_exe=Path("nds_runner"))
+        ok = tool.compile_shard_dll(
+            args, [work / "body.c"], work, work / "bank.stage" /
+            f"bank{tool.SHARED_LIBRARY_SUFFIX}", 9)
+        assert ok and len(commands) == 1
+        command = commands[0]
+        assert command[:2] == ["tcc", "-shared"]
+        assert "-DNDS_STATIC_CPU=0" in command
+        if sys.platform == "win32":
+            assert any(arg.startswith("-L") for arg in command)
+            assert "-lnds_runner" in command
+        else:
+            assert not any(arg.startswith("-L") for arg in command)
+            assert not any(arg.startswith("-l") for arg in command)
+    finally:
+        tool.run = original_run
+        tool.tcc_include_dir = original_include
+        tool.tcc_import_dir = original_import
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gcc", default="gcc")
@@ -105,6 +141,7 @@ def main() -> int:
     args = parser.parse_args()
     args.work = args.work.resolve()
     args.work.mkdir(parents=True, exist_ok=True)
+    check_tcc_command(args.work)
 
     for cpu, expected_static in ((9, 0), (7, 1)):
         bank = info(build(args.work, args.gcc, cpu, expected_static))

@@ -380,6 +380,7 @@ add_executable(nds_runner
     src/runtime_abi_shims.cpp
     src/savestate.cpp
     src/live_overlay.cpp
+    src/live_overlay_platform.cpp
     src/battery_save.cpp
     src/firmware_state.cpp
     src/generated_firmware.cpp
@@ -707,10 +708,7 @@ endif()
 if(NDS_ENABLE_COMPUTE_RENDERER AND NDS_SDL_BACKEND STREQUAL "NONE")
     message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires NDS_SDL_BACKEND=SDL3 or SDL2")
 endif()
-if(NDS_ENABLE_COMPUTE_RENDERER AND CMAKE_DL_LIBS)
-    target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})
-endif()
-if(NDS_ENABLE_PCAP_BACKEND AND CMAKE_DL_LIBS)
+if(CMAKE_DL_LIBS)
     target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})
 endif()
 if(WIN32)
@@ -843,6 +841,7 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   add_executable(live_overlay_preflight_test
       tests/live_overlay_preflight_test.cpp
       src/live_overlay.cpp
+      src/live_overlay_platform.cpp
       # live_overlay_poll() opens an NDS_EMU_OVERLAY region, whose accumulators
       # and tick calibration live in these two translation units.
       src/emu_profile.cpp
@@ -851,8 +850,18 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  set_target_properties(live_overlay_preflight_test PROPERTIES ENABLE_EXPORTS ON)
+  if(CMAKE_DL_LIBS)
+    target_link_libraries(live_overlay_preflight_test PRIVATE ${CMAKE_DL_LIBS})
+  endif()
   add_test(NAME live_overlay_preflight_test
            COMMAND live_overlay_preflight_test)
+
+  add_executable(live_overlay_platform_test
+      tests/live_overlay_platform_test.cpp
+      src/live_overlay_platform.cpp)
+  target_include_directories(live_overlay_platform_test PRIVATE src)
+  add_test(NAME live_overlay_platform_test COMMAND live_overlay_platform_test)
 
   add_executable(dispatch_lookup_test
       tests/dispatch_lookup_test.cpp)
@@ -913,15 +922,27 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         NAME live_queue_persist_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_queue_persist_test.py")
-    if(WIN32)
-      # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
-      # what the runner cross-checks against the bank's metadata CPU.
+    # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
+    # what the runner cross-checks against the bank's metadata CPU.
+    add_test(
+        NAME live_shard_wrapper_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_wrapper_test.py"
+                --gcc "${CMAKE_C_COMPILER}"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-wrapper-work")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       add_test(
-          NAME live_shard_wrapper_test
+          NAME live_overlay_linux_loader_test
           COMMAND "${Python3_EXECUTABLE}"
-                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_wrapper_test.py"
-                  --gcc "${CMAKE_C_COMPILER}"
-                  --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-wrapper-work")
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_linux_loader_test.py"
+                  --cc "${CMAKE_C_COMPILER}"
+                  --runner-test "$<TARGET_FILE:live_overlay_preflight_test>"
+                  --work "${CMAKE_CURRENT_BINARY_DIR}/live-overlay-linux-loader-work")
+      add_test(
+          NAME live_overlay_linux_process_test
+          COMMAND "$<TARGET_FILE:live_overlay_preflight_test>"
+                  --spawn-command
+                  "${CMAKE_CURRENT_BINARY_DIR}/live-overlay-linux-process-work")
     endif()
     add_test(
         NAME m7_collect_two_instance_evidence_test

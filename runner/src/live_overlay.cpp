@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "coverage_manifest.h"
+#include "live_overlay_platform.h"
 #include "runtime_arm.h"
 #include "state.h"
 #include "emu_profile.h"
@@ -27,6 +29,17 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <signal.h>
+#include <sys/file.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char** environ;
 #endif
 
 namespace {
@@ -231,6 +244,8 @@ struct LoadedBank {
     bool superseded = false;
 #if defined(_WIN32)
     HMODULE handle = nullptr;
+#elif defined(__linux__)
+    void* handle = nullptr;
 #endif
 };
 
@@ -264,7 +279,7 @@ constexpr uint32_t kDormantMaxPagesPerCandidate = 64u;
 constexpr unsigned kDormantMaxValidationProbes = 256u;
 
 struct DormantCandidate {
-    std::string key;    // lower-cased canonical path; the queued_paths key
+    std::string key;    // canonical platform path key; the queued_paths key
     std::string path;   // canonical path; empty for a test-injected candidate
     int cpu = 0;        // 0 = ARM9, 1 = ARM7 (normalized)
     std::vector<uint32_t> pages;  // 4 KB page bases this shard's rows own
@@ -337,6 +352,8 @@ struct MaintenanceResult {
 #if defined(_WIN32)
     HANDLE child = nullptr;
     HANDLE child_job = nullptr;
+#elif defined(__linux__)
+    pid_t child = -1;
 #endif
 };
 
@@ -451,10 +468,36 @@ struct State {
 #if defined(_WIN32)
     HANDLE child = nullptr;
     HANDLE child_job = nullptr;
+#elif defined(__linux__)
+    pid_t child = -1;
 #endif
 };
 
 State g_live;
+
+bool child_active() {
+#if defined(_WIN32)
+    return g_live.child != nullptr;
+#elif defined(__linux__)
+    return g_live.child > 0;
+#else
+    return false;
+#endif
+}
+
+#if defined(__linux__)
+void terminate_and_reap(pid_t& child) {
+    if (child <= 0) return;
+    // The compiler and every recompiler/compiler subprocess inherit the
+    // process group created by posix_spawn. Kill the group first, with the
+    // direct child fallback covering a provider that changed its own group.
+    kill(-child, SIGKILL);
+    kill(child, SIGKILL);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    child = -1;
+}
+#endif
 
 // Always-on: no build-type guard, no sampling. Callers are all cold paths
 // (a shard load, a bank adoption, a slow-path dispatch reject), so the cost is
@@ -506,6 +549,15 @@ std::string path_string(const std::filesystem::path& path) {
     return path.lexically_normal().generic_string();
 }
 
+std::string path_key(const std::filesystem::path& path) {
+    const std::string value = path_string(path);
+#if defined(_WIN32)
+    return lower_ascii(value);
+#else
+    return value;
+#endif
+}
+
 bool path_under_cache(const std::filesystem::path& cache_dir,
                       const std::filesystem::path& path) {
     if (cache_dir.empty()) return false;
@@ -514,14 +566,40 @@ bool path_under_cache(const std::filesystem::path& cache_dir,
     if (ec) return false;
     const auto child = std::filesystem::weakly_canonical(path, ec);
     if (ec) return false;
-    const std::string root_s = lower_ascii(path_string(root));
-    const std::string child_s = lower_ascii(path_string(child));
+    const std::string root_s = path_key(root);
+    const std::string child_s = path_key(child);
     return child_s == root_s ||
         (child_s.size() > root_s.size() &&
          child_s.compare(0, root_s.size(), root_s) == 0 &&
          (root_s.empty() || root_s.back() == '/' ||
           child_s[root_s.size()] == '/'));
 }
+
+#if defined(_WIN32)
+using NativeLibrarySymbol = FARPROC;
+#elif defined(__linux__)
+using NativeLibrarySymbol = void*;
+#endif
+
+#if defined(_WIN32) || defined(__linux__)
+void close_library(LoadedBank& bank) {
+    if (!bank.handle) return;
+#if defined(_WIN32)
+    FreeLibrary(bank.handle);
+#else
+    dlclose(bank.handle);
+#endif
+    bank.handle = nullptr;
+}
+
+NativeLibrarySymbol library_symbol(const LoadedBank& bank, const char* name) {
+#if defined(_WIN32)
+    return GetProcAddress(bank.handle, name);
+#else
+    return dlsym(bank.handle, name);
+#endif
+}
+#endif
 
 void copy_cstr(char* dst, std::size_t dst_len, const char* src) {
     if (!dst || dst_len == 0u) return;
@@ -1122,11 +1200,13 @@ void update_batch_ramp(uint64_t pending, uint64_t duration_ms) {
 // unreadable, mismatched, or contended reads as "no backlog": the queue is
 // scheduling advice, and a bad one must never be able to block a launch.
 uint64_t read_persisted_pending_count() {
-#if defined(_WIN32)
     if (g_live.cache_dir.empty() || g_live.rom_sha1.empty()) return 0u;
     std::error_code ec;
     const auto queue_path = g_live.cache_dir / "live-queue.json";
     if (!std::filesystem::is_regular_file(queue_path, ec)) return 0u;
+
+    std::string text;
+#if defined(_WIN32)
 
     // Same lock file and same exclusive byte-range discipline the compiler
     // uses (tools/compile_live_shards.py::exclusive_file_lock): one permanent
@@ -1154,7 +1234,6 @@ uint64_t read_persisted_pending_count() {
         return 0u;
     }
 
-    std::string text;
     {
         std::ifstream f(queue_path, std::ios::binary);
         std::ostringstream buffer;
@@ -1164,6 +1243,36 @@ uint64_t read_persisted_pending_count() {
     OVERLAPPED unlock_ov{};
     UnlockFileEx(lock, 0, 1u, 0u, &unlock_ov);
     CloseHandle(lock);
+#elif defined(__linux__)
+    const std::string lock_name =
+        path_string(g_live.cache_dir / "live-index.lock");
+    const int lock = ::open(lock_name.c_str(), O_RDWR | O_CREAT, 0666);
+    if (lock < 0) return 0u;
+    bool held = false;
+    const uint64_t deadline = steady_ms() + kQueueLockWaitMs;
+    for (;;) {
+        if (flock(lock, LOCK_EX | LOCK_NB) == 0) {
+            held = true;
+            break;
+        }
+        if (steady_ms() >= deadline) break;
+        usleep(25000u);
+    }
+    if (!held) {
+        ::close(lock);
+        return 0u;
+    }
+    {
+        std::ifstream f(queue_path, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << f.rdbuf();
+        text = buffer.str();
+    }
+    flock(lock, LOCK_UN);
+    ::close(lock);
+#else
+    return 0u;
+#endif
 
     // Refuse a queue that belongs to another ROM. Sharing one cache directory
     // between titles is supported for the index, so it must be checked here.
@@ -1188,9 +1297,6 @@ uint64_t read_persisted_pending_count() {
         any = true;
     }
     return any ? value : 0u;
-#else
-    return 0u;
-#endif
 }
 
 void reload_persisted_queue() {
@@ -1259,9 +1365,7 @@ void evaluate_run_futility() {
             return;
         }
     }
-#if defined(_WIN32)
-    if (g_live.child) return;
-#endif
+    if (child_active()) return;
     g_live.run_watch = false;
     const uint64_t loaded = g_live.banks_loaded - g_live.run_loaded_mark;
     const uint64_t rejected = g_live.banks_rejected - g_live.run_rejected_mark;
@@ -1355,17 +1459,6 @@ uint64_t bank_content_identity(const NdsLiveBankInfo& info) {
     return hash;
 }
 
-bool is_final_dll_path(const std::filesystem::path& path) {
-    const std::string filename = lower_ascii(path.filename().string());
-    constexpr const char* kStageSuffix = ".stage.dll";
-    if (filename.size() >= std::strlen(kStageSuffix) &&
-        filename.compare(filename.size() - std::strlen(kStageSuffix),
-                         std::strlen(kStageSuffix), kStageSuffix) == 0) {
-        return false;
-    }
-    return lower_ascii(path.extension().string()) == ".dll";
-}
-
 // Tier order for two banks covering the SAME generation: gcc > tcc > unknown.
 // The compiler writes each shard into <cache>/<backend>/, so the immediate
 // parent directory names the backend. An unrecognized layout scores 0 rather
@@ -1384,16 +1477,16 @@ uint32_t backend_tier(const std::filesystem::path& path) {
 // records it when it drains prepare_errors.
 bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
                       std::string& error, RejectReason& reason) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     if (!path_under_cache(g_live.cache_dir, path)) {
         reason = RejectReason::LoadPathOutsideCache;
-        error = "published DLL outside live overlay cache: " +
+        error = "published library outside live overlay cache: " +
             path_string(path);
         return false;
     }
-    if (!is_final_dll_path(path)) {
+    if (!live_overlay_is_final_library_path(path)) {
         reason = RejectReason::LoadNotPublishedDll;
-        error = "live bank is not an atomically published DLL: " +
+        error = "live bank is not an atomically published library: " +
             path_string(path);
         return false;
     }
@@ -1402,46 +1495,57 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     const auto canon_path = std::filesystem::weakly_canonical(path, ec);
     if (ec) {
         reason = RejectReason::LoadCanonicalizeFailed;
-        error = "cannot canonicalize published DLL: " +
+        error = "cannot canonicalize published library: " +
             path_string(path);
         return false;
     }
     const std::string canon = path_string(canon_path);
-    HMODULE handle = LoadLibraryA(canon.c_str());
-    if (!handle) {
+    bank = {};
+#if defined(_WIN32)
+    bank.handle = LoadLibraryA(canon.c_str());
+#else
+    dlerror();
+    bank.handle = dlopen(canon.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!bank.handle) {
         reason = RejectReason::LoadLibraryFailed;
+#if defined(_WIN32)
         error = "LoadLibrary failed: " + canon;
+#else
+        const char* detail = dlerror();
+        error = "dlopen failed: " + canon +
+            (detail ? std::string(": ") + detail : std::string{});
+#endif
         return false;
     }
 
     using InfoFn = const NdsLiveBankInfo* (*)();
-    FARPROC proc = GetProcAddress(handle, "nds_live_bank_info");
+    NativeLibrarySymbol proc = library_symbol(bank, "nds_live_bank_info");
     InfoFn info_fn = nullptr;
     static_assert(sizeof(info_fn) == sizeof(proc));
     std::memcpy(&info_fn, &proc, sizeof(info_fn));
     const NdsLiveBankInfo* info = info_fn ? info_fn() : nullptr;
     if (!info) {
-        FreeLibrary(handle);
+        close_library(bank);
         reason = RejectReason::LoadNoBankInfo;
-        error = "live DLL does not export bank metadata: " + canon;
+        error = "live library does not export bank metadata: " + canon;
         return false;
     }
     std::string preflight_error;
     if (!validate_live_bank_info(*info, g_live.rom_sha1, preflight_error,
                                  &reason)) {
-        FreeLibrary(handle);
+        close_library(bank);
         error = preflight_error + ": " + canon;
         return false;
     }
 
-    bank = {};
     bank.path = canon;
     bank.backend_tier = backend_tier(path);
     bank.bank_id = info->bank_id ? info->bank_id : "";
     bank.candidate_id = info->candidate_id ? info->candidate_id : "";
     using GenerationFn = const char* (*)();
-    FARPROC generation_proc =
-        GetProcAddress(handle, "nds_live_generation_id");
+    NativeLibrarySymbol generation_proc =
+        library_symbol(bank, "nds_live_generation_id");
     GenerationFn generation_fn = nullptr;
     static_assert(sizeof(generation_fn) == sizeof(generation_proc));
     std::memcpy(&generation_fn, &generation_proc, sizeof(generation_fn));
@@ -1456,13 +1560,12 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     bank.dispatch = info->dispatch;
     bank.dispatch_len = info->dispatch_len;
     bank.content_identity = bank_content_identity(*info);
-    bank.handle = handle;
     return true;
 #else
     (void)path;
     (void)bank;
     reason = RejectReason::LoadUnsupportedPlatform;
-    error = "live overlay loading is implemented for Windows only";
+    error = "live overlay loading is unsupported on this platform";
     return false;
 #endif
 }
@@ -1514,7 +1617,7 @@ bool dispatch_rows_cover(const LoadedBank& super, const LoadedBank& sub) {
 }
 
 bool commit_prepared_bank(LoadedBank bank) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     for (const LoadedBank& loaded : g_live.loaded) {
         if (!same_candidate_key(loaded, bank)) continue;
         if (loaded.content_identity != bank.content_identity) {
@@ -1526,7 +1629,7 @@ bool commit_prepared_bank(LoadedBank bank) {
         } else {
             note_reject(RejectReason::DropDuplicateCandidate);
         }
-        if (bank.handle) FreeLibrary(bank.handle);
+        close_library(bank);
         return loaded.content_identity == bank.content_identity;
     }
     // ---- one decision per same-generation resident ----------------------
@@ -1579,7 +1682,7 @@ bool commit_prepared_bank(LoadedBank bank) {
         } else {
             note_reject(RejectReason::DropRedundantSubset);
         }
-        if (bank.handle) FreeLibrary(bank.handle);
+        close_library(bank);
         return true;
     }
     for (LoadedBank& loaded : g_live.loaded) {
@@ -1601,10 +1704,7 @@ bool commit_prepared_bank(LoadedBank bank) {
         loaded.registered = false;
         loaded.superseded = true;
         loaded.dispatch = nullptr;
-        if (loaded.handle) {
-            FreeLibrary(loaded.handle);
-            loaded.handle = nullptr;
-        }
+        close_library(loaded);
     }
     bank.serial = g_live.next_bank_serial++;
     bank.generation = static_cast<uint32_t>(++g_live.publication_generation);
@@ -1640,11 +1740,8 @@ bool commit_prepared_bank(LoadedBank bank) {
 void admit_prepared_bank(LoadedBank bank, const std::string& key) {
     if (!bank_guard_bytes_live(bank)) {
         note_dormant_candidate(bank, key);
-#if defined(_WIN32)
-        if (bank.handle) {
-            FreeLibrary(bank.handle);
-            bank.handle = nullptr;
-        }
+#if defined(_WIN32) || defined(__linux__)
+        close_library(bank);
 #endif
         return;
     }
@@ -1703,12 +1800,13 @@ void ensure_workers() {
 bool make_queue_candidate(const std::filesystem::path& cache_dir,
                           const std::filesystem::path& path,
                           QueueCandidate& out) {
-    if (!is_final_dll_path(path) || !path_under_cache(cache_dir, path))
+    if (!live_overlay_is_final_library_path(path) ||
+        !path_under_cache(cache_dir, path))
         return false;
     std::error_code ec;
     auto canon_path = std::filesystem::weakly_canonical(path, ec);
     if (ec) return false;
-    out.key = lower_ascii(path_string(canon_path));
+    out.key = path_key(canon_path);
     out.path = std::move(canon_path);
     return true;
 }
@@ -1763,7 +1861,7 @@ void commit_one_ready_bank() {
         note_reject(error.reason);
     }
     if (have_bank) {
-        const std::string key = lower_ascii(bank.path);
+        const std::string key = path_key(std::filesystem::path(bank.path));
         admit_prepared_bank(std::move(bank), key);
     }
 }
@@ -1787,7 +1885,7 @@ std::vector<QueueCandidate> scan_cache(
         if (ec) break;
         if (!entry.is_regular_file(ec)) continue;
         const auto path = entry.path();
-        if (!is_final_dll_path(path)) continue;
+        if (!live_overlay_is_final_library_path(path)) continue;
         const auto write_time = entry.last_write_time(ec);
         if (ec) {
             ec.clear();
@@ -1807,8 +1905,7 @@ std::vector<QueueCandidate> scan_cache(
                                              const CachedDllPath& b) {
         if (a.tier != b.tier) return a.tier > b.tier;
         if (a.write_time != b.write_time) return a.write_time < b.write_time;
-        return lower_ascii(path_string(a.path)) <
-            lower_ascii(path_string(b.path));
+        return path_key(a.path) < path_key(b.path);
     });
     out.reserve(paths.size());
     for (const CachedDllPath& item : paths) {
@@ -1867,6 +1964,8 @@ uint64_t pending_from_log(const std::string& log_path, uint64_t fallback) {
 unsigned long current_process_id() {
 #if defined(_WIN32)
     return static_cast<unsigned long>(GetCurrentProcessId());
+#elif defined(__linux__)
+    return static_cast<unsigned long>(getpid());
 #else
     return 0ul;
 #endif
@@ -1899,7 +1998,6 @@ MaintenanceResult run_finished_job(const MaintenanceJob& job) {
 MaintenanceResult start_child_job(MaintenanceJob& job) {
     MaintenanceResult result;
     result.kind = MaintenanceKind::StartChild;
-#if defined(_WIN32)
     std::error_code ec;
     std::filesystem::create_directories(job.cache_dir / "snapshots", ec);
     if (ec) {
@@ -1939,6 +2037,7 @@ MaintenanceResult start_child_job(MaintenanceJob& job) {
                   static_cast<unsigned long long>(job.run_index));
     result.log_path = path_string(job.cache_dir / "logs" / log_name);
 
+#if defined(_WIN32)
     SECURITY_ATTRIBUTES sa{sizeof(sa), NULL, TRUE};
     HANDLE log = CreateFileA(result.log_path.c_str(), GENERIC_WRITE,
                              FILE_SHARE_READ, &sa, CREATE_ALWAYS,
@@ -2003,9 +2102,82 @@ MaintenanceResult start_child_job(MaintenanceJob& job) {
     result.started_ms = steady_ms();
     result.ok = true;
     return result;
+#elif defined(__linux__)
+    const int log = ::open(result.log_path.c_str(),
+                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (log < 0) {
+        result.error = "cannot open live overlay compiler log: " +
+            std::string(std::strerror(errno));
+        return result;
+    }
+
+    const std::string cache = path_string(job.cache_dir);
+    const std::array<std::string, 4> overrides = {
+        "NDS_LIVE_OVERLAY_MANIFEST=" + result.manifest_path,
+        "NDS_LIVE_OVERLAY_CACHE=" + cache,
+        "NDS_LIVE_OVERLAY_ROM_SHA1=" + job.rom_sha1,
+        "NDS_LIVE_OVERLAY_MAX_PAGES=" + std::to_string(job.batch_cap),
+    };
+    std::vector<std::string> environment;
+    for (char** item = environ; item && *item; ++item) {
+        const std::string value(*item);
+        bool replaced = false;
+        for (const std::string& override_value : overrides) {
+            const std::size_t equals = override_value.find('=');
+            if (value.compare(0, equals + 1u, override_value, 0,
+                              equals + 1u) == 0) {
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) environment.push_back(value);
+    }
+    environment.insert(environment.end(), overrides.begin(), overrides.end());
+    std::vector<char*> envp;
+    envp.reserve(environment.size() + 1u);
+    for (std::string& value : environment) envp.push_back(value.data());
+    envp.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int rc = posix_spawn_file_actions_init(&actions);
+    const bool actions_initialized = rc == 0;
+    if (rc == 0) rc = posix_spawn_file_actions_adddup2(&actions, log,
+                                                       STDOUT_FILENO);
+    if (rc == 0) rc = posix_spawn_file_actions_adddup2(&actions, log,
+                                                       STDERR_FILENO);
+    if (rc == 0) rc = posix_spawn_file_actions_addclose(&actions, log);
+    if (rc == 0) rc = posix_spawnattr_init(&attributes);
+    const bool attributes_initialized = rc == 0;
+    if (rc == 0) rc = posix_spawnattr_setflags(
+        &attributes, POSIX_SPAWN_SETPGROUP);
+    if (rc == 0) rc = posix_spawnattr_setpgroup(&attributes, 0);
+    pid_t child = -1;
+    // Run the provider in its own process group and below emulator priority.
+    // $0/$1 carry the command without interpolating it into this wrapper.
+    char shell[] = "/bin/sh";
+    char wrapper[] = "exec nice -n 10 \"$0\" -c \"$1\"";
+    char* argv[] = {shell, const_cast<char*>("-c"), wrapper, shell,
+                    job.command.data(), nullptr};
+    if (rc == 0) {
+        rc = posix_spawn(&child, shell, &actions, &attributes, argv,
+                         envp.data());
+    }
+    if (actions_initialized) posix_spawn_file_actions_destroy(&actions);
+    if (attributes_initialized) posix_spawnattr_destroy(&attributes);
+    ::close(log);
+    if (rc != 0) {
+        result.error = "posix_spawn failed for live overlay compiler: " +
+            std::string(std::strerror(rc));
+        return result;
+    }
+    result.child = child;
+    result.started_ms = steady_ms();
+    result.ok = true;
+    return result;
 #else
     (void)job;
-    result.error = "live overlay compilation is implemented for Windows only";
+    result.error = "live overlay compilation is unsupported on this platform";
     return result;
 #endif
 }
@@ -2148,6 +2320,9 @@ void apply_start_child(MaintenanceResult& result) {
     g_live.child_job = result.child_job;
     result.child = nullptr;
     result.child_job = nullptr;
+#elif defined(__linux__)
+    g_live.child = result.child;
+    result.child = -1;
 #endif
     g_live.manifest_path = std::move(result.manifest_path);
     ++g_live.runs_started;
@@ -2179,6 +2354,21 @@ void drain_maintenance_results() {
                 break;
         }
     }
+}
+
+void queue_run_finished(uint32_t exit_code) {
+    ++g_live.runs_finished;
+    MaintenanceJob job;
+    job.kind = MaintenanceKind::RunFinished;
+    job.cache_dir = g_live.cache_dir;
+    job.log_path = g_live.log_path;
+    job.pending_fallback = g_live.pending_candidates;
+    job.exit_code = exit_code;
+    job.duration_ms = g_live.last_compile_start_ms
+        ? steady_ms() - g_live.last_compile_start_ms
+        : 0u;
+    g_live.run_finish_pending = true;
+    push_maintenance_job(std::move(job));
 }
 
 }  // namespace
@@ -2316,6 +2506,9 @@ void live_overlay_shutdown() {
             }
             if (result.child) CloseHandle(result.child);
         }
+#elif defined(__linux__)
+        for (MaintenanceResult& result : g_live.maint_results)
+            terminate_and_reap(result.child);
 #endif
         g_live.maint_results.clear();
         g_live.maint_results_ready.store(false, std::memory_order_release);
@@ -2336,6 +2529,8 @@ void live_overlay_shutdown() {
         CloseHandle(g_live.child);
         g_live.child = nullptr;
     }
+#elif defined(__linux__)
+    terminate_and_reap(g_live.child);
 #endif
     {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
@@ -2350,9 +2545,9 @@ void live_overlay_shutdown() {
     if (g_live.prepare_thread.joinable()) g_live.prepare_thread.join();
     {
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
         for (LoadedBank& bank : g_live.ready_queue) {
-            if (bank.handle) FreeLibrary(bank.handle);
+            close_library(bank);
         }
 #endif
         g_live.ready_queue.clear();
@@ -2486,7 +2681,7 @@ void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
 }
 
 void live_overlay_poll() {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     if (!g_live.enabled) return;
     // Past the enabled gate, so a session without live sharding pays nothing.
     // When it IS enabled this runs a queue reload, a bank publication, a
@@ -2525,7 +2720,8 @@ void live_overlay_poll() {
     // A finished run whose log has not been read yet has not had its shards
     // queued, so its verdict is not in yet either.
     if (!g_live.run_finish_pending) evaluate_run_futility();
-    if (g_live.child) {
+    if (child_active()) {
+#if defined(_WIN32)
         DWORD exit_code = STILL_ACTIVE;
         if (GetExitCodeProcess(g_live.child, &exit_code) &&
             exit_code != STILL_ACTIVE) {
@@ -2535,26 +2731,34 @@ void live_overlay_poll() {
                 CloseHandle(g_live.child_job);
                 g_live.child_job = nullptr;
             }
-            ++g_live.runs_finished;
-            MaintenanceJob job;
-            job.kind = MaintenanceKind::RunFinished;
-            job.cache_dir = g_live.cache_dir;
-            job.log_path = g_live.log_path;
-            job.pending_fallback = g_live.pending_candidates;
-            job.exit_code = static_cast<uint32_t>(exit_code);
-            job.duration_ms = g_live.last_compile_start_ms
-                ? steady_ms() - g_live.last_compile_start_ms
-                : 0u;
-            g_live.run_finish_pending = true;
-            push_maintenance_job(std::move(job));
+            queue_run_finished(static_cast<uint32_t>(exit_code));
         }
+#elif defined(__linux__)
+        int status = 0;
+        const pid_t waited = waitpid(g_live.child, &status, WNOHANG);
+        if (waited == g_live.child) {
+            g_live.child = -1;
+            const uint32_t exit_code = WIFEXITED(status)
+                ? static_cast<uint32_t>(WEXITSTATUS(status))
+                : (WIFSIGNALED(status)
+                       ? 128u + static_cast<uint32_t>(WTERMSIG(status))
+                       : 1u);
+            queue_run_finished(exit_code);
+        } else if (waited < 0 && errno != EINTR) {
+            g_live.last_error = "waitpid failed for live overlay compiler: " +
+                std::string(std::strerror(errno));
+            g_live.child = -1;
+            queue_run_finished(1u);
+        }
+#endif
     }
     if (!compile_activation_elapsed()) return;
     schedule_pending_compile();
     // Never commission the next run past a start or a run-completion the
     // worker still owes an answer for: the batch cap, the cooldown and the
     // backlog all come out of that answer.
-    if (!g_live.child && !g_live.start_pending && !g_live.run_finish_pending &&
+    if (!child_active() && !g_live.start_pending &&
+        !g_live.run_finish_pending &&
         g_live.trigger_requests > g_live.runs_started) {
         if (!request_child_start())
             g_live.trigger_requests = g_live.runs_started;
@@ -2642,7 +2846,7 @@ bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
                                       const char* candidate_id,
                                       const char* generation_id,
                                       unsigned backend_tier,
-                                      const char* path_key,
+                                      const char* path_text,
                                       const NdsDispatchEntry* dispatch,
                                       unsigned dispatch_len) {
     LoadedBank bank{};
@@ -2655,24 +2859,25 @@ bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
     bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
     bank.dispatch = dispatch;
     bank.dispatch_len = dispatch_len;
-    bank.path = path_key ? path_key : "";
+    bank.path = path_text ? path_text : "";
     bank.content_identity = hash_bytes(1469598103934665603ull,
                                        bank.candidate_id.data(),
                                        bank.candidate_id.size());
     const uint64_t loaded_before = g_live.banks_loaded;
-    const std::string key = lower_ascii(bank.path);
+    const std::string key = path_key(std::filesystem::path(bank.path));
     admit_prepared_bank(std::move(bank), key);
     return g_live.banks_loaded != loaded_before;
 }
 
-bool live_overlay_enqueue_path_for_test(const char* path_key) {
+bool live_overlay_enqueue_path_for_test(const char* path_text) {
     // The REAL queueing path, not a reimplementation: queued_paths is what
     // decides whether a rescanned or republished DLL can ever reach the
     // prepare worker again, so "parking released the key" is only observable
     // by asking enqueue_candidate itself.
     QueueCandidate candidate;
-    candidate.key = lower_ascii(path_key ? path_key : "");
-    candidate.path = std::filesystem::path(path_key ? path_key : "");
+    candidate.key = path_key(std::filesystem::path(
+        path_text ? path_text : ""));
+    candidate.path = std::filesystem::path(path_text ? path_text : "");
     return enqueue_candidate(candidate);
 }
 
@@ -2715,11 +2920,7 @@ void live_overlay_summary(NdsLiveOverlaySummary* out) {
     out->dormant_activations = g_live.dormant_activations;
     out->dormant_parked = g_live.dormant_parked;
     out->dormant_requeues = g_live.dormant_requeues;
-#if defined(_WIN32)
-    out->busy = g_live.child != nullptr;
-#else
-    out->busy = false;
-#endif
+    out->busy = child_active();
     // g_live.loaded is mutated under publish_mutex when a prepared shard is
     // adopted, so walk it under the same lock the status JSON uses.
     std::lock_guard<std::mutex> lock(g_live.publish_mutex);
@@ -2760,11 +2961,7 @@ std::string live_overlay_status_json() {
         << (g_live.persisted_backlog ? "true" : "false")
         << ",\"last_run_ms\":" << g_live.last_run_duration_ms
         << ",\"busy\":";
-#if defined(_WIN32)
-    out << (g_live.child ? "true" : "false");
-#else
-    out << "false";
-#endif
+    out << (child_active() ? "true" : "false");
     out << ",\"tier3_arm9\":" << g_live.tier3[0]
         << ",\"tier3_arm7\":" << g_live.tier3[1]
         << ",\"mismatch_rejects_arm9\":" << g_live.mismatch_rejects[0]

@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 
 extern "C" ArmCpuState g_cpu = {};
@@ -25,12 +27,17 @@ bool coverage_manifest_write(const char*, char*, unsigned) { return false; }
 // written on the maintenance worker. The capture has to succeed for the unit
 // layer to exercise the async path at all; the write is what refuses.
 struct CoverageLiveSnapshot { int unused; };
+bool g_allow_snapshot_write = false;
 CoverageLiveSnapshot* coverage_manifest_capture_live_snapshot(uint32_t) {
     return new CoverageLiveSnapshot{0};
 }
 bool coverage_manifest_write_captured_snapshot(const CoverageLiveSnapshot*,
-                                               const char*, char* error,
+                                               const char* path, char* error,
                                                unsigned error_cap) {
+    if (g_allow_snapshot_write && path) {
+        std::ofstream(path, std::ios::binary) << "{}\n";
+        return true;
+    }
     if (error && error_cap)
         std::snprintf(error, error_cap, "test stub refuses to write");
     return false;
@@ -119,7 +126,57 @@ bool metadata(const NdsLiveBankInfo& info, char* error, uint32_t error_len) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::strcmp(argv[1], "--load-cache") == 0) {
+        g_bytes_live = true;
+        live_overlay_configure(true, false, 0u, 0u, 0u, "", argv[2], "test");
+        live_overlay_register_cached_banks();
+        for (int i = 0; i < 200; ++i) {
+            live_overlay_poll();
+            if (live_overlay_status_json().find("\"banks_loaded\":1") !=
+                std::string::npos) {
+                live_overlay_shutdown();
+                std::puts("PASS: live overlay cache library loaded");
+                return 0;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::fprintf(stderr, "FAIL: cache library was not adopted: %s\n",
+                     live_overlay_status_json().c_str());
+        live_overlay_shutdown();
+        return 1;
+    }
+#if defined(__linux__)
+    if (argc == 3 && std::strcmp(argv[1], "--spawn-command") == 0) {
+        std::filesystem::create_directories(argv[2]);
+        g_allow_snapshot_write = true;
+        const char* command =
+            "test -f \"$NDS_LIVE_OVERLAY_MANIFEST\" && "
+            "test \"$NDS_LIVE_OVERLAY_ROM_SHA1\" = test && "
+            "test -n \"$NDS_LIVE_OVERLAY_CACHE\" && "
+            "test -n \"$NDS_LIVE_OVERLAY_MAX_PAGES\" && "
+            "printf 'NDS_SHARD_PENDING 0\\n'";
+        live_overlay_configure(true, true, 0u, 0u, 0u, command, argv[2],
+                               "test");
+        if (!live_overlay_trigger_now()) return 1;
+        for (int i = 0; i < 1000; ++i) {
+            live_overlay_poll();
+            if (status_number("runs_finished") == 1u &&
+                status_number("runs_failed") == 0u &&
+                live_overlay_status_json().find("\"busy\":false") !=
+                    std::string::npos) {
+                live_overlay_shutdown();
+                std::puts("PASS: Linux live overlay child lifecycle");
+                return 0;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::fprintf(stderr, "FAIL: compiler child did not finish: %s\n",
+                     live_overlay_status_json().c_str());
+        live_overlay_shutdown();
+        return 1;
+    }
+#endif
     char error[256];
     const NdsStaticValidation owner_a{0x02000000u, sizeof(bytes_a), bytes_a};
     const NdsStaticValidation owner_b{0x02000000u, sizeof(bytes_b), bytes_b};
@@ -333,7 +390,7 @@ int main() {
                 "a runtime reset should unlatch the cache-scan guard"))
         return 1;
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     const unsigned before_poll = g_registrations;
     live_overlay_poll();
     if (!expect(g_registrations == before_poll + 1u,
@@ -346,7 +403,7 @@ int main() {
 #endif
     live_overlay_shutdown();
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     // beads-w184: once the one-shot startup work is complete, an idle live
     // overlay poll must not take the empty publish/maintenance queue locks.
     // These counters are bumped inside the drain functions, so this fails if
@@ -446,7 +503,7 @@ int main() {
     // matter how large the backlog says it is: otherwise the guard's whole
     // purpose (not re-running identical rejected work forever) is inverted
     // into re-running it FASTER.
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     // Control first, so the suppressed case cannot pass for the wrong reason.
     // A backlog on an UNsuppressed provider does reach start_child (which
     // fails here only because this unit build stubs the manifest writer, and
@@ -492,7 +549,7 @@ int main() {
     live_overlay_shutdown();
 #endif
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     // ---- gcc-wins tie-break is UNCHANGED -------------------------------
     //
     // Reordering and enlarging batches changes WHICH shard arrives when, so
@@ -532,7 +589,7 @@ int main() {
     live_overlay_shutdown();
 #endif
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     // ---- beads-yjp.53: supersede must never LOSE a row -----------------
     //
     // Two candidates for the same page byte generation are two translations
@@ -636,7 +693,7 @@ int main() {
     live_overlay_shutdown();
 #endif
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
     // ---- beads-yjp.62: dormant shards, woken by a Tier-3 entry ----------
     //
     // A shard for a per-scene guest code window (ITCM 0x01FF8000, a swapped

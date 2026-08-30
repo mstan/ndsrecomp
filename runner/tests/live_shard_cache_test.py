@@ -77,13 +77,14 @@ def run_tool(args: argparse.Namespace, manifest_path: Path,
         "--cache", str(args.cache),
         "--rom-sha1", ROM_SHA1,
         "--ndsrecomp-root", str(args.ndsrecomp_root),
-        "--runner-build", str(args.runner_build),
         "--recompiler", str(args.recompiler),
         "--gcc", str(args.gcc),
         f"--generated-opt={generated_opt}",
         "--max-pages", "8",
         "--min-hits", "1",
     ]
+    if sys.platform == "win32":
+        command.extend(["--runner-build", str(args.runner_build)])
     result = subprocess.run(
         command, text=True, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT)
@@ -95,8 +96,9 @@ def run_tool(args: argparse.Namespace, manifest_path: Path,
     return result
 
 
-def dlls(cache: Path) -> list[Path]:
-    return sorted((cache / "gcc").glob("*.dll"))
+def libraries(cache: Path) -> list[Path]:
+    suffix = ".dll" if sys.platform == "win32" else ".so"
+    return sorted((cache / "gcc").glob(f"*{suffix}"))
 
 
 def main() -> int:
@@ -125,21 +127,23 @@ def main() -> int:
 
     result = run_tool(args, gen_a)
     assert "NDS_SHARD_RESULT ok=1 failed=0" in result.stdout
-    assert len(dlls(args.cache)) == 1
+    assert len(libraries(args.cache)) == 1
 
     result = run_tool(args, gen_b)
     assert "NDS_SHARD_RESULT ok=1 failed=0" in result.stdout
-    assert len(dlls(args.cache)) == 2
+    assert len(libraries(args.cache)) == 2
 
-    before = {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    before = {path: path.stat().st_mtime_ns for path in libraries(args.cache)}
     result = run_tool(args, gen_a_hot)
     assert "NDS_SHARD_RESULT ok=0 failed=0" in result.stdout
-    assert before == {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    assert before == {path: path.stat().st_mtime_ns
+                      for path in libraries(args.cache)}
 
     result = run_tool(args, gen_a_expanded)
     assert "NDS_SHARD_RESULT ok=1 failed=0" in result.stdout
-    assert len(dlls(args.cache)) == 3
-    assert not list(args.cache.rglob("*.stage.dll"))
+    assert len(libraries(args.cache)) == 3
+    suffix = ".dll" if sys.platform == "win32" else ".so"
+    assert not list(args.cache.rglob(f"*.stage{suffix}"))
 
     index = json.loads((args.cache / "live-index.json").read_text(
         encoding="utf-8"))
@@ -166,11 +170,12 @@ def main() -> int:
     # and nothing is compiled at all.
     gen_a_shrunk = args.work / "generation-a-shrunk.json"
     manifest(gen_a_shrunk, arm_program(1), [BASE + 0x40])
-    before = {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    before = {path: path.stat().st_mtime_ns for path in libraries(args.cache)}
     result = run_tool(args, gen_a_shrunk)
     assert "NDS_SHARD_RESULT ok=0 failed=0" in result.stdout, result.stdout
-    assert len(dlls(args.cache)) == 3
-    assert before == {path: path.stat().st_mtime_ns for path in dlls(args.cache)}
+    assert len(libraries(args.cache)) == 3
+    assert before == {path: path.stat().st_mtime_ns
+                      for path in libraries(args.cache)}
     index = json.loads((args.cache / "live-index.json").read_text(
         encoding="utf-8"))
     published_roots = {
@@ -185,10 +190,10 @@ def main() -> int:
     # then reuse that exact provider candidate on the next run.
     result = run_tool(args, gen_a, generated_opt="-O0")
     assert "NDS_SHARD_RESULT ok=1 failed=0" in result.stdout
-    assert len(dlls(args.cache)) == 4
+    assert len(libraries(args.cache)) == 4
     result = run_tool(args, gen_a, generated_opt="-O0")
     assert "NDS_SHARD_RESULT ok=0 failed=0" in result.stdout
-    assert len(dlls(args.cache)) == 4
+    assert len(libraries(args.cache)) == 4
     index = json.loads((args.cache / "live-index.json").read_text(
         encoding="utf-8"))
     provider_ids = {item.get("provider_id")
