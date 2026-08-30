@@ -18,6 +18,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -51,12 +52,18 @@ struct DirEntry {
     uint32_t flags = 0;
 };
 
+struct CoreState {
+    NdsSchedulerSaveState scheduler{};
+    NdsBusMemorySnapshot memory{};
+    NdsCp15SaveState cp15{};
+    NdsRuntimeSaveState runtime{};
+};
+
 void set_error(std::string* error, const std::string& text) {
     if (error) *error = text;
 }
 
-bool valid_sha1_or_empty(const std::string& text) {
-    if (text.empty()) return true;
+bool valid_sha1(const std::string& text) {
     if (text.size() != 40u) return false;
     for (char ch : text) {
         if (!std::isxdigit(static_cast<unsigned char>(ch)) ||
@@ -382,6 +389,46 @@ bool atomic_write_file(const std::string& path,
             return false;
         }
     }
+    auto flush_file_to_disk = [&](const std::filesystem::path& file) {
+#if defined(_WIN32)
+        HANDLE h = CreateFileA(file.string().c_str(),
+                               GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ,
+                               nullptr,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            set_error(error, "failed to reopen temporary savestate file");
+            return false;
+        }
+        const BOOL ok = FlushFileBuffers(h);
+        CloseHandle(h);
+        if (!ok) {
+            set_error(error, "failed to flush temporary savestate file");
+            return false;
+        }
+        return true;
+#else
+        const int fd = open(file.c_str(), O_RDONLY);
+        if (fd < 0) {
+            set_error(error, "failed to reopen temporary savestate file");
+            return false;
+        }
+        const bool ok = fsync(fd) == 0;
+        close(fd);
+        if (!ok) {
+            set_error(error, "failed to flush temporary savestate file");
+            return false;
+        }
+        return true;
+#endif
+    };
+    if (!flush_file_to_disk(tmp)) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
 #if defined(_WIN32)
     if (!MoveFileExA(tmp.string().c_str(), path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -396,6 +443,20 @@ bool atomic_write_file(const std::string& path,
     if (ec) {
         set_error(error, "failed to atomically replace savestate file");
         std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    const std::filesystem::path parent =
+        dst.parent_path().empty() ? std::filesystem::path(".")
+                                  : dst.parent_path();
+    const int dir_fd = open(parent.c_str(), O_RDONLY);
+    if (dir_fd < 0) {
+        set_error(error, "failed to open savestate directory for flush");
+        return false;
+    }
+    const bool dir_ok = fsync(dir_fd) == 0;
+    close(dir_fd);
+    if (!dir_ok) {
+        set_error(error, "failed to flush savestate directory");
         return false;
     }
 #endif
@@ -542,6 +603,29 @@ bool load_file(const std::string& path,
     return true;
 }
 
+bool export_core_state(CoreState* out, std::string* error) {
+    if (!out) return false;
+    if (!scheduler_savestate_export(&out->scheduler) ||
+        !bus_savestate_export(&out->memory)) {
+        set_error(error, "failed to export core savestate sections");
+        return false;
+    }
+    cp15_savestate_export(&out->cp15);
+    runtime_savestate_export(&out->runtime);
+    return true;
+}
+
+bool import_core_state(const CoreState& state, std::string* error) {
+    if (!bus_savestate_import(state.memory, error) ||
+        !cp15_savestate_import(state.cp15, error) ||
+        !runtime_savestate_import(state.runtime, error) ||
+        !scheduler_savestate_import(state.scheduler, error))
+        return false;
+    bus_fast_refresh();
+    runtime_savestate_invalidate_host_caches();
+    return true;
+}
+
 }  // namespace
 
 bool nds_savestate_save_core(const std::string& path,
@@ -551,29 +635,22 @@ bool nds_savestate_save_core(const std::string& path,
         set_error(error, "savestate identity requires an exact build id");
         return false;
     }
-    if (!valid_sha1_or_empty(identity.rom_sha1)) {
+    if (!valid_sha1(identity.rom_sha1)) {
         set_error(error, "savestate identity has invalid ROM SHA-1");
         return false;
     }
 
-    NdsSchedulerSaveState scheduler{};
-    NdsBusMemorySnapshot memory{};
-    NdsCp15SaveState cp15{};
-    NdsRuntimeSaveState runtime{};
-    if (!scheduler_savestate_export(&scheduler) ||
-        !bus_savestate_export(&memory)) {
-        set_error(error, "failed to export core savestate sections");
-        return false;
-    }
-    cp15_savestate_export(&cp15);
-    runtime_savestate_export(&runtime);
+    CoreState core{};
+    if (!export_core_state(&core, error)) return false;
 
     std::vector<Section> sections;
     if (!append_section(sections, kSectionIden, encode_identity(identity), error) ||
-        !append_section(sections, kSectionSchd, encode_scheduler(scheduler), error) ||
-        !append_section(sections, kSectionMemr, encode_memory(memory), error) ||
-        !append_section(sections, kSectionCp15, encode_cp15(cp15), error) ||
-        !append_section(sections, kSectionRtim, encode_runtime_state(runtime), error))
+        !append_section(sections, kSectionSchd,
+                        encode_scheduler(core.scheduler), error) ||
+        !append_section(sections, kSectionMemr, encode_memory(core.memory), error) ||
+        !append_section(sections, kSectionCp15, encode_cp15(core.cp15), error) ||
+        !append_section(sections, kSectionRtim,
+                        encode_runtime_state(core.runtime), error))
         return false;
 
     return atomic_write_file(path, build_file(sections), error);
@@ -583,7 +660,7 @@ bool nds_savestate_load_core(const std::string& path,
                              const NdsSavestateIdentity& expected_identity,
                              std::string* error) {
     if (expected_identity.build_id.empty() ||
-        !valid_sha1_or_empty(expected_identity.rom_sha1)) {
+        !valid_sha1(expected_identity.rom_sha1)) {
         set_error(error, "expected savestate identity is invalid");
         return false;
     }
@@ -606,37 +683,39 @@ bool nds_savestate_load_core(const std::string& path,
         return false;
     }
 
-    NdsSchedulerSaveState scheduler{};
-    NdsBusMemorySnapshot memory{};
-    NdsCp15SaveState cp15{};
-    NdsRuntimeSaveState runtime{};
+    CoreState loaded{};
     if (!find_section(sections, kSectionSchd, &payload) ||
-        !decode_scheduler(payload, &scheduler)) {
+        !decode_scheduler(payload, &loaded.scheduler)) {
         set_error(error, "scheduler section is missing or corrupt");
         return false;
     }
     if (!find_section(sections, kSectionMemr, &payload) ||
-        !decode_memory(payload, &memory)) {
+        !decode_memory(payload, &loaded.memory)) {
         set_error(error, "memory section is missing or corrupt");
         return false;
     }
     if (!find_section(sections, kSectionCp15, &payload) ||
-        !decode_cp15(payload, &cp15)) {
+        !decode_cp15(payload, &loaded.cp15)) {
         set_error(error, "CP15 section is missing or corrupt");
         return false;
     }
     if (!find_section(sections, kSectionRtim, &payload) ||
-        !decode_runtime_state(payload, &runtime)) {
+        !decode_runtime_state(payload, &loaded.runtime)) {
         set_error(error, "runtime section is missing or corrupt");
         return false;
     }
 
-    if (!bus_savestate_import(memory, error) ||
-        !cp15_savestate_import(cp15, error) ||
-        !runtime_savestate_import(runtime, error) ||
-        !scheduler_savestate_import(scheduler, error))
+    CoreState previous{};
+    if (!export_core_state(&previous, error)) return false;
+    if (!import_core_state(loaded, error)) {
+        const std::string primary = error ? *error : std::string{};
+        std::string rollback_error;
+        if (!import_core_state(previous, &rollback_error) && error) {
+            *error = primary + "; rollback failed: " + rollback_error;
+        } else if (error) {
+            *error = primary;
+        }
         return false;
-    bus_fast_refresh();
-    runtime_savestate_invalidate_host_caches();
+    }
     return true;
 }
