@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "state.h"
 #include "savestate.h"
@@ -127,6 +128,13 @@ uint64_t next_scheduled_event_time() {
 }
 
 bool g_sample_active = false;
+bool g_round_active = false;
+std::thread::id g_owner_thread;
+
+struct RoundActivityGuard {
+    RoundActivityGuard() { g_round_active = true; }
+    ~RoundActivityGuard() { g_round_active = false; }
+};
 
 void save_current() {
     if (g_cur < 0) return;
@@ -278,6 +286,7 @@ void scheduler_init() {
     g_slot[1] = CpuSlot{};
     g_cur = -1;
     g_sys_timestamp = 0;
+    g_owner_thread = std::this_thread::get_id();
     scheduler_profile_reset();
 }
 
@@ -312,6 +321,7 @@ void scheduler_set_cpu_boot(int cpu, uint32_t entry, uint32_t sp,
 }
 
 void scheduler_run_round() {
+    RoundActivityGuard round_activity;
     // melonDS-faithful interleave (docs/scheduler_design.md, Commit A). Each
     // outer iteration is capped at kIterCap SYSTEM cycles (or the next scheduled
     // event, whichever is sooner). ARM9 runs FIRST up to its target and may
@@ -592,6 +602,19 @@ bool scheduler_cpu_terminal_halted(int cpu) { return g_slot[cpu & 1].halted; }
 const char* scheduler_cpu_halt_reason(int cpu) {
     return g_slot[cpu & 1].reason ? g_slot[cpu & 1].reason : "";
 }
+
+bool scheduler_savestate_quiescent() {
+    return std::this_thread::get_id() == g_owner_thread && !g_round_active;
+}
+
+bool scheduler_savestate_begin() {
+    // Transactions are synchronous on the scheduler owner. Rejecting every
+    // other thread avoids a check-then-race without charging a mutex/atomic
+    // exchange to every 64-cycle scheduler round.
+    return scheduler_savestate_quiescent();
+}
+
+void scheduler_savestate_end() {}
 
 bool scheduler_savestate_export(NdsSchedulerSaveState* out) {
     if (!out) return false;

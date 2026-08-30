@@ -6,11 +6,14 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "runtime_arm.h"
 #include "scheduler.h"
 #include "state.h"
+
+void savestate_test_fail_next_io_import();
 
 namespace {
 
@@ -18,6 +21,7 @@ constexpr uint32_t kHeaderSize = 24u;
 constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kSectionSchd = 0x44484353u; // SCHD
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
+constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
 constexpr size_t kEncodedArmCpuStateBytes =
     (16u + 1u + ARM_BANK_COUNT * 3u + 5u + 5u) * 4u;
 constexpr size_t kEncodedSchedulerCpuBlockBytes =
@@ -536,6 +540,203 @@ bool semantic_import_failure_rolls_back() {
     return ok;
 }
 
+NdsIoCoreSaveState patterned_io(uint32_t seed) {
+    NdsIoCoreSaveState out{};
+    out.vcount = static_cast<uint16_t>(seed % 263u);
+    out.next_vcount = static_cast<uint16_t>(seed + 17u);
+    out.next_vcount_valid = 1u;
+    out.in_vblank = 1u;
+    out.display_last = 0x1100000000000000ull | seed;
+    out.gxfifo_stall = 1u;
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out.ipcsync_out[cpu] = static_cast<uint16_t>(seed + cpu);
+        out.postflg[cpu] = static_cast<uint8_t>((seed + cpu) & 1u);
+        out.dispstat[cpu] = static_cast<uint16_t>(0x108u + seed + cpu);
+        out.vcount_match[cpu] = static_cast<uint8_t>(cpu);
+        out.ime[cpu] = seed + 0x100u + cpu;
+        out.ie[cpu] = seed + 0x200u + cpu;
+        out.irq_flags[cpu] = seed + 0x300u + cpu;
+        out.haltcnt[cpu] = static_cast<uint8_t>(seed + cpu);
+        out.cpu_halted[cpu] = static_cast<uint8_t>(cpu);
+        out.halt_entry_cycle[cpu] = 0x2200000000000000ull + seed + cpu;
+        out.fifo_count[cpu] = 16u;
+        out.fifo_head[cpu] = static_cast<uint8_t>(15 - cpu);
+        out.fifocnt[cpu] = 0x8404u;
+        out.fifo_lastrx[cpu] = seed + 0x400u + cpu;
+        out.dma_entry_cycle[cpu] = 0x3300000000000000ull + seed + cpu;
+        out.timer_last[cpu] = 0x4400000000000000ull + seed + cpu;
+        out.exmemcnt[cpu] = static_cast<uint16_t>(0x4000u + seed + cpu);
+        out.keycnt[cpu] = static_cast<uint16_t>(0x8000u + seed + cpu);
+        for (int i = 0; i < 16; ++i)
+            out.fifo[cpu][i] = seed + cpu * 0x100u + i;
+        for (int ch = 0; ch < 4; ++ch) {
+            auto& dma = out.dma[cpu][ch];
+            dma.src = seed + 0x1000u + cpu * 0x100u + ch;
+            dma.dst = seed + 0x2000u + cpu * 0x100u + ch;
+            dma.cnt = seed + 0x3000u + cpu * 0x100u + ch;
+            dma.cur_src = dma.src + 4u;
+            dma.cur_dst = dma.dst + 8u;
+            dma.remaining = seed + ch + 1u;
+            dma.src_inc = (ch % 3) - 1;
+            dma.dst_inc = 1 - (ch % 3);
+            dma.burst_index = static_cast<uint16_t>(seed + ch);
+            dma.start_mode = cpu == 0 ? static_cast<uint8_t>(ch)
+                                      : static_cast<uint8_t>(0x10u + ch);
+            dma.running = static_cast<uint8_t>(ch & 1);
+            dma.in_progress = static_cast<uint8_t>((ch + 1) & 1);
+            dma.burst_start = static_cast<uint8_t>(ch & 1);
+            auto& timer = out.timer[cpu][ch];
+            timer.reload = static_cast<uint16_t>(seed + ch);
+            timer.counter = static_cast<uint16_t>(seed + 0x100u + ch);
+            timer.ctrl = static_cast<uint16_t>(0x80u | ch);
+            timer.accum = static_cast<uint64_t>(seed + ch) & 63u;
+        }
+    }
+    out.divcnt = static_cast<uint16_t>(seed);
+    out.sqrtcnt = static_cast<uint16_t>(seed + 1u);
+    for (int i = 0; i < 2; ++i) {
+        out.div_numer[i] = seed + 0x5000u + i;
+        out.div_denom[i] = seed + 0x6000u + i;
+        out.div_quot[i] = seed + 0x7000u + i;
+        out.div_rem[i] = seed + 0x8000u + i;
+        out.sqrt_value[i] = seed + 0x9000u + i;
+    }
+    out.div_deadline = 0x5500000000000000ull + seed;
+    out.sqrt_result = seed + 0xA000u;
+    out.sqrt_deadline = 0x6600000000000000ull + seed;
+    out.powercontrol7 = static_cast<uint16_t>(seed & 3u);
+    out.keyinput = seed + 0xB000u;
+    out.rcnt = static_cast<uint16_t>(seed + 2u);
+    out.wramcnt = static_cast<uint8_t>(seed);
+    out.wifiwaitcnt = static_cast<uint16_t>(seed + 3u);
+    out.biosprot = seed + 0xC000u;
+    out.pm_index = static_cast<uint8_t>(seed & 7u);
+    out.pm_hold = 1u;
+    out.powered_off = 1u;
+    out.tsc_ctrl = static_cast<uint8_t>(seed + 4u);
+    out.tsc_conv = static_cast<uint16_t>(seed + 5u);
+    out.tsc_datapos = 2;
+    out.tsc_x = static_cast<uint16_t>(seed + 6u);
+    out.tsc_y = static_cast<uint16_t>(seed + 7u);
+    for (size_t i = 0; i < 8u; ++i) {
+        out.pm_regs[i] = static_cast<uint8_t>(seed + i);
+        out.pm_masks[i] = static_cast<uint8_t>(seed + 0x10u + i);
+    }
+    for (size_t i = 0; i < sizeof(out.io_mem); ++i)
+        out.io_mem[i] = static_cast<uint8_t>(seed + i * 13u);
+    return out;
+}
+
+bool io_core_roundtrip_and_rollback() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-io-core.nss";
+    std::filesystem::remove(path);
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
+    scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
+    const NdsSavestateIdentity identity{
+        "build-io", "0123456789abcdef0123456789abcdef01234567"};
+    const NdsIoCoreSaveState saved = patterned_io(0x21u);
+    const NdsIoCoreSaveState current = patterned_io(0x71u);
+    std::string error;
+    bool ok = expect(io_savestate_import(saved, &error), "seed IO state") &&
+        expect(nds_savestate_save_core(path.string(), identity, &error),
+               error.c_str()) &&
+        expect(io_savestate_import(current, &error), "mutate IO state") &&
+        expect(nds_savestate_load_core(path.string(), identity, &error),
+               error.c_str());
+    NdsIoCoreSaveState actual{};
+    ok &= expect(io_savestate_export(&actual), "export loaded IO state");
+    ok &= expect(std::memcmp(&actual, &saved, sizeof(saved)) == 0,
+                 "every covered IO field roundtrips");
+
+    ok &= expect(io_savestate_import(current, &error),
+                 "restore current IO state before apply failure");
+    savestate_test_fail_next_io_import();
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "semantic IO apply failure rejects load");
+    actual = {};
+    ok &= expect(io_savestate_export(&actual),
+                 "export IO state after apply rollback");
+    ok &= expect(std::memcmp(&actual, &current, sizeof(current)) == 0,
+                 "semantic apply failure rolls back IO state");
+
+    // IO semantic corruption is rejected during prevalidation, before apply.
+    // IOCR byte 254 is DMA[0][0].src_inc in the explicit packed layout.
+    ok &= expect(patch_section_u32(path, kSectionIocr, 254u, 2u),
+                 "patch invalid DMA increment");
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "invalid IO section must be rejected");
+    actual = {};
+    ok &= expect(io_savestate_export(&actual), "export rolled-back IO state");
+    ok &= expect(std::memcmp(&actual, &current, sizeof(current)) == 0,
+                 "invalid IO load rolls back every covered field");
+    std::filesystem::remove(path);
+    runtime_shutdown();
+    return ok;
+}
+
+bool reject_states(void* context, std::string* error) {
+    ++*static_cast<unsigned*>(context);
+    if (error) *error = "network session connected";
+    return false;
+}
+
+bool eligibility_hook_rejects_before_export() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-policy.nss";
+    std::filesystem::remove(path);
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    const NdsSavestateIdentity identity{
+        "build-policy", "0123456789abcdef0123456789abcdef01234567"};
+    unsigned calls = 0;
+    std::string error;
+    nds_savestate_set_eligibility_hook(reject_states, &calls);
+    bool ok = expect(!nds_savestate_save_core(path.string(), identity, &error),
+                     "eligibility hook rejects save") &&
+        expect(error == "network session connected",
+               "eligibility rejection preserves policy reason") &&
+        expect(calls == 1u && !std::filesystem::exists(path),
+               "rejected save exports no file");
+    nds_savestate_set_eligibility_hook(nullptr, nullptr);
+    runtime_shutdown();
+    return ok;
+}
+
+bool control_thread_is_not_quiescent_owner() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-control-thread.nss";
+    std::filesystem::remove(path);
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    const NdsSavestateIdentity identity{
+        "build-thread", "0123456789abcdef0123456789abcdef01234567"};
+    bool result = true;
+    std::string error;
+    std::thread control([&] {
+        result = nds_savestate_save_core(path.string(), identity, &error);
+    });
+    control.join();
+    bool ok = expect(!result, "control thread save is rejected") &&
+        expect(error == "savestate requires the scheduler owner between rounds",
+               "control thread rejection identifies owner policy") &&
+        expect(!std::filesystem::exists(path),
+               "control thread cannot export a partial state");
+    runtime_shutdown();
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -545,5 +746,8 @@ int main() {
     ok &= corrupt_section_rejects();
     ok &= scheduler_cpu_byte_layout_is_stable();
     ok &= semantic_import_failure_rolls_back();
+    ok &= io_core_roundtrip_and_rollback();
+    ok &= eligibility_hook_rejects_before_export();
+    ok &= control_thread_is_not_quiescent_owner();
     return ok ? 0 : 1;
 }

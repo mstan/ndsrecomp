@@ -15,6 +15,7 @@
 #include "cart_backup.h"
 #include "state.h"
 #include "scheduler.h"
+#include "savestate.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "spu.h"
@@ -757,6 +758,7 @@ struct DmaChannel {
 };
 DmaChannel g_dma[2][4] = {};
 uint64_t g_dma_entry_cycle[2] = {};
+bool g_gxfifo_stall = false;
 
 enum class DmaRegion : uint8_t {
     Void, Main, Wram, Io, Palette, Vram, Oam, GbaRom, GbaRam, Wifi
@@ -2471,6 +2473,210 @@ void nds_dump_irq() {
                      c == 0 ? '9' : '7', g_ime[c], g_ie[c], g_if[c], g_ipcsync_out[c]);
 }
 
+bool io_savestate_export(NdsIoCoreSaveState* out) {
+    if (!out) return false;
+    *out = NdsIoCoreSaveState{};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out->ipcsync_out[cpu] = g_ipcsync_out[cpu];
+        out->postflg[cpu] = g_postflg[cpu];
+        out->dispstat[cpu] = g_dispstat[cpu];
+        out->vcount_match[cpu] = g_vcount_match[cpu] ? 1u : 0u;
+        out->ime[cpu] = g_ime[cpu];
+        out->ie[cpu] = g_ie[cpu];
+        out->irq_flags[cpu] = g_if[cpu];
+        out->haltcnt[cpu] = g_haltcnt[cpu];
+        out->cpu_halted[cpu] = g_cpu_halted[cpu] ? 1u : 0u;
+        out->halt_entry_cycle[cpu] = g_halt_entry_cycle[cpu];
+        out->fifo_count[cpu] = static_cast<uint8_t>(g_fifo_cnt[cpu]);
+        out->fifo_head[cpu] = static_cast<uint8_t>(g_fifo_head[cpu]);
+        out->fifocnt[cpu] = g_fifocnt[cpu];
+        out->fifo_lastrx[cpu] = g_fifo_lastrx[cpu];
+        std::memcpy(out->fifo[cpu], g_fifo[cpu], sizeof(out->fifo[cpu]));
+        out->dma_entry_cycle[cpu] = g_dma_entry_cycle[cpu];
+        out->timer_last[cpu] = g_timer_last[cpu];
+        out->exmemcnt[cpu] = g_exmemcnt[cpu];
+        out->keycnt[cpu] = g_keycnt[cpu];
+        for (int ch = 0; ch < 4; ++ch) {
+            const DmaChannel& src = g_dma[cpu][ch];
+            NdsIoDmaSaveState& dst = out->dma[cpu][ch];
+            dst.src = src.src;
+            dst.dst = src.dst;
+            dst.cnt = src.cnt;
+            dst.cur_src = src.cur_src;
+            dst.cur_dst = src.cur_dst;
+            dst.remaining = src.remaining;
+            dst.src_inc = src.src_inc;
+            dst.dst_inc = src.dst_inc;
+            dst.start_mode = src.start_mode;
+            dst.burst_index = src.burst_index;
+            dst.running = src.running ? 1u : 0u;
+            dst.in_progress = src.in_progress ? 1u : 0u;
+            dst.burst_start = src.burst_start ? 1u : 0u;
+
+            const Timer& timer = g_timer[cpu][ch];
+            out->timer[cpu][ch] = {
+                timer.reload, timer.counter, timer.ctrl, timer.accum};
+        }
+    }
+    out->vcount = g_vcount;
+    out->next_vcount = g_next_vcount;
+    out->next_vcount_valid = g_next_vcount_valid ? 1u : 0u;
+    out->in_vblank = g_in_vblank ? 1u : 0u;
+    out->display_last = g_display_last;
+    out->gxfifo_stall = g_gxfifo_stall ? 1u : 0u;
+
+    out->divcnt = g_divcnt;
+    std::memcpy(out->div_numer, g_div_numer, sizeof(out->div_numer));
+    std::memcpy(out->div_denom, g_div_denom, sizeof(out->div_denom));
+    std::memcpy(out->div_quot, g_div_quot, sizeof(out->div_quot));
+    std::memcpy(out->div_rem, g_div_rem, sizeof(out->div_rem));
+    out->div_deadline = g_div_deadline;
+    out->sqrtcnt = g_sqrtcnt;
+    std::memcpy(out->sqrt_value, g_sqrt_val, sizeof(out->sqrt_value));
+    out->sqrt_result = g_sqrt_res;
+    out->sqrt_deadline = g_sqrt_deadline;
+
+    out->powercontrol7 = g_powercontrol7;
+    out->keyinput = g_keyinput;
+    out->rcnt = g_rcnt;
+    out->wramcnt = g_wramcnt;
+    out->wifiwaitcnt = g_wifiwaitcnt;
+    out->biosprot = g_biosprot;
+    out->pm_index = g_pm_index;
+    std::memcpy(out->pm_regs, g_pm_regs, sizeof(out->pm_regs));
+    std::memcpy(out->pm_masks, g_pm_masks, sizeof(out->pm_masks));
+    out->pm_hold = g_pm_hold ? 1u : 0u;
+    out->powered_off = g_powered_off ? 1u : 0u;
+    out->tsc_ctrl = g_tsc_ctrl;
+    out->tsc_conv = g_tsc_conv;
+    out->tsc_datapos = g_tsc_datapos;
+    out->tsc_x = g_tsc_x;
+    out->tsc_y = g_tsc_y;
+    std::memcpy(out->io_mem, g_io_mem, sizeof(out->io_mem));
+    return true;
+}
+
+bool io_savestate_validate(const NdsIoCoreSaveState& in,
+                           std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    if (!binary(in.next_vcount_valid) || !binary(in.in_vblank) ||
+        !binary(in.gxfifo_stall) || !binary(in.pm_hold) ||
+        !binary(in.powered_off) || in.vcount > 262u ||
+        in.tsc_datapos < 0 || in.tsc_datapos > 2 ||
+        (in.powercontrol7 & ~0x0003u) != 0u || in.pm_index >= 8u)
+        return fail("savestate IO core scalar is invalid");
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (!binary(in.vcount_match[cpu]) || !binary(in.cpu_halted[cpu]) ||
+            in.fifo_count[cpu] > 16u || in.fifo_head[cpu] >= 16u ||
+            (in.fifocnt[cpu] & ~0xC404u) != 0u)
+            return fail("savestate IO CPU state is invalid");
+        for (int ch = 0; ch < 4; ++ch) {
+            const NdsIoDmaSaveState& dma = in.dma[cpu][ch];
+            const bool valid_mode = cpu == 0
+                ? dma.start_mode <= 7u
+                : dma.start_mode == 0u ||
+                    (dma.start_mode >= 0x10u && dma.start_mode <= 0x13u);
+            const bool valid_src_inc = dma.src_inc >= -1 && dma.src_inc <= 1;
+            const bool valid_dst_inc = dma.dst_inc >= -1 && dma.dst_inc <= 1;
+            if (!binary(dma.running) || !binary(dma.in_progress) ||
+                !binary(dma.burst_start) || !valid_mode || !valid_src_inc ||
+                !valid_dst_inc || in.timer[cpu][ch].accum >= 1024u)
+                return fail("savestate DMA/timer state is invalid");
+        }
+    }
+    return true;
+}
+
+bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error) {
+    if (!io_savestate_validate(in, error)) return false;
+
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        g_ipcsync_out[cpu] = in.ipcsync_out[cpu];
+        g_postflg[cpu] = in.postflg[cpu];
+        g_dispstat[cpu] = in.dispstat[cpu];
+        g_vcount_match[cpu] = in.vcount_match[cpu] != 0;
+        g_ime[cpu] = in.ime[cpu];
+        g_ie[cpu] = in.ie[cpu];
+        g_if[cpu] = in.irq_flags[cpu];
+        g_haltcnt[cpu] = in.haltcnt[cpu];
+        g_cpu_halted[cpu] = in.cpu_halted[cpu] != 0;
+        g_halt_entry_cycle[cpu] = in.halt_entry_cycle[cpu];
+        g_fifo_cnt[cpu] = in.fifo_count[cpu];
+        g_fifo_head[cpu] = in.fifo_head[cpu];
+        g_fifocnt[cpu] = in.fifocnt[cpu];
+        g_fifo_lastrx[cpu] = in.fifo_lastrx[cpu];
+        std::memcpy(g_fifo[cpu], in.fifo[cpu], sizeof(g_fifo[cpu]));
+        g_dma_entry_cycle[cpu] = in.dma_entry_cycle[cpu];
+        g_timer_last[cpu] = in.timer_last[cpu];
+        g_exmemcnt[cpu] = in.exmemcnt[cpu];
+        g_keycnt[cpu] = in.keycnt[cpu];
+        for (int ch = 0; ch < 4; ++ch) {
+            const NdsIoDmaSaveState& src = in.dma[cpu][ch];
+            DmaChannel& dst = g_dma[cpu][ch];
+            dst.src = src.src;
+            dst.dst = src.dst;
+            dst.cnt = src.cnt;
+            dst.cur_src = src.cur_src;
+            dst.cur_dst = src.cur_dst;
+            dst.remaining = src.remaining;
+            dst.src_inc = src.src_inc;
+            dst.dst_inc = src.dst_inc;
+            dst.start_mode = src.start_mode;
+            dst.burst_index = src.burst_index;
+            dst.running = src.running != 0;
+            dst.in_progress = src.in_progress != 0;
+            dst.burst_start = src.burst_start != 0;
+            const NdsIoTimerSaveState& timer = in.timer[cpu][ch];
+            g_timer[cpu][ch] = {
+                timer.reload, timer.counter, timer.ctrl, timer.accum};
+        }
+    }
+    g_vcount = in.vcount;
+    g_next_vcount = in.next_vcount;
+    g_next_vcount_valid = in.next_vcount_valid != 0;
+    g_in_vblank = in.in_vblank != 0;
+    g_display_last = in.display_last;
+    g_gxfifo_stall = in.gxfifo_stall != 0;
+
+    g_divcnt = in.divcnt;
+    std::memcpy(g_div_numer, in.div_numer, sizeof(g_div_numer));
+    std::memcpy(g_div_denom, in.div_denom, sizeof(g_div_denom));
+    std::memcpy(g_div_quot, in.div_quot, sizeof(g_div_quot));
+    std::memcpy(g_div_rem, in.div_rem, sizeof(g_div_rem));
+    g_div_deadline = in.div_deadline;
+    g_sqrtcnt = in.sqrtcnt;
+    std::memcpy(g_sqrt_val, in.sqrt_value, sizeof(g_sqrt_val));
+    g_sqrt_res = in.sqrt_result;
+    g_sqrt_deadline = in.sqrt_deadline;
+
+    g_powercontrol7 = in.powercontrol7;
+    g_keyinput = in.keyinput;
+    g_rcnt = in.rcnt;
+    g_wramcnt = in.wramcnt;
+    g_wifiwaitcnt = in.wifiwaitcnt;
+    g_biosprot = in.biosprot;
+    g_pm_index = in.pm_index;
+    std::memcpy(g_pm_regs, in.pm_regs, sizeof(g_pm_regs));
+    std::memcpy(g_pm_masks, in.pm_masks, sizeof(g_pm_masks));
+    g_pm_hold = in.pm_hold != 0;
+    g_powered_off = in.powered_off != 0;
+    g_tsc_ctrl = in.tsc_ctrl;
+    g_tsc_conv = in.tsc_conv;
+    g_tsc_datapos = in.tsc_datapos;
+    g_tsc_x = in.tsc_x;
+    g_tsc_y = in.tsc_y;
+    std::memcpy(g_io_mem, in.io_mem, sizeof(g_io_mem));
+
+    irq_recompute(0);
+    irq_recompute(1);
+    bus_fast_refresh();
+    return true;
+}
+
 uint32_t nds_irq_pending(int cpu) {
     cpu &= 1;
     return (g_ime[cpu] & 1u) ? (g_ie[cpu] & g_if[cpu]) : 0u;
@@ -2508,7 +2714,6 @@ bool nds_dma_cpu_stalled(int cpu) { return dma_any_running(cpu & 1); }
 // GXFIFO ARM9 stall flag (melonDS CPUStop_GXStall). Set/cleared by the
 // vendored GPU3D via the NDS shim; scheduler consumption lands with the
 // geometry engine's Run() wiring (3D Phase 2).
-static bool g_gxfifo_stall = false;
 void nds_gxfifo_set_stall(bool stalled) { g_gxfifo_stall = stalled; }
 bool nds_gxfifo_stalled() { return g_gxfifo_stall; }
 

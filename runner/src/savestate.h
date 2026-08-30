@@ -59,6 +59,99 @@ struct NdsRuntimeSaveState {
     uint32_t force_tier3 = 0;
 };
 
+struct NdsIoDmaSaveState {
+    uint32_t src = 0;
+    uint32_t dst = 0;
+    uint32_t cnt = 0;
+    uint32_t cur_src = 0;
+    uint32_t cur_dst = 0;
+    uint32_t remaining = 0;
+    int32_t src_inc = 0;
+    int32_t dst_inc = 0;
+    uint16_t burst_index = 0;
+    uint8_t start_mode = 0;
+    uint8_t running = 0;
+    uint8_t in_progress = 0;
+    uint8_t burst_start = 0;
+};
+
+struct NdsIoTimerSaveState {
+    uint16_t reload = 0;
+    uint16_t counter = 0;
+    uint16_t ctrl = 0;
+    uint64_t accum = 0;
+};
+
+// Architectural state owned by io.cpp. This deliberately excludes host
+// resources, cartridge/firmware contents, trace rings, and device objects.
+// Those require their own sections; copying their raw structs would persist
+// pointers, callbacks, mutexes, and host-thread state.
+struct NdsIoCoreSaveState {
+    uint16_t ipcsync_out[2]{};
+    uint8_t postflg[2]{};
+
+    uint16_t dispstat[2]{};
+    uint16_t vcount = 0;
+    uint16_t next_vcount = 0;
+    uint8_t next_vcount_valid = 0;
+    uint8_t vcount_match[2]{};
+    uint8_t in_vblank = 0;
+    uint64_t display_last = 0;
+
+    uint32_t ime[2]{};
+    uint32_t ie[2]{};
+    uint32_t irq_flags[2]{};
+    uint8_t haltcnt[2]{};
+    uint8_t cpu_halted[2]{};
+    uint64_t halt_entry_cycle[2]{};
+
+    uint32_t fifo[2][16]{};
+    uint8_t fifo_count[2]{};
+    uint8_t fifo_head[2]{};
+    uint16_t fifocnt[2]{};
+    uint32_t fifo_lastrx[2]{};
+
+    NdsIoDmaSaveState dma[2][4]{};
+    uint64_t dma_entry_cycle[2]{};
+    uint8_t gxfifo_stall = 0;
+
+    NdsIoTimerSaveState timer[2][4]{};
+    uint64_t timer_last[2]{};
+
+    uint16_t divcnt = 0;
+    uint32_t div_numer[2]{};
+    uint32_t div_denom[2]{};
+    uint32_t div_quot[2]{};
+    uint32_t div_rem[2]{};
+    uint64_t div_deadline = UINT64_MAX;
+    uint16_t sqrtcnt = 0;
+    uint32_t sqrt_value[2]{};
+    uint32_t sqrt_result = 0;
+    uint64_t sqrt_deadline = UINT64_MAX;
+
+    uint16_t exmemcnt[2]{};
+    uint16_t powercontrol7 = 0;
+    uint32_t keyinput = 0;
+    uint16_t keycnt[2]{};
+    uint16_t rcnt = 0;
+    uint8_t wramcnt = 0;
+    uint16_t wifiwaitcnt = 0;
+    uint32_t biosprot = 0;
+
+    uint8_t pm_index = 0;
+    uint8_t pm_regs[8]{};
+    uint8_t pm_masks[8]{};
+    uint8_t pm_hold = 0;
+    uint8_t powered_off = 0;
+    uint8_t tsc_ctrl = 0;
+    uint16_t tsc_conv = 0;
+    int32_t tsc_datapos = 0;
+    uint16_t tsc_x = 0;
+    uint16_t tsc_y = 0;
+
+    uint8_t io_mem[0x2000]{};
+};
+
 bool bus_savestate_export(NdsBusMemorySnapshot* out);
 bool bus_savestate_import(const NdsBusMemorySnapshot& in, std::string* error);
 
@@ -73,6 +166,21 @@ void runtime_savestate_export(NdsRuntimeSaveState* out);
 bool runtime_savestate_import(const NdsRuntimeSaveState& in,
                               std::string* error);
 void runtime_savestate_invalidate_host_caches();
+
+bool io_savestate_export(NdsIoCoreSaveState* out);
+bool io_savestate_validate(const NdsIoCoreSaveState& in, std::string* error);
+bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error);
+
+using NdsSavestateEligibilityHook = bool (*)(void* context,
+                                             std::string* error);
+// Called after the scheduler-quiescence check and before any export or apply.
+// The current Wi-Fi query surface reports backend/thread activity but not the
+// guest's association or local-MP connection state, so it cannot faithfully
+// implement the connected-only policy. A future network owner must register a
+// hook backed by that actual state; treating "backend enabled" as connected
+// would incorrectly disable offline states.
+void nds_savestate_set_eligibility_hook(NdsSavestateEligibilityHook hook,
+                                        void* context);
 
 bool nds_savestate_save_core(const std::string& path,
                              const NdsSavestateIdentity& identity,

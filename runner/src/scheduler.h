@@ -90,3 +90,10 @@ uint64_t scheduler_system_timestamp();
 uint64_t scheduler_next_event_timestamp();
 bool scheduler_cpu_terminal_halted(int cpu);
 const char* scheduler_cpu_halt_reason(int cpu);
+
+// Save/load may run only synchronously on the scheduler's owning thread and
+// between rounds. A control/debug thread is rejected rather than racing live
+// state; the owner-thread contract avoids a lock in every scheduler round.
+bool scheduler_savestate_quiescent();
+bool scheduler_savestate_begin();
+void scheduler_savestate_end();

@@ -39,6 +39,11 @@ through a temporary path and atomically replaces the destination.
   and MPU/cache/access registers.
 - `RTIM`: runner-side runtime counters/toggles needed by this core roundtrip
   and host dispatch/cache invalidation after load.
+- `IOCR`: explicit little-endian IRQ/IME/IE/IF and HALT state, IPCSYNC and
+  IPC FIFOs, DMA channels, timers, DIV/SQRT units and deadlines, display
+  counters/phase, power/input latches, and the generic I/O register backing.
+  The section contains no raw device structs, pointers, callbacks, mutexes,
+  host threads, strings, or trace rings.
 
 ## Guest-visible state owners
 
@@ -72,7 +77,11 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
   POWCNT, key/touch input latches, timers, DMA engines, VCOUNT/DISPSTAT,
   display scheduling, DIV/SQRT units, SPI firmware/RTC/gamecard protocol,
   AUXSPI/cart backup state, system-event queue/deadlines, event counters, and
-  device debug rings. Not covered.
+  device debug rings. Covered: IRQ/HALT, IPC, DMA, timers, DIV/SQRT deadlines,
+  display counters/phase, core power/input latches, and generic I/O backing.
+  Not covered: cartridge/firmware/RTC serial protocols and their deadlines,
+  persistent backup contents, event counters, and device debug rings. A
+  deadline is not saved without the protocol state that gives it meaning.
 - `runner/src/vram.cpp`: VRAM bank contents, VRAMCNT/VRAMSTAT mapping, palette,
   OAM, CPU/video mappings, renderer flattened views, LCDC capture visibility,
   provenance, and texture generations. Not covered.
@@ -105,8 +114,6 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
 The following sections must be implemented and tested before frontend F-key
 save/load slots are safe:
 
-- IO core: IRQ, HALT, IPC, timers, DMA, DIV/SQRT, display counters, power,
-  input, and system-event queue/deadline serialization.
 - Cartridge/firmware/RTC: gamecard transfer state, AUXSPI transaction state,
   cart backup chip state, firmware SPI state, dirty persistence flags, and RTC
   serial datetime state.
@@ -119,3 +126,24 @@ save/load slots are safe:
   rings, replay/local-MP/slirp ownership, power and scheduled events.
 - Debug/profiling policy: decide which always-on rings/counters are reset,
   preserved, or explicitly marked host-only across load.
+
+## Transaction and network policy
+
+Save/load is accepted only synchronously on the scheduler's owning thread and
+between rounds. A control/debug thread is rejected, so it cannot pass a
+quiescence check and race the next emulation round. This deliberately avoids
+putting a mutex or atomic exchange in every 64-cycle scheduler round; frontend
+commands must marshal the transaction onto the emulation thread.
+
+Every decoded core section is structurally and semantically validated before
+the first live owner is changed. The apply path still snapshots the current
+core and restores it if an owner reports an apply-time failure, so a future
+owner cannot turn a failed load into a half-loaded machine.
+
+An eligibility callback can reject both save and load before state is read or
+applied. It is intentionally not wired to `NdsWifiNetworkState`: that query
+reports backend and worker activity, but not guest association or local-MP
+connection state. Treating an enabled backend as connected would disable
+offline save states and would fake the requested connected-only policy. The
+Wi-Fi owner must expose actual WFC association/local-peer state, then register
+that callback before frontend slots are enabled.

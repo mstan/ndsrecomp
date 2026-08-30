@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -10,10 +11,12 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "state.h"
+#include "scheduler.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -34,8 +37,9 @@ constexpr uint32_t kSectionSchd = 0x44484353u; // SCHD
 constexpr uint32_t kSectionMemr = 0x524D454Du; // MEMR
 constexpr uint32_t kSectionCp15 = 0x35315043u; // CP15
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
+constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
 constexpr uint32_t kSectionVersion = 1u;
-constexpr uint32_t kRequiredSections = 5u;
+constexpr uint32_t kRequiredSections = 6u;
 
 struct Section {
     uint32_t tag = 0;
@@ -57,6 +61,29 @@ struct CoreState {
     NdsBusMemorySnapshot memory{};
     NdsCp15SaveState cp15{};
     NdsRuntimeSaveState runtime{};
+    NdsIoCoreSaveState io{};
+};
+
+std::atomic_flag g_transaction_active = ATOMIC_FLAG_INIT;
+std::mutex g_eligibility_mutex;
+NdsSavestateEligibilityHook g_eligibility_hook = nullptr;
+void* g_eligibility_context = nullptr;
+
+struct TransactionGuard {
+    bool locked = false;
+    TransactionGuard() {
+        locked = !g_transaction_active.test_and_set(std::memory_order_acquire);
+        if (locked && !scheduler_savestate_begin()) {
+            g_transaction_active.clear(std::memory_order_release);
+            locked = false;
+        }
+    }
+    ~TransactionGuard() {
+        if (locked) {
+            scheduler_savestate_end();
+            g_transaction_active.clear(std::memory_order_release);
+        }
+    }
 };
 
 void set_error(std::string* error, const std::string& text) {
@@ -341,7 +368,8 @@ bool decode_cp15(const std::vector<uint8_t>& payload,
         if (!read_u32(payload, pos, &value)) return false;
     for (uint32_t& value : state->access_perm)
         if (!read_u32(payload, pos, &value)) return false;
-    return pos == payload.size() && reserved == 0;
+    return pos == payload.size() && reserved == 0 && high <= 1u &&
+        itcm <= 1u && dtcm <= 1u;
 }
 
 std::vector<uint8_t> encode_runtime_state(const NdsRuntimeSaveState& state) {
@@ -365,6 +393,174 @@ bool decode_runtime_state(const std::vector<uint8_t>& payload,
         pos == payload.size();
 }
 
+std::vector<uint8_t> encode_io_core(const NdsIoCoreSaveState& state) {
+    std::vector<uint8_t> out;
+    auto flags2 = [&](const uint8_t values[2]) {
+        put_u8(out, values[0]); put_u8(out, values[1]);
+    };
+    auto u16s2 = [&](const uint16_t values[2]) {
+        put_u32(out, values[0]); put_u32(out, values[1]);
+    };
+    auto u32s2 = [&](const uint32_t values[2]) {
+        put_u32(out, values[0]); put_u32(out, values[1]);
+    };
+    auto u64s2 = [&](const uint64_t values[2]) {
+        put_u64(out, values[0]); put_u64(out, values[1]);
+    };
+
+    u16s2(state.ipcsync_out); flags2(state.postflg);
+    u16s2(state.dispstat); put_u32(out, state.vcount);
+    put_u32(out, state.next_vcount); put_u8(out, state.next_vcount_valid);
+    flags2(state.vcount_match); put_u8(out, state.in_vblank);
+    put_u64(out, state.display_last);
+    u32s2(state.ime); u32s2(state.ie); u32s2(state.irq_flags);
+    flags2(state.haltcnt); flags2(state.cpu_halted);
+    u64s2(state.halt_entry_cycle);
+    for (const auto& cpu : state.fifo)
+        for (uint32_t value : cpu) put_u32(out, value);
+    flags2(state.fifo_count); flags2(state.fifo_head);
+    u16s2(state.fifocnt); u32s2(state.fifo_lastrx);
+    for (const auto& cpu : state.dma) for (const auto& dma : cpu) {
+        put_u32(out, dma.src); put_u32(out, dma.dst); put_u32(out, dma.cnt);
+        put_u32(out, dma.cur_src); put_u32(out, dma.cur_dst);
+        put_u32(out, dma.remaining);
+        put_u32(out, static_cast<uint32_t>(dma.src_inc));
+        put_u32(out, static_cast<uint32_t>(dma.dst_inc));
+        put_u32(out, dma.burst_index); put_u8(out, dma.start_mode);
+        put_u8(out, dma.running); put_u8(out, dma.in_progress);
+        put_u8(out, dma.burst_start);
+    }
+    u64s2(state.dma_entry_cycle); put_u8(out, state.gxfifo_stall);
+    for (const auto& cpu : state.timer) for (const auto& timer : cpu) {
+        put_u32(out, timer.reload); put_u32(out, timer.counter);
+        put_u32(out, timer.ctrl); put_u64(out, timer.accum);
+    }
+    u64s2(state.timer_last);
+    put_u32(out, state.divcnt); u32s2(state.div_numer);
+    u32s2(state.div_denom); u32s2(state.div_quot); u32s2(state.div_rem);
+    put_u64(out, state.div_deadline); put_u32(out, state.sqrtcnt);
+    u32s2(state.sqrt_value); put_u32(out, state.sqrt_result);
+    put_u64(out, state.sqrt_deadline);
+    u16s2(state.exmemcnt); put_u32(out, state.powercontrol7);
+    put_u32(out, state.keyinput); u16s2(state.keycnt);
+    put_u32(out, state.rcnt); put_u8(out, state.wramcnt);
+    put_u32(out, state.wifiwaitcnt); put_u32(out, state.biosprot);
+    put_u8(out, state.pm_index); put_bytes(out, state.pm_regs, 8u);
+    put_bytes(out, state.pm_masks, 8u); put_u8(out, state.pm_hold);
+    put_u8(out, state.powered_off); put_u8(out, state.tsc_ctrl);
+    put_u32(out, state.tsc_conv);
+    put_u32(out, static_cast<uint32_t>(state.tsc_datapos));
+    put_u32(out, state.tsc_x); put_u32(out, state.tsc_y);
+    put_bytes(out, state.io_mem, sizeof(state.io_mem));
+    return out;
+}
+
+bool decode_io_core(const std::vector<uint8_t>& payload,
+                    NdsIoCoreSaveState* state) {
+    size_t pos = 0;
+    *state = NdsIoCoreSaveState{};
+    auto flags2 = [&](uint8_t values[2]) {
+        return read_u8(payload, pos, &values[0]) &&
+            read_u8(payload, pos, &values[1]);
+    };
+    auto u16s2 = [&](uint16_t values[2]) {
+        uint32_t a = 0, b = 0;
+        if (!read_u32(payload, pos, &a) || !read_u32(payload, pos, &b) ||
+            a > UINT16_MAX || b > UINT16_MAX) return false;
+        values[0] = static_cast<uint16_t>(a);
+        values[1] = static_cast<uint16_t>(b);
+        return true;
+    };
+    auto u32s2 = [&](uint32_t values[2]) {
+        return read_u32(payload, pos, &values[0]) &&
+            read_u32(payload, pos, &values[1]);
+    };
+    auto u64s2 = [&](uint64_t values[2]) {
+        return read_u64(payload, pos, &values[0]) &&
+            read_u64(payload, pos, &values[1]);
+    };
+    auto u16 = [&](uint16_t* value) {
+        uint32_t wide = 0;
+        if (!read_u32(payload, pos, &wide) || wide > UINT16_MAX) return false;
+        *value = static_cast<uint16_t>(wide);
+        return true;
+    };
+    auto bytes = [&](void* dst, size_t size) {
+        if (payload.size() - pos < size) return false;
+        std::memcpy(dst, payload.data() + pos, size);
+        pos += size;
+        return true;
+    };
+
+    if (!u16s2(state->ipcsync_out) || !flags2(state->postflg) ||
+        !u16s2(state->dispstat) || !u16(&state->vcount) ||
+        !u16(&state->next_vcount) ||
+        !read_u8(payload, pos, &state->next_vcount_valid) ||
+        !flags2(state->vcount_match) ||
+        !read_u8(payload, pos, &state->in_vblank) ||
+        !read_u64(payload, pos, &state->display_last) ||
+        !u32s2(state->ime) || !u32s2(state->ie) ||
+        !u32s2(state->irq_flags) || !flags2(state->haltcnt) ||
+        !flags2(state->cpu_halted) || !u64s2(state->halt_entry_cycle))
+        return false;
+    for (auto& cpu : state->fifo)
+        for (uint32_t& value : cpu)
+            if (!read_u32(payload, pos, &value)) return false;
+    if (!flags2(state->fifo_count) || !flags2(state->fifo_head) ||
+        !u16s2(state->fifocnt) || !u32s2(state->fifo_lastrx)) return false;
+    for (auto& cpu : state->dma) for (auto& dma : cpu) {
+        uint32_t src_inc = 0, dst_inc = 0;
+        if (!read_u32(payload, pos, &dma.src) ||
+            !read_u32(payload, pos, &dma.dst) ||
+            !read_u32(payload, pos, &dma.cnt) ||
+            !read_u32(payload, pos, &dma.cur_src) ||
+            !read_u32(payload, pos, &dma.cur_dst) ||
+            !read_u32(payload, pos, &dma.remaining) ||
+            !read_u32(payload, pos, &src_inc) ||
+            !read_u32(payload, pos, &dst_inc) ||
+            !u16(&dma.burst_index) ||
+            !read_u8(payload, pos, &dma.start_mode) ||
+            !read_u8(payload, pos, &dma.running) ||
+            !read_u8(payload, pos, &dma.in_progress) ||
+            !read_u8(payload, pos, &dma.burst_start)) return false;
+        dma.src_inc = static_cast<int32_t>(src_inc);
+        dma.dst_inc = static_cast<int32_t>(dst_inc);
+    }
+    if (!u64s2(state->dma_entry_cycle) ||
+        !read_u8(payload, pos, &state->gxfifo_stall)) return false;
+    for (auto& cpu : state->timer) for (auto& timer : cpu) {
+        if (!u16(&timer.reload) || !u16(&timer.counter) ||
+            !u16(&timer.ctrl) || !read_u64(payload, pos, &timer.accum))
+            return false;
+    }
+    if (!u64s2(state->timer_last) || !u16(&state->divcnt) ||
+        !u32s2(state->div_numer) || !u32s2(state->div_denom) ||
+        !u32s2(state->div_quot) || !u32s2(state->div_rem) ||
+        !read_u64(payload, pos, &state->div_deadline) ||
+        !u16(&state->sqrtcnt) || !u32s2(state->sqrt_value) ||
+        !read_u32(payload, pos, &state->sqrt_result) ||
+        !read_u64(payload, pos, &state->sqrt_deadline) ||
+        !u16s2(state->exmemcnt) || !u16(&state->powercontrol7) ||
+        !read_u32(payload, pos, &state->keyinput) ||
+        !u16s2(state->keycnt) || !u16(&state->rcnt) ||
+        !read_u8(payload, pos, &state->wramcnt) ||
+        !u16(&state->wifiwaitcnt) ||
+        !read_u32(payload, pos, &state->biosprot) ||
+        !read_u8(payload, pos, &state->pm_index) ||
+        !bytes(state->pm_regs, sizeof(state->pm_regs)) ||
+        !bytes(state->pm_masks, sizeof(state->pm_masks)) ||
+        !read_u8(payload, pos, &state->pm_hold) ||
+        !read_u8(payload, pos, &state->powered_off) ||
+        !read_u8(payload, pos, &state->tsc_ctrl) ||
+        !u16(&state->tsc_conv)) return false;
+    uint32_t datapos = 0;
+    if (!read_u32(payload, pos, &datapos) || !u16(&state->tsc_x) ||
+        !u16(&state->tsc_y) ||
+        !bytes(state->io_mem, sizeof(state->io_mem))) return false;
+    state->tsc_datapos = static_cast<int32_t>(datapos);
+    return pos == payload.size();
+}
+
 bool append_section(std::vector<Section>& sections, uint32_t tag,
                     std::vector<uint8_t> payload, std::string* error) {
     if (payload.empty()) {
@@ -385,7 +581,7 @@ bool append_section(std::vector<Section>& sections, uint32_t tag,
 bool known_section_tag(uint32_t tag) {
     return tag == kSectionIden || tag == kSectionSchd ||
         tag == kSectionMemr || tag == kSectionCp15 ||
-        tag == kSectionRtim;
+        tag == kSectionRtim || tag == kSectionIocr;
 }
 
 bool atomic_write_file(const std::string& path,
@@ -634,17 +830,75 @@ bool export_core_state(CoreState* out, std::string* error) {
     }
     cp15_savestate_export(&out->cp15);
     runtime_savestate_export(&out->runtime);
-    return true;
+    return io_savestate_export(&out->io);
 }
 
 bool import_core_state(const CoreState& state, std::string* error) {
     if (!bus_savestate_import(state.memory, error) ||
         !cp15_savestate_import(state.cp15, error) ||
         !runtime_savestate_import(state.runtime, error) ||
+        !io_savestate_import(state.io, error) ||
         !scheduler_savestate_import(state.scheduler, error))
         return false;
     bus_fast_refresh();
     runtime_savestate_invalidate_host_caches();
+    return true;
+}
+
+bool validate_core_state(const CoreState& state, std::string* error) {
+    auto fail = [&](const char* message) {
+        set_error(error, message);
+        return false;
+    };
+    const NdsBusMemorySnapshot& mem = state.memory;
+    if (mem.main_ram.size() != 4u * 1024u * 1024u ||
+        mem.itcm.size() != 32u * 1024u ||
+        mem.dtcm.size() != 16u * 1024u ||
+        mem.shared_wram.size() != 32u * 1024u ||
+        mem.arm7_wram.size() != 64u * 1024u ||
+        mem.arm9_bios.size() != 4u * 1024u ||
+        mem.arm7_bios.size() != 16u * 1024u)
+        return fail("savestate memory backing size mismatch");
+    if (mem.main_ram_written.size() != mem.main_ram.size() ||
+        mem.itcm_written.size() != mem.itcm.size() ||
+        mem.dtcm_written.size() != mem.dtcm.size() ||
+        mem.shared_wram_written.size() != mem.shared_wram.size() ||
+        mem.arm7_wram_written.size() != mem.arm7_wram.size())
+        return fail("savestate memory provenance size mismatch");
+    constexpr size_t kExecPageSize = 4096u;
+    if (mem.main_ram_generation.size() != mem.main_ram.size() / kExecPageSize ||
+        mem.itcm_generation.size() != mem.itcm.size() / kExecPageSize ||
+        mem.dtcm_generation.size() != mem.dtcm.size() / kExecPageSize ||
+        mem.shared_wram_generation.size() !=
+            mem.shared_wram.size() / kExecPageSize ||
+        mem.arm7_wram_generation.size() !=
+            mem.arm7_wram.size() / kExecPageSize)
+        return fail("savestate memory generation size mismatch");
+    if (state.runtime.active_cpu > 1u || state.runtime.force_tier3 > 1u)
+        return fail("savestate runtime state is invalid");
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (state.scheduler.crs_depth[cpu] >
+                NDS_RUNTIME_CALL_STACK_CAPACITY ||
+            state.scheduler.started[cpu] > 1u ||
+            state.scheduler.terminal_halted[cpu] > 1u)
+            return fail("savestate scheduler state is invalid");
+    }
+    return io_savestate_validate(state.io, error);
+}
+
+bool transaction_allowed(std::string* error) {
+    NdsSavestateEligibilityHook hook = nullptr;
+    void* context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_eligibility_mutex);
+        hook = g_eligibility_hook;
+        context = g_eligibility_context;
+    }
+    if (hook && !hook(context, error)) {
+        if (error && error->empty())
+            *error = "savestate transaction rejected by eligibility policy";
+        return false;
+    }
     return true;
 }
 
@@ -653,6 +907,12 @@ bool import_core_state(const CoreState& state, std::string* error) {
 bool nds_savestate_save_core(const std::string& path,
                              const NdsSavestateIdentity& identity,
                              std::string* error) {
+    TransactionGuard transaction;
+    if (!transaction.locked) {
+        set_error(error, "savestate requires the scheduler owner between rounds");
+        return false;
+    }
+    if (!transaction_allowed(error)) return false;
     if (identity.build_id.empty()) {
         set_error(error, "savestate identity requires an exact build id");
         return false;
@@ -672,7 +932,9 @@ bool nds_savestate_save_core(const std::string& path,
         !append_section(sections, kSectionMemr, encode_memory(core.memory), error) ||
         !append_section(sections, kSectionCp15, encode_cp15(core.cp15), error) ||
         !append_section(sections, kSectionRtim,
-                        encode_runtime_state(core.runtime), error))
+                        encode_runtime_state(core.runtime), error) ||
+        !append_section(sections, kSectionIocr,
+                        encode_io_core(core.io), error))
         return false;
 
     return atomic_write_file(path, build_file(sections), error);
@@ -681,6 +943,12 @@ bool nds_savestate_save_core(const std::string& path,
 bool nds_savestate_load_core(const std::string& path,
                              const NdsSavestateIdentity& expected_identity,
                              std::string* error) {
+    TransactionGuard transaction;
+    if (!transaction.locked) {
+        set_error(error, "savestate requires the scheduler owner between rounds");
+        return false;
+    }
+    if (!transaction_allowed(error)) return false;
     if (expected_identity.build_id.empty() ||
         !valid_sha1(expected_identity.rom_sha1)) {
         set_error(error, "expected savestate identity is invalid");
@@ -726,6 +994,12 @@ bool nds_savestate_load_core(const std::string& path,
         set_error(error, "runtime section is missing or corrupt");
         return false;
     }
+    if (!find_section(sections, kSectionIocr, &payload) ||
+        !decode_io_core(payload, &loaded.io)) {
+        set_error(error, "IO core section is missing or corrupt");
+        return false;
+    }
+    if (!validate_core_state(loaded, error)) return false;
 
     CoreState previous{};
     if (!export_core_state(&previous, error)) return false;
@@ -740,4 +1014,11 @@ bool nds_savestate_load_core(const std::string& path,
         return false;
     }
     return true;
+}
+
+void nds_savestate_set_eligibility_hook(NdsSavestateEligibilityHook hook,
+                                        void* context) {
+    std::lock_guard<std::mutex> lock(g_eligibility_mutex);
+    g_eligibility_hook = hook;
+    g_eligibility_context = hook ? context : nullptr;
 }

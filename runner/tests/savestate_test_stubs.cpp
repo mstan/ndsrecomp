@@ -9,6 +9,7 @@
 #include "io.h"
 #include "live_overlay.h"
 #include "runtime_arm.h"
+#include "savestate.h"
 #include "vram.h"
 
 namespace {
@@ -81,6 +82,61 @@ bool nds_dma_cpu_stalled(int) { return false; }
 unsigned long long nds_dma_entry_cycle(int) { return 0; }
 void nds_dma_run(int, unsigned long long) {}
 bool nds_gxfifo_stalled() { return false; }
+namespace {
+NdsIoCoreSaveState g_test_io_state{};
+bool g_fail_next_io_import = false;
+}
+
+void savestate_test_fail_next_io_import() { g_fail_next_io_import = true; }
+
+bool io_savestate_export(NdsIoCoreSaveState* out) {
+    if (!out) return false;
+    *out = g_test_io_state;
+    return true;
+}
+
+bool io_savestate_validate(const NdsIoCoreSaveState& in,
+                           std::string* error) {
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    if (!binary(in.next_vcount_valid) || !binary(in.in_vblank) ||
+        !binary(in.gxfifo_stall) || !binary(in.pm_hold) ||
+        !binary(in.powered_off) || in.vcount > 262u ||
+        in.tsc_datapos < 0 || in.tsc_datapos > 2 ||
+        (in.powercontrol7 & ~0x0003u) != 0u || in.pm_index >= 8u) {
+        if (error) *error = "savestate IO core scalar is invalid";
+        return false;
+    }
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (!binary(in.vcount_match[cpu]) || !binary(in.cpu_halted[cpu]) ||
+            in.fifo_count[cpu] > 16u || in.fifo_head[cpu] >= 16u ||
+            (in.fifocnt[cpu] & ~0xC404u) != 0u)
+            return false;
+        for (int ch = 0; ch < 4; ++ch) {
+            const auto& dma = in.dma[cpu][ch];
+            const bool valid_mode = cpu == 0
+                ? dma.start_mode <= 7u
+                : dma.start_mode == 0u ||
+                    (dma.start_mode >= 0x10u && dma.start_mode <= 0x13u);
+            if (!binary(dma.running) || !binary(dma.in_progress) ||
+                !binary(dma.burst_start) || dma.src_inc < -1 ||
+                dma.src_inc > 1 || dma.dst_inc < -1 || dma.dst_inc > 1 ||
+                !valid_mode || in.timer[cpu][ch].accum >= 1024u)
+                return false;
+        }
+    }
+    return true;
+}
+
+bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error) {
+    if (!io_savestate_validate(in, error)) return false;
+    if (g_fail_next_io_import) {
+        g_fail_next_io_import = false;
+        if (error) *error = "injected IO apply failure";
+        return false;
+    }
+    g_test_io_state = in;
+    return true;
+}
 
 void nds_tick_spu(uint64_t) {}
 uint64_t nds_wifi_next_event_time() { return UINT64_MAX; }
