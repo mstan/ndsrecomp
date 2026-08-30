@@ -408,6 +408,8 @@ struct State {
     std::deque<std::filesystem::path> prepare_queue;
     std::deque<LoadedBank> ready_queue;
     std::deque<PreparedError> prepare_errors;
+    std::atomic<bool> prepare_results_ready{false};
+    uint64_t prepare_result_drains_for_test = 0;
     // Shards the prepare worker has taken off prepare_queue but not yet
     // resolved onto ready_queue/prepare_errors. Without this the three
     // containers are all momentarily empty mid-load, which would let the
@@ -437,6 +439,8 @@ struct State {
     std::condition_variable maint_cv;
     std::deque<MaintenanceJob> maint_jobs;
     std::deque<MaintenanceResult> maint_results;
+    std::atomic<bool> maint_results_ready{false};
+    uint64_t maint_result_drains_for_test = 0;
     std::thread maint_thread;
     bool maint_stop = false;
     // Outstanding worker jobs whose results the emulation thread has not
@@ -1672,6 +1676,8 @@ void prepare_worker_main() {
             else    g_live.prepare_errors.push_back(
                         PreparedError{std::move(error), reason});
             --g_live.prepare_in_flight;
+            g_live.prepare_results_ready.store(true,
+                                               std::memory_order_release);
         }
     }
 }
@@ -1736,6 +1742,7 @@ void commit_one_ready_bank() {
     PreparedError error;
     bool have_bank = false;
     {
+        ++g_live.prepare_result_drains_for_test;
         std::lock_guard<std::mutex> lock(g_live.publish_mutex);
         if (!g_live.prepare_errors.empty()) {
             error = std::move(g_live.prepare_errors.front());
@@ -1746,6 +1753,9 @@ void commit_one_ready_bank() {
             g_live.ready_queue.pop_front();
             have_bank = true;
         }
+        g_live.prepare_results_ready.store(
+            !g_live.prepare_errors.empty() || !g_live.ready_queue.empty(),
+            std::memory_order_release);
     }
     if (!error.text.empty()) {
         g_live.last_error = std::move(error.text);
@@ -2033,6 +2043,8 @@ void maintenance_worker_main() {
         {
             std::lock_guard<std::mutex> lock(g_live.maint_mutex);
             g_live.maint_results.push_back(std::move(result));
+            g_live.maint_results_ready.store(true,
+                                             std::memory_order_release);
         }
     }
 }
@@ -2147,8 +2159,11 @@ void apply_start_child(MaintenanceResult& result) {
 void drain_maintenance_results() {
     std::deque<MaintenanceResult> results;
     {
+        ++g_live.maint_result_drains_for_test;
         std::lock_guard<std::mutex> lock(g_live.maint_mutex);
         results.swap(g_live.maint_results);
+        g_live.maint_results_ready.store(!g_live.maint_results.empty(),
+                                         std::memory_order_release);
     }
     for (MaintenanceResult& result : results) {
         switch (result.kind) {
@@ -2303,6 +2318,7 @@ void live_overlay_shutdown() {
         }
 #endif
         g_live.maint_results.clear();
+        g_live.maint_results_ready.store(false, std::memory_order_release);
     }
     g_live.start_pending = false;
     g_live.run_finish_pending = false;
@@ -2332,13 +2348,17 @@ void live_overlay_shutdown() {
     }
     g_live.publish_cv.notify_all();
     if (g_live.prepare_thread.joinable()) g_live.prepare_thread.join();
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
 #if defined(_WIN32)
-    std::lock_guard<std::mutex> lock(g_live.publish_mutex);
-    for (LoadedBank& bank : g_live.ready_queue) {
-        if (bank.handle) FreeLibrary(bank.handle);
-    }
+        for (LoadedBank& bank : g_live.ready_queue) {
+            if (bank.handle) FreeLibrary(bank.handle);
+        }
 #endif
-    g_live.ready_queue.clear();
+        g_live.ready_queue.clear();
+        g_live.prepare_errors.clear();
+        g_live.prepare_results_ready.store(false, std::memory_order_release);
+    }
 }
 
 void live_overlay_runtime_reset() {
@@ -2479,8 +2499,8 @@ void live_overlay_poll() {
     // enabled the overlay without going through live_overlay_configure; it
     // is a no-op in every normal session.
     reload_persisted_queue();
-    ensure_workers();
     if (!g_live.initial_cache_scan_done) {
+        ensure_workers();
         // beads-yjp.59: the cache walk is a worker job, but re-registering the
         // resident banks after a runtime reset is not -- the dispatch index is
         // emulation-thread-owned and lookup reads it lock-free.
@@ -2491,8 +2511,17 @@ void live_overlay_poll() {
     // Publication is an emulation-thread operation. The worker may prepare
     // multiple candidates, but at most one complete bank becomes visible per
     // poll so lookup can never observe a partially populated bundle.
-    commit_one_ready_bank();
-    drain_maintenance_results();
+    // The exchange claims one drain opportunity; the drain itself republishes
+    // true under the queue mutex if more work remains, so a producer cannot
+    // have its ready store overwritten by a consumer-side empty poll.
+    if (g_live.prepare_results_ready.exchange(false,
+                                              std::memory_order_acquire)) {
+        commit_one_ready_bank();
+    }
+    if (g_live.maint_results_ready.exchange(false,
+                                            std::memory_order_acquire)) {
+        drain_maintenance_results();
+    }
     // A finished run whose log has not been read yet has not had its shards
     // queued, so its verdict is not in yet either.
     if (!g_live.run_finish_pending) evaluate_run_futility();
@@ -2566,6 +2595,15 @@ void live_overlay_note_backlog_for_test(uint64_t pending,
 uint32_t live_overlay_batch_cap_for_test() { return effective_batch_cap(); }
 
 uint32_t live_overlay_cooldown_for_test() { return effective_cooldown_ms(); }
+
+void live_overlay_poll_drain_counts_for_test(
+    uint64_t* prepare_result_drains,
+    uint64_t* maintenance_result_drains) {
+    if (prepare_result_drains)
+        *prepare_result_drains = g_live.prepare_result_drains_for_test;
+    if (maintenance_result_drains)
+        *maintenance_result_drains = g_live.maint_result_drains_for_test;
+}
 
 void live_overlay_suppress_for_test(const char* reason) {
     g_live.auto_suppressed = true;

@@ -150,6 +150,9 @@ void live_overlay_note_backlog_for_test(uint64_t pending,
                                         uint64_t run_duration_ms);
 uint32_t live_overlay_batch_cap_for_test();
 uint32_t live_overlay_cooldown_for_test();
+void live_overlay_poll_drain_counts_for_test(
+    uint64_t* prepare_result_drains,
+    uint64_t* maintenance_result_drains);
 
 // Test-only: latch the futility suppression the way a proven-futile run does,
 // so the queue-policy paths can be shown NOT to bypass it.

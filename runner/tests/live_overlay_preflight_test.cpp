@@ -346,6 +346,30 @@ int main() {
 #endif
     live_overlay_shutdown();
 
+#if defined(_WIN32)
+    // beads-w184: once the one-shot startup work is complete, an idle live
+    // overlay poll must not take the empty publish/maintenance queue locks.
+    // These counters are bumped inside the drain functions, so this fails if
+    // the poll goes back to unconditionally processing empty queues.
+    live_overlay_configure(true, false, 0u, 0u, 0u, "",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    live_overlay_register_cached_banks();
+    uint64_t prepare_drains_before = 0u;
+    uint64_t maint_drains_before = 0u;
+    live_overlay_poll_drain_counts_for_test(&prepare_drains_before,
+                                            &maint_drains_before);
+    for (int i = 0; i < 64; ++i) live_overlay_poll();
+    uint64_t prepare_drains_after = 0u;
+    uint64_t maint_drains_after = 0u;
+    live_overlay_poll_drain_counts_for_test(&prepare_drains_after,
+                                            &maint_drains_after);
+    if (!expect(prepare_drains_after == prepare_drains_before &&
+                maint_drains_after == maint_drains_before,
+                "idle overlay polls must not drain empty result queues"))
+        return 1;
+    live_overlay_shutdown();
+#endif
+
     // ---- beads-yjp.51: adaptive queue policy ----------------------------
     //
     // Cadence is a pure function of the reported backlog plus the last run's
