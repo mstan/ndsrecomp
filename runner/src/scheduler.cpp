@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "state.h"
+#include "savestate.h"
 #include "runtime_arm.h"
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
@@ -590,4 +591,47 @@ uint64_t scheduler_next_event_timestamp() { return next_scheduled_event_time(); 
 bool scheduler_cpu_terminal_halted(int cpu) { return g_slot[cpu & 1].halted; }
 const char* scheduler_cpu_halt_reason(int cpu) {
     return g_slot[cpu & 1].reason ? g_slot[cpu & 1].reason : "";
+}
+
+bool scheduler_savestate_export(NdsSchedulerSaveState* out) {
+    if (!out) return false;
+    save_current();
+    *out = NdsSchedulerSaveState{};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out->cpu[cpu] = g_slot[cpu].state;
+        out->crs_depth[cpu] = g_slot[cpu].crs_depth;
+        out->deferred_cycles[cpu] = g_slot[cpu].deferred_cycles;
+        out->cycles[cpu] = g_slot[cpu].cycles;
+        out->started[cpu] = g_slot[cpu].started ? 1u : 0u;
+        out->terminal_halted[cpu] = g_slot[cpu].halted ? 1u : 0u;
+        std::memcpy(out->crs[cpu], g_slot[cpu].crs,
+                    sizeof(out->crs[cpu]));
+    }
+    out->system_timestamp = g_sys_timestamp;
+    return true;
+}
+
+bool scheduler_savestate_import(const NdsSchedulerSaveState& in,
+                                std::string* error) {
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (in.crs_depth[cpu] > NDS_RUNTIME_CALL_STACK_CAPACITY) {
+            if (error) *error = "savestate call-return stack depth is invalid";
+            return false;
+        }
+        g_slot[cpu] = CpuSlot{};
+        g_slot[cpu].state = in.cpu[cpu];
+        g_slot[cpu].crs_depth = in.crs_depth[cpu];
+        g_slot[cpu].deferred_cycles = in.deferred_cycles[cpu];
+        g_slot[cpu].cycles = in.cycles[cpu];
+        g_slot[cpu].started = in.started[cpu] != 0;
+        g_slot[cpu].halted = in.terminal_halted[cpu] != 0;
+        g_slot[cpu].reason = g_slot[cpu].halted ? "savestate terminal halt"
+                                                : nullptr;
+        std::memcpy(g_slot[cpu].crs, in.crs[cpu], sizeof(g_slot[cpu].crs));
+    }
+    g_sys_timestamp = in.system_timestamp;
+    g_cur = -1;
+    runtime_call_stack_restore(nullptr, 0);
+    runtime_deferred_cycles_set(0);
+    return true;
 }

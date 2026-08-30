@@ -378,6 +378,7 @@ add_executable(nds_runner
     # live shards published before those became header inlines. Must stay a
     # separate TU: it defines NDS_RUNTIME_ABI_SHIMS to suppress the inlines.
     src/runtime_abi_shims.cpp
+    src/savestate.cpp
     src/live_overlay.cpp
     src/battery_save.cpp
     src/firmware_state.cpp
@@ -769,6 +770,26 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/battery_save.cpp)
   target_include_directories(firmware_state_test PRIVATE src)
   add_test(NAME firmware_state_test COMMAND firmware_state_test)
+
+  add_executable(savestate_test
+      tests/savestate_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp)
+  target_include_directories(savestate_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(savestate_test)
+  target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME savestate_test COMMAND savestate_test)
 
   # AUXSPI backup-chip protocol: pins the write-enable latch's lifetime across
   # chip-select transfers, which is what silently dropped every cartridge save.

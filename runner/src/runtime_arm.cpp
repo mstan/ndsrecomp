@@ -27,6 +27,7 @@
 #endif
 
 #include "state.h"
+#include "savestate.h"
 #include "io.h"
 #include "tier3.h"
 #include "diagnostics.h"
@@ -2131,6 +2132,41 @@ extern "C" void runtime_init(void*) {
 extern "C" void runtime_shutdown(void) {
     g_crs_depth = 0;
     g_deferred_cycles = 0;
+}
+
+void runtime_savestate_export(NdsRuntimeSaveState* out) {
+    if (!out) return;
+    out->insn_count[0] = g_insn_count[0];
+    out->insn_count[1] = g_insn_count[1];
+    out->force_tier3_misses = g_nds_force_tier3_misses;
+    out->active_cpu = static_cast<uint32_t>(g_nds_active);
+    out->force_tier3 = g_nds_force_tier3 ? 1u : 0u;
+}
+
+bool runtime_savestate_import(const NdsRuntimeSaveState& in,
+                              std::string* error) {
+    if (in.active_cpu > 1u) {
+        if (error) *error = "savestate active CPU is invalid";
+        return false;
+    }
+    g_insn_count[0] = in.insn_count[0];
+    g_insn_count[1] = in.insn_count[1];
+    g_nds_force_tier3_misses = in.force_tier3_misses;
+    g_nds_active = in.active_cpu ? NDS_ARM7 : NDS_ARM9;
+    g_nds_force_tier3 = in.force_tier3 != 0u;
+    g_runtime_cycles = 0;
+    g_nds_terminal = false;
+    g_nds_halt_reason = nullptr;
+    g_nds_unwinding = 0;
+    runtime_savestate_invalidate_host_caches();
+    return true;
+}
+
+void runtime_savestate_invalidate_host_caches() {
+    request_yield_poll();
+    g_static_guard = nullptr;
+    g_dispatch_cache = {};
+    link_epoch_bump();
 }
 
 std::string nds_hle_profile_json() {

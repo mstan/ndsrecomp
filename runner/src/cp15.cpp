@@ -14,6 +14,7 @@
 #include <cstdio>
 
 #include "state.h"
+#include "savestate.h"
 #include "runtime_arm.h"
 #include "io.h"
 
@@ -206,4 +207,31 @@ extern "C" void runtime_coproc_cdp(uint32_t cp_num, uint32_t op1,
                                    uint32_t crn, uint32_t crm, uint32_t op2) {
     std::fprintf(stderr, "[cp15] CDP p%u (c%u,c%u,%u) — no-op\n",
                  cp_num, crn, crm, op2);
+}
+
+void cp15_savestate_export(NdsCp15SaveState* out) {
+    if (!out) return;
+    out->visible = g_cp15;
+    out->timing_generation = g_cp15_timing_generation;
+    for (uint32_t i = 0; i < 8u; ++i) {
+        out->mpu_region[i] = g_mpu_region[i];
+        out->cache_cfg[i] = g_cache_cfg[i];
+        out->access_perm[i] = g_access_perm[i];
+    }
+}
+
+bool cp15_savestate_import(const NdsCp15SaveState& in, std::string* error) {
+    (void)error;
+    g_cp15 = in.visible;
+    g_cp15_timing_generation = in.timing_generation
+        ? in.timing_generation
+        : 1u;
+    for (uint32_t i = 0; i < 8u; ++i) {
+        g_mpu_region[i] = in.mpu_region[i];
+        g_cache_cfg[i] = in.cache_cfg[i];
+        g_access_perm[i] = in.access_perm[i];
+        set_mpu_region(i, g_mpu_region[i]);
+    }
+    bus_fast_refresh();
+    return true;
 }

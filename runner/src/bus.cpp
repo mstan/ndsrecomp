@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "state.h"
+#include "savestate.h"
 #include "runtime_arm.h"
 #include "io.h"
 #include "mem_timing_profile.h"
@@ -617,6 +618,79 @@ bool bus_get_region(const char* name, BusRegion* out) {
         return true;
     }
     return false;
+}
+
+bool bus_savestate_export(NdsBusMemorySnapshot* out) {
+    if (!out) return false;
+    out->main_ram = g_main_ram;
+    out->itcm = g_itcm;
+    out->dtcm = g_dtcm;
+    out->shared_wram = g_shared_wram;
+    out->arm7_wram = g_arm7_wram;
+    out->arm9_bios = g_arm9_bios;
+    out->arm7_bios = g_arm7_bios;
+    out->main_ram_written = g_main_ram_written;
+    out->itcm_written = g_itcm_written;
+    out->dtcm_written = g_dtcm_written;
+    out->shared_wram_written = g_shared_wram_written;
+    out->arm7_wram_written = g_arm7_wram_written;
+    out->main_ram_generation = g_main_ram_generation;
+    out->itcm_generation = g_itcm_generation;
+    out->dtcm_generation = g_dtcm_generation;
+    out->shared_wram_generation = g_shared_wram_generation;
+    out->arm7_wram_generation = g_arm7_wram_generation;
+    return true;
+}
+
+bool bus_savestate_import(const NdsBusMemorySnapshot& in, std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (in.main_ram.size() != 4u * 1024u * 1024u ||
+        in.itcm.size() != 32u * 1024u ||
+        in.dtcm.size() != 16u * 1024u ||
+        in.shared_wram.size() != 32u * 1024u ||
+        in.arm7_wram.size() != 64u * 1024u ||
+        in.arm9_bios.size() != 4u * 1024u ||
+        in.arm7_bios.size() != 16u * 1024u)
+        return fail("savestate memory backing size mismatch");
+    if (in.main_ram_written.size() != in.main_ram.size() ||
+        in.itcm_written.size() != in.itcm.size() ||
+        in.dtcm_written.size() != in.dtcm.size() ||
+        in.shared_wram_written.size() != in.shared_wram.size() ||
+        in.arm7_wram_written.size() != in.arm7_wram.size())
+        return fail("savestate memory provenance size mismatch");
+    if (in.main_ram_generation.size() != in.main_ram.size() / kExecPageSize ||
+        in.itcm_generation.size() != in.itcm.size() / kExecPageSize ||
+        in.dtcm_generation.size() != in.dtcm.size() / kExecPageSize ||
+        in.shared_wram_generation.size() !=
+            in.shared_wram.size() / kExecPageSize ||
+        in.arm7_wram_generation.size() !=
+            in.arm7_wram.size() / kExecPageSize)
+        return fail("savestate memory generation size mismatch");
+
+    g_main_ram = in.main_ram;
+    g_itcm = in.itcm;
+    g_dtcm = in.dtcm;
+    g_shared_wram = in.shared_wram;
+    g_arm7_wram = in.arm7_wram;
+    g_arm9_bios = in.arm9_bios;
+    g_arm7_bios = in.arm7_bios;
+    g_main_ram_written = in.main_ram_written;
+    g_itcm_written = in.itcm_written;
+    g_dtcm_written = in.dtcm_written;
+    g_shared_wram_written = in.shared_wram_written;
+    g_arm7_wram_written = in.arm7_wram_written;
+    g_main_ram_generation = in.main_ram_generation;
+    g_itcm_generation = in.itcm_generation;
+    g_dtcm_generation = in.dtcm_generation;
+    g_shared_wram_generation = in.shared_wram_generation;
+    g_arm7_wram_generation = in.arm7_wram_generation;
+    reset_arm9_code_timing();
+    bus_fast_refresh();
+    runtime_note_code_write();
+    return true;
 }
 
 // True for writable regions that can hold guest-copied executable code â€”
