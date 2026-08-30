@@ -143,14 +143,6 @@ bool read_u64(const std::vector<uint8_t>& in, size_t& pos, uint64_t* value) {
     return true;
 }
 
-bool read_bytes(const std::vector<uint8_t>& in, size_t& pos, void* dst,
-                size_t size) {
-    if (in.size() - pos < size) return false;
-    std::memcpy(dst, in.data() + pos, size);
-    pos += size;
-    return true;
-}
-
 bool read_string(const std::vector<uint8_t>& in, size_t& pos,
                  std::string* out) {
     uint32_t size = 0;
@@ -185,6 +177,35 @@ bool read_vec32(const std::vector<uint8_t>& in, size_t& pos,
     return true;
 }
 
+void put_cpu_state(std::vector<uint8_t>& out, const ArmCpuState& cpu) {
+    for (uint32_t value : cpu.R) put_u32(out, value);
+    put_u32(out, cpu.cpsr);
+    for (uint32_t value : cpu.banked_sp) put_u32(out, value);
+    for (uint32_t value : cpu.banked_lr) put_u32(out, value);
+    for (uint32_t value : cpu.banked_spsr) put_u32(out, value);
+    for (uint32_t value : cpu.r8_12_user) put_u32(out, value);
+    for (uint32_t value : cpu.r8_12_fiq) put_u32(out, value);
+}
+
+bool read_cpu_state(const std::vector<uint8_t>& in, size_t& pos,
+                    ArmCpuState* cpu) {
+    *cpu = ArmCpuState{};
+    for (uint32_t& value : cpu->R)
+        if (!read_u32(in, pos, &value)) return false;
+    if (!read_u32(in, pos, &cpu->cpsr)) return false;
+    for (uint32_t& value : cpu->banked_sp)
+        if (!read_u32(in, pos, &value)) return false;
+    for (uint32_t& value : cpu->banked_lr)
+        if (!read_u32(in, pos, &value)) return false;
+    for (uint32_t& value : cpu->banked_spsr)
+        if (!read_u32(in, pos, &value)) return false;
+    for (uint32_t& value : cpu->r8_12_user)
+        if (!read_u32(in, pos, &value)) return false;
+    for (uint32_t& value : cpu->r8_12_fiq)
+        if (!read_u32(in, pos, &value)) return false;
+    return true;
+}
+
 std::vector<uint8_t> encode_identity(const NdsSavestateIdentity& identity) {
     std::vector<uint8_t> out;
     put_string(out, identity.build_id);
@@ -203,13 +224,13 @@ bool decode_identity(const std::vector<uint8_t>& payload,
 std::vector<uint8_t> encode_scheduler(const NdsSchedulerSaveState& state) {
     std::vector<uint8_t> out;
     for (int cpu = 0; cpu < 2; ++cpu) {
-        put_bytes(out, &state.cpu[cpu], sizeof(state.cpu[cpu]));
+        put_cpu_state(out, state.cpu[cpu]);
         put_u32(out, state.crs_depth[cpu]);
         put_u32(out, state.deferred_cycles[cpu]);
         put_u64(out, state.cycles[cpu]);
         put_u8(out, state.started[cpu]);
         put_u8(out, state.terminal_halted[cpu]);
-        put_bytes(out, state.crs[cpu], sizeof(state.crs[cpu]));
+        for (uint32_t value : state.crs[cpu]) put_u32(out, value);
     }
     put_u64(out, state.system_timestamp);
     return out;
@@ -220,14 +241,15 @@ bool decode_scheduler(const std::vector<uint8_t>& payload,
     size_t pos = 0;
     *state = NdsSchedulerSaveState{};
     for (int cpu = 0; cpu < 2; ++cpu) {
-        if (!read_bytes(payload, pos, &state->cpu[cpu], sizeof(state->cpu[cpu])) ||
+        if (!read_cpu_state(payload, pos, &state->cpu[cpu]) ||
             !read_u32(payload, pos, &state->crs_depth[cpu]) ||
             !read_u32(payload, pos, &state->deferred_cycles[cpu]) ||
             !read_u64(payload, pos, &state->cycles[cpu]) ||
             !read_u8(payload, pos, &state->started[cpu]) ||
-            !read_u8(payload, pos, &state->terminal_halted[cpu]) ||
-            !read_bytes(payload, pos, state->crs[cpu], sizeof(state->crs[cpu])))
+            !read_u8(payload, pos, &state->terminal_halted[cpu]))
             return false;
+        for (uint32_t& value : state->crs[cpu])
+            if (!read_u32(payload, pos, &value)) return false;
     }
     return read_u64(payload, pos, &state->system_timestamp) &&
         pos == payload.size();

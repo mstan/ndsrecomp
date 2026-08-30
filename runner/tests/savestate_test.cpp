@@ -18,6 +18,11 @@ constexpr uint32_t kHeaderSize = 24u;
 constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kSectionSchd = 0x44484353u; // SCHD
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
+constexpr size_t kEncodedArmCpuStateBytes =
+    (16u + 1u + ARM_BANK_COUNT * 3u + 5u + 5u) * 4u;
+constexpr size_t kEncodedSchedulerCpuBlockBytes =
+    kEncodedArmCpuStateBytes + 4u + 4u + 8u + 1u + 1u +
+    NDS_RUNTIME_CALL_STACK_CAPACITY * 4u;
 
 bool expect(bool value, const char* message) {
     if (!value) std::fprintf(stderr, "FAIL: %s\n", message);
@@ -71,6 +76,27 @@ bool save_bytes(const std::filesystem::path& path,
     return static_cast<bool>(out);
 }
 
+bool section_payload(const std::filesystem::path& path, uint32_t tag,
+                     std::vector<uint8_t>* payload) {
+    std::vector<uint8_t> bytes;
+    if (!load_bytes(path, &bytes) || bytes.size() < kHeaderSize)
+        return false;
+    const uint32_t count = read_u32le(bytes, 12u);
+    for (uint32_t i = 0; i < count; ++i) {
+        const size_t dir = kHeaderSize + size_t{i} * kDirEntrySize;
+        if (dir + kDirEntrySize > bytes.size()) return false;
+        if (read_u32le(bytes, dir) != tag) continue;
+        const uint64_t offset = read_u64le(bytes, dir + 8u);
+        const uint64_t size = read_u64le(bytes, dir + 16u);
+        if (offset + size > bytes.size()) return false;
+        payload->assign(bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                        bytes.begin() +
+                            static_cast<std::ptrdiff_t>(offset + size));
+        return true;
+    }
+    return false;
+}
+
 bool patch_section_u32(const std::filesystem::path& path, uint32_t tag,
                        size_t payload_offset, uint32_t value) {
     std::vector<uint8_t> bytes;
@@ -95,6 +121,16 @@ bool patch_section_u32(const std::filesystem::path& path, uint32_t tag,
         return save_bytes(path, bytes);
     }
     return false;
+}
+
+bool expect_le32_at(const std::vector<uint8_t>& bytes, size_t offset,
+                    uint32_t value, const char* message) {
+    if (!expect(offset + 4u <= bytes.size(), message)) return false;
+    return expect(bytes[offset + 0u] == static_cast<uint8_t>(value) &&
+                  bytes[offset + 1u] == static_cast<uint8_t>(value >> 8u) &&
+                  bytes[offset + 2u] == static_cast<uint8_t>(value >> 16u) &&
+                  bytes[offset + 3u] == static_cast<uint8_t>(value >> 24u),
+                  message);
 }
 
 bool fill_pattern(std::vector<uint8_t>* bytes, uint8_t seed) {
@@ -319,6 +355,140 @@ bool corrupt_section_rejects() {
     return expect(rejected, "corrupt section checksum must be rejected");
 }
 
+bool scheduler_cpu_byte_layout_is_stable() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-scheduler-layout.nss";
+    std::filesystem::remove(path);
+
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
+    scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
+
+    NdsSchedulerSaveState sched{};
+    if (!expect(scheduler_savestate_export(&sched), "export scheduler layout"))
+        return false;
+    sched.cpu[0].R[0] = 0x01020304u;
+    sched.cpu[0].R[15] = 0x15161718u;
+    sched.cpu[0].cpsr = 0x21222324u;
+    sched.cpu[0].banked_sp[ARM_BANK_IRQ] = 0x31323334u;
+    sched.cpu[0].banked_lr[ARM_BANK_SUPERVISOR] = 0x41424344u;
+    sched.cpu[0].banked_spsr[ARM_BANK_UNDEFINED] = 0x51525354u;
+    sched.cpu[0].r8_12_user[3] = 0x61626364u;
+    sched.cpu[0].r8_12_fiq[4] = 0x71727374u;
+    sched.crs_depth[0] = 2u;
+    sched.deferred_cycles[0] = 0x81828384u;
+    sched.cycles[0] = 0x0102030405060708ull;
+    sched.started[0] = 1u;
+    sched.terminal_halted[0] = 0u;
+    sched.crs[0][0] = 0x91929394u;
+    sched.crs[0][1] = 0xA1A2A3A4u;
+
+    sched.cpu[1].R[0] = 0xB1B2B3B4u;
+    sched.cpu[1].cpsr = 0xC1C2C3C4u;
+    sched.crs_depth[1] = 1u;
+    sched.deferred_cycles[1] = 0xD1D2D3D4u;
+    sched.cycles[1] = 0x1112131415161718ull;
+    sched.started[1] = 0u;
+    sched.terminal_halted[1] = 1u;
+    sched.crs[1][0] = 0xE1E2E3E4u;
+    sched.system_timestamp = 0x2122232425262728ull;
+
+    if (!expect(scheduler_savestate_import(sched, nullptr),
+                "import scheduler layout"))
+        return false;
+
+    const NdsSavestateIdentity identity{
+        "build-layout", "0123456789abcdef0123456789abcdef01234567"};
+    std::string error;
+    if (!expect(nds_savestate_save_core(path.string(), identity, &error),
+                error.c_str()))
+        return false;
+
+    std::vector<uint8_t> payload;
+    bool ok = expect(section_payload(path, kSectionSchd, &payload),
+                     "extract scheduler section");
+    ok &= expect(payload.size() == 2u * kEncodedSchedulerCpuBlockBytes + 8u,
+                 "scheduler section has explicit packed size");
+
+    constexpr size_t kR0 = 0u;
+    constexpr size_t kR15 = 15u * 4u;
+    constexpr size_t kCpsr = 16u * 4u;
+    constexpr size_t kBankedSp =
+        kCpsr + 4u + ARM_BANK_IRQ * 4u;
+    constexpr size_t kBankedLr =
+        kCpsr + 4u + ARM_BANK_COUNT * 4u +
+        ARM_BANK_SUPERVISOR * 4u;
+    constexpr size_t kBankedSpsr =
+        kCpsr + 4u + ARM_BANK_COUNT * 8u +
+        ARM_BANK_UNDEFINED * 4u;
+    constexpr size_t kR8User =
+        kCpsr + 4u + ARM_BANK_COUNT * 12u + 3u * 4u;
+    constexpr size_t kR8Fiq =
+        kCpsr + 4u + ARM_BANK_COUNT * 12u + 5u * 4u + 4u * 4u;
+    constexpr size_t kCrsDepth = kEncodedArmCpuStateBytes;
+    constexpr size_t kDeferred = kCrsDepth + 4u;
+    constexpr size_t kCycles = kDeferred + 4u;
+    constexpr size_t kStarted = kCycles + 8u;
+    constexpr size_t kTerminalHalted = kStarted + 1u;
+    constexpr size_t kCrs = kTerminalHalted + 1u;
+
+    ok &= expect_le32_at(payload, kR0, 0x01020304u,
+                         "ARM9 R0 is explicit little-endian");
+    ok &= expect_le32_at(payload, kR15, 0x15161718u,
+                         "ARM9 R15 offset is stable");
+    ok &= expect_le32_at(payload, kCpsr, 0x21222324u,
+                         "ARM9 CPSR offset is stable");
+    ok &= expect_le32_at(payload, kBankedSp, 0x31323334u,
+                         "ARM9 banked SP offset is stable");
+    ok &= expect_le32_at(payload, kBankedLr, 0x41424344u,
+                         "ARM9 banked LR offset is stable");
+    ok &= expect_le32_at(payload, kBankedSpsr, 0x51525354u,
+                         "ARM9 banked SPSR offset is stable");
+    ok &= expect_le32_at(payload, kR8User, 0x61626364u,
+                         "ARM9 user R8-R12 bank offset is stable");
+    ok &= expect_le32_at(payload, kR8Fiq, 0x71727374u,
+                         "ARM9 FIQ R8-R12 bank offset is stable");
+    ok &= expect_le32_at(payload, kCrsDepth, 2u,
+                         "ARM9 CRS depth follows CPU fields without padding");
+    ok &= expect_le32_at(payload, kDeferred, 0x81828384u,
+                         "ARM9 deferred cycles offset is stable");
+    ok &= expect_le32_at(payload, kCycles + 0u, 0x05060708u,
+                         "ARM9 cycles low word is little-endian");
+    ok &= expect_le32_at(payload, kCycles + 4u, 0x01020304u,
+                         "ARM9 cycles high word is little-endian");
+    ok &= expect(payload[kStarted] == 1u && payload[kTerminalHalted] == 0u,
+                 "ARM9 scheduler flags are packed bytes");
+    ok &= expect_le32_at(payload, kCrs + 0u, 0x91929394u,
+                         "ARM9 CRS entry 0 is little-endian");
+    ok &= expect_le32_at(payload, kCrs + 4u, 0xA1A2A3A4u,
+                         "ARM9 CRS entry 1 is little-endian");
+
+    const size_t cpu1 = kEncodedSchedulerCpuBlockBytes;
+    ok &= expect_le32_at(payload, cpu1 + kR0, 0xB1B2B3B4u,
+                         "ARM7 R0 starts at explicit second CPU block");
+    ok &= expect_le32_at(payload, cpu1 + kCpsr, 0xC1C2C3C4u,
+                         "ARM7 CPSR offset is stable");
+    ok &= expect(payload[cpu1 + kStarted] == 0u &&
+                 payload[cpu1 + kTerminalHalted] == 1u,
+                 "ARM7 scheduler flags are packed bytes");
+    ok &= expect_le32_at(payload, cpu1 + kCrs, 0xE1E2E3E4u,
+                         "ARM7 CRS entry is little-endian");
+    ok &= expect_le32_at(payload, 2u * kEncodedSchedulerCpuBlockBytes + 0u,
+                         0x25262728u,
+                         "system timestamp low word is little-endian");
+    ok &= expect_le32_at(payload, 2u * kEncodedSchedulerCpuBlockBytes + 4u,
+                         0x21222324u,
+                         "system timestamp high word is little-endian");
+
+    std::filesystem::remove(path);
+    runtime_shutdown();
+    return ok;
+}
+
 bool semantic_import_failure_rolls_back() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() /
@@ -354,7 +524,7 @@ bool semantic_import_failure_rolls_back() {
     ok &= expect(seed_core_state(0x88u, 0x88888888u, 0x00002002u),
                  "seed current state before invalid scheduler load");
     ok &= expect(patch_section_u32(
-                     path, kSectionSchd, sizeof(ArmCpuState),
+                     path, kSectionSchd, kEncodedArmCpuStateBytes,
                      NDS_RUNTIME_CALL_STACK_CAPACITY + 1u),
                  "patch scheduler section with invalid call stack depth");
     ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
@@ -373,6 +543,7 @@ int main() {
     ok &= core_roundtrip();
     ok &= identity_rejects();
     ok &= corrupt_section_rejects();
+    ok &= scheduler_cpu_byte_layout_is_stable();
     ok &= semantic_import_failure_rolls_back();
     return ok ? 0 : 1;
 }
