@@ -1301,6 +1301,40 @@ bool spu_sections_roundtrip_replay_and_rollback() {
         expect(same_spu(actual, current),
                "SPU prevalidation failure leaves live state untouched");
 
+    constexpr uint32_t kSpuChannelBytes = 99u;
+    constexpr uint32_t kSpuCaptureBase = 16u * kSpuChannelBytes;
+    ok &= expect(nds_savestate_save_core(path.string(), identity, &error),
+                 "rewrite valid current SPU state for FIFO cursor validation") &&
+        expect(patch_section_u32(path, kSectionSpu, 0u, 0xA840007Fu),
+               "patch PCM16 SPU channel control") &&
+        expect(patch_section_u32(path, kSectionSpu, 86u, 31u),
+               "patch misaligned PCM16 FIFO read cursor") &&
+        expect(patch_section_u32(path, kSectionSpu, 90u, 0u),
+               "patch aligned PCM16 FIFO write cursor") &&
+        expect(patch_section_u32(path, kSectionSpu, 98u, 1u),
+               "patch coherent PCM16 FIFO level") &&
+        expect(!nds_savestate_load_core(path.string(), identity, &error),
+               "misaligned SPU channel FIFO cursor is rejected before apply") &&
+        expect(spu_savestate_export(&actual),
+               "export SPU after channel cursor rejection") &&
+        expect(same_spu(actual, current),
+               "channel cursor prevalidation failure leaves live state untouched");
+
+    ok &= expect(nds_savestate_save_core(path.string(), identity, &error),
+                 "rewrite valid current SPU state for capture cursor validation") &&
+        expect(patch_section_u32(path, kSectionSpu, kSpuCaptureBase + 37u, 15u),
+               "patch misaligned SPU capture FIFO read cursor") &&
+        expect(patch_section_u32(path, kSectionSpu, kSpuCaptureBase + 41u, 3u),
+               "patch coherent SPU capture FIFO write cursor") &&
+        expect(patch_section_u32(path, kSectionSpu, kSpuCaptureBase + 49u, 4u),
+               "patch coherent SPU capture FIFO level") &&
+        expect(!nds_savestate_load_core(path.string(), identity, &error),
+               "misaligned SPU capture FIFO cursor is rejected before apply") &&
+        expect(spu_savestate_export(&actual),
+               "export SPU after capture cursor rejection") &&
+        expect(same_spu(actual, current),
+               "capture cursor prevalidation failure leaves live state untouched");
+
     // Restore a valid file, then fail a later IO owner after SPU apply. The
     // transaction must put the previous active audio timeline back exactly.
     ok &= expect(nds_savestate_save_core(path.string(), identity, &error),

@@ -611,6 +611,7 @@ bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error) {
     if ((in.cnt & ~0xBF7Fu) != 0u || in.bias > 0x3FFu)
         return fail("savestate SPU global state is invalid");
     for (const NdsSpuChannelSaveState& channel : in.channel) {
+        const uint32_t format = (channel.cnt >> 29) & 3u;
         if ((channel.cnt & ~0xFF7F837Fu) != 0u ||
             (channel.src & ~0x07FFFFFCu) != 0u ||
             channel.loop > 0x3FFFCu || (channel.loop & 3u) != 0u ||
@@ -625,6 +626,10 @@ bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error) {
             (channel.source_offset & 3u) != 0u ||
             channel.source_offset > channel.loop + channel.length)
             return fail("savestate SPU channel state is invalid");
+        if ((channel.fifo_write & 3u) != 0u ||
+            (format == 1u && (channel.fifo_read & 1u) != 0u) ||
+            (format == 2u && channel.pos < 8 && (channel.fifo_read & 3u) != 0u))
+            return fail("savestate SPU channel FIFO cursor is invalid");
     }
     for (const NdsSpuCaptureSaveState& capture : in.capture) {
         if ((capture.cnt & ~0x8Fu) != 0u ||
@@ -640,6 +645,9 @@ bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error) {
             (capture.length == 0u ? capture.write_offset != 0u
                                   : capture.write_offset >= capture.length))
             return fail("savestate SPU capture state is invalid");
+        if ((capture.fifo_read & 3u) != 0u ||
+            ((capture.cnt & 0x88u) == 0x80u && (capture.fifo_write & 1u) != 0u))
+            return fail("savestate SPU capture FIFO cursor is invalid");
     }
     return true;
 }
