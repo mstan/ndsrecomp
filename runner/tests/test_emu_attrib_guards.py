@@ -121,11 +121,17 @@ check("scheduler.cpp times next_scheduled_event_time",
 
 # ── 2. The round region is opened, and opened first ─────────────────────────
 round_body = body(sched, "scheduler_run_round", SRC / "scheduler.cpp")
-first = next((l.strip() for l in round_body.splitlines()
-              if l.strip() and not l.strip().startswith("//")), "")
-check("scheduler_run_round opens NdsEmuRound as its first statement",
-      first.startswith("NdsEmuRound"),
-      f"first statement is {first!r}")
+statements = [l.strip() for l in round_body.splitlines()
+              if l.strip() and not l.strip().startswith("//")]
+first = statements[0] if statements else ""
+second = statements[1] if len(statements) > 1 else ""
+round_opens_first = (
+    first.startswith("NdsEmuRound") or
+    (first.startswith("RoundActivityGuard") and
+     second.startswith("NdsEmuRound")))
+check("scheduler_run_round opens NdsEmuRound before scheduler work",
+      round_opens_first,
+      f"first statements are {first!r}, {second!r}")
 
 # ── 3. All six bus slow paths wrapped -- no partial conversion ──────────────
 bus = read(SRC / "bus.cpp")
