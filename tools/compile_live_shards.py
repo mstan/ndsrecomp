@@ -496,6 +496,13 @@ def collect_candidates(
                 "page": page,
                 "entries": [],
                 "executions": 0,
+                # A root bitmap names PCs that actually fell through to the
+                # interpreter for this exact page generation. Keep its
+                # positive observation count separate from ordinary entry
+                # hits: --min-hits filters noisy call/indirect candidates,
+                # but must not delay first-encounter root-only code until it
+                # has been interpreted that many times.
+                "root_hits": 0,
                 # Where the 4 KiB payload can be read back from on a later
                 # run. Snapshots are permanent under <cache>/snapshots, so
                 # this is what makes a queued candidate resumable rather than
@@ -504,6 +511,11 @@ def collect_candidates(
             })
             current["entries"] = merge_entries(current["entries"], entries)
             current["executions"] += int(page.get("executions", 0))
+            if args.include_roots:
+                current["root_hits"] += sum(
+                    int(entry.get("hits", 0))
+                    for entry in root_entries(page)
+                    if not excluded(int(entry["addr"]), args.exclude_range))
 
     candidates = []
     for key, current in by_page.items():
@@ -525,7 +537,16 @@ def collect_candidates(
             hits = max(hits, carry["hits"])
             current["executions"] = max(current["executions"],
                                         carry["executions"])
-        if hits >= args.min_hits:
+        # Root-only observations are the evidence that unknown code has
+        # already reached Tier 3. Requiring the general hot-entry threshold
+        # here made --include-roots ineffective on first encounter: the
+        # runtime repeatedly invoked the compiler, but every newly executed
+        # page was discarded below the release policy's --min-hits 8 gate.
+        # A zero-hit bitmap does not qualify, nor does a low-hit call/indirect
+        # page. max-pages and the durable queue still bound each compile run.
+        root_encountered = (
+            args.include_roots and current["root_hits"] > 0)
+        if hits >= args.min_hits or root_encountered:
             candidates.append((hits, current["executions"],
                                current["page"], entries, current["manifest"]))
     # Hottest FIRST, by execution weight. Execution count is the page's share

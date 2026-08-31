@@ -79,6 +79,15 @@ def page(addr: int, executions: int, entry_hits: list[int],
     }
 
 
+def root_page(addr: int, executions: int, root_hits: int) -> dict:
+    """One root-only page with an ARM root at addr + 0x10."""
+    result = page(addr, executions, [])
+    # ARM roots are a one-bit-per-word bitmap. Bit four is addr + 0x10.
+    result["root_arm"] = base64.b64encode(bytes([1 << 4])).decode("ascii")
+    result["root_hits"] = [root_hits]
+    return result
+
+
 def manifest(pages: list[dict]) -> dict:
     return {
         "schema": 4,
@@ -155,6 +164,35 @@ def test_carried_weight_beats_the_recency_window(cache: Path) -> None:
         args, [(manifest_path, manifest([aged, fresh]))], {7, 9}, carried)
     check(int(with_carry[0][2]["addr"], 16) == 0x02004000,
           "the carried execution weight must restore the aged-out hot page")
+
+
+def test_first_encounter_root_policy(cache: Path) -> None:
+    """Executed roots bypass the hot-entry threshold, and only when enabled."""
+    args = make_args(cache)
+    args.min_hits = 8
+    root = root_page(0x0200B000, executions=1, root_hits=1)
+    unexecuted_root = root_page(0x0200C000, executions=0, root_hits=0)
+    cold_entry = page(0x0200D000, executions=500, entry_hits=[1])
+    pages = [root, unexecuted_root, cold_entry]
+    manifest_path = cache / "snapshots" / "manifest-root-first.json"
+
+    without_roots = tool.collect_candidates(
+        args, [(manifest_path, manifest(pages))], {9}, {})
+    check(without_roots == [],
+          "a one-hit root must not qualify while include_roots is disabled")
+
+    args.include_roots = True
+    with_roots = tool.collect_candidates(
+        args, [(manifest_path, manifest(pages))], {9}, {})
+    check(len(with_roots) == 1,
+          f"only the executed root page should qualify, got {with_roots}")
+    candidate = with_roots[0]
+    check(int(candidate[2]["addr"], 16) == 0x0200B000,
+          "the one-hit root-only page must qualify on first encounter")
+    check(candidate[0] == 1 and candidate[3][0]["hits"] == 1,
+          "the candidate must preserve the real root observation count")
+    check("root" in candidate[3][0]["kinds"],
+          "the candidate must preserve root provenance")
 
 
 # ------------------------------------------------------------- persistence
@@ -378,6 +416,7 @@ def main() -> int:
         for name, case in [
             ("ordering", test_ordering),
             ("carried weight", test_carried_weight_beats_the_recency_window),
+            ("first-encounter roots", test_first_encounter_root_policy),
             ("round-trip", test_roundtrip_and_schema),
             ("corrupt tolerance", test_corrupt_tolerance),
             ("resume", test_resume_reloads_the_payload),
