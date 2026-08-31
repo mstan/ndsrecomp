@@ -776,6 +776,7 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/bus.cpp
       src/cp15.cpp
       src/scheduler.cpp
+      src/spu.cpp
       src/runtime_arm.cpp
       src/dispatch_timing.cpp
       src/emu_profile.cpp)

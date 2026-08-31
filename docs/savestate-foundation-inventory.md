@@ -2,7 +2,7 @@
 
 This document is the review boundary for `beads-q7fj`'s save-state foundation.
 The implemented container covers the deterministic CPU, memory, I/O, storage,
-and video core; it is not a user-facing whole-console state format yet.
+video, and audio core; it is not a user-facing whole-console state format yet.
 
 ## Existing melonDS integrations
 
@@ -54,6 +54,9 @@ through a temporary path and atomically replaces the destination.
   native framebuffers, frame/presentation capture state, and capture latches.
 - `GP3D`: the vendored geometry/FIFO/register/render-list device graph plus the
   runner timestamp used for geometry command timing.
+- `SPU`: master sound control/bias and exact sample phase; all 16 channels'
+  PCM/ADPCM/PSG/noise playback state and source FIFOs; and both capture units'
+  timers, FIFOs, destinations, and write positions.
 
 ## Guest-visible state owners
 
@@ -112,7 +115,12 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
   traces are host-only: restore invalidates them and renders the restored
   guest render list into newly coherent resources.
 - `runner/src/spu.cpp`: ARM7 sound registers, channel/capture state, bias,
-  mixer timing/output queues, and debug output rings. Not covered.
+  mixer timing/output queues, and debug output rings. Covered: every
+  guest-visible channel/capture field and the mix deadline phase. Host output
+  and SDL queues, backend handles/callback ownership, and debug history are not
+  serialized. Import discards the core presentation queue and advances an
+  atomic presentation epoch; SDL2 pauses and clears its callback-owned ring and
+  SDL3 clears its stream before restored samples are presented.
 - `runner/src/wifi_net.cpp` and `runner/vendor/melonds/Wifi.cpp`: runner Wi-Fi
   bridge state, firmware binding, POWCNT2 power gate, event scheduling, local
   multiplayer/replay/slirp state, packet rings, and vendored Wi-Fi device
@@ -133,10 +141,10 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
 
 ## Blockers for user-facing save states
 
-The video sections are implemented but frontend F-key save/load slots remain
-blocked until the following owners and policy are implemented and tested:
+The video and audio sections are implemented but frontend F-key save/load slots
+remain blocked until the following owners and policy are implemented and
+tested:
 
-- SPU: sound register/channel/capture/mixer queues and sample timing.
 - Wi-Fi: vendored Wi-Fi `DoSavestate` integration plus runner bridge, packet
   rings, replay/local-MP/slirp ownership, power and scheduled events.
 - Debug/profiling policy: decide which always-on rings/counters are reset,

@@ -1,5 +1,6 @@
 #include "savestate.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include "runtime_arm.h"
 #include "scheduler.h"
+#include "spu.h"
 #include "state.h"
 
 void savestate_test_fail_next_io_import();
@@ -30,6 +32,7 @@ constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
 constexpr uint32_t kSectionVram = 0x4D415256u; // VRAM
 constexpr uint32_t kSectionGp2d = 0x44325047u; // GP2D
 constexpr uint32_t kSectionGp3d = 0x44335047u; // GP3D
+constexpr uint32_t kSectionSpu = 0x20555053u;  // SPU
 constexpr size_t kEncodedArmCpuStateBytes =
     (16u + 1u + ARM_BANK_COUNT * 3u + 5u + 5u) * 4u;
 constexpr size_t kEncodedSchedulerCpuBlockBytes =
@@ -46,6 +49,7 @@ void reset_test_machine() {
     bus_init();
     cp15_reset();
     scheduler_init();
+    nds_spu_reset();
     savestate_test_reset_io_state();
 }
 
@@ -1121,6 +1125,202 @@ bool video_sections_roundtrip_and_prevalidate() {
     return ok;
 }
 
+NdsSpuSaveState patterned_spu(uint8_t seed) {
+    NdsSpuSaveState out{};
+    auto fill_fifo = [seed](uint8_t* fifo, size_t size, uint8_t salt) {
+        for (size_t i = 0; i < size; ++i)
+            fifo[i] = static_cast<uint8_t>(seed + salt + i * 7u);
+    };
+
+    auto& pcm = out.channel[0];
+    pcm.cnt = 0x8840007Fu;
+    pcm.src = 0x02000000u;
+    pcm.reload = static_cast<uint16_t>(0xF800u + seed);
+    pcm.loop = 16u;
+    pcm.length = 64u;
+    pcm.timer = 0xF900u;
+    pcm.pos = static_cast<int32_t>(seed & 3u);
+    pcm.sample = static_cast<int16_t>(0x1200u + seed);
+    pcm.noise = 0x4567u;
+    pcm.adpcm_value = -1000 - seed;
+    pcm.adpcm_index = 23;
+    pcm.adpcm_loop_value = 2000 + seed;
+    pcm.adpcm_loop_index = 17;
+    pcm.adpcm_byte = static_cast<uint8_t>(0xA0u | (seed & 0xFu));
+    fill_fifo(pcm.fifo, sizeof(pcm.fifo), 1u);
+    pcm.fifo_read = 0u;
+    pcm.fifo_write = 0u;
+    pcm.source_offset = 32u;
+    pcm.fifo_level = 32u;
+
+    auto& psg = out.channel[8];
+    psg.cnt = 0xE040007Fu;
+    psg.reload = static_cast<uint16_t>(0xFA00u + seed);
+    psg.timer = 0xFB00u;
+    psg.pos = 5;
+    psg.sample = -0x2000;
+
+    auto& noise = out.channel[14];
+    noise.cnt = 0xE060007Fu;
+    noise.reload = static_cast<uint16_t>(0xF700u + seed);
+    noise.timer = 0xFC00u;
+    noise.noise = static_cast<uint16_t>(0x6A5Bu ^ seed);
+    noise.sample = 0x1234;
+
+    auto& capture16 = out.capture[0];
+    capture16.cnt = 0x80u;
+    capture16.dst = 0x02000100u;
+    capture16.reload = static_cast<uint16_t>(0xF600u + seed);
+    capture16.length = 64u;
+    capture16.timer = 0xFD00u;
+    fill_fifo(capture16.fifo, sizeof(capture16.fifo), 3u);
+
+    auto& capture8 = out.capture[1];
+    capture8.cnt = 0x88u;
+    capture8.dst = 0x02000200u;
+    capture8.reload = static_cast<uint16_t>(0xF500u + seed);
+    capture8.length = 64u;
+    capture8.timer = 0xFE00u;
+    fill_fifo(capture8.fifo, sizeof(capture8.fifo), 5u);
+
+    out.cnt = 0x807Fu;
+    out.bias = static_cast<uint16_t>(0x200u + (seed & 0x1Fu));
+    return out;
+}
+
+bool same_spu(const NdsSpuSaveState& a, const NdsSpuSaveState& b) {
+    if (a.cnt != b.cnt || a.bias != b.bias || a.mix_count != b.mix_count)
+        return false;
+    for (size_t i = 0; i < 16u; ++i) {
+        const auto& x = a.channel[i];
+        const auto& y = b.channel[i];
+        if (x.cnt != y.cnt || x.src != y.src || x.reload != y.reload ||
+            x.loop != y.loop || x.length != y.length ||
+            x.key_on != y.key_on || x.timer != y.timer || x.pos != y.pos ||
+            x.sample != y.sample || x.noise != y.noise ||
+            x.adpcm_value != y.adpcm_value ||
+            x.adpcm_index != y.adpcm_index ||
+            x.adpcm_loop_value != y.adpcm_loop_value ||
+            x.adpcm_loop_index != y.adpcm_loop_index ||
+            x.adpcm_byte != y.adpcm_byte ||
+            std::memcmp(x.fifo, y.fifo, sizeof(x.fifo)) != 0 ||
+            x.fifo_read != y.fifo_read || x.fifo_write != y.fifo_write ||
+            x.source_offset != y.source_offset || x.fifo_level != y.fifo_level)
+            return false;
+    }
+    for (size_t i = 0; i < 2u; ++i) {
+        const auto& x = a.capture[i];
+        const auto& y = b.capture[i];
+        if (x.cnt != y.cnt || x.dst != y.dst || x.reload != y.reload ||
+            x.length != y.length || x.timer != y.timer || x.pos != y.pos ||
+            std::memcmp(x.fifo, y.fifo, sizeof(x.fifo)) != 0 ||
+            x.fifo_read != y.fifo_read || x.fifo_write != y.fifo_write ||
+            x.write_offset != y.write_offset || x.fifo_level != y.fifo_level)
+            return false;
+    }
+    return true;
+}
+
+bool spu_sections_roundtrip_replay_and_rollback() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "ndsrecomp-savestate-spu.nss";
+    const std::filesystem::path replay =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-spu-replay.nss";
+    std::filesystem::remove(path);
+    std::filesystem::remove(replay);
+    reset_test_machine();
+    scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
+    scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
+    const NdsSavestateIdentity identity{
+        "build-spu", "0123456789abcdef0123456789abcdef01234567"};
+    std::string error;
+
+    const NdsSpuSaveState saved = patterned_spu(0x11u);
+    bool ok = expect(spu_savestate_import(saved, &error), "seed active SPU") &&
+        expect(nds_savestate_save_core(path.string(), identity, &error),
+               error.c_str());
+
+    const uint64_t first_start = nds_spu_debug_output_produced();
+    nds_tick_spu(64u * 1024u);
+    std::vector<int16_t> first_audio(64u * 2u);
+    ok &= expect(nds_spu_debug_copy_output(first_start, first_audio.data(), 64u) ==
+                     64u,
+                 "active SPU produces first replay window");
+    NdsBusMemorySnapshot first_memory{};
+    ok &= expect(bus_savestate_export(&first_memory),
+                 "capture first SPU memory window");
+
+    ok &= expect(nds_savestate_load_core(path.string(), identity, &error),
+                 error.c_str());
+    std::array<int16_t, 2> stale{};
+    ok &= expect(nds_spu_read_output(stale.data(), 1u) == 0u,
+                 "load discards abandoned host presentation samples");
+    NdsSpuSaveState loaded{};
+    ok &= expect(spu_savestate_export(&loaded), "export loaded SPU") &&
+        expect(same_spu(loaded, saved),
+               "all sound channels, captures, and mixer phase roundtrip");
+    ok &= expect(nds_savestate_save_core(replay.string(), identity, &error),
+                 error.c_str());
+
+    const uint64_t second_start = nds_spu_debug_output_produced();
+    nds_tick_spu(64u * 1024u);
+    std::vector<int16_t> second_audio(64u * 2u);
+    ok &= expect(nds_spu_debug_copy_output(
+                     second_start, second_audio.data(), 64u) == 64u,
+                 "active SPU produces second replay window");
+    NdsBusMemorySnapshot second_memory{};
+    ok &= expect(bus_savestate_export(&second_memory),
+                 "capture second SPU memory window") &&
+        expect(first_audio == second_audio,
+               "active PCM, PSG, and noise replay sample-exactly") &&
+        expect(first_memory.main_ram == second_memory.main_ram,
+               "active 8-bit and 16-bit captures replay byte-exactly");
+
+    std::vector<uint8_t> original, repeated;
+    ok &= expect(section_payload(path, kSectionSpu, &original),
+                 "extract original SPU section") &&
+        expect(section_payload(replay, kSectionSpu, &repeated),
+               "extract repeated SPU section") &&
+        expect(original == repeated,
+               "repeated SPU load/save is byte deterministic") &&
+        expect_le32_at(original, 0u, saved.channel[0].cnt,
+                       "SPU channel control is explicit little-endian") &&
+        expect_le32_at(original, 4u, saved.channel[0].src,
+                       "SPU source address is explicit little-endian");
+
+    const NdsSpuSaveState current = patterned_spu(0x51u);
+    ok &= expect(spu_savestate_import(current, &error), "seed current SPU") &&
+        expect(patch_section_u32(path, kSectionSpu, 98u, 31u),
+               "patch inconsistent SPU FIFO level") &&
+        expect(!nds_savestate_load_core(path.string(), identity, &error),
+               "invalid SPU section is rejected before apply");
+    NdsSpuSaveState actual{};
+    ok &= expect(spu_savestate_export(&actual),
+                 "export SPU after prevalidation rejection") &&
+        expect(same_spu(actual, current),
+               "SPU prevalidation failure leaves live state untouched");
+
+    // Restore a valid file, then fail a later IO owner after SPU apply. The
+    // transaction must put the previous active audio timeline back exactly.
+    ok &= expect(nds_savestate_save_core(path.string(), identity, &error),
+                 "rewrite valid current SPU state");
+    const NdsSpuSaveState rollback_target = patterned_spu(0x71u);
+    ok &= expect(spu_savestate_import(rollback_target, &error),
+                 "seed SPU rollback target");
+    savestate_test_fail_next_io_import();
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "later owner failure rejects load") &&
+        expect(spu_savestate_export(&actual), "export rolled-back SPU") &&
+        expect(same_spu(actual, rollback_target),
+               "later owner failure rolls SPU back exactly");
+
+    std::filesystem::remove(path);
+    std::filesystem::remove(replay);
+    runtime_shutdown();
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -1135,5 +1335,6 @@ int main() {
     ok &= eligibility_hook_rejects_before_export();
     ok &= control_thread_is_not_quiescent_owner();
     ok &= video_sections_roundtrip_and_prevalidate();
+    ok &= spu_sections_roundtrip_replay_and_rollback();
     return ok ? 0 : 1;
 }

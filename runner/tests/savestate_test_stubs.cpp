@@ -361,7 +361,6 @@ bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
     return true;
 }
 
-void nds_tick_spu(uint64_t) {}
 uint64_t nds_wifi_next_event_time() { return UINT64_MAX; }
 void nds_wifi_run_events(uint64_t) {}
 bool nds_wifi_address(int, uint32_t) { return false; }

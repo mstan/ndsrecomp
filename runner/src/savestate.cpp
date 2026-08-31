@@ -28,7 +28,7 @@
 namespace {
 
 constexpr uint8_t kMagic[8] = {'N', 'D', 'S', 'S', 'T', 'A', 'T', 'E'};
-constexpr uint32_t kFormatVersion = 3u;
+constexpr uint32_t kFormatVersion = 4u;
 constexpr uint32_t kHeaderSize = 24u;
 constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kMaxSections = 16u;
@@ -42,8 +42,9 @@ constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
 constexpr uint32_t kSectionVram = 0x4D415256u; // VRAM
 constexpr uint32_t kSectionGp2d = 0x44325047u; // GP2D
 constexpr uint32_t kSectionGp3d = 0x44335047u; // GP3D
+constexpr uint32_t kSectionSpu = 0x20555053u;  // SPU
 constexpr uint32_t kSectionVersion = 1u;
-constexpr uint32_t kRequiredSections = 10u;
+constexpr uint32_t kRequiredSections = 11u;
 
 struct Section {
     uint32_t tag = 0;
@@ -70,6 +71,7 @@ struct CoreState {
     NdsVramSaveState vram{};
     NdsGpu2dSaveState gpu2d{};
     NdsGpu3dSaveState gpu3d{};
+    NdsSpuSaveState spu{};
 };
 
 std::atomic_flag g_transaction_active = ATOMIC_FLAG_INIT;
@@ -865,6 +867,100 @@ bool decode_gpu3d(const std::vector<uint8_t>& payload,
         pos == payload.size();
 }
 
+std::vector<uint8_t> encode_spu(const NdsSpuSaveState& state) {
+    std::vector<uint8_t> out;
+    for (const NdsSpuChannelSaveState& channel : state.channel) {
+        put_u32(out, channel.cnt); put_u32(out, channel.src);
+        put_u32(out, channel.reload); put_u32(out, channel.loop);
+        put_u32(out, channel.length); put_u8(out, channel.key_on);
+        put_u32(out, channel.timer);
+        put_u32(out, static_cast<uint32_t>(channel.pos));
+        put_u32(out, static_cast<uint16_t>(channel.sample));
+        put_u32(out, channel.noise);
+        put_u32(out, static_cast<uint32_t>(channel.adpcm_value));
+        put_u32(out, static_cast<uint32_t>(channel.adpcm_index));
+        put_u32(out, static_cast<uint32_t>(channel.adpcm_loop_value));
+        put_u32(out, static_cast<uint32_t>(channel.adpcm_loop_index));
+        put_u8(out, channel.adpcm_byte);
+        put_bytes(out, channel.fifo, sizeof(channel.fifo));
+        put_u32(out, channel.fifo_read); put_u32(out, channel.fifo_write);
+        put_u32(out, channel.source_offset); put_u32(out, channel.fifo_level);
+    }
+    for (const NdsSpuCaptureSaveState& capture : state.capture) {
+        put_u8(out, capture.cnt); put_u32(out, capture.dst);
+        put_u32(out, capture.reload); put_u32(out, capture.length);
+        put_u32(out, capture.timer);
+        put_u32(out, static_cast<uint32_t>(capture.pos));
+        put_bytes(out, capture.fifo, sizeof(capture.fifo));
+        put_u32(out, capture.fifo_read); put_u32(out, capture.fifo_write);
+        put_u32(out, capture.write_offset); put_u32(out, capture.fifo_level);
+    }
+    put_u32(out, state.cnt); put_u32(out, state.bias);
+    put_u64(out, state.mix_count);
+    return out;
+}
+
+bool decode_spu(const std::vector<uint8_t>& payload, NdsSpuSaveState* state) {
+    size_t pos = 0;
+    *state = NdsSpuSaveState{};
+    auto bytes = [&](void* dst, size_t size) {
+        if (payload.size() - pos < size) return false;
+        std::memcpy(dst, payload.data() + pos, size);
+        pos += size;
+        return true;
+    };
+    auto u16 = [&](uint16_t* value) {
+        uint32_t wide = 0;
+        if (!read_u32(payload, pos, &wide) || wide > UINT16_MAX) return false;
+        *value = static_cast<uint16_t>(wide);
+        return true;
+    };
+    for (NdsSpuChannelSaveState& channel : state->channel) {
+        uint32_t signed_value = 0;
+        uint16_t sample_bits = 0;
+        if (!read_u32(payload, pos, &channel.cnt) ||
+            !read_u32(payload, pos, &channel.src) || !u16(&channel.reload) ||
+            !read_u32(payload, pos, &channel.loop) ||
+            !read_u32(payload, pos, &channel.length) ||
+            !read_u8(payload, pos, &channel.key_on) ||
+            !read_u32(payload, pos, &channel.timer) ||
+            !read_u32(payload, pos, &signed_value)) return false;
+        channel.pos = static_cast<int32_t>(signed_value);
+        if (!u16(&sample_bits) || !u16(&channel.noise) ||
+            !read_u32(payload, pos, &signed_value)) return false;
+        channel.sample = static_cast<int16_t>(sample_bits);
+        channel.adpcm_value = static_cast<int32_t>(signed_value);
+        if (!read_u32(payload, pos, &signed_value)) return false;
+        channel.adpcm_index = static_cast<int32_t>(signed_value);
+        if (!read_u32(payload, pos, &signed_value)) return false;
+        channel.adpcm_loop_value = static_cast<int32_t>(signed_value);
+        if (!read_u32(payload, pos, &signed_value)) return false;
+        channel.adpcm_loop_index = static_cast<int32_t>(signed_value);
+        if (!read_u8(payload, pos, &channel.adpcm_byte) ||
+            !bytes(channel.fifo, sizeof(channel.fifo)) ||
+            !read_u32(payload, pos, &channel.fifo_read) ||
+            !read_u32(payload, pos, &channel.fifo_write) ||
+            !read_u32(payload, pos, &channel.source_offset) ||
+            !read_u32(payload, pos, &channel.fifo_level)) return false;
+    }
+    for (NdsSpuCaptureSaveState& capture : state->capture) {
+        uint32_t signed_value = 0;
+        if (!read_u8(payload, pos, &capture.cnt) ||
+            !read_u32(payload, pos, &capture.dst) || !u16(&capture.reload) ||
+            !read_u32(payload, pos, &capture.length) ||
+            !read_u32(payload, pos, &capture.timer) ||
+            !read_u32(payload, pos, &signed_value)) return false;
+        capture.pos = static_cast<int32_t>(signed_value);
+        if (!bytes(capture.fifo, sizeof(capture.fifo)) ||
+            !read_u32(payload, pos, &capture.fifo_read) ||
+            !read_u32(payload, pos, &capture.fifo_write) ||
+            !read_u32(payload, pos, &capture.write_offset) ||
+            !read_u32(payload, pos, &capture.fifo_level)) return false;
+    }
+    return u16(&state->cnt) && u16(&state->bias) &&
+        read_u64(payload, pos, &state->mix_count) && pos == payload.size();
+}
+
 bool append_section(std::vector<Section>& sections, uint32_t tag,
                     std::vector<uint8_t> payload, std::string* error) {
     if (payload.empty()) {
@@ -886,7 +982,8 @@ bool known_section_tag(uint32_t tag) {
     return tag == kSectionIden || tag == kSectionSchd ||
         tag == kSectionMemr || tag == kSectionCp15 ||
         tag == kSectionRtim || tag == kSectionIocr || tag == kSectionIopf ||
-        tag == kSectionVram || tag == kSectionGp2d || tag == kSectionGp3d;
+        tag == kSectionVram || tag == kSectionGp2d || tag == kSectionGp3d ||
+        tag == kSectionSpu;
 }
 
 bool atomic_write_file(const std::string& path,
@@ -1139,9 +1236,10 @@ bool export_core_state(CoreState* out, std::string* error) {
         !io_peripheral_savestate_export(&out->peripherals) ||
         !vram_savestate_export(&out->vram) ||
         !gpu2d_savestate_export(&out->gpu2d) ||
-        !gpu3d_savestate_export(&out->gpu3d, error)) {
+        !gpu3d_savestate_export(&out->gpu3d, error) ||
+        !spu_savestate_export(&out->spu)) {
         if (error && error->empty())
-            *error = "failed to export video savestate sections";
+            *error = "failed to export device savestate sections";
         return false;
     }
     return true;
@@ -1151,6 +1249,7 @@ bool import_core_state(const CoreState& state, std::string* error) {
     if (!bus_savestate_import(state.memory, error) ||
         !cp15_savestate_import(state.cp15, error) ||
         !runtime_savestate_import(state.runtime, error) ||
+        !spu_savestate_import(state.spu, error) ||
         !io_savestate_import(state.io, error) ||
         !io_peripheral_savestate_import(state.peripherals, error) ||
         !vram_savestate_import(state.vram, error) ||
@@ -1205,7 +1304,8 @@ bool validate_core_state(const CoreState& state, std::string* error) {
         !io_peripheral_savestate_validate(state.peripherals, error) ||
         !vram_savestate_validate(state.vram, error) ||
         !gpu2d_savestate_validate(state.gpu2d, error) ||
-        !gpu3d_savestate_validate(state.gpu3d, error))
+        !gpu3d_savestate_validate(state.gpu3d, error) ||
+        !spu_savestate_validate(state.spu, error))
         return false;
     const uint64_t now = state.scheduler.system_timestamp;
     auto pending_not_in_past = [&](uint64_t deadline) {
@@ -1224,6 +1324,8 @@ bool validate_core_state(const CoreState& state, std::string* error) {
         (((now + 1u) * kRtcDenominator) - 1u) / kRtcNumerator;
     if (state.peripherals.rtc_processed_ticks > rtc_due)
         return fail("savestate RTC phase is ahead of scheduler time");
+    if (state.spu.mix_count > now / 1024u)
+        return fail("savestate SPU phase is ahead of scheduler time");
     return true;
 }
 
@@ -1284,7 +1386,8 @@ bool nds_savestate_save_core(const std::string& path,
         !append_section(sections, kSectionGp2d,
                         encode_gpu2d(core.gpu2d), error) ||
         !append_section(sections, kSectionGp3d,
-                        encode_gpu3d(core.gpu3d), error))
+                        encode_gpu3d(core.gpu3d), error) ||
+        !append_section(sections, kSectionSpu, encode_spu(core.spu), error))
         return false;
 
     return atomic_write_file(path, build_file(sections), error);
@@ -1367,6 +1470,11 @@ bool nds_savestate_load_core(const std::string& path,
     if (!find_section(sections, kSectionGp3d, &payload) ||
         !decode_gpu3d(payload, &loaded.gpu3d)) {
         set_error(error, "GPU3D section is missing or corrupt");
+        return false;
+    }
+    if (!find_section(sections, kSectionSpu, &payload) ||
+        !decode_spu(payload, &loaded.spu)) {
+        set_error(error, "SPU section is missing or corrupt");
         return false;
     }
     // Historical mutable flash is session-local after load. This override is

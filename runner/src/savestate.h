@@ -276,6 +276,54 @@ struct NdsGpu3dSaveState {
     uint64_t arm9_timestamp = 0;
 };
 
+struct NdsSpuChannelSaveState {
+    uint32_t cnt = 0;
+    uint32_t src = 0;
+    uint16_t reload = 0;
+    uint32_t loop = 0;
+    uint32_t length = 0;
+    uint8_t key_on = 0;
+    uint32_t timer = 0;
+    int32_t pos = 0;
+    int16_t sample = 0;
+    uint16_t noise = 0;
+    int32_t adpcm_value = 0;
+    int32_t adpcm_index = 0;
+    int32_t adpcm_loop_value = 0;
+    int32_t adpcm_loop_index = 0;
+    uint8_t adpcm_byte = 0;
+    uint8_t fifo[32]{};
+    uint32_t fifo_read = 0;
+    uint32_t fifo_write = 0;
+    uint32_t source_offset = 0;
+    uint32_t fifo_level = 0;
+};
+
+struct NdsSpuCaptureSaveState {
+    uint8_t cnt = 0;
+    uint32_t dst = 0;
+    uint16_t reload = 0;
+    uint32_t length = 0;
+    uint32_t timer = 0;
+    int32_t pos = 0;
+    uint8_t fifo[16]{};
+    uint32_t fifo_read = 0;
+    uint32_t fifo_write = 0;
+    uint32_t write_offset = 0;
+    uint32_t fifo_level = 0;
+};
+
+// Guest-visible DS sound state and exact sample phase. Host audio devices,
+// presentation queues, callback/thread synchronization, and debug history are
+// deliberately absent and are invalidated after a successful import.
+struct NdsSpuSaveState {
+    NdsSpuChannelSaveState channel[16]{};
+    NdsSpuCaptureSaveState capture[2]{};
+    uint16_t cnt = 0;
+    uint16_t bias = 0;
+    uint64_t mix_count = 0;
+};
+
 bool bus_savestate_export(NdsBusMemorySnapshot* out);
 bool bus_savestate_import(const NdsBusMemorySnapshot& in, std::string* error);
 
@@ -316,6 +364,10 @@ bool gpu3d_savestate_validate(const NdsGpu3dSaveState& in,
                               std::string* error);
 bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
                             std::string* error);
+
+bool spu_savestate_export(NdsSpuSaveState* out);
+bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error);
+bool spu_savestate_import(const NdsSpuSaveState& in, std::string* error);
 
 using NdsSavestateEligibilityHook = bool (*)(void* context,
                                              std::string* error);

@@ -2016,6 +2016,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     bool audio_started = false;
     uint32_t audio_start_threshold = kAudioStartFrames;
     bool audio_queue_error = false;
+    uint64_t audio_presentation_epoch = nds_spu_presentation_epoch();
     bool turbo_pressed = false;
     bool turbo_active = false;
     bool focus_release_pending = false;
@@ -2114,6 +2115,19 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         // client is connected). See debug_server.h.
         publish_input_debug();
         debug_pump();
+        const uint64_t current_audio_epoch = nds_spu_presentation_epoch();
+        if (current_audio_epoch != audio_presentation_epoch) {
+            // A state load abandoned the samples already buffered in SDL.
+            // Pause the callback/stream before clearing it, then use the normal
+            // short steady-state prebuffer to restart from restored guest time.
+            pause_audio(audio, true);
+            clear_audio_queue(audio, audio_queue);
+            audio_queue.started.store(false, std::memory_order_relaxed);
+            audio_started = false;
+            audio_start_threshold = kAudioQueueFrames;
+            audio_pace_floor = kAudioQueueFrames;
+            audio_presentation_epoch = current_audio_epoch;
+        }
         if (selftest_menu) {
             const NdsEventCounts& counts = nds_event_counts();
             SDL_Event injected{};
