@@ -471,6 +471,13 @@ void bus_init() {
     bus_fast_refresh();
 }
 
+void bus_debug_history_reset() {
+    g_ring_w = 0;
+    g_ring_seq = 0;
+    g_watch_w = 0;
+    g_watch_count = 0;
+}
+
 // ── Inline bus fast path (B3): exported fast-map windows ───────────────
 // The static-inline bus_read_*/bus_write_* layer in runtime_arm.h serves
 // main RAM / WRAM / ARM9 TCM directly from these windows while the

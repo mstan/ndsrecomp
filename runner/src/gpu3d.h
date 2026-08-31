@@ -81,6 +81,7 @@ struct NdsGpu3dProfile {
     uint64_t compute_map_calls;
 };
 void nds_gpu3d_profile(NdsGpu3dProfile* out);
+void nds_gpu3d_debug_history_reset();
 
 // ARM9 3D register window: DISP3DCNT (0x04000060..63) plus the melonDS
 // dispatch range 0x04000320..0x040006A3 (tables, clear/fog, GXFIFO at

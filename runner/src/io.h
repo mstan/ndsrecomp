@@ -14,6 +14,8 @@
 uint32_t nds_io_read(uint32_t addr, uint32_t width);
 void     nds_io_write(uint32_t addr, uint32_t value, uint32_t width);
 void     nds_io_reset();
+// Clear observer history without changing any guest-visible device state.
+void     nds_io_debug_history_reset();
 // Opt-in host-clock RTC (--rtc-host): when true, every guest boot
 // (nds_io_reset) starts the RTC at the host's local time instead of the
 // fixed deterministic power-on datetime. Default false — the oracle gates

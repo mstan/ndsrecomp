@@ -289,6 +289,11 @@ struct NdsFrontendOptions {
     NdsCartridgeSaveConfig cartridge_save{};
     NdsNetworkOptions network{};
     NdsLocalWirelessOptions local_wireless{};
+    // Populated only after the cartridge identity is verified. This directory
+    // is already per-ROM; input events never supply arbitrary filenames.
+    std::string savestate_directory;
+    std::string savestate_build_id;
+    std::string savestate_rom_sha1;
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.

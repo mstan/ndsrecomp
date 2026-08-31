@@ -2766,6 +2766,41 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
                 out->fenced_lines);
 }
 
+void nds_gpu2d_profile_reset() {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
+    g_render_ns = 0;
+    g_obj_ns = 0;
+    g_engine_ns[0] = g_engine_ns[1] = 0;
+    std::memset(g_text_lines, 0, sizeof(g_text_lines));
+    g_no_effect_lines[0] = g_no_effect_lines[1] = 0;
+    g_render_scanlines = 0;
+    g_direct_frames = 0;
+    g_hd_frames = 0;
+    g_hd_presented = 0;
+    g_direct_overlay_ns = 0;
+    std::fill_n(g_direct_class_frames, NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
+    std::fill_n(g_direct_class_engine_a_ns,
+                NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mask_frames,
+                NDS_GPU2D_DIRECT_BG_MASK_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mask_engine_a_ns,
+                NDS_GPU2D_DIRECT_BG_MASK_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mode_frames,
+                NDS_GPU2D_DIRECT_BG_MODE_COUNT, 0u);
+    std::fill_n(g_direct_extra_effect_frames,
+                NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT, 0u);
+    std::fill_n(g_direct_extra_master_bright_frames,
+                NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT, 0u);
+    g_direct_class_transitions = 0;
+    g_threaded_lines = 0;
+    g_inline_lines = 0;
+    g_fence_wait_ns = 0;
+    g_fence_helped_lines = 0;
+    g_staged_captures = 0;
+    std::fill_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
+    std::fill_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
+}
+
 const char* nds_gpu2d_direct_class_name(uint32_t index) {
     static constexpr const char* kNames[NDS_GPU2D_DIRECT_CLASS_COUNT] = {
         "supported",

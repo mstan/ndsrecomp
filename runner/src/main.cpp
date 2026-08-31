@@ -438,6 +438,7 @@ int main(int argc, char** argv) {
     uint32_t cli_live_overlay_auto_cooldown_ms = 60000u;
     std::string cli_live_overlay_command;
     std::string cli_live_overlay_cache;
+    std::string cli_savestate_dir;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -624,6 +625,8 @@ int main(int argc, char** argv) {
             cli_live_overlay_command = argv[++i];
         } else if (a == "--live-overlay-cache" && i + 1 < argc) {
             cli_live_overlay_cache = argv[++i];
+        } else if (a == "--savestate-dir" && i + 1 < argc) {
+            cli_savestate_dir = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -678,6 +681,7 @@ int main(int argc, char** argv) {
                 "[--live-overlay-activation-delay-ms N] "
                 "[--live-overlay-auto-delay-ms N] "
                 "[--live-overlay-auto-cooldown-ms N] "
+                "[--savestate-dir DIR] "
                 "[--force-tier3 | NDS_FORCE_TIER3=1]\n",
                 argv[0]);
             return 0;
@@ -1544,6 +1548,12 @@ int main(int argc, char** argv) {
             : std::filesystem::path(rom_path).filename().string();
     nds_diagnostics_set_identity(rom_sha1.c_str(), rom_name.c_str(),
                                  NDS_RUNNER_BUILD_ID);
+    if (!cli_savestate_dir.empty() && !rom_sha1.empty()) {
+        frontend_options.savestate_directory =
+            (std::filesystem::path(cli_savestate_dir) / rom_sha1).string();
+        frontend_options.savestate_build_id = NDS_RUNNER_BUILD_ID;
+        frontend_options.savestate_rom_sha1 = rom_sha1;
+    }
     nds_diagnostics_set_versions(NDS_FRAMEWORK_VERSION, NDS_GAME_VERSION);
     std::string rom_game_code;
     uint32_t rom_revision = 0;

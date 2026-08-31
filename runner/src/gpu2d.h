@@ -217,3 +217,4 @@ struct NdsGpu2dProfile {
     uint64_t staged_captures;
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);
+void nds_gpu2d_profile_reset();

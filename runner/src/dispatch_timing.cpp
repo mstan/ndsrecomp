@@ -123,6 +123,16 @@ void nds_dispatch_timing_init() {
     nds_dispatch_timing_detail::ensure_calibrated();
 }
 
+void nds_dispatch_timing_reset() {
+    g_nds_dispatch_timing[0] = {};
+    g_nds_dispatch_timing[1] = {};
+    g_nds_dispatch_pending_class = NDS_DISPATCH_CLASS_GENERIC;
+    std::memset(nds_dispatch_timing_detail::g_class_gate, 0,
+                sizeof(nds_dispatch_timing_detail::g_class_gate));
+    std::memset(nds_dispatch_timing_detail::g_cache_gate, 0,
+                sizeof(nds_dispatch_timing_detail::g_cache_gate));
+}
+
 uint64_t nds_dispatch_timing_modulus() {
     nds_dispatch_timing_detail::ensure_calibrated();
     return nds_dispatch_timing_detail::g_modulus;

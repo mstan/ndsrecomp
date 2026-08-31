@@ -379,6 +379,7 @@ add_executable(nds_runner
     # separate TU: it defines NDS_RUNTIME_ABI_SHIMS to suppress the inlines.
     src/runtime_abi_shims.cpp
     src/savestate.cpp
+    src/savestate_slots.cpp
     src/live_overlay.cpp
     src/live_overlay_platform.cpp
     src/battery_save.cpp
@@ -790,6 +791,16 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   ndsrecomp_link_tomlpp(savestate_test)
   target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
   add_test(NAME savestate_test COMMAND savestate_test)
+
+  add_executable(savestate_slots_test
+      tests/savestate_slots_test.cpp
+      src/savestate_slots.cpp)
+  target_include_directories(savestate_slots_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  add_test(NAME savestate_slots_test COMMAND savestate_slots_test)
 
   add_executable(network_savestate_guard_test
       tests/network_savestate_guard_test.cpp

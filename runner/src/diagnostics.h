@@ -33,3 +33,6 @@ void nds_diagnostics_start_performance_log(
 void nds_diagnostics_maybe_write_performance_sample(
     const NdsFrontendLiveStats& stats);
 void nds_diagnostics_stop_performance_log();
+// Drop interval baselines after a historical load. The next sample primes a
+// fresh epoch instead of subtracting counters from the pre-load timeline.
+void nds_diagnostics_reset_performance_history();

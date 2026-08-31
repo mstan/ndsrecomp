@@ -1882,6 +1882,14 @@ void nds_io_reset() {
     nds_gpu3d_reset();
 }
 
+void nds_io_debug_history_reset() {
+    g_counts = {};
+    g_dma_trace_count = 0;
+    g_card_trace_w = 0;
+    g_card_trace_count = 0;
+    g_card_trace_seq = 0;
+}
+
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     g_fw.assign(p, p + n);
     g_fw_dirty = false;

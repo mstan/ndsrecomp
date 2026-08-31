@@ -338,6 +338,7 @@ void runtime_savestate_export(NdsRuntimeSaveState* out);
 bool runtime_savestate_import(const NdsRuntimeSaveState& in,
                               std::string* error);
 void runtime_savestate_invalidate_host_caches();
+void runtime_savestate_reset_host_history();
 
 bool io_savestate_export(NdsIoCoreSaveState* out);
 bool io_savestate_validate(const NdsIoCoreSaveState& in, std::string* error);
@@ -376,6 +377,7 @@ using NdsSavestateEligibilityHook = bool (*)(void* context,
 // backend configuration/activity alone is deliberately not a connection.
 void nds_savestate_set_eligibility_hook(NdsSavestateEligibilityHook hook,
                                         void* context);
+bool nds_savestate_check_eligibility(std::string* error);
 
 bool nds_savestate_save_core(const std::string& path,
                              const NdsSavestateIdentity& identity,

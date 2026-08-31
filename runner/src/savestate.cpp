@@ -1500,6 +1500,10 @@ bool nds_savestate_load_core(const std::string& path,
     return true;
 }
 
+bool nds_savestate_check_eligibility(std::string* error) {
+    return transaction_allowed(error);
+}
+
 void nds_savestate_set_eligibility_hook(NdsSavestateEligibilityHook hook,
                                         void* context) {
     std::lock_guard<std::mutex> lock(g_eligibility_mutex);

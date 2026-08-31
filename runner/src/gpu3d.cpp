@@ -595,6 +595,12 @@ void nds_gpu3d_profile(NdsGpu3dProfile* out) {
     if (out) *out = g_gpu3d_profile;
 }
 
+void nds_gpu3d_debug_history_reset() {
+    g_gx_run_trace_count = 0;
+    g_gx_write_trace_count = 0;
+    g_gpu3d_profile = {};
+}
+
 void nds_gpu3d_state(NdsGxStateSnapshot* out) {
     if (!out) return;
     auto& g3 = g_nds.GPU.GPU3D;

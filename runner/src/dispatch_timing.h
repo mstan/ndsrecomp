@@ -175,6 +175,7 @@ inline uint64_t ticks_to_ns(uint64_t delta) {
 // runner start-up so the first sampled dispatch is not the one paying for
 // calibration.
 void nds_dispatch_timing_init();
+void nds_dispatch_timing_reset();
 
 // The pending class tag. A dispatch wrapper (runtime_dispatch_literal_call
 // and friends) records why it is entering, and the region inside

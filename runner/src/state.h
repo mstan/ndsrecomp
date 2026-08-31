@@ -101,6 +101,7 @@ extern "C" void runtime_clear_fast_limit(void);
 
 // Bus lifecycle / image loading (implemented in bus.cpp).
 void bus_init();
+void bus_debug_history_reset();
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n);
 void bus_load_arm7_bios(const uint8_t* p, uint32_t n);
 void bus_dump_access_ring(uint32_t max_entries);

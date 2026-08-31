@@ -859,3 +859,18 @@ void nds_diagnostics_stop_performance_log() {
     std::fclose(g_perf);
     g_perf = nullptr;
 }
+
+void nds_diagnostics_reset_performance_history() {
+    g_last_ticks = 0;
+    g_prev_frontend = {};
+    g_prev_tier3 = {};
+    g_prev_dispatch[0] = {};
+    g_prev_dispatch[1] = {};
+    g_prev_timing[0] = {};
+    g_prev_timing[1] = {};
+    g_prev_local_mp = {};
+    g_prev_sched = {};
+    g_prev_gpu2d = {};
+    g_prev_gpu3d = {};
+    g_prev_emu = {};
+}

@@ -2180,6 +2180,17 @@ void runtime_savestate_invalidate_host_caches() {
     link_epoch_bump();
 }
 
+void runtime_savestate_reset_host_history() {
+    g_insn_count[0] = g_insn_count[1] = 0u;
+    g_nds_force_tier3_misses = 0u;
+    g_nds_dispatch_stats[0] = {};
+    g_nds_dispatch_stats[1] = {};
+    g_link_hits[0] = g_link_hits[1] = 0u;
+    g_link_resolves[0] = g_link_resolves[1] = 0u;
+    g_link_falls[0] = g_link_falls[1] = 0u;
+    runtime_trace_reset();
+}
+
 std::string nds_hle_profile_json() {
 #if !defined(NDS_PROFILE_HLE_HEAT)
     return "{\"enabled\":false,\"routines\":[]}";

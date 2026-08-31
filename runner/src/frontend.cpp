@@ -24,6 +24,7 @@
 #include "relative_mouse_touch.h"
 #include "runtime_arm.h"
 #include "scheduler.h"
+#include "savestate_slots.h"
 #include "spu.h"
 #include "title_patches.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -681,6 +682,20 @@ SDL_Scancode sdl_event_scancode(const SDL_Event& event) {
 #endif
 }
 
+bool sdl_event_shift(const SDL_Event& event) {
+#if defined(NDS_HAVE_SDL3)
+    return (event.key.mod & SDL_KMOD_SHIFT) != 0;
+#else
+    return (event.key.keysym.mod & KMOD_SHIFT) != 0;
+#endif
+}
+
+unsigned savestate_function_key(SDL_Scancode scancode) {
+    if (scancode < SDL_SCANCODE_F1 || scancode > SDL_SCANCODE_F12)
+        return 0u;
+    return static_cast<unsigned>(scancode - SDL_SCANCODE_F1) + 1u;
+}
+
 void sdl_set_event_scancode(SDL_Event& event, SDL_Scancode key) {
 #if defined(NDS_HAVE_SDL3)
     event.key.scancode = key;
@@ -1268,6 +1283,106 @@ void render_line(SDL_Renderer* renderer, int x1, int y1, int x2, int y2) {
 #endif
 }
 
+void fill_rect(SDL_Renderer* renderer, const SDL_Rect& rect) {
+#if defined(NDS_HAVE_SDL3)
+    const SDL_FRect frect{static_cast<float>(rect.x),
+                          static_cast<float>(rect.y),
+                          static_cast<float>(rect.w),
+                          static_cast<float>(rect.h)};
+    SDL_RenderFillRect(renderer, &frect);
+#else
+    SDL_RenderFillRect(renderer, &rect);
+#endif
+}
+
+const char* notice_glyph(char ch) {
+    switch (static_cast<char>(std::toupper(static_cast<unsigned char>(ch)))) {
+        case 'A': return "01110100011000111111100011000110001";
+        case 'B': return "11110100011000111110100011000111110";
+        case 'C': return "01111100001000010000100001000001111";
+        case 'D': return "11110100011000110001100011000111110";
+        case 'E': return "11111100001000011110100001000011111";
+        case 'F': return "11111100001000011110100001000010000";
+        case 'G': return "01111100001000010111100011000101111";
+        case 'H': return "10001100011000111111100011000110001";
+        case 'I': return "11111001000010000100001000010011111";
+        case 'J': return "00111000100001000010100101001001100";
+        case 'K': return "10001100101010011000101001001010001";
+        case 'L': return "10000100001000010000100001000011111";
+        case 'M': return "10001110111010110101100011000110001";
+        case 'N': return "10001110011010110011100011000110001";
+        case 'O': return "01110100011000110001100011000101110";
+        case 'P': return "11110100011000111110100001000010000";
+        case 'Q': return "01110100011000110001101011001001101";
+        case 'R': return "11110100011000111110101001001010001";
+        case 'S': return "01111100001000001110000010000111110";
+        case 'T': return "11111001000010000100001000010000100";
+        case 'U': return "10001100011000110001100011000101110";
+        case 'V': return "10001100011000110001100010101000100";
+        case 'W': return "10001100011000110101101011101110001";
+        case 'X': return "10001100010101000100010101000110001";
+        case 'Y': return "10001100010101000100001000010000100";
+        case 'Z': return "11111000010001000100010001000011111";
+        case '0': return "01110100011001110101110011000101110";
+        case '1': return "00100011000010000100001000010001110";
+        case '2': return "01110100010000100010001000100011111";
+        case '3': return "11110000010000101110000010000111110";
+        case '4': return "00010001100101010010111110001000010";
+        case '5': return "11111100001000011110000010000111110";
+        case '6': return "01110100001000011110100011000101110";
+        case '7': return "11111000010001000100010000100001000";
+        case '8': return "01110100011000101110100011000101110";
+        case '9': return "01110100011000101111000010000101110";
+        case ':': return "00000001000010000000001000010000000";
+        case '.': return "00000000000000000000000000010000100";
+        case '-': return "00000000000000011111000000000000000";
+        case '/': return "00001000100001000100010001000010000";
+        case '(': return "00010001000100001000010000010000010";
+        case ')': return "01000001000001000010000100010001000";
+        case '_': return "00000000000000000000000000000011111";
+        case ' ': return "00000000000000000000000000000000000";
+        default:  return "01110000010001000100001000000000100";
+    }
+}
+
+void draw_savestate_notice(SDL_Renderer* renderer,
+                           const SDL_Rect& screen,
+                           const char* text) {
+    if (!renderer || !text || !*text) return;
+    constexpr int kColumns = 40;
+    constexpr int kRows = 5;
+    constexpr int kGlyphWidth = 6;
+    constexpr int kGlyphHeight = 8;
+    const SDL_Rect background{screen.x + 5,
+                              screen.y + screen.h - kRows * kGlyphHeight - 5,
+                              kColumns * kGlyphWidth + 6,
+                              kRows * kGlyphHeight + 4};
+    SDL_SetRenderDrawColor(renderer, 10, 10, 10, 255);
+    fill_rect(renderer, background);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    int row = 0;
+    int column = 0;
+    for (const char* p = text; *p && row < kRows; ++p) {
+        if (*p == '\n' || column == kColumns) {
+            ++row;
+            column = 0;
+            if (*p == '\n') continue;
+            if (row >= kRows) break;
+        }
+        const char* glyph = notice_glyph(*p);
+        for (int gy = 0; gy < 7; ++gy) {
+            for (int gx = 0; gx < 5; ++gx) {
+                if (glyph[gy * 5 + gx] != '1') continue;
+                const SDL_Rect pixel{
+                    background.x + 3 + column * kGlyphWidth + gx,
+                    background.y + 2 + row * kGlyphHeight + gy, 1, 1};
+                fill_rect(renderer, pixel);
+            }
+        }
+        ++column;
+    }
+}
+
 bool create_presentation(const NdsFrontendOptions& options,
                          FrontendPresentation& presentation,
                          bool allow_gl_top = true) {
@@ -1483,7 +1598,8 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
                                   int bottom_width,
                                   bool virtual_stylus_visible,
                                   float virtual_stylus_x,
-                                  float virtual_stylus_y) {
+                                  float virtual_stylus_y,
+                                  const char* savestate_notice) {
     PresentationTicks ticks{};
     if (presentation.gl_top) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -1514,6 +1630,7 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         if (virtual_stylus_visible)
             draw_virtual_stylus(renderer, screen_rect,
                                 virtual_stylus_x, virtual_stylus_y);
+        draw_savestate_notice(renderer, screen_rect, savestate_notice);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -1545,6 +1662,7 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         if (virtual_stylus_visible)
             draw_virtual_stylus(renderer, bottom_rect,
                                 virtual_stylus_x, virtual_stylus_y);
+        draw_savestate_notice(renderer, bottom_rect, savestate_notice);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -1563,6 +1681,8 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         if (screen == 1 && virtual_stylus_visible)
             draw_virtual_stylus(renderer, screen_rect,
                                 virtual_stylus_x, virtual_stylus_y);
+        if (screen == 1)
+            draw_savestate_notice(renderer, screen_rect, savestate_notice);
         ticks.draw += SDL_GetPerformanceCounter() - start;
         start = SDL_GetPerformanceCounter();
         SDL_RenderPresent(renderer);
@@ -2099,6 +2219,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     uint64_t first_underrun_frame = 0;
     uint64_t last_underrun_frame = 0;
     const uint64_t soak_start = SDL_GetPerformanceCounter();
+    std::string savestate_notice;
+    uint64_t savestate_notice_until = 0;
 
     while (running) {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -2343,7 +2465,34 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 const SDL_Scancode scancode = sdl_event_scancode(event);
-                if (scancode == SDL_SCANCODE_ESCAPE) {
+                NdsSavestateSlotCommand state_command{};
+                const unsigned function_key = savestate_function_key(scancode);
+                const bool state_shortcut = nds_savestate_slot_shortcut(
+                    function_key, sdl_event_shift(event), false,
+                    &state_command);
+                if (state_shortcut) {
+                    const NdsSavestateSlotResult result =
+                        nds_savestate_slot_execute(
+                            options.savestate_directory,
+                            {options.savestate_build_id,
+                             options.savestate_rom_sha1},
+                            state_command);
+                    savestate_notice = result.message;
+                    savestate_notice_until = SDL_GetPerformanceCounter() +
+                        frequency * 4u;
+                    std::fprintf(stderr, "[savestate] %s\n",
+                                 result.message.c_str());
+                    if (result.success &&
+                        state_command.action ==
+                            NdsSavestateSlotAction::Load) {
+                        blend_cache.valid = false;
+                        // Guest input registers came from historical state;
+                        // the live host controls become authoritative again
+                        // before the restored machine executes a round.
+                        publish_keys();
+                        if (!mouse_down) nds_set_touch(0, 0, false);
+                    }
+                } else if (scancode == SDL_SCANCODE_ESCAPE) {
                     if (relative_mouse.captured())
                         release_relative_mouse();
                     else
@@ -2837,7 +2986,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 presentation, blend_cache.blended[0].data(), top_width,
                 blend_cache.blended[1].data(), bottom_width,
                 mph_prime_virtual_stylus,
-                mph_virtual_x, mph_virtual_y);
+                mph_virtual_x, mph_virtual_y,
+                savestate_notice.empty() ? nullptr : savestate_notice.c_str());
             if (!synthetic_ticks.ok) {
                 compute_failed = true;
                 running = false;
@@ -2859,7 +3009,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             presentation, top_pixels, top_width,
             bottom_pixels, bottom_width,
             mph_prime_virtual_stylus,
-            mph_virtual_x, mph_virtual_y);
+            mph_virtual_x, mph_virtual_y,
+            savestate_notice.empty() ? nullptr : savestate_notice.c_str());
         if (!presentation_ticks.ok) {
             compute_failed = true;
             running = false;
@@ -2927,6 +3078,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.real_presents = shown_frames;
         g_live_stats.synthetic_presents = synthetic_presents;
         const uint64_t counter = SDL_GetPerformanceCounter();
+        if (!savestate_notice.empty() && counter >= savestate_notice_until)
+            savestate_notice.clear();
         g_live_stats.now_ticks = counter;
         g_live_stats.freq = frequency;
         nds_diagnostics_maybe_write_performance_sample(g_live_stats);
@@ -2936,7 +3089,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             const double fps = static_cast<double>(fps_frames) / seconds;
             const std::string fps_text =
                 std::to_string(fps).substr(0, 4) + " FPS";
-            const std::string top_title = presentation.separate
+            const std::string top_title = !savestate_notice.empty()
+                ? "ndsrecomp - " + savestate_notice
+                : presentation.separate
                 ? "ndsrecomp - Top Screen - " + fps_text
                 : "ndsrecomp firmware preview - " + fps_text;
             SDL_SetWindowTitle(presentation.windows[0],
