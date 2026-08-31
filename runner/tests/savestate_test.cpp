@@ -15,6 +15,7 @@
 
 void savestate_test_fail_next_io_import();
 void savestate_test_fail_next_peripheral_import_after_apply();
+void savestate_test_reset_io_state();
 
 namespace {
 
@@ -33,6 +34,14 @@ constexpr size_t kEncodedSchedulerCpuBlockBytes =
 bool expect(bool value, const char* message) {
     if (!value) std::fprintf(stderr, "FAIL: %s\n", message);
     return value;
+}
+
+void reset_test_machine() {
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    savestate_test_reset_io_state();
 }
 
 uint32_t crc32(const uint8_t* data, size_t size) {
@@ -214,10 +223,7 @@ bool core_roundtrip() {
         std::filesystem::temp_directory_path() / "ndsrecomp-savestate-test.nss";
     std::filesystem::remove(path);
 
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0100u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000100u, 0xD3u);
 
@@ -272,6 +278,7 @@ bool core_roundtrip() {
     bus_init();
     cp15_reset();
     scheduler_init();
+    savestate_test_reset_io_state();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
 
@@ -319,10 +326,7 @@ bool identity_rejects() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "ndsrecomp-savestate-id.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
 
@@ -357,10 +361,7 @@ bool corrupt_section_rejects() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "ndsrecomp-savestate-corrupt.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
 
@@ -392,10 +393,7 @@ bool scheduler_cpu_byte_layout_is_stable() {
         "ndsrecomp-savestate-scheduler-layout.nss";
     std::filesystem::remove(path);
 
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
 
@@ -426,7 +424,7 @@ bool scheduler_cpu_byte_layout_is_stable() {
     sched.started[1] = 0u;
     sched.terminal_halted[1] = 1u;
     sched.crs[1][0] = 0xE1E2E3E4u;
-    sched.system_timestamp = 0x2122232425262728ull;
+    sched.system_timestamp = 0x0001020325262728ull;
 
     if (!expect(scheduler_savestate_import(sched, nullptr),
                 "import scheduler layout"))
@@ -512,7 +510,7 @@ bool scheduler_cpu_byte_layout_is_stable() {
                          0x25262728u,
                          "system timestamp low word is little-endian");
     ok &= expect_le32_at(payload, 2u * kEncodedSchedulerCpuBlockBytes + 4u,
-                         0x21222324u,
+                         0x00010203u,
                          "system timestamp high word is little-endian");
 
     std::filesystem::remove(path);
@@ -525,10 +523,7 @@ bool semantic_import_failure_rolls_back() {
         std::filesystem::temp_directory_path() /
         "ndsrecomp-savestate-rollback.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
 
@@ -654,15 +649,92 @@ NdsIoCoreSaveState patterned_io(uint32_t seed) {
     return out;
 }
 
+bool same_io_core(const NdsIoCoreSaveState& a, const NdsIoCoreSaveState& b) {
+    auto bytes = [](const void* x, const void* y, size_t size) {
+        return std::memcmp(x, y, size) == 0;
+    };
+    bool same = bytes(a.ipcsync_out, b.ipcsync_out, sizeof(a.ipcsync_out)) &&
+        bytes(a.postflg, b.postflg, sizeof(a.postflg)) &&
+        bytes(a.dispstat, b.dispstat, sizeof(a.dispstat)) &&
+        a.vcount == b.vcount && a.next_vcount == b.next_vcount &&
+        a.next_vcount_valid == b.next_vcount_valid &&
+        bytes(a.vcount_match, b.vcount_match, sizeof(a.vcount_match)) &&
+        a.in_vblank == b.in_vblank &&
+        a.display_last == b.display_last &&
+        bytes(a.ime, b.ime, sizeof(a.ime)) &&
+        bytes(a.ie, b.ie, sizeof(a.ie)) &&
+        bytes(a.irq_flags, b.irq_flags, sizeof(a.irq_flags)) &&
+        bytes(a.haltcnt, b.haltcnt, sizeof(a.haltcnt)) &&
+        bytes(a.cpu_halted, b.cpu_halted, sizeof(a.cpu_halted)) &&
+        bytes(a.halt_entry_cycle, b.halt_entry_cycle,
+              sizeof(a.halt_entry_cycle)) &&
+        bytes(a.fifo, b.fifo, sizeof(a.fifo)) &&
+        bytes(a.fifo_count, b.fifo_count, sizeof(a.fifo_count)) &&
+        bytes(a.fifo_head, b.fifo_head, sizeof(a.fifo_head)) &&
+        bytes(a.fifocnt, b.fifocnt, sizeof(a.fifocnt)) &&
+        bytes(a.fifo_lastrx, b.fifo_lastrx, sizeof(a.fifo_lastrx)) &&
+        bytes(a.dma_entry_cycle, b.dma_entry_cycle,
+              sizeof(a.dma_entry_cycle)) &&
+        a.gxfifo_stall == b.gxfifo_stall &&
+        bytes(a.timer_last, b.timer_last, sizeof(a.timer_last)) &&
+        a.divcnt == b.divcnt &&
+        bytes(a.div_numer, b.div_numer, sizeof(a.div_numer)) &&
+        bytes(a.div_denom, b.div_denom, sizeof(a.div_denom)) &&
+        bytes(a.div_quot, b.div_quot, sizeof(a.div_quot)) &&
+        bytes(a.div_rem, b.div_rem, sizeof(a.div_rem)) &&
+        a.div_deadline == b.div_deadline &&
+        a.sqrtcnt == b.sqrtcnt &&
+        bytes(a.sqrt_value, b.sqrt_value, sizeof(a.sqrt_value)) &&
+        a.sqrt_result == b.sqrt_result &&
+        a.sqrt_deadline == b.sqrt_deadline &&
+        bytes(a.exmemcnt, b.exmemcnt, sizeof(a.exmemcnt)) &&
+        a.powercontrol7 == b.powercontrol7 &&
+        a.keyinput == b.keyinput &&
+        bytes(a.keycnt, b.keycnt, sizeof(a.keycnt)) &&
+        a.rcnt == b.rcnt && a.wramcnt == b.wramcnt &&
+        a.wifiwaitcnt == b.wifiwaitcnt &&
+        a.biosprot == b.biosprot &&
+        a.pm_index == b.pm_index &&
+        bytes(a.pm_regs, b.pm_regs, sizeof(a.pm_regs)) &&
+        bytes(a.pm_masks, b.pm_masks, sizeof(a.pm_masks)) &&
+        a.pm_hold == b.pm_hold && a.powered_off == b.powered_off &&
+        a.tsc_ctrl == b.tsc_ctrl && a.tsc_conv == b.tsc_conv &&
+        a.tsc_datapos == b.tsc_datapos && a.tsc_x == b.tsc_x &&
+        a.tsc_y == b.tsc_y &&
+        bytes(a.io_mem, b.io_mem, sizeof(a.io_mem));
+    for (int cpu = 0; same && cpu < 2; ++cpu) {
+        for (int ch = 0; same && ch < 4; ++ch) {
+            const NdsIoDmaSaveState& ad = a.dma[cpu][ch];
+            const NdsIoDmaSaveState& bd = b.dma[cpu][ch];
+            same = ad.src == bd.src && ad.dst == bd.dst &&
+                ad.cnt == bd.cnt && ad.cur_src == bd.cur_src &&
+                ad.cur_dst == bd.cur_dst &&
+                ad.remaining == bd.remaining &&
+                ad.src_inc == bd.src_inc && ad.dst_inc == bd.dst_inc &&
+                ad.burst_index == bd.burst_index &&
+                ad.start_mode == bd.start_mode &&
+                ad.running == bd.running &&
+                ad.in_progress == bd.in_progress &&
+                ad.burst_start == bd.burst_start;
+        }
+        for (int ch = 0; same && ch < 4; ++ch) {
+            const NdsIoTimerSaveState& at = a.timer[cpu][ch];
+            const NdsIoTimerSaveState& bt = b.timer[cpu][ch];
+            same = at.reload == bt.reload &&
+                at.counter == bt.counter &&
+                at.ctrl == bt.ctrl &&
+                at.accum == bt.accum;
+        }
+    }
+    return same;
+}
+
 bool io_core_roundtrip_and_rollback() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() /
         "ndsrecomp-savestate-io-core.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
     const NdsSavestateIdentity identity{
@@ -678,7 +750,7 @@ bool io_core_roundtrip_and_rollback() {
                error.c_str());
     NdsIoCoreSaveState actual{};
     ok &= expect(io_savestate_export(&actual), "export loaded IO state");
-    ok &= expect(std::memcmp(&actual, &saved, sizeof(saved)) == 0,
+    ok &= expect(same_io_core(actual, saved),
                  "every covered IO field roundtrips");
 
     ok &= expect(io_savestate_import(current, &error),
@@ -689,7 +761,7 @@ bool io_core_roundtrip_and_rollback() {
     actual = {};
     ok &= expect(io_savestate_export(&actual),
                  "export IO state after apply rollback");
-    ok &= expect(std::memcmp(&actual, &current, sizeof(current)) == 0,
+    ok &= expect(same_io_core(actual, current),
                  "semantic apply failure rolls back IO state");
 
     // IO semantic corruption is rejected during prevalidation, before apply.
@@ -700,7 +772,7 @@ bool io_core_roundtrip_and_rollback() {
                  "invalid IO section must be rejected");
     actual = {};
     ok &= expect(io_savestate_export(&actual), "export rolled-back IO state");
-    ok &= expect(std::memcmp(&actual, &current, sizeof(current)) == 0,
+    ok &= expect(same_io_core(actual, current),
                  "invalid IO load rolls back every covered field");
     std::filesystem::remove(path);
     runtime_shutdown();
@@ -841,10 +913,7 @@ bool peripheral_roundtrip_rollback_and_deadlines() {
         std::filesystem::temp_directory_path() /
         "ndsrecomp-savestate-peripherals.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
     scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
     constexpr uint64_t now = 1000000u;
@@ -941,10 +1010,7 @@ bool eligibility_hook_rejects_before_export() {
         std::filesystem::temp_directory_path() /
         "ndsrecomp-savestate-policy.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     const NdsSavestateIdentity identity{
         "build-policy", "0123456789abcdef0123456789abcdef01234567"};
     unsigned calls = 0;
@@ -966,10 +1032,7 @@ bool control_thread_is_not_quiescent_owner() {
         std::filesystem::temp_directory_path() /
         "ndsrecomp-savestate-control-thread.nss";
     std::filesystem::remove(path);
-    runtime_init(nullptr);
-    bus_init();
-    cp15_reset();
-    scheduler_init();
+    reset_test_machine();
     const NdsSavestateIdentity identity{
         "build-thread", "0123456789abcdef0123456789abcdef01234567"};
     bool result = true;

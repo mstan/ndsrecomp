@@ -84,14 +84,22 @@ void nds_dma_run(int, unsigned long long) {}
 bool nds_gxfifo_stalled() { return false; }
 namespace {
 NdsIoCoreSaveState g_test_io_state{};
-NdsIoPeripheralSaveState g_test_peripheral_state = [] {
+NdsIoPeripheralSaveState default_peripheral_state() {
     NdsIoPeripheralSaveState state{};
     state.rtc_datetime[1] = 1u;
     state.rtc_datetime[2] = 1u;
     return state;
-}();
+}
+NdsIoPeripheralSaveState g_test_peripheral_state = default_peripheral_state();
 bool g_fail_next_io_import = false;
 bool g_fail_next_peripheral_import_after_apply = false;
+}
+
+void savestate_test_reset_io_state() {
+    g_test_io_state = NdsIoCoreSaveState{};
+    g_test_peripheral_state = default_peripheral_state();
+    g_fail_next_io_import = false;
+    g_fail_next_peripheral_import_after_apply = false;
 }
 
 void savestate_test_fail_next_io_import() { g_fail_next_io_import = true; }

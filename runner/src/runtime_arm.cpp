@@ -268,6 +268,17 @@ static_assert(sizeof(CachedStaticLookup) == 128u);
 std::array<std::array<CachedStaticLookup, kDispatchCacheSize>, 2>
     g_dispatch_cache{};
 
+void clear_dispatch_cache_cpu(unsigned cpu) {
+    CachedStaticLookup empty{};
+    for (CachedStaticLookup& slot : g_dispatch_cache[cpu & 1u])
+        slot = empty;
+}
+
+void clear_dispatch_cache_all() {
+    clear_dispatch_cache_cpu(0u);
+    clear_dispatch_cache_cpu(1u);
+}
+
 // Cycle budget for the run slice; runtime_should_yield trips when reached
 // so a guest spin loop can't hang the host.
 unsigned long long g_cycle_cap = 0;  // 0 = unlimited
@@ -968,7 +979,7 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
     // the slot's next resolve.
     link_epoch_bump();
     if (++ctx.dispatch_epoch == 0u) {
-        g_dispatch_cache[cpu & 1] = {};
+        clear_dispatch_cache_cpu(cpu);
         ctx.dispatch_epoch = 1u;
     }
 }
@@ -996,7 +1007,7 @@ extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
     // this bank's bodies can no longer be reached without re-resolving.
     link_epoch_bump();
     if (++ctx.dispatch_epoch == 0u) {
-        g_dispatch_cache[cpu & 1] = {};
+        clear_dispatch_cache_cpu(cpu);
         ctx.dispatch_epoch = 1u;
     }
 }
@@ -2111,7 +2122,7 @@ extern "C" void runtime_init(void*) {
         ctx.exc_base = 0u;
     }
     g_static_guard = nullptr;
-    g_dispatch_cache = {};
+    clear_dispatch_cache_all();
     // dispatch_epoch restarts at 1 on reset, so the per-CPU epoch alone
     // cannot distinguish a pre-reset slot from a post-reset one. The link
     // epoch is monotonic across resets and closes that hole.
@@ -2165,7 +2176,7 @@ bool runtime_savestate_import(const NdsRuntimeSaveState& in,
 void runtime_savestate_invalidate_host_caches() {
     request_yield_poll();
     g_static_guard = nullptr;
-    g_dispatch_cache = {};
+    clear_dispatch_cache_all();
     link_epoch_bump();
 }
 

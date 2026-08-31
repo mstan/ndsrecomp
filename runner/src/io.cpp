@@ -1731,6 +1731,7 @@ void auxspi_write_data(uint8_t val) {
     const uint64_t now = active() == 0 ? (g_runtime_cycles >> 1)
                                        : g_runtime_cycles;
     g_auxspi_deadline = now + delay;
+    nds_reschedule_slice(g_auxspi_deadline);
 }
 
 uint8_t auxspi_read_data() {

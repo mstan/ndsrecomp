@@ -184,6 +184,13 @@ def main():
 
     if "runtime_clear_fast_limit" not in body(io, "nds_io_reset"):
         fail("machine reset does not clear the deadline")
+    if "nds_reschedule_slice(g_auxspi_deadline)" not in body(io, "auxspi_write_data"):
+        fail("AUXSPI byte transfers arm g_auxspi_deadline without shortening "
+             "the current slice; busy-clear timing can be overshot")
+    if re.search(r"g_dispatch_cache(?:\s*\[[^\]]+\])?\s*=\s*\{\s*\}",
+                 runtime):
+        fail("dispatch cache invalidation uses aggregate assignment; on "
+             "Windows this can materialize the 8-16 MiB cache on the stack")
     for fn in ("nds_event_break_arm", "nds_event_break_disarm"):
         if "runtime_clear_fast_limit" not in body(io, fn):
             fail(f"{fn} does not clear the deadline; an event break armed "
