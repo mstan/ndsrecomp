@@ -898,7 +898,10 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       # accumulators and tick calibration those two units define.
       src/emu_profile.cpp
       src/dispatch_timing.cpp)
-  target_include_directories(gpu2d_window_test PRIVATE src)
+  target_include_directories(gpu2d_window_test PRIVATE
+      src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
 
   if(Python3_Interpreter_FOUND)
