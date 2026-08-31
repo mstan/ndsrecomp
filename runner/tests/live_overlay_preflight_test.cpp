@@ -440,6 +440,35 @@ int main(int argc, char** argv) {
                 maint_drains_after == maint_drains_before,
                 "idle overlay polls must not drain empty result queues"))
         return 1;
+
+    // beads-w184: generated banks report every control transfer. Full
+    // DiagEntry writes on that path cost measurable frame time, while these
+    // records are not compiler input. Ordinary sharding must do no transfer
+    // trace accounting; the explicit field trace remains bounded by sampling.
+    for (unsigned i = 0; i < 4096u; ++i)
+        live_overlay_note_transfer(NDS_ARM9, i * 4u, i * 4u + 4u, 0u, 0u, 0u);
+    if (!expect(status_number("transfer_diag_seen") == 0u &&
+                    status_number("transfer_diag_samples") == 0u,
+                "ordinary live sharding must not trace generated transfers"))
+        return 1;
+    live_overlay_set_transfer_trace(true);
+    for (unsigned i = 0; i < 2050u; ++i)
+        live_overlay_note_transfer(NDS_ARM9, i * 4u, i * 4u + 4u, 0u, 0u, 0u);
+    if (!expect(status_number("transfer_diag_seen") == 2050u &&
+                    status_number("transfer_diag_samples") == 3u,
+                "the opt-in transfer trace must sample one call per 1024"))
+        return 1;
+    if (!expect(live_overlay_diagnostics_json(1u).find(
+                    "\"kind\":\"transfer\"") != std::string::npos,
+                "the sampled transfer must remain available to field tools"))
+        return 1;
+    live_overlay_set_transfer_trace(false);
+    for (unsigned i = 0; i < 4096u; ++i)
+        live_overlay_note_transfer(NDS_ARM9, i * 4u, i * 4u + 4u, 0u, 0u, 0u);
+    if (!expect(status_number("transfer_diag_seen") == 0u &&
+                    status_number("transfer_diag_samples") == 0u,
+                "disabling transfer trace must restore the zero-work path"))
+        return 1;
     live_overlay_shutdown();
 #endif
 

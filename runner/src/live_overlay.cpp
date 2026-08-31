@@ -89,6 +89,11 @@ constexpr uint32_t kBacklogTargetRunMs = 20000u;
 // reading the persisted queue at startup. Missing the read costs one run's
 // worth of cadence, never correctness, so it must never stall the launch.
 constexpr uint32_t kQueueLockWaitMs = 2000u;
+// Generated code reports every control transfer, which is millions of calls
+// per second in MPH. Detailed records are field diagnostics, not compiler
+// input, so keep an opt-in trace useful without making tracing itself a frame
+// time problem.
+constexpr uint64_t kTransferDiagSampleInterval = 1024u;
 
 enum class DiagKind : uint8_t {
     Transfer,
@@ -360,6 +365,7 @@ struct MaintenanceResult {
 struct State {
     bool enabled = false;
     bool auto_trigger = false;
+    bool transfer_trace = false;
     bool initial_cache_scan_done = false;
     uint32_t activation_delay_ms = 0u;
     uint32_t auto_start_delay_ms = 0u;
@@ -370,6 +376,8 @@ struct State {
     std::filesystem::path cache_dir;
     std::string rom_sha1;
     uint64_t tier3[2] = {};
+    uint64_t transfer_diag_seen = 0u;
+    uint64_t transfer_diag_samples = 0u;
     uint64_t mismatch_rejects[2] = {};
     uint64_t next_trigger[2] = {kFirstTriggerTier3, kFirstTriggerTier3};
     bool generation_pending = false;
@@ -2429,6 +2437,7 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
                             const char* rom_sha1) {
     g_live.enabled = enabled;
     g_live.auto_trigger = auto_trigger;
+    g_live.transfer_trace = false;
     g_live.initial_cache_scan_done = false;
     g_live.activation_delay_ms = activation_delay_ms;
     g_live.auto_start_delay_ms = auto_start_delay_ms;
@@ -2440,6 +2449,8 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
                                  : std::filesystem::path{};
     g_live.rom_sha1 = rom_sha1 ? rom_sha1 : "";
     g_live.tier3[0] = g_live.tier3[1] = 0u;
+    g_live.transfer_diag_seen = 0u;
+    g_live.transfer_diag_samples = 0u;
     g_live.mismatch_rejects[0] = g_live.mismatch_rejects[1] = 0u;
     g_live.next_trigger[0] = g_live.next_trigger[1] = kFirstTriggerTier3;
     g_live.generation_pending = false;
@@ -2581,6 +2592,12 @@ void live_overlay_register_cached_banks() {
     g_live.initial_cache_scan_done = true;
 }
 
+void live_overlay_set_transfer_trace(bool enabled) {
+    g_live.transfer_trace = enabled;
+    g_live.transfer_diag_seen = 0u;
+    g_live.transfer_diag_samples = 0u;
+}
+
 void live_overlay_note_tier3(int cpu, uint32_t pc) {
     (void)pc;
     if (!live_overlay_active()) return;
@@ -2609,10 +2626,17 @@ bool live_overlay_dormant_covers(int cpu, uint32_t pc) {
 
 void live_overlay_note_transfer(int cpu, uint32_t source_pc, uint32_t target,
                                 uint32_t lr, uint32_t cpsr, uint32_t type) {
+    // Keep this first branch cheaper than live_overlay_active(): generated
+    // banks call here for every control transfer, while detailed ring entries
+    // are unrelated to root discovery, compilation, or native-hit accounting.
+    if (!g_live.transfer_trace) return;
+    const uint64_t seen = g_live.transfer_diag_seen++;
+    if (seen % kTransferDiagSampleInterval != 0u) return;
     if (!live_overlay_active()) return;
     DiagEntry& e = push_diag(DiagKind::Transfer, cpu, source_pc, target, lr,
                              cpsr, "transfer");
     e.aux0 = type;
+    ++g_live.transfer_diag_samples;
 }
 
 void live_overlay_note_lookup(int cpu, uint32_t pc, uint32_t target_pc,
@@ -2962,7 +2986,13 @@ std::string live_overlay_status_json() {
         << ",\"last_run_ms\":" << g_live.last_run_duration_ms
         << ",\"busy\":";
     out << (child_active() ? "true" : "false");
-    out << ",\"tier3_arm9\":" << g_live.tier3[0]
+    out << ",\"transfer_trace\":"
+        << (g_live.transfer_trace ? "true" : "false")
+        << ",\"transfer_diag_sample_interval\":"
+        << kTransferDiagSampleInterval
+        << ",\"transfer_diag_seen\":" << g_live.transfer_diag_seen
+        << ",\"transfer_diag_samples\":" << g_live.transfer_diag_samples
+        << ",\"tier3_arm9\":" << g_live.tier3[0]
         << ",\"tier3_arm7\":" << g_live.tier3[1]
         << ",\"mismatch_rejects_arm9\":" << g_live.mismatch_rejects[0]
         << ",\"mismatch_rejects_arm7\":" << g_live.mismatch_rejects[1]

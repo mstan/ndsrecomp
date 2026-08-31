@@ -22,6 +22,10 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
 void live_overlay_shutdown();
 void live_overlay_runtime_reset();
 void live_overlay_register_cached_banks();
+// Detailed transfer records are diagnostic-only and expensive at the generated
+// branch rate. They are opt-in and sampled; ordinary live sharding keeps the
+// compact Tier-3/root coverage path without touching the diagnostic ring.
+void live_overlay_set_transfer_trace(bool enabled);
 void live_overlay_note_tier3(int cpu, uint32_t pc);
 // Tier-3 ENTRY hook -- once per tier3_run(), NOT once per interpreted
 // instruction (beads-yjp.62). Entering the interpreter at `pc` is the proof

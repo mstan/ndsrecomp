@@ -429,6 +429,7 @@ int main(int argc, char** argv) {
     std::string cli_net_capture_scenario;
     bool cli_live_overlay_enable = false;
     bool cli_live_overlay_auto = false;
+    bool cli_live_overlay_transfer_trace = false;
     bool cli_live_overlay_activation_delay_set = false;
     bool cli_live_overlay_auto_delay_set = false;
     bool cli_live_overlay_auto_cooldown_set = false;
@@ -605,6 +606,8 @@ int main(int argc, char** argv) {
             cli_live_overlay_enable = true;
         } else if (a == "--live-overlay-auto") {
             cli_live_overlay_auto = true;
+        } else if (a == "--live-overlay-transfer-trace") {
+            cli_live_overlay_transfer_trace = true;
         } else if (a == "--live-overlay-activation-delay-ms" && i + 1 < argc) {
             cli_live_overlay_activation_delay_ms =
                 static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
@@ -671,6 +674,7 @@ int main(int argc, char** argv) {
                 "[--net-capture-scenario NAME] "
                 "[--live-overlay-enable --live-overlay-command CMD "
                 "--live-overlay-cache DIR] [--live-overlay-auto] "
+                "[--live-overlay-transfer-trace] "
                 "[--live-overlay-activation-delay-ms N] "
                 "[--live-overlay-auto-delay-ms N] "
                 "[--live-overlay-auto-cooldown-ms N] "
@@ -1692,6 +1696,7 @@ int main(int argc, char** argv) {
                            cli_live_overlay_command.c_str(),
                            cli_live_overlay_cache.c_str(),
                            rom_sha1.c_str());
+    live_overlay_set_transfer_trace(cli_live_overlay_transfer_trace);
     mph_mouse_aim_policy =
         rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
         frontend_options.relative_mouse_touch;
