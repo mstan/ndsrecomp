@@ -152,6 +152,74 @@ struct NdsIoCoreSaveState {
     uint8_t io_mem[0x2000]{};
 };
 
+// Gamecard, SPI-firmware, and RTC state owned by io.cpp. Paths and host file
+// handles are deliberately absent. The persistence-detached flags are host
+// policy state: a historical load may restore guest-visible flash contents,
+// but must not silently replace a newer canonical battery file.
+struct NdsIoPeripheralSaveState {
+    uint32_t romctrl = 0;
+    uint32_t card_transfer_pos = 0;
+    uint32_t card_transfer_len = 0;
+    uint64_t card_deadline = UINT64_MAX;
+    uint8_t card_end_event = 0;
+    uint8_t card_irq_cpu = 0;
+    uint8_t card_command[8]{};
+    uint8_t card_command_mode = 0;
+    uint32_t card_data_mode = 0;
+    std::vector<uint8_t> card_response;
+    uint32_t key1_schedule[0x412]{};
+    uint32_t card_chip_id = 0;
+    uint8_t key1_available = 0;
+    uint8_t card_has_ir = 0;
+
+    uint16_t auxspicnt = 0;
+    uint8_t auxspi_data = 0;
+    uint8_t auxspi_hold = 0;
+    uint32_t auxspi_pos = 0;
+    uint64_t auxspi_deadline = UINT64_MAX;
+    uint8_t cart_ir_cmd = 0;
+
+    uint8_t backup_type = 0;
+    uint32_t backup_size = 0;
+    std::vector<uint8_t> backup_data;
+    uint8_t backup_cmd = 0;
+    uint8_t backup_status = 0;
+    uint32_t backup_addr = 0;
+    uint8_t backup_dirty = 0;
+    uint8_t backup_persistence_detached = 0;
+
+    uint16_t spicnt = 0;
+    uint8_t spi_response = 0;
+    uint64_t spi_deadline = UINT64_MAX;
+    std::vector<uint8_t> firmware_data;
+    uint8_t firmware_dirty = 0;
+    uint8_t firmware_persistence_detached = 0;
+    uint8_t firmware_hold = 0;
+    uint8_t firmware_cmd = 0;
+    uint8_t firmware_status = 0;
+    uint32_t firmware_addr = 0;
+    uint32_t firmware_data_pos = 0;
+
+    uint16_t rtc_io = 0;
+    uint8_t rtc_input = 0;
+    uint32_t rtc_inbit = 0;
+    uint32_t rtc_inpos = 0;
+    uint8_t rtc_output[8]{};
+    uint32_t rtc_outbit = 0;
+    uint32_t rtc_outpos = 0;
+    uint8_t rtc_cmd = 0;
+    uint8_t rtc_datetime[7]{};
+    uint8_t rtc_status1 = 0;
+    uint8_t rtc_status2 = 0;
+    uint8_t rtc_alarm1[3]{};
+    uint8_t rtc_alarm2[3]{};
+    uint8_t rtc_clock_adjust = 0;
+    uint8_t rtc_free = 0;
+    uint8_t rtc_irq_flag = 0;
+    uint32_t rtc_clock_count = 0;
+    uint64_t rtc_processed_ticks = 0;
+};
+
 bool bus_savestate_export(NdsBusMemorySnapshot* out);
 bool bus_savestate_import(const NdsBusMemorySnapshot& in, std::string* error);
 
@@ -170,6 +238,12 @@ void runtime_savestate_invalidate_host_caches();
 bool io_savestate_export(NdsIoCoreSaveState* out);
 bool io_savestate_validate(const NdsIoCoreSaveState& in, std::string* error);
 bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error);
+
+bool io_peripheral_savestate_export(NdsIoPeripheralSaveState* out);
+bool io_peripheral_savestate_validate(const NdsIoPeripheralSaveState& in,
+                                      std::string* error);
+bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
+                                    std::string* error);
 
 using NdsSavestateEligibilityHook = bool (*)(void* context,
                                              std::string* error);

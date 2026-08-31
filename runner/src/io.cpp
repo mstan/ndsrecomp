@@ -130,6 +130,8 @@ NdsCartBackup g_cart_backup;
 bool     g_cart_has_ir = false;
 uint8_t  g_cart_ir_cmd = 0;
 std::string g_cart_save_path;
+bool g_cart_persistence_detached = false;
+bool g_cart_detached_warning_emitted = false;
 
 uint32_t load_le32(const uint8_t* p) {
     return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
@@ -1043,6 +1045,8 @@ void dma_reg_write(int cpu, uint32_t addr, uint32_t value, uint32_t width) {
 std::vector<uint8_t> g_fw;
 std::string g_fw_save_path;
 bool g_fw_dirty = false;
+bool g_fw_persistence_detached = false;
+bool g_fw_detached_warning_emitted = false;
 uint16_t g_spicnt = 0;       // 0x040001C0
 uint8_t  g_spi_resp = 0;     // byte clocked back on the next SPIDATA read
 uint64_t g_spi_deadline = UINT64_MAX;
@@ -1880,6 +1884,8 @@ void nds_io_reset() {
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     g_fw.assign(p, p + n);
     g_fw_dirty = false;
+    g_fw_persistence_detached = false;
+    g_fw_detached_warning_emitted = false;
     nds_wifi_load_firmware(p, n);
 }
 
@@ -1898,6 +1904,15 @@ void nds_io_set_firmware_save_path(const char* path) {
 
 bool nds_io_flush_firmware_save() {
     if (!g_fw_dirty || g_fw_save_path.empty()) return true;
+    if (g_fw_persistence_detached) {
+        if (!g_fw_detached_warning_emitted) {
+            std::fprintf(stderr,
+                         "[firmware] historical savestate session is detached; "
+                         "canonical firmware was not replaced\n");
+            g_fw_detached_warning_emitted = true;
+        }
+        return true;
+    }
     std::string error;
     if (!nds_battery_save_write_atomic(
             g_fw_save_path, g_fw.data(), g_fw.size(), &error)) {
@@ -1947,6 +1962,8 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
     if (g_cart_backup.sram.size() != g_cart_backup.config.size) {
         g_cart_backup.sram.assign(g_cart_backup.config.size, 0xFFu);
         g_cart_backup.dirty = false;
+        g_cart_persistence_detached = false;
+        g_cart_detached_warning_emitted = false;
         if (!g_cart_save_path.empty()) {
             std::string error;
             switch (nds_battery_save_load_exact(
@@ -1987,6 +2004,15 @@ void nds_io_set_cartridge_save_path(const char* path) {
 bool nds_io_flush_cartridge_save() {
     if (!g_cart_backup.dirty || g_cart_save_path.empty())
         return true;
+    if (g_cart_persistence_detached) {
+        if (!g_cart_detached_warning_emitted) {
+            std::fprintf(stderr,
+                         "[save] historical savestate session is detached; "
+                         "canonical cartridge save was not replaced\n");
+            g_cart_detached_warning_emitted = true;
+        }
+        return true;
+    }
     std::string error;
     if (!nds_battery_save_write_atomic(
             g_cart_save_path, g_cart_backup.sram.data(),
@@ -2674,6 +2700,212 @@ bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error) {
     irq_recompute(0);
     irq_recompute(1);
     bus_fast_refresh();
+    return true;
+}
+
+bool io_peripheral_savestate_export(NdsIoPeripheralSaveState* out) {
+    if (!out) return false;
+    *out = NdsIoPeripheralSaveState{};
+    out->romctrl = g_romctrl;
+    out->card_transfer_pos = g_card_transfer_pos;
+    out->card_transfer_len = g_card_transfer_len;
+    out->card_deadline = g_card_deadline;
+    out->card_end_event = g_card_end_event ? 1u : 0u;
+    out->card_irq_cpu = static_cast<uint8_t>(g_card_irq_cpu);
+    std::memcpy(out->card_command, g_card_command,
+                sizeof(out->card_command));
+    out->card_command_mode = static_cast<uint8_t>(g_card_mode);
+    out->card_data_mode = g_card_data_mode;
+    out->card_response = g_card_response;
+    std::memcpy(out->key1_schedule, g_key1_schedule,
+                sizeof(out->key1_schedule));
+    out->card_chip_id = g_card_chip_id;
+    out->key1_available = g_key1_available ? 1u : 0u;
+    out->card_has_ir = g_cart_has_ir ? 1u : 0u;
+
+    out->auxspicnt = g_auxspicnt;
+    out->auxspi_data = g_auxspi_data;
+    out->auxspi_hold = g_auxspi_hold ? 1u : 0u;
+    out->auxspi_pos = g_auxspi_pos;
+    out->auxspi_deadline = g_auxspi_deadline;
+    out->cart_ir_cmd = g_cart_ir_cmd;
+
+    out->backup_type = static_cast<uint8_t>(g_cart_backup.config.type);
+    out->backup_size = g_cart_backup.config.size;
+    out->backup_data = g_cart_backup.sram;
+    out->backup_cmd = g_cart_backup.cmd;
+    out->backup_status = g_cart_backup.status;
+    out->backup_addr = g_cart_backup.addr;
+    out->backup_dirty = g_cart_backup.dirty ? 1u : 0u;
+    out->backup_persistence_detached =
+        g_cart_persistence_detached ? 1u : 0u;
+
+    out->spicnt = g_spicnt;
+    out->spi_response = g_spi_resp;
+    out->spi_deadline = g_spi_deadline;
+    out->firmware_data = g_fw;
+    out->firmware_dirty = g_fw_dirty ? 1u : 0u;
+    out->firmware_persistence_detached =
+        g_fw_persistence_detached ? 1u : 0u;
+    out->firmware_hold = g_fw_hold ? 1u : 0u;
+    out->firmware_cmd = g_fw_cmd;
+    out->firmware_status = g_fw_status;
+    out->firmware_addr = g_fw_addr;
+    out->firmware_data_pos = g_fw_data_pos;
+
+    out->rtc_io = g_rtc_io;
+    out->rtc_input = g_rtc_input;
+    out->rtc_inbit = static_cast<uint32_t>(g_rtc_inbit);
+    out->rtc_inpos = static_cast<uint32_t>(g_rtc_inpos);
+    std::memcpy(out->rtc_output, g_rtc_output, sizeof(out->rtc_output));
+    out->rtc_outbit = static_cast<uint32_t>(g_rtc_outbit);
+    out->rtc_outpos = static_cast<uint32_t>(g_rtc_outpos);
+    out->rtc_cmd = g_rtc_cmd;
+    std::memcpy(out->rtc_datetime, g_rtc_datetime,
+                sizeof(out->rtc_datetime));
+    out->rtc_status1 = g_rtc_status1;
+    out->rtc_status2 = g_rtc_status2;
+    std::memcpy(out->rtc_alarm1, g_rtc_alarm1, sizeof(out->rtc_alarm1));
+    std::memcpy(out->rtc_alarm2, g_rtc_alarm2, sizeof(out->rtc_alarm2));
+    out->rtc_clock_adjust = g_rtc_clock_adjust;
+    out->rtc_free = g_rtc_free;
+    out->rtc_irq_flag = g_rtc_irq_flag;
+    out->rtc_clock_count = g_rtc_clock_count;
+    out->rtc_processed_ticks = g_rtc_processed_ticks;
+    return true;
+}
+
+bool io_peripheral_savestate_validate(const NdsIoPeripheralSaveState& in,
+                                      std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    const bool aux_busy = (in.auxspicnt & 0x0080u) != 0u;
+    const bool spi_busy = (in.spicnt & 0x0080u) != 0u;
+    if (!binary(in.card_end_event) || in.card_irq_cpu > 1u ||
+        in.card_command_mode > static_cast<uint8_t>(CardCommandMode::Normal) ||
+        in.card_data_mode > 2u || !binary(in.key1_available) ||
+        !binary(in.card_has_ir) || !binary(in.auxspi_hold) ||
+        !binary(in.backup_dirty) ||
+        !binary(in.backup_persistence_detached) ||
+        !binary(in.firmware_dirty) ||
+        !binary(in.firmware_persistence_detached) ||
+        !binary(in.firmware_hold))
+        return fail("savestate cartridge/SPI flag is invalid");
+    if (in.card_transfer_len > 0x4000u ||
+        in.card_response.size() != in.card_transfer_len ||
+        in.card_transfer_pos > in.card_transfer_len ||
+        (in.card_transfer_pos & 3u) != 0u)
+        return fail("savestate gamecard transfer is invalid");
+    if (aux_busy != (in.auxspi_deadline != UINT64_MAX) ||
+        spi_busy != (in.spi_deadline != UINT64_MAX))
+        return fail("savestate SPI busy/deadline state is inconsistent");
+    if (in.backup_type > static_cast<uint8_t>(NdsCartridgeSaveType::Flash) ||
+        in.backup_size > 64u * 1024u * 1024u ||
+        in.backup_data.size() != in.backup_size)
+        return fail("savestate cartridge backup geometry is invalid");
+
+    // These immutable values are derived from the exact ROM/configuration and
+    // loaded firmware. A state may restore protocol phase, but it may not
+    // replace the inserted hardware identity.
+    if (in.card_chip_id != g_card_chip_id ||
+        (in.key1_available != 0u) != g_key1_available ||
+        (in.card_has_ir != 0u) != g_cart_has_ir ||
+        in.backup_type != static_cast<uint8_t>(g_cart_backup.config.type) ||
+        in.backup_size != g_cart_backup.config.size ||
+        in.firmware_data.size() != g_fw.size())
+        return fail("savestate cartridge/firmware identity mismatch");
+
+    if (in.rtc_inbit > 7u || in.rtc_outbit > 7u ||
+        in.rtc_inpos > 0x7FFFFFFFu || in.rtc_outpos > 7u)
+        return fail("savestate RTC serial phase is invalid");
+    auto valid_bcd = [](uint8_t value, uint8_t max) {
+        return (value & 0x0Fu) < 10u && (value >> 4u) < 10u && value <= max;
+    };
+    const uint8_t hour_max = (in.rtc_status1 & 0x02u) ? 0x23u : 0x11u;
+    const uint8_t hour = in.rtc_datetime[4] & 0x3Fu;
+    if (!valid_bcd(in.rtc_datetime[0], 0x99u) ||
+        !valid_bcd(in.rtc_datetime[1], 0x12u) ||
+        in.rtc_datetime[1] == 0u ||
+        !valid_bcd(in.rtc_datetime[2], 0x31u) ||
+        in.rtc_datetime[2] == 0u || in.rtc_datetime[3] > 6u ||
+        !valid_bcd(hour, hour_max) ||
+        !valid_bcd(in.rtc_datetime[5], 0x59u) ||
+        !valid_bcd(in.rtc_datetime[6], 0x59u))
+        return fail("savestate RTC date/time is invalid");
+    return true;
+}
+
+bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
+                                    std::string* error) {
+    if (!io_peripheral_savestate_validate(in, error)) return false;
+    g_romctrl = in.romctrl;
+    g_card_transfer_pos = in.card_transfer_pos;
+    g_card_transfer_len = in.card_transfer_len;
+    g_card_deadline = in.card_deadline;
+    g_card_end_event = in.card_end_event != 0u;
+    g_card_irq_cpu = in.card_irq_cpu;
+    std::memcpy(g_card_command, in.card_command, sizeof(g_card_command));
+    g_card_mode = static_cast<CardCommandMode>(in.card_command_mode);
+    g_card_data_mode = in.card_data_mode;
+    g_card_response = in.card_response;
+    std::memcpy(g_key1_schedule, in.key1_schedule,
+                sizeof(g_key1_schedule));
+
+    g_auxspicnt = in.auxspicnt;
+    g_auxspi_data = in.auxspi_data;
+    g_auxspi_hold = in.auxspi_hold != 0u;
+    g_auxspi_pos = in.auxspi_pos;
+    g_auxspi_deadline = in.auxspi_deadline;
+    g_cart_ir_cmd = in.cart_ir_cmd;
+
+    g_cart_backup.config.type =
+        static_cast<NdsCartridgeSaveType>(in.backup_type);
+    g_cart_backup.config.size = in.backup_size;
+    g_cart_backup.sram = in.backup_data;
+    g_cart_backup.cmd = in.backup_cmd;
+    g_cart_backup.status = in.backup_status;
+    g_cart_backup.addr = in.backup_addr;
+    g_cart_backup.dirty = in.backup_dirty != 0u;
+    g_cart_persistence_detached =
+        in.backup_persistence_detached != 0u;
+    g_cart_detached_warning_emitted = false;
+
+    g_spicnt = in.spicnt;
+    g_spi_resp = in.spi_response;
+    g_spi_deadline = in.spi_deadline;
+    g_fw = in.firmware_data;
+    g_fw_dirty = in.firmware_dirty != 0u;
+    g_fw_persistence_detached =
+        in.firmware_persistence_detached != 0u;
+    g_fw_detached_warning_emitted = false;
+    g_fw_hold = in.firmware_hold != 0u;
+    g_fw_cmd = in.firmware_cmd;
+    g_fw_status = in.firmware_status;
+    g_fw_addr = in.firmware_addr;
+    g_fw_data_pos = in.firmware_data_pos;
+    nds_wifi_rebind_firmware(g_fw.data(), static_cast<uint32_t>(g_fw.size()));
+
+    g_rtc_io = in.rtc_io;
+    g_rtc_input = in.rtc_input;
+    g_rtc_inbit = static_cast<int>(in.rtc_inbit);
+    g_rtc_inpos = static_cast<int>(in.rtc_inpos);
+    std::memcpy(g_rtc_output, in.rtc_output, sizeof(g_rtc_output));
+    g_rtc_outbit = static_cast<int>(in.rtc_outbit);
+    g_rtc_outpos = static_cast<int>(in.rtc_outpos);
+    g_rtc_cmd = in.rtc_cmd;
+    std::memcpy(g_rtc_datetime, in.rtc_datetime, sizeof(g_rtc_datetime));
+    g_rtc_status1 = in.rtc_status1;
+    g_rtc_status2 = in.rtc_status2;
+    std::memcpy(g_rtc_alarm1, in.rtc_alarm1, sizeof(g_rtc_alarm1));
+    std::memcpy(g_rtc_alarm2, in.rtc_alarm2, sizeof(g_rtc_alarm2));
+    g_rtc_clock_adjust = in.rtc_clock_adjust;
+    g_rtc_free = in.rtc_free;
+    g_rtc_irq_flag = in.rtc_irq_flag;
+    g_rtc_clock_count = in.rtc_clock_count;
+    g_rtc_processed_ticks = in.rtc_processed_ticks;
     return true;
 }
 

@@ -44,6 +44,11 @@ through a temporary path and atomically replaces the destination.
   counters/phase, power/input latches, and the generic I/O register backing.
   The section contains no raw device structs, pointers, callbacks, mutexes,
   host threads, strings, or trace rings.
+- `IOPF`: gamecard transfer/KEY1 phase and deadlines, AUXSPI controller and
+  backup-chip protocol, cartridge backup bytes, firmware SPI/controller and
+  mutable firmware bytes, and RTC serial/calendar/IRQ phase. Immutable
+  cartridge geometry and firmware size are checked against the currently
+  inserted exact-ROM hardware before apply.
 
 ## Guest-visible state owners
 
@@ -79,9 +84,10 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
   AUXSPI/cart backup state, system-event queue/deadlines, event counters, and
   device debug rings. Covered: IRQ/HALT, IPC, DMA, timers, DIV/SQRT deadlines,
   display counters/phase, core power/input latches, and generic I/O backing.
-  Not covered: cartridge/firmware/RTC serial protocols and their deadlines,
-  persistent backup contents, event counters, and device debug rings. A
-  deadline is not saved without the protocol state that gives it meaning.
+  Covered: cartridge/firmware/RTC serial protocols and their deadlines plus
+  persistent backup/firmware contents. Not covered: event counters and device
+  debug rings. Each restored deadline is validated with the protocol state
+  that gives it meaning and against scheduler time.
 - `runner/src/vram.cpp`: VRAM bank contents, VRAMCNT/VRAMSTAT mapping, palette,
   OAM, CPU/video mappings, renderer flattened views, LCDC capture visibility,
   provenance, and texture generations. Not covered.
@@ -102,7 +108,11 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
 - `runner/src/cart_backup.cpp`, `runner/src/battery_save.cpp`, and
   firmware/cartridge paths reached through `io.cpp`: persistent flash/EEPROM
   backing state, dirty flags, SPI transaction state, and atomic save flushing.
-  Not covered.
+  Covered. A historical state restores the guest-visible mutable flash into a
+  session detached from the canonical host files. Automatic transaction and
+  shutdown flushes are suppressed for that session, so loading an old state
+  cannot silently overwrite a newer cartridge save or firmware profile. A
+  fresh process boot reloads and reattaches the canonical files.
 - `runner/src/live_overlay.cpp`, `runner/src/coverage_manifest.cpp`, and
   diagnostics/debug modules: host-only compilation/cache/diagnostic state.
   Not guest-visible by itself, but load must invalidate or refresh any cache
@@ -114,9 +124,6 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
 The following sections must be implemented and tested before frontend F-key
 save/load slots are safe:
 
-- Cartridge/firmware/RTC: gamecard transfer state, AUXSPI transaction state,
-  cart backup chip state, firmware SPI state, dirty persistence flags, and RTC
-  serial datetime state.
 - VRAM/video memory: VRAM bank contents/mapping, palette, OAM, renderer views,
   LCDC capture state, provenance, and texture generations.
 - 2D/3D GPU: 2D engine registers/framebuffers/capture state plus vendored

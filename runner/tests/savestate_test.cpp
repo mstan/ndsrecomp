@@ -14,6 +14,7 @@
 #include "state.h"
 
 void savestate_test_fail_next_io_import();
+void savestate_test_fail_next_peripheral_import_after_apply();
 
 namespace {
 
@@ -22,6 +23,7 @@ constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kSectionSchd = 0x44484353u; // SCHD
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
 constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
+constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
 constexpr size_t kEncodedArmCpuStateBytes =
     (16u + 1u + ARM_BANK_COUNT * 3u + 5u + 5u) * 4u;
 constexpr size_t kEncodedSchedulerCpuBlockBytes =
@@ -118,6 +120,31 @@ bool patch_section_u32(const std::filesystem::path& path, uint32_t tag,
             return false;
         write_u32le(bytes, static_cast<size_t>(section_offset) + payload_offset,
                     value);
+        const uint8_t* payload =
+            bytes.data() + static_cast<size_t>(section_offset);
+        write_u32le(bytes, dir + 24u,
+                    crc32(payload, static_cast<size_t>(section_size)));
+        return save_bytes(path, bytes);
+    }
+    return false;
+}
+
+bool patch_section_u8(const std::filesystem::path& path, uint32_t tag,
+                      size_t payload_offset, uint8_t value) {
+    std::vector<uint8_t> bytes;
+    if (!load_bytes(path, &bytes) || bytes.size() < kHeaderSize)
+        return false;
+    const uint32_t count = read_u32le(bytes, 12u);
+    for (uint32_t i = 0; i < count; ++i) {
+        const size_t dir = kHeaderSize + size_t{i} * kDirEntrySize;
+        if (dir + kDirEntrySize > bytes.size()) return false;
+        if (read_u32le(bytes, dir) != tag) continue;
+        const uint64_t section_offset = read_u64le(bytes, dir + 8u);
+        const uint64_t section_size = read_u64le(bytes, dir + 16u);
+        if (payload_offset >= section_size ||
+            section_offset + section_size > bytes.size())
+            return false;
+        bytes[static_cast<size_t>(section_offset) + payload_offset] = value;
         const uint8_t* payload =
             bytes.data() + static_cast<size_t>(section_offset);
         write_u32le(bytes, dir + 24u,
@@ -680,6 +707,229 @@ bool io_core_roundtrip_and_rollback() {
     return ok;
 }
 
+NdsIoPeripheralSaveState patterned_peripherals(uint32_t seed, uint64_t now) {
+    NdsIoPeripheralSaveState out{};
+    out.romctrl = 0x80000000u | seed;
+    out.card_transfer_pos = 4u;
+    out.card_transfer_len = 8u;
+    out.card_deadline = now + 100u + seed;
+    out.card_irq_cpu = 1u;
+    for (size_t i = 0; i < sizeof(out.card_command); ++i)
+        out.card_command[i] = static_cast<uint8_t>(seed + i);
+    out.card_command_mode = 2u;
+    out.card_data_mode = 2u;
+    out.card_response = {static_cast<uint8_t>(seed), 1u, 2u, 3u,
+                         4u, 5u, 6u, 7u};
+    for (size_t i = 0;
+         i < sizeof(out.key1_schedule) / sizeof(out.key1_schedule[0]); ++i)
+        out.key1_schedule[i] = seed + static_cast<uint32_t>(i * 3u);
+    out.card_chip_id = 0xC200u | seed;
+    out.key1_available = 1u;
+    out.card_has_ir = 1u;
+    out.auxspicnt = 0x8080u;
+    out.auxspi_data = static_cast<uint8_t>(seed + 1u);
+    out.auxspi_hold = 1u;
+    out.auxspi_pos = seed + 2u;
+    out.auxspi_deadline = now + 200u + seed;
+    out.cart_ir_cmd = static_cast<uint8_t>(seed + 3u);
+    out.backup_type = 3u;
+    out.backup_size = 16u;
+    out.backup_data.resize(out.backup_size);
+    fill_pattern(&out.backup_data, static_cast<uint8_t>(seed + 4u));
+    out.backup_cmd = 0x0Au;
+    out.backup_status = 0x02u;
+    out.backup_addr = seed + 0x100u;
+    out.backup_dirty = 1u;
+    out.spicnt = 0x8180u;
+    out.spi_response = static_cast<uint8_t>(seed + 5u);
+    out.spi_deadline = now + 300u + seed;
+    out.firmware_data.resize(32u);
+    fill_pattern(&out.firmware_data, static_cast<uint8_t>(seed + 6u));
+    out.firmware_dirty = 1u;
+    out.firmware_hold = 1u;
+    out.firmware_cmd = 0x0Au;
+    out.firmware_status = 0x02u;
+    out.firmware_addr = seed + 0x200u;
+    out.firmware_data_pos = seed + 7u;
+    out.rtc_io = static_cast<uint16_t>(0x1100u | seed);
+    out.rtc_input = static_cast<uint8_t>(seed + 8u);
+    out.rtc_inbit = 3u;
+    out.rtc_inpos = 4u;
+    for (size_t i = 0; i < sizeof(out.rtc_output); ++i)
+        out.rtc_output[i] = static_cast<uint8_t>(seed + 9u + i);
+    out.rtc_outbit = 5u;
+    out.rtc_outpos = 6u;
+    out.rtc_cmd = 0xA6u;
+    const uint8_t datetime[7] = {0x24u, 0x01u, 0x02u, 0x03u,
+                                 0x12u, 0x34u, 0x56u};
+    std::memcpy(out.rtc_datetime, datetime, sizeof(datetime));
+    out.rtc_status1 = 0x02u;
+    out.rtc_status2 = static_cast<uint8_t>(seed);
+    for (size_t i = 0; i < 3u; ++i) {
+        out.rtc_alarm1[i] = static_cast<uint8_t>(seed + 0x10u + i);
+        out.rtc_alarm2[i] = static_cast<uint8_t>(seed + 0x20u + i);
+    }
+    out.rtc_clock_adjust = static_cast<uint8_t>(seed + 0x30u);
+    out.rtc_free = static_cast<uint8_t>(seed + 0x31u);
+    out.rtc_irq_flag = static_cast<uint8_t>(seed + 0x32u);
+    out.rtc_clock_count = seed + 0x300u;
+    out.rtc_processed_ticks =
+        (((now + 1u) * 32768u) - 1u) / 33513982u;
+    return out;
+}
+
+bool same_peripherals(const NdsIoPeripheralSaveState& a,
+                      const NdsIoPeripheralSaveState& b) {
+    return a.romctrl == b.romctrl &&
+        a.card_transfer_pos == b.card_transfer_pos &&
+        a.card_transfer_len == b.card_transfer_len &&
+        a.card_deadline == b.card_deadline &&
+        a.card_end_event == b.card_end_event &&
+        a.card_irq_cpu == b.card_irq_cpu &&
+        std::memcmp(a.card_command, b.card_command,
+                    sizeof(a.card_command)) == 0 &&
+        a.card_command_mode == b.card_command_mode &&
+        a.card_data_mode == b.card_data_mode &&
+        a.card_response == b.card_response &&
+        std::memcmp(a.key1_schedule, b.key1_schedule,
+                    sizeof(a.key1_schedule)) == 0 &&
+        a.card_chip_id == b.card_chip_id &&
+        a.key1_available == b.key1_available &&
+        a.card_has_ir == b.card_has_ir &&
+        a.auxspicnt == b.auxspicnt && a.auxspi_data == b.auxspi_data &&
+        a.auxspi_hold == b.auxspi_hold && a.auxspi_pos == b.auxspi_pos &&
+        a.auxspi_deadline == b.auxspi_deadline &&
+        a.cart_ir_cmd == b.cart_ir_cmd &&
+        a.backup_type == b.backup_type && a.backup_size == b.backup_size &&
+        a.backup_data == b.backup_data && a.backup_cmd == b.backup_cmd &&
+        a.backup_status == b.backup_status &&
+        a.backup_addr == b.backup_addr && a.backup_dirty == b.backup_dirty &&
+        a.backup_persistence_detached == b.backup_persistence_detached &&
+        a.spicnt == b.spicnt && a.spi_response == b.spi_response &&
+        a.spi_deadline == b.spi_deadline &&
+        a.firmware_data == b.firmware_data &&
+        a.firmware_dirty == b.firmware_dirty &&
+        a.firmware_persistence_detached ==
+            b.firmware_persistence_detached &&
+        a.firmware_hold == b.firmware_hold &&
+        a.firmware_cmd == b.firmware_cmd &&
+        a.firmware_status == b.firmware_status &&
+        a.firmware_addr == b.firmware_addr &&
+        a.firmware_data_pos == b.firmware_data_pos &&
+        a.rtc_io == b.rtc_io && a.rtc_input == b.rtc_input &&
+        a.rtc_inbit == b.rtc_inbit && a.rtc_inpos == b.rtc_inpos &&
+        std::memcmp(a.rtc_output, b.rtc_output,
+                    sizeof(a.rtc_output)) == 0 &&
+        a.rtc_outbit == b.rtc_outbit && a.rtc_outpos == b.rtc_outpos &&
+        a.rtc_cmd == b.rtc_cmd &&
+        std::memcmp(a.rtc_datetime, b.rtc_datetime,
+                    sizeof(a.rtc_datetime)) == 0 &&
+        a.rtc_status1 == b.rtc_status1 &&
+        a.rtc_status2 == b.rtc_status2 &&
+        std::memcmp(a.rtc_alarm1, b.rtc_alarm1,
+                    sizeof(a.rtc_alarm1)) == 0 &&
+        std::memcmp(a.rtc_alarm2, b.rtc_alarm2,
+                    sizeof(a.rtc_alarm2)) == 0 &&
+        a.rtc_clock_adjust == b.rtc_clock_adjust &&
+        a.rtc_free == b.rtc_free && a.rtc_irq_flag == b.rtc_irq_flag &&
+        a.rtc_clock_count == b.rtc_clock_count &&
+        a.rtc_processed_ticks == b.rtc_processed_ticks;
+}
+
+bool peripheral_roundtrip_rollback_and_deadlines() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-peripherals.nss";
+    std::filesystem::remove(path);
+    runtime_init(nullptr);
+    bus_init();
+    cp15_reset();
+    scheduler_init();
+    scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
+    scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
+    constexpr uint64_t now = 1000000u;
+    NdsSchedulerSaveState sched{};
+    scheduler_savestate_export(&sched);
+    sched.cycles[0] = now * 2u;
+    sched.cycles[1] = now;
+    sched.system_timestamp = now;
+    scheduler_savestate_import(sched, nullptr);
+
+    const NdsSavestateIdentity identity{
+        "build-peripherals", "0123456789abcdef0123456789abcdef01234567"};
+    const NdsIoPeripheralSaveState saved = patterned_peripherals(0x11u, now);
+    const NdsIoPeripheralSaveState current = patterned_peripherals(0x41u, now);
+    std::string error;
+    bool ok = expect(io_peripheral_savestate_import(saved, &error),
+                     "seed peripheral state") &&
+        expect(nds_savestate_save_core(path.string(), identity, &error),
+               error.c_str()) &&
+        expect(io_peripheral_savestate_import(current, &error),
+               "mutate peripheral state") &&
+        expect(nds_savestate_load_core(path.string(), identity, &error),
+               error.c_str());
+    NdsIoPeripheralSaveState actual{};
+    NdsIoPeripheralSaveState expected = saved;
+    expected.backup_persistence_detached = 1u;
+    expected.firmware_persistence_detached = 1u;
+    ok &= expect(io_peripheral_savestate_export(&actual),
+                 "export loaded peripheral state");
+    ok &= expect(same_peripherals(actual, expected),
+                 "gamecard, backup, firmware SPI, and RTC roundtrip");
+    ok &= expect(actual.backup_persistence_detached != 0u &&
+                 actual.firmware_persistence_detached != 0u,
+                 "historical mutable flash is detached from canonical files");
+
+    ok &= expect(io_peripheral_savestate_import(current, &error),
+                 "restore current peripheral state before apply failure");
+    savestate_test_fail_next_peripheral_import_after_apply();
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "peripheral apply failure rejects load");
+    actual = {};
+    ok &= expect(io_peripheral_savestate_export(&actual),
+                 "export peripheral state after rollback");
+    ok &= expect(same_peripherals(actual, current),
+                 "peripheral apply failure restores protocol and persistence state");
+
+    std::vector<uint8_t> payload;
+    ok &= expect(section_payload(path, kSectionIopf, &payload),
+                 "extract peripheral section");
+    ok &= expect_le32_at(payload, 0u, saved.romctrl,
+                         "gamecard ROMCTRL is explicit little-endian");
+    ok &= expect_le32_at(payload, 12u,
+                         static_cast<uint32_t>(saved.card_deadline),
+                         "gamecard deadline low word is little-endian");
+    // card command mode is fixed at byte 30 before the variable response.
+    ok &= expect(patch_section_u8(path, kSectionIopf, 30u, 7u),
+                 "patch invalid gamecard command mode");
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "invalid protocol state is rejected before apply");
+    actual = {};
+    io_peripheral_savestate_export(&actual);
+    ok &= expect(same_peripherals(actual, current),
+                 "protocol corruption leaves live peripherals untouched");
+
+    ok &= expect(io_peripheral_savestate_import(saved, &error),
+                 "reseed peripheral deadline state") &&
+        expect(nds_savestate_save_core(path.string(), identity, &error),
+               error.c_str()) &&
+        expect(io_peripheral_savestate_import(current, &error),
+               "restore current state before stale deadline load") &&
+        expect(patch_section_u32(path, kSectionIopf, 12u,
+                                 static_cast<uint32_t>(now - 1u)),
+               "patch gamecard deadline into scheduler past");
+    ok &= expect(!nds_savestate_load_core(path.string(), identity, &error),
+                 "deadline before scheduler time is rejected");
+    actual = {};
+    io_peripheral_savestate_export(&actual);
+    ok &= expect(same_peripherals(actual, current),
+                 "deadline rejection leaves live peripherals untouched");
+
+    std::filesystem::remove(path);
+    runtime_shutdown();
+    return ok;
+}
+
 bool reject_states(void* context, std::string* error) {
     ++*static_cast<unsigned*>(context);
     if (error) *error = "network session connected";
@@ -747,6 +997,7 @@ int main() {
     ok &= scheduler_cpu_byte_layout_is_stable();
     ok &= semantic_import_failure_rolls_back();
     ok &= io_core_roundtrip_and_rollback();
+    ok &= peripheral_roundtrip_rollback_and_deadlines();
     ok &= eligibility_hook_rejects_before_export();
     ok &= control_thread_is_not_quiescent_owner();
     return ok ? 0 : 1;

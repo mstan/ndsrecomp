@@ -317,7 +317,9 @@ void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
 bool     nds_io_replace_firmware(const uint8_t* p, uint32_t n);
 // Optional mutable firmware backing file. Guest SPI writes are committed
-// atomically at transaction boundaries and retried on every orderly exit.
+// atomically at transaction boundaries and retried on every orderly exit,
+// except after a historical savestate load detaches the session from the
+// canonical profile to prevent stale-state overwrite.
 void     nds_io_set_firmware_save_path(const char* path);
 bool     nds_io_flush_firmware_save();
 // Read-only view over the already-loaded firmware image (empty until
@@ -334,7 +336,9 @@ bool     nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 void     nds_io_configure_cartridge_save(
              const NdsCartridgeSaveConfig& config);
 // Interactive play defaults to a battery-save file derived from the ROM.
-// Serve/batch gates leave this path empty unless explicitly requested.
+// Serve/batch gates leave this path empty unless explicitly requested. A
+// historical savestate load restores guest bytes session-locally and blocks
+// automatic writes to this canonical file until a fresh process boot.
 void     nds_io_set_cartridge_save_path(const char* path);
 bool     nds_io_flush_cartridge_save();
 bool     nds_io_cartridge_save_snapshot(const uint8_t** data, uint32_t* size,

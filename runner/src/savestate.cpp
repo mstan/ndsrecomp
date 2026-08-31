@@ -28,7 +28,7 @@
 namespace {
 
 constexpr uint8_t kMagic[8] = {'N', 'D', 'S', 'S', 'T', 'A', 'T', 'E'};
-constexpr uint32_t kFormatVersion = 1u;
+constexpr uint32_t kFormatVersion = 2u;
 constexpr uint32_t kHeaderSize = 24u;
 constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kMaxSections = 16u;
@@ -38,8 +38,9 @@ constexpr uint32_t kSectionMemr = 0x524D454Du; // MEMR
 constexpr uint32_t kSectionCp15 = 0x35315043u; // CP15
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
 constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
+constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
 constexpr uint32_t kSectionVersion = 1u;
-constexpr uint32_t kRequiredSections = 6u;
+constexpr uint32_t kRequiredSections = 7u;
 
 struct Section {
     uint32_t tag = 0;
@@ -62,6 +63,7 @@ struct CoreState {
     NdsCp15SaveState cp15{};
     NdsRuntimeSaveState runtime{};
     NdsIoCoreSaveState io{};
+    NdsIoPeripheralSaveState peripherals{};
 };
 
 std::atomic_flag g_transaction_active = ATOMIC_FLAG_INIT;
@@ -561,6 +563,150 @@ bool decode_io_core(const std::vector<uint8_t>& payload,
     return pos == payload.size();
 }
 
+std::vector<uint8_t> encode_io_peripherals(
+        const NdsIoPeripheralSaveState& state) {
+    std::vector<uint8_t> out;
+    put_u32(out, state.romctrl);
+    put_u32(out, state.card_transfer_pos);
+    put_u32(out, state.card_transfer_len);
+    put_u64(out, state.card_deadline);
+    put_u8(out, state.card_end_event);
+    put_u8(out, state.card_irq_cpu);
+    put_bytes(out, state.card_command, sizeof(state.card_command));
+    put_u8(out, state.card_command_mode);
+    put_u32(out, state.card_data_mode);
+    put_vec8(out, state.card_response);
+    for (uint32_t value : state.key1_schedule) put_u32(out, value);
+    put_u32(out, state.card_chip_id);
+    put_u8(out, state.key1_available);
+    put_u8(out, state.card_has_ir);
+
+    put_u32(out, state.auxspicnt);
+    put_u8(out, state.auxspi_data);
+    put_u8(out, state.auxspi_hold);
+    put_u32(out, state.auxspi_pos);
+    put_u64(out, state.auxspi_deadline);
+    put_u8(out, state.cart_ir_cmd);
+
+    put_u8(out, state.backup_type);
+    put_u32(out, state.backup_size);
+    put_vec8(out, state.backup_data);
+    put_u8(out, state.backup_cmd);
+    put_u8(out, state.backup_status);
+    put_u32(out, state.backup_addr);
+    put_u8(out, state.backup_dirty);
+    put_u8(out, state.backup_persistence_detached);
+
+    put_u32(out, state.spicnt);
+    put_u8(out, state.spi_response);
+    put_u64(out, state.spi_deadline);
+    put_vec8(out, state.firmware_data);
+    put_u8(out, state.firmware_dirty);
+    put_u8(out, state.firmware_persistence_detached);
+    put_u8(out, state.firmware_hold);
+    put_u8(out, state.firmware_cmd);
+    put_u8(out, state.firmware_status);
+    put_u32(out, state.firmware_addr);
+    put_u32(out, state.firmware_data_pos);
+
+    put_u32(out, state.rtc_io);
+    put_u8(out, state.rtc_input);
+    put_u32(out, state.rtc_inbit);
+    put_u32(out, state.rtc_inpos);
+    put_bytes(out, state.rtc_output, sizeof(state.rtc_output));
+    put_u32(out, state.rtc_outbit);
+    put_u32(out, state.rtc_outpos);
+    put_u8(out, state.rtc_cmd);
+    put_bytes(out, state.rtc_datetime, sizeof(state.rtc_datetime));
+    put_u8(out, state.rtc_status1);
+    put_u8(out, state.rtc_status2);
+    put_bytes(out, state.rtc_alarm1, sizeof(state.rtc_alarm1));
+    put_bytes(out, state.rtc_alarm2, sizeof(state.rtc_alarm2));
+    put_u8(out, state.rtc_clock_adjust);
+    put_u8(out, state.rtc_free);
+    put_u8(out, state.rtc_irq_flag);
+    put_u32(out, state.rtc_clock_count);
+    put_u64(out, state.rtc_processed_ticks);
+    return out;
+}
+
+bool decode_io_peripherals(const std::vector<uint8_t>& payload,
+                           NdsIoPeripheralSaveState* state) {
+    size_t pos = 0;
+    *state = NdsIoPeripheralSaveState{};
+    auto bytes = [&](void* dst, size_t size) {
+        if (payload.size() - pos < size) return false;
+        std::memcpy(dst, payload.data() + pos, size);
+        pos += size;
+        return true;
+    };
+    auto u16 = [&](uint16_t* value) {
+        uint32_t wide = 0;
+        if (!read_u32(payload, pos, &wide) || wide > UINT16_MAX) return false;
+        *value = static_cast<uint16_t>(wide);
+        return true;
+    };
+    if (!read_u32(payload, pos, &state->romctrl) ||
+        !read_u32(payload, pos, &state->card_transfer_pos) ||
+        !read_u32(payload, pos, &state->card_transfer_len) ||
+        !read_u64(payload, pos, &state->card_deadline) ||
+        !read_u8(payload, pos, &state->card_end_event) ||
+        !read_u8(payload, pos, &state->card_irq_cpu) ||
+        !bytes(state->card_command, sizeof(state->card_command)) ||
+        !read_u8(payload, pos, &state->card_command_mode) ||
+        !read_u32(payload, pos, &state->card_data_mode) ||
+        !read_vec8(payload, pos, &state->card_response)) return false;
+    for (uint32_t& value : state->key1_schedule)
+        if (!read_u32(payload, pos, &value)) return false;
+    if (!read_u32(payload, pos, &state->card_chip_id) ||
+        !read_u8(payload, pos, &state->key1_available) ||
+        !read_u8(payload, pos, &state->card_has_ir) ||
+        !u16(&state->auxspicnt) ||
+        !read_u8(payload, pos, &state->auxspi_data) ||
+        !read_u8(payload, pos, &state->auxspi_hold) ||
+        !read_u32(payload, pos, &state->auxspi_pos) ||
+        !read_u64(payload, pos, &state->auxspi_deadline) ||
+        !read_u8(payload, pos, &state->cart_ir_cmd) ||
+        !read_u8(payload, pos, &state->backup_type) ||
+        !read_u32(payload, pos, &state->backup_size) ||
+        !read_vec8(payload, pos, &state->backup_data) ||
+        !read_u8(payload, pos, &state->backup_cmd) ||
+        !read_u8(payload, pos, &state->backup_status) ||
+        !read_u32(payload, pos, &state->backup_addr) ||
+        !read_u8(payload, pos, &state->backup_dirty) ||
+        !read_u8(payload, pos, &state->backup_persistence_detached) ||
+        !u16(&state->spicnt) ||
+        !read_u8(payload, pos, &state->spi_response) ||
+        !read_u64(payload, pos, &state->spi_deadline) ||
+        !read_vec8(payload, pos, &state->firmware_data) ||
+        !read_u8(payload, pos, &state->firmware_dirty) ||
+        !read_u8(payload, pos, &state->firmware_persistence_detached) ||
+        !read_u8(payload, pos, &state->firmware_hold) ||
+        !read_u8(payload, pos, &state->firmware_cmd) ||
+        !read_u8(payload, pos, &state->firmware_status) ||
+        !read_u32(payload, pos, &state->firmware_addr) ||
+        !read_u32(payload, pos, &state->firmware_data_pos) ||
+        !u16(&state->rtc_io) ||
+        !read_u8(payload, pos, &state->rtc_input) ||
+        !read_u32(payload, pos, &state->rtc_inbit) ||
+        !read_u32(payload, pos, &state->rtc_inpos) ||
+        !bytes(state->rtc_output, sizeof(state->rtc_output)) ||
+        !read_u32(payload, pos, &state->rtc_outbit) ||
+        !read_u32(payload, pos, &state->rtc_outpos) ||
+        !read_u8(payload, pos, &state->rtc_cmd) ||
+        !bytes(state->rtc_datetime, sizeof(state->rtc_datetime)) ||
+        !read_u8(payload, pos, &state->rtc_status1) ||
+        !read_u8(payload, pos, &state->rtc_status2) ||
+        !bytes(state->rtc_alarm1, sizeof(state->rtc_alarm1)) ||
+        !bytes(state->rtc_alarm2, sizeof(state->rtc_alarm2)) ||
+        !read_u8(payload, pos, &state->rtc_clock_adjust) ||
+        !read_u8(payload, pos, &state->rtc_free) ||
+        !read_u8(payload, pos, &state->rtc_irq_flag) ||
+        !read_u32(payload, pos, &state->rtc_clock_count) ||
+        !read_u64(payload, pos, &state->rtc_processed_ticks)) return false;
+    return pos == payload.size();
+}
+
 bool append_section(std::vector<Section>& sections, uint32_t tag,
                     std::vector<uint8_t> payload, std::string* error) {
     if (payload.empty()) {
@@ -581,7 +727,7 @@ bool append_section(std::vector<Section>& sections, uint32_t tag,
 bool known_section_tag(uint32_t tag) {
     return tag == kSectionIden || tag == kSectionSchd ||
         tag == kSectionMemr || tag == kSectionCp15 ||
-        tag == kSectionRtim || tag == kSectionIocr;
+        tag == kSectionRtim || tag == kSectionIocr || tag == kSectionIopf;
 }
 
 bool atomic_write_file(const std::string& path,
@@ -830,7 +976,8 @@ bool export_core_state(CoreState* out, std::string* error) {
     }
     cp15_savestate_export(&out->cp15);
     runtime_savestate_export(&out->runtime);
-    return io_savestate_export(&out->io);
+    return io_savestate_export(&out->io) &&
+        io_peripheral_savestate_export(&out->peripherals);
 }
 
 bool import_core_state(const CoreState& state, std::string* error) {
@@ -838,6 +985,7 @@ bool import_core_state(const CoreState& state, std::string* error) {
         !cp15_savestate_import(state.cp15, error) ||
         !runtime_savestate_import(state.runtime, error) ||
         !io_savestate_import(state.io, error) ||
+        !io_peripheral_savestate_import(state.peripherals, error) ||
         !scheduler_savestate_import(state.scheduler, error))
         return false;
     bus_fast_refresh();
@@ -883,7 +1031,27 @@ bool validate_core_state(const CoreState& state, std::string* error) {
             state.scheduler.terminal_halted[cpu] > 1u)
             return fail("savestate scheduler state is invalid");
     }
-    return io_savestate_validate(state.io, error);
+    if (!io_savestate_validate(state.io, error) ||
+        !io_peripheral_savestate_validate(state.peripherals, error))
+        return false;
+    const uint64_t now = state.scheduler.system_timestamp;
+    auto pending_not_in_past = [&](uint64_t deadline) {
+        return deadline == UINT64_MAX || deadline >= now ||
+            state.io.powered_off != 0u;
+    };
+    if (!pending_not_in_past(state.peripherals.card_deadline) ||
+        !pending_not_in_past(state.peripherals.auxspi_deadline) ||
+        !pending_not_in_past(state.peripherals.spi_deadline))
+        return fail("savestate peripheral deadline precedes scheduler time");
+    constexpr uint64_t kRtcNumerator = 33513982u;
+    constexpr uint64_t kRtcDenominator = 32768u;
+    if (now > UINT64_MAX / kRtcDenominator - 1u)
+        return fail("savestate scheduler timestamp exceeds RTC range");
+    const uint64_t rtc_due =
+        (((now + 1u) * kRtcDenominator) - 1u) / kRtcNumerator;
+    if (state.peripherals.rtc_processed_ticks > rtc_due)
+        return fail("savestate RTC phase is ahead of scheduler time");
+    return true;
 }
 
 bool transaction_allowed(std::string* error) {
@@ -924,6 +1092,7 @@ bool nds_savestate_save_core(const std::string& path,
 
     CoreState core{};
     if (!export_core_state(&core, error)) return false;
+    if (!validate_core_state(core, error)) return false;
 
     std::vector<Section> sections;
     if (!append_section(sections, kSectionIden, encode_identity(identity), error) ||
@@ -934,7 +1103,9 @@ bool nds_savestate_save_core(const std::string& path,
         !append_section(sections, kSectionRtim,
                         encode_runtime_state(core.runtime), error) ||
         !append_section(sections, kSectionIocr,
-                        encode_io_core(core.io), error))
+                        encode_io_core(core.io), error) ||
+        !append_section(sections, kSectionIopf,
+                        encode_io_peripherals(core.peripherals), error))
         return false;
 
     return atomic_write_file(path, build_file(sections), error);
@@ -999,6 +1170,17 @@ bool nds_savestate_load_core(const std::string& path,
         set_error(error, "IO core section is missing or corrupt");
         return false;
     }
+    if (!find_section(sections, kSectionIopf, &payload) ||
+        !decode_io_peripherals(payload, &loaded.peripherals)) {
+        set_error(error, "IO peripheral section is missing or corrupt");
+        return false;
+    }
+    // Historical mutable flash is session-local after load. This override is
+    // applied after decoding so no state file can opt itself back into
+    // replacing canonical battery files. Rollback still restores the prior
+    // live flags from the separately exported `previous` snapshot below.
+    loaded.peripherals.backup_persistence_detached = 1u;
+    loaded.peripherals.firmware_persistence_detached = 1u;
     if (!validate_core_state(loaded, error)) return false;
 
     CoreState previous{};

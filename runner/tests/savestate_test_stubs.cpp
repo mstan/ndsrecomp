@@ -84,10 +84,20 @@ void nds_dma_run(int, unsigned long long) {}
 bool nds_gxfifo_stalled() { return false; }
 namespace {
 NdsIoCoreSaveState g_test_io_state{};
+NdsIoPeripheralSaveState g_test_peripheral_state = [] {
+    NdsIoPeripheralSaveState state{};
+    state.rtc_datetime[1] = 1u;
+    state.rtc_datetime[2] = 1u;
+    return state;
+}();
 bool g_fail_next_io_import = false;
+bool g_fail_next_peripheral_import_after_apply = false;
 }
 
 void savestate_test_fail_next_io_import() { g_fail_next_io_import = true; }
+void savestate_test_fail_next_peripheral_import_after_apply() {
+    g_fail_next_peripheral_import_after_apply = true;
+}
 
 bool io_savestate_export(NdsIoCoreSaveState* out) {
     if (!out) return false;
@@ -135,6 +145,53 @@ bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error) {
         return false;
     }
     g_test_io_state = in;
+    return true;
+}
+
+bool io_peripheral_savestate_export(NdsIoPeripheralSaveState* out) {
+    if (!out) return false;
+    *out = g_test_peripheral_state;
+    return true;
+}
+
+bool io_peripheral_savestate_validate(const NdsIoPeripheralSaveState& in,
+                                      std::string* error) {
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    if (!binary(in.card_end_event) || in.card_irq_cpu > 1u ||
+        in.card_command_mode > 2u || in.card_data_mode > 2u ||
+        !binary(in.key1_available) || !binary(in.card_has_ir) ||
+        !binary(in.auxspi_hold) || !binary(in.backup_dirty) ||
+        !binary(in.backup_persistence_detached) ||
+        !binary(in.firmware_dirty) ||
+        !binary(in.firmware_persistence_detached) ||
+        !binary(in.firmware_hold) || in.card_transfer_len > 0x4000u ||
+        in.card_response.size() != in.card_transfer_len ||
+        in.card_transfer_pos > in.card_transfer_len ||
+        (in.card_transfer_pos & 3u) != 0u ||
+        in.backup_type > 3u || in.backup_data.size() != in.backup_size ||
+        in.rtc_inbit > 7u || in.rtc_outbit > 7u || in.rtc_outpos > 7u) {
+        if (error) *error = "savestate IO peripheral state is invalid";
+        return false;
+    }
+    const bool aux_busy = (in.auxspicnt & 0x0080u) != 0u;
+    const bool spi_busy = (in.spicnt & 0x0080u) != 0u;
+    if (aux_busy != (in.auxspi_deadline != UINT64_MAX) ||
+        spi_busy != (in.spi_deadline != UINT64_MAX)) {
+        if (error) *error = "savestate IO peripheral deadline is invalid";
+        return false;
+    }
+    return true;
+}
+
+bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
+                                    std::string* error) {
+    if (!io_peripheral_savestate_validate(in, error)) return false;
+    g_test_peripheral_state = in;
+    if (g_fail_next_peripheral_import_after_apply) {
+        g_fail_next_peripheral_import_after_apply = false;
+        if (error) *error = "injected peripheral apply failure";
+        return false;
+    }
     return true;
 }
 
