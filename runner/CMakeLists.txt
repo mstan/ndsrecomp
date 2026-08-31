@@ -950,6 +950,10 @@ ndsrecomp_link_tomlpp(frontend_config_test)
         NAME scheduler_halt_fidelity_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scheduler_halt_fidelity.py")
+    add_test(
+        NAME savestate_frontend_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_savestate_frontend_guards.py")
     # Two runners may share one live-overlay cache directory, so the shard
     # index read-modify-write has to survive concurrent writers.
     add_test(

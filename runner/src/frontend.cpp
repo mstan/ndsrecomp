@@ -2490,7 +2490,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         // the live host controls become authoritative again
                         // before the restored machine executes a round.
                         publish_keys();
-                        if (!mouse_down) nds_set_touch(0, 0, false);
+                        if (mouse_down) {
+                            set_touch_from_mouse(
+                                static_cast<float>(last_touch_event_x),
+                                static_cast<float>(last_touch_event_y),
+                                true, options.screen_layout,
+                                bottom_logical_width);
+                        } else {
+                            nds_set_touch(0, 0, false);
+                        }
                     }
                 } else if (scancode == SDL_SCANCODE_ESCAPE) {
                     if (relative_mouse.captured())
