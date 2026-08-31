@@ -1,0 +1,18 @@
+Subject: WifiAP: report every accepted client lifecycle transition
+
+ndsrecomp modification to vendored melonDS src/WifiAP.cpp (GPLv3 5(a)
+notice; see patches/README.md for the convention).
+
+Calls the runner-owned nds_wifi_on_client_state_changed hook from Reset and
+immediately after each accepted authentication, association, deassociation,
+and deauthentication state update. The runner uses this authoritative
+ClientStatus value for save-state eligibility. Backend configuration and an
+idle worker thread cannot substitute for the guest station's connection
+state. The hook only updates one atomic policy word and performs no polling.
+
+--- a/src/WifiAP.cpp
++++ b/src/WifiAP.cpp
+@@ (runner hook declarations)
++void nds_wifi_on_client_state_changed(uint32_t status);
+@@ (WifiAP::Reset and each ClientStatus transition)
++    ::nds_wifi_on_client_state_changed((uint32_t)ClientStatus);

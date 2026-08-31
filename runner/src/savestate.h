@@ -372,11 +372,8 @@ bool spu_savestate_import(const NdsSpuSaveState& in, std::string* error);
 using NdsSavestateEligibilityHook = bool (*)(void* context,
                                              std::string* error);
 // Called after the scheduler-quiescence check and before any export or apply.
-// The current Wi-Fi query surface reports backend/thread activity but not the
-// guest's association or local-MP connection state, so it cannot faithfully
-// implement the connected-only policy. A future network owner must register a
-// hook backed by that actual state; treating "backend enabled" as connected
-// would incorrectly disable offline states.
+// wifi_net installs an authoritative lifecycle-backed hook at bridge attach;
+// backend configuration/activity alone is deliberately not a connection.
 void nds_savestate_set_eligibility_hook(NdsSavestateEligibilityHook hook,
                                         void* context);
 

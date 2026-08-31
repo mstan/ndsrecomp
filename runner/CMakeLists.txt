@@ -392,6 +392,7 @@ add_executable(nds_runner
     src/direct_boot.cpp
     src/io.cpp
     src/wifi_net.cpp
+    src/network_savestate_guard.cpp
     src/net/net_ring.cpp
     src/net/net_classify.cpp
     src/net/net_capture.cpp
@@ -789,6 +790,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   ndsrecomp_link_tomlpp(savestate_test)
   target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
   add_test(NAME savestate_test COMMAND savestate_test)
+
+  add_executable(network_savestate_guard_test
+      tests/network_savestate_guard_test.cpp
+      src/network_savestate_guard.cpp)
+  target_include_directories(network_savestate_guard_test PRIVATE src)
+  add_test(NAME network_savestate_guard_test
+           COMMAND network_savestate_guard_test)
 
   add_executable(video_savestate_test
       tests/video_savestate_test.cpp

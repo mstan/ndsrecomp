@@ -434,3 +434,18 @@ represents pointers as indexes but trusted those indexes before the runner
 could semantically validate the detached device. These checks do not change
 the stream format or any valid state; they make a checksum-recomputed corrupt
 `GP3D` section fail before it can construct or dereference an invalid pointer.
+
+## 0018-wifiap-client-state-hook.patch
+
+`src/WifiAP.cpp`: reports reset plus every accepted authentication,
+association, deassociation, and deauthentication `ClientStatus` transition to
+the runner's save-state network guard. This is the guest station's
+authoritative association lifecycle; backend configuration and worker-thread
+activity are deliberately not used as connection proxies.
+
+## 0019-wifi-local-mp-disconnect-hook.patch
+
+`src/Wifi.cpp`: reports every transition that leaves local multiplayer mode.
+Together with the runner bridge marking a peer only after receipt of a
+validated local datagram, this gives the save-state guard an explicit peer
+start/end lifecycle without treating UDP `sendto()` success as a connection.
