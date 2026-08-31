@@ -5,9 +5,11 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "gpu2d.h"
 #include "io.h"
+#include "savestate.h"
 
 namespace {
 
@@ -297,6 +299,74 @@ void nds_vram_copy_texpal(uint8_t* dst) {
 }
 
 uint64_t nds_vram_texture_generation() { return g_texture_generation; }
+
+bool vram_savestate_export(NdsVramSaveState* out) {
+    if (!out) return false;
+    // A completed capture line is guest memory even if its worker produced it
+    // asynchronously. Commit every staged line before taking the snapshot.
+    nds_gpu2d_read_fence();
+    out->vram.assign(g_vram.begin(), g_vram.end());
+    out->written.assign(g_vram_written.begin(), g_vram_written.end());
+    out->exec_generation.assign(g_vram_generation.begin(),
+                                g_vram_generation.end());
+    out->palette.assign(g_palette.begin(), g_palette.end());
+    out->oam.assign(g_oam.begin(), g_oam.end());
+    std::copy(g_cnt.begin(), g_cnt.end(), out->vramcnt);
+    out->texture_generation = g_texture_generation;
+    return true;
+}
+
+bool vram_savestate_validate(const NdsVramSaveState& in,
+                             std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (in.vram.size() != kTotalVram ||
+        in.written.size() != kTotalVram ||
+        in.exec_generation.size() != kExecPageCount ||
+        in.palette.size() != g_palette.size() ||
+        in.oam.size() != g_oam.size())
+        return fail("savestate VRAM backing size mismatch");
+    if (in.texture_generation == 0u)
+        return fail("savestate VRAM texture generation is invalid");
+    if (std::any_of(in.written.begin(), in.written.end(),
+                    [](uint8_t value) { return value > 1u; }))
+        return fail("savestate VRAM provenance is invalid");
+    for (unsigned bank = 0; bank < 9; ++bank) {
+        if (sanitize(bank, in.vramcnt[bank]) != in.vramcnt[bank])
+            return fail("savestate VRAMCNT value is invalid");
+    }
+    return true;
+}
+
+bool vram_savestate_import(const NdsVramSaveState& in,
+                           std::string* error) {
+    if (!vram_savestate_validate(in, error)) return false;
+    // Renderer jobs dereference the live flat maps and physical backing.
+    // Drain before changing either, then rebuild every derived map locally.
+    nds_gpu2d_drain(NDS_GPU2D_FENCE_FRAME);
+    std::copy(in.vram.begin(), in.vram.end(), g_vram.begin());
+    std::copy(in.written.begin(), in.written.end(), g_vram_written.begin());
+    std::copy(in.exec_generation.begin(), in.exec_generation.end(),
+              g_vram_generation.begin());
+    std::copy(in.palette.begin(), in.palette.end(), g_palette.begin());
+    std::copy(in.oam.begin(), in.oam.end(), g_oam.begin());
+
+    g_cnt.fill(0);
+    g_lcdc = 0;
+    g_abg.fill(0); g_aobj.fill(0); g_bbg.fill(0); g_bobj.fill(0);
+    g_abg_ext.fill(0); g_aobj_ext = 0;
+    g_bbg_ext.fill(0); g_bobj_ext = 0;
+    g_texture.fill(0); g_texpal.fill(0); g_arm7.fill(0);
+    for (unsigned bank = 0; bank < 9; ++bank) {
+        g_cnt[bank] = in.vramcnt[bank];
+        apply_map(bank, g_cnt[bank], true);
+    }
+    g_texture_generation = in.texture_generation;
+    refresh_renderer_views();
+    return true;
+}
 
 bool nds_vram_lcdc_mapped(unsigned bank) {
     return bank < 9 && (g_lcdc & (1u << bank)) != 0;

@@ -220,6 +220,62 @@ struct NdsIoPeripheralSaveState {
     uint64_t rtc_processed_ticks = 0;
 };
 
+// Physical video memory and mapping state. The derived CPU/renderer maps are
+// rebuilt on import and are intentionally absent from this representation.
+struct NdsVramSaveState {
+    std::vector<uint8_t> vram;
+    std::vector<uint8_t> written;
+    std::vector<uint32_t> exec_generation;
+    std::vector<uint8_t> palette;
+    std::vector<uint8_t> oam;
+    uint8_t vramcnt[9]{};
+    uint64_t texture_generation = 0;
+};
+
+struct NdsGpu2dUnitSaveState {
+    uint32_t dispcnt = 0;
+    uint16_t bgcnt[4]{};
+    uint16_t bgx[4]{};
+    uint16_t bgy[4]{};
+    int16_t pa[2]{}, pb[2]{}, pc[2]{}, pd[2]{};
+    int32_t refx[2]{}, refy[2]{};
+    uint8_t win[12]{};
+    uint8_t bg_mosaic_x = 0;
+    uint8_t bg_mosaic_y = 0;
+    uint8_t obj_mosaic_x = 0;
+    uint8_t obj_mosaic_y = 0;
+    uint16_t bldcnt = 0;
+    uint16_t bldalpha = 0;
+    uint8_t eva = 0;
+    uint8_t evb = 0;
+    uint8_t evy = 0;
+    int32_t refx_internal[2]{};
+    int32_t refy_internal[2]{};
+    uint32_t capture = 0;
+    uint16_t master_bright = 0;
+    uint8_t capture_latch = 0;
+};
+
+struct NdsGpu2dSaveState {
+    NdsGpu2dUnitSaveState unit[2]{};
+    // Four native 256x192 physical framebuffers, ordered [buffer][screen].
+    std::vector<uint32_t> framebuffers;
+    uint8_t front = 0;
+    uint8_t frame_capture_active = 0;
+    uint8_t present_capture_active = 0;
+};
+
+// The geometry engine owns a large pointer-rich state graph. Its vendored
+// serializer converts internal pointers to array indexes; detached decode and
+// semantic validation reject indexes that do not resolve inside their owning
+// arrays before the live engine is changed. The blob contains device state
+// only; renderer objects and host GPU resources are reset and rebuilt from
+// guest VRAM and the restored render list.
+struct NdsGpu3dSaveState {
+    std::vector<uint8_t> device;
+    uint64_t arm9_timestamp = 0;
+};
+
 bool bus_savestate_export(NdsBusMemorySnapshot* out);
 bool bus_savestate_import(const NdsBusMemorySnapshot& in, std::string* error);
 
@@ -244,6 +300,22 @@ bool io_peripheral_savestate_validate(const NdsIoPeripheralSaveState& in,
                                       std::string* error);
 bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
                                     std::string* error);
+
+bool vram_savestate_export(NdsVramSaveState* out);
+bool vram_savestate_validate(const NdsVramSaveState& in, std::string* error);
+bool vram_savestate_import(const NdsVramSaveState& in, std::string* error);
+
+bool gpu2d_savestate_export(NdsGpu2dSaveState* out);
+bool gpu2d_savestate_validate(const NdsGpu2dSaveState& in,
+                              std::string* error);
+bool gpu2d_savestate_import(const NdsGpu2dSaveState& in,
+                            std::string* error);
+
+bool gpu3d_savestate_export(NdsGpu3dSaveState* out, std::string* error);
+bool gpu3d_savestate_validate(const NdsGpu3dSaveState& in,
+                              std::string* error);
+bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
+                            std::string* error);
 
 using NdsSavestateEligibilityHook = bool (*)(void* context,
                                              std::string* error);

@@ -1,9 +1,8 @@
 # Save-State Foundation Inventory
 
-This document is the review boundary for `beads-q7fj`'s first save-state
-foundation. The implemented container deliberately covers the deterministic
-core needed by `savestate_test`; it is not a user-facing whole-console state
-format yet.
+This document is the review boundary for `beads-q7fj`'s save-state foundation.
+The implemented container covers the deterministic CPU, memory, I/O, storage,
+and video core; it is not a user-facing whole-console state format yet.
 
 ## Existing melonDS integrations
 
@@ -19,8 +18,8 @@ outside that class.
   by the vendored GPU/Wi-Fi models.
 - `runner/vendor/melonds/Wifi.cpp` implements `Wifi::DoSavestate`.
 
-These are inventory items only in this foundation. The runner does not yet
-embed melonDS `Savestate` payloads into the new top-level container.
+`GPU3D::DoSavestate` is embedded as the payload of the top-level `GP3D`
+section. The Wi-Fi serializer remains an inventory item only.
 
 ## Covered foundation sections
 
@@ -49,6 +48,12 @@ through a temporary path and atomically replaces the destination.
   mutable firmware bytes, and RTC serial/calendar/IRQ phase. Immutable
   cartridge geometry and firmware size are checked against the currently
   inserted exact-ROM hardware before apply.
+- `VRAM`: all physical VRAM banks, write provenance, executable generations,
+  palette, OAM, VRAMCNT mapping, and the texture-coherence generation.
+- `GP2D`: both engines' explicit guest registers and affine accumulators, four
+  native framebuffers, frame/presentation capture state, and capture latches.
+- `GP3D`: the vendored geometry/FIFO/register/render-list device graph plus the
+  runner timestamp used for geometry command timing.
 
 ## Guest-visible state owners
 
@@ -90,15 +95,22 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
   that gives it meaning and against scheduler time.
 - `runner/src/vram.cpp`: VRAM bank contents, VRAMCNT/VRAMSTAT mapping, palette,
   OAM, CPU/video mappings, renderer flattened views, LCDC capture visibility,
-  provenance, and texture generations. Not covered.
+  provenance, and texture generations. Covered. Derived CPU/video mappings
+  and flattened renderer views are rebuilt from restored VRAMCNT state.
 - `runner/src/gpu2d.cpp`: 2D engine registers, framebuffers, scanline
   renderer state, affine/internal reference accumulators, display capture
   latches, direct-frame/HD state, threaded render jobs, and GPU profile
-  counters. Not covered.
+  counters. Covered: guest registers/accumulators, native framebuffers, and
+  capture state. Worker jobs are drained at the transaction boundary;
+  adaptive/direct/HD presentation caches and counters are host-only and reset.
 - `runner/src/gpu3d.cpp` and `runner/vendor/melonds/GPU3D.cpp`: bridge state,
   renderer selection, power/render width/wide projection state, run/write
   traces, compute/soft renderer resources, texture-cache coherence, and the
-  vendored GPU3D device state. Not covered.
+  vendored GPU3D device state. Covered: the vendored device graph and command
+  timing timestamp. Renderer selection/settings remain host configuration.
+  Renderer objects, compute buffers, GL handles/fences, texture views, and
+  traces are host-only: restore invalidates them and renders the restored
+  guest render list into newly coherent resources.
 - `runner/src/spu.cpp`: ARM7 sound registers, channel/capture state, bias,
   mixer timing/output queues, and debug output rings. Not covered.
 - `runner/src/wifi_net.cpp` and `runner/vendor/melonds/Wifi.cpp`: runner Wi-Fi
@@ -121,13 +133,9 @@ roundtrip; the rest are blockers before exposing frontend save/load slots.
 
 ## Blockers for user-facing save states
 
-The following sections must be implemented and tested before frontend F-key
-save/load slots are safe:
+The video sections are implemented but frontend F-key save/load slots remain
+blocked until the following owners and policy are implemented and tested:
 
-- VRAM/video memory: VRAM bank contents/mapping, palette, OAM, renderer views,
-  LCDC capture state, provenance, and texture generations.
-- 2D/3D GPU: 2D engine registers/framebuffers/capture state plus vendored
-  GPU3D `DoSavestate` integration and runner-owned bridge/compute state.
 - SPU: sound register/channel/capture/mixer queues and sample timing.
 - Wi-Fi: vendored Wi-Fi `DoSavestate` integration plus runner bridge, packet
   rings, replay/local-MP/slirp ownership, power and scheduled events.

@@ -91,6 +91,25 @@ NdsIoPeripheralSaveState default_peripheral_state() {
     return state;
 }
 NdsIoPeripheralSaveState g_test_peripheral_state = default_peripheral_state();
+NdsVramSaveState default_vram_state() {
+    NdsVramSaveState state{};
+    state.vram.resize(0xA4000u);
+    state.written.resize(0xA4000u);
+    state.exec_generation.resize((0xA4000u + 0xFFFu) / 0x1000u);
+    state.palette.resize(0x800u);
+    state.oam.resize(0x800u);
+    state.texture_generation = 1u;
+    return state;
+}
+NdsGpu2dSaveState default_gpu2d_state() {
+    NdsGpu2dSaveState state{};
+    state.framebuffers.resize(4u * 256u * 192u);
+    state.unit[0].eva = state.unit[1].eva = 16u;
+    return state;
+}
+NdsVramSaveState g_test_vram_state = default_vram_state();
+NdsGpu2dSaveState g_test_gpu2d_state = default_gpu2d_state();
+NdsGpu3dSaveState g_test_gpu3d_state{{0x47u, 0x50u, 0x33u, 0x44u}, 0u};
 bool g_fail_next_io_import = false;
 bool g_fail_next_peripheral_import_after_apply = false;
 }
@@ -98,6 +117,9 @@ bool g_fail_next_peripheral_import_after_apply = false;
 void savestate_test_reset_io_state() {
     g_test_io_state = NdsIoCoreSaveState{};
     g_test_peripheral_state = default_peripheral_state();
+    g_test_vram_state = default_vram_state();
+    g_test_gpu2d_state = default_gpu2d_state();
+    g_test_gpu3d_state = {{0x47u, 0x50u, 0x33u, 0x44u}, 0u};
     g_fail_next_io_import = false;
     g_fail_next_peripheral_import_after_apply = false;
 }
@@ -105,6 +127,72 @@ void savestate_test_reset_io_state() {
 void savestate_test_fail_next_io_import() { g_fail_next_io_import = true; }
 void savestate_test_fail_next_peripheral_import_after_apply() {
     g_fail_next_peripheral_import_after_apply = true;
+}
+
+void savestate_test_set_video_pattern(uint8_t seed) {
+    g_test_vram_state = default_vram_state();
+    for (size_t i = 0; i < g_test_vram_state.vram.size(); ++i) {
+        g_test_vram_state.vram[i] = static_cast<uint8_t>(seed + i * 3u);
+        g_test_vram_state.written[i] = static_cast<uint8_t>((i + seed) & 1u);
+    }
+    for (size_t i = 0; i < g_test_vram_state.exec_generation.size(); ++i)
+        g_test_vram_state.exec_generation[i] = seed +
+            static_cast<uint32_t>(i);
+    for (size_t i = 0; i < g_test_vram_state.palette.size(); ++i) {
+        g_test_vram_state.palette[i] = static_cast<uint8_t>(seed ^ i);
+        g_test_vram_state.oam[i] = static_cast<uint8_t>(seed + i * 5u);
+    }
+    g_test_vram_state.vramcnt[0] = 0x80u;
+    g_test_vram_state.vramcnt[2] = 0x82u;
+    g_test_vram_state.texture_generation = 100u + seed;
+
+    g_test_gpu2d_state = default_gpu2d_state();
+    g_test_gpu2d_state.unit[0].dispcnt = 0x00010000u | seed;
+    g_test_gpu2d_state.unit[0].refx_internal[0] = -1000 - seed;
+    g_test_gpu2d_state.unit[0].capture = 0x80000000u | seed;
+    g_test_gpu2d_state.unit[0].capture_latch = 1u;
+    g_test_gpu2d_state.front = seed & 1u;
+    g_test_gpu2d_state.frame_capture_active = 1u;
+    for (size_t i = 0; i < g_test_gpu2d_state.framebuffers.size(); ++i)
+        g_test_gpu2d_state.framebuffers[i] =
+            (uint32_t{seed} << 24u) ^ static_cast<uint32_t>(i * 17u);
+
+    g_test_gpu3d_state.device = {0x47u, 0x50u, 0x33u, 0x44u, seed,
+                                 static_cast<uint8_t>(seed ^ 0xA5u)};
+    g_test_gpu3d_state.arm9_timestamp = 0x1122334455660000ull + seed;
+}
+
+bool savestate_test_video_matches(uint8_t seed) {
+    NdsVramSaveState expected_vram = default_vram_state();
+    NdsGpu2dSaveState expected_gpu2d = default_gpu2d_state();
+    NdsGpu3dSaveState expected_gpu3d{};
+    const NdsVramSaveState saved_vram = g_test_vram_state;
+    const NdsGpu2dSaveState saved_gpu2d = g_test_gpu2d_state;
+    const NdsGpu3dSaveState saved_gpu3d = g_test_gpu3d_state;
+    savestate_test_set_video_pattern(seed);
+    expected_vram = g_test_vram_state;
+    expected_gpu2d = g_test_gpu2d_state;
+    expected_gpu3d = g_test_gpu3d_state;
+    g_test_vram_state = saved_vram;
+    g_test_gpu2d_state = saved_gpu2d;
+    g_test_gpu3d_state = saved_gpu3d;
+    return g_test_vram_state.vram == expected_vram.vram &&
+        g_test_vram_state.written == expected_vram.written &&
+        g_test_vram_state.exec_generation == expected_vram.exec_generation &&
+        g_test_vram_state.palette == expected_vram.palette &&
+        g_test_vram_state.oam == expected_vram.oam &&
+        std::memcmp(g_test_vram_state.vramcnt, expected_vram.vramcnt, 9u) == 0 &&
+        g_test_vram_state.texture_generation == expected_vram.texture_generation &&
+        g_test_gpu2d_state.framebuffers == expected_gpu2d.framebuffers &&
+        g_test_gpu2d_state.unit[0].dispcnt == expected_gpu2d.unit[0].dispcnt &&
+        g_test_gpu2d_state.unit[0].refx_internal[0] ==
+            expected_gpu2d.unit[0].refx_internal[0] &&
+        g_test_gpu2d_state.unit[0].capture == expected_gpu2d.unit[0].capture &&
+        g_test_gpu2d_state.unit[0].capture_latch == 1u &&
+        g_test_gpu2d_state.front == expected_gpu2d.front &&
+        g_test_gpu2d_state.frame_capture_active == 1u &&
+        g_test_gpu3d_state.device == expected_gpu3d.device &&
+        g_test_gpu3d_state.arm9_timestamp == expected_gpu3d.arm9_timestamp;
 }
 
 bool io_savestate_export(NdsIoCoreSaveState* out) {
@@ -200,6 +288,76 @@ bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
         if (error) *error = "injected peripheral apply failure";
         return false;
     }
+    return true;
+}
+
+bool vram_savestate_export(NdsVramSaveState* out) {
+    if (!out) return false;
+    *out = g_test_vram_state;
+    return true;
+}
+
+bool vram_savestate_validate(const NdsVramSaveState& in,
+                             std::string* error) {
+    if (in.vram.size() != 0xA4000u || in.written.size() != 0xA4000u ||
+        in.exec_generation.size() != (0xA4000u + 0xFFFu) / 0x1000u ||
+        in.palette.size() != 0x800u || in.oam.size() != 0x800u ||
+        in.texture_generation == 0u) {
+        if (error) *error = "savestate VRAM state is invalid";
+        return false;
+    }
+    return true;
+}
+
+bool vram_savestate_import(const NdsVramSaveState& in,
+                           std::string* error) {
+    if (!vram_savestate_validate(in, error)) return false;
+    g_test_vram_state = in;
+    return true;
+}
+
+bool gpu2d_savestate_export(NdsGpu2dSaveState* out) {
+    if (!out) return false;
+    *out = g_test_gpu2d_state;
+    return true;
+}
+
+bool gpu2d_savestate_validate(const NdsGpu2dSaveState& in,
+                              std::string* error) {
+    if (in.framebuffers.size() != 4u * 256u * 192u || in.front > 1u ||
+        in.unit[0].capture_latch > 1u || in.unit[1].capture_latch > 1u) {
+        if (error) *error = "savestate GPU2D state is invalid";
+        return false;
+    }
+    return true;
+}
+
+bool gpu2d_savestate_import(const NdsGpu2dSaveState& in,
+                            std::string* error) {
+    if (!gpu2d_savestate_validate(in, error)) return false;
+    g_test_gpu2d_state = in;
+    return true;
+}
+
+bool gpu3d_savestate_export(NdsGpu3dSaveState* out, std::string*) {
+    if (!out) return false;
+    *out = g_test_gpu3d_state;
+    return true;
+}
+
+bool gpu3d_savestate_validate(const NdsGpu3dSaveState& in,
+                              std::string* error) {
+    if (in.device.empty()) {
+        if (error) *error = "savestate GPU3D state is invalid";
+        return false;
+    }
+    return true;
+}
+
+bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
+                            std::string* error) {
+    if (!gpu3d_savestate_validate(in, error)) return false;
+    g_test_gpu3d_state = in;
     return true;
 }
 

@@ -11,11 +11,13 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "gpu3d.h"
 #include "io.h"
+#include "savestate.h"
 #include "title_patches.h"
 #include "vram.h"
 #include "emu_profile.h"
@@ -45,6 +47,58 @@ struct Unit {
     // (melonDS Unit::CaptureLatch).
     bool capture_latch = false;
 };
+
+NdsGpu2dUnitSaveState export_unit(const Unit& unit) {
+    NdsGpu2dUnitSaveState out{};
+    out.dispcnt = unit.dispcnt;
+    std::copy_n(unit.bgcnt, 4, out.bgcnt);
+    std::copy_n(unit.bgx, 4, out.bgx);
+    std::copy_n(unit.bgy, 4, out.bgy);
+    std::copy_n(unit.pa, 2, out.pa); std::copy_n(unit.pb, 2, out.pb);
+    std::copy_n(unit.pc, 2, out.pc); std::copy_n(unit.pd, 2, out.pd);
+    std::copy_n(unit.refx, 2, out.refx);
+    std::copy_n(unit.refy, 2, out.refy);
+    std::copy_n(unit.win, 12, out.win);
+    out.bg_mosaic_x = unit.bg_mosaic_x;
+    out.bg_mosaic_y = unit.bg_mosaic_y;
+    out.obj_mosaic_x = unit.obj_mosaic_x;
+    out.obj_mosaic_y = unit.obj_mosaic_y;
+    out.bldcnt = unit.bldcnt;
+    out.bldalpha = unit.bldalpha;
+    out.eva = unit.eva; out.evb = unit.evb; out.evy = unit.evy;
+    std::copy_n(unit.refx_internal, 2, out.refx_internal);
+    std::copy_n(unit.refy_internal, 2, out.refy_internal);
+    out.capture = unit.capture;
+    out.master_bright = unit.master_bright;
+    out.capture_latch = unit.capture_latch ? 1u : 0u;
+    return out;
+}
+
+Unit import_unit(const NdsGpu2dUnitSaveState& in) {
+    Unit out{};
+    out.dispcnt = in.dispcnt;
+    std::copy_n(in.bgcnt, 4, out.bgcnt);
+    std::copy_n(in.bgx, 4, out.bgx);
+    std::copy_n(in.bgy, 4, out.bgy);
+    std::copy_n(in.pa, 2, out.pa); std::copy_n(in.pb, 2, out.pb);
+    std::copy_n(in.pc, 2, out.pc); std::copy_n(in.pd, 2, out.pd);
+    std::copy_n(in.refx, 2, out.refx);
+    std::copy_n(in.refy, 2, out.refy);
+    std::copy_n(in.win, 12, out.win);
+    out.bg_mosaic_x = in.bg_mosaic_x;
+    out.bg_mosaic_y = in.bg_mosaic_y;
+    out.obj_mosaic_x = in.obj_mosaic_x;
+    out.obj_mosaic_y = in.obj_mosaic_y;
+    out.bldcnt = in.bldcnt;
+    out.bldalpha = in.bldalpha;
+    out.eva = in.eva; out.evb = in.evb; out.evy = in.evy;
+    std::copy_n(in.refx_internal, 2, out.refx_internal);
+    std::copy_n(in.refy_internal, 2, out.refy_internal);
+    out.capture = in.capture;
+    out.master_bright = in.master_bright;
+    out.capture_latch = in.capture_latch != 0u;
+    return out;
+}
 
 struct Pixel {
     uint32_t color = 0; // 6-bit R/G/B in bytes
@@ -2062,6 +2116,90 @@ void nds_gpu2d_set_threaded(bool enabled, unsigned workers) {
 bool nds_gpu2d_threaded() { return g_pool != nullptr; }
 
 void nds_gpu2d_shutdown_workers() { stop_pool(); }
+
+bool gpu2d_savestate_export(NdsGpu2dSaveState* out) {
+    if (!out) return false;
+    // This is called only at the scheduler's between-round transaction point.
+    // Finish every line and apply every capture write so no worker-owned job
+    // or pointer has to cross the state boundary.
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    out->unit[0] = export_unit(g_unit[0]);
+    out->unit[1] = export_unit(g_unit[1]);
+    out->framebuffers.clear();
+    out->framebuffers.reserve(4u * 256u * 192u);
+    for (const auto& buffers : g_fb)
+        for (const auto& frame : buffers)
+            out->framebuffers.insert(out->framebuffers.end(),
+                                     frame.begin(), frame.end());
+    out->front = static_cast<uint8_t>(g_front);
+    out->frame_capture_active = g_frame_capture_active ? 1u : 0u;
+    out->present_capture_active = g_present_capture_active ? 1u : 0u;
+    return true;
+}
+
+bool gpu2d_savestate_validate(const NdsGpu2dSaveState& in,
+                              std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (in.framebuffers.size() != 4u * 256u * 192u)
+        return fail("savestate GPU2D framebuffer size mismatch");
+    if (in.front > 1u || in.frame_capture_active > 1u ||
+        in.present_capture_active > 1u)
+        return fail("savestate GPU2D frame state is invalid");
+    for (const NdsGpu2dUnitSaveState& unit : in.unit) {
+        if (unit.capture_latch > 1u || unit.bg_mosaic_x > 15u ||
+            unit.bg_mosaic_y > 15u || unit.obj_mosaic_x > 15u ||
+            unit.obj_mosaic_y > 15u || unit.eva > 16u ||
+            unit.evb > 16u || unit.evy > 16u)
+            return fail("savestate GPU2D register state is invalid");
+    }
+    return true;
+}
+
+bool gpu2d_savestate_import(const NdsGpu2dSaveState& in,
+                            std::string* error) {
+    if (!gpu2d_savestate_validate(in, error)) return false;
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    g_unit[0] = import_unit(in.unit[0]);
+    g_unit[1] = import_unit(in.unit[1]);
+    size_t pos = 0;
+    for (auto& buffers : g_fb) {
+        for (auto& frame : buffers) {
+            std::copy_n(in.framebuffers.begin() +
+                            static_cast<std::ptrdiff_t>(pos),
+                        frame.size(), frame.begin());
+            pos += frame.size();
+        }
+    }
+    g_front = in.front;
+    g_frame_capture_active = in.frame_capture_active != 0u;
+    g_present_capture_active = in.present_capture_active != 0u;
+
+    // These are presentation/worker products, not DS state. Recreate them
+    // from the restored registers, VRAM, and 3D frame on subsequent hooks.
+    g_latch_job = {};
+    g_staged_bank_mask = 0;
+    g_capture_apply_index = g_pool
+        ? g_pool->head.load(std::memory_order_acquire) : 0u;
+    nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+    nds_gpu2d_staged_captures.store(0u, std::memory_order_relaxed);
+    g_direct_frame_active = false;
+    g_direct_present_frame_active = false;
+    g_direct_current_frame = {};
+    g_direct_present_frame = {};
+    g_direct_object_write = 0;
+    g_direct_force_cpu_frames = std::max(g_direct_force_cpu_frames, 1u);
+    g_hd_frame_valid = false;
+    g_hd_frame = {};
+    for (auto& frame : g_adaptive_frame) frame.fill(0u);
+    for (auto& frame : g_wide_3d_frame) frame.fill(0u);
+    for (auto& frame : g_wide_3d_attr_frame) frame.fill(0u);
+    g_wide_3d_width.fill(0u);
+    for (auto& frame : g_direct_object_frame) frame.fill(0u);
+    return true;
+}
 
 void nds_gpu2d_render_scanline(int line) {
     if (line < 0 || line >= 192) return;

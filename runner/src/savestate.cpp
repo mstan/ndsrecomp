@@ -28,7 +28,7 @@
 namespace {
 
 constexpr uint8_t kMagic[8] = {'N', 'D', 'S', 'S', 'T', 'A', 'T', 'E'};
-constexpr uint32_t kFormatVersion = 2u;
+constexpr uint32_t kFormatVersion = 3u;
 constexpr uint32_t kHeaderSize = 24u;
 constexpr uint32_t kDirEntrySize = 32u;
 constexpr uint32_t kMaxSections = 16u;
@@ -39,8 +39,11 @@ constexpr uint32_t kSectionCp15 = 0x35315043u; // CP15
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
 constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
 constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
+constexpr uint32_t kSectionVram = 0x4D415256u; // VRAM
+constexpr uint32_t kSectionGp2d = 0x44325047u; // GP2D
+constexpr uint32_t kSectionGp3d = 0x44335047u; // GP3D
 constexpr uint32_t kSectionVersion = 1u;
-constexpr uint32_t kRequiredSections = 7u;
+constexpr uint32_t kRequiredSections = 10u;
 
 struct Section {
     uint32_t tag = 0;
@@ -64,6 +67,9 @@ struct CoreState {
     NdsRuntimeSaveState runtime{};
     NdsIoCoreSaveState io{};
     NdsIoPeripheralSaveState peripherals{};
+    NdsVramSaveState vram{};
+    NdsGpu2dSaveState gpu2d{};
+    NdsGpu3dSaveState gpu3d{};
 };
 
 std::atomic_flag g_transaction_active = ATOMIC_FLAG_INIT;
@@ -707,6 +713,158 @@ bool decode_io_peripherals(const std::vector<uint8_t>& payload,
     return pos == payload.size();
 }
 
+std::vector<uint8_t> encode_vram(const NdsVramSaveState& state) {
+    std::vector<uint8_t> out;
+    put_vec8(out, state.vram);
+    put_vec8(out, state.written);
+    put_vec32(out, state.exec_generation);
+    put_vec8(out, state.palette);
+    put_vec8(out, state.oam);
+    put_bytes(out, state.vramcnt, sizeof(state.vramcnt));
+    put_u64(out, state.texture_generation);
+    return out;
+}
+
+bool decode_vram(const std::vector<uint8_t>& payload,
+                 NdsVramSaveState* state) {
+    size_t pos = 0;
+    *state = NdsVramSaveState{};
+    if (!read_vec8(payload, pos, &state->vram) ||
+        !read_vec8(payload, pos, &state->written) ||
+        !read_vec32(payload, pos, &state->exec_generation) ||
+        !read_vec8(payload, pos, &state->palette) ||
+        !read_vec8(payload, pos, &state->oam) ||
+        payload.size() - pos < sizeof(state->vramcnt))
+        return false;
+    std::memcpy(state->vramcnt, payload.data() + pos,
+                sizeof(state->vramcnt));
+    pos += sizeof(state->vramcnt);
+    return read_u64(payload, pos, &state->texture_generation) &&
+        pos == payload.size();
+}
+
+void encode_gpu2d_unit(std::vector<uint8_t>& out,
+                       const NdsGpu2dUnitSaveState& unit) {
+    put_u32(out, unit.dispcnt);
+    for (uint16_t value : unit.bgcnt) put_u32(out, value);
+    for (uint16_t value : unit.bgx) put_u32(out, value);
+    for (uint16_t value : unit.bgy) put_u32(out, value);
+    for (int16_t value : unit.pa)
+        put_u32(out, static_cast<uint16_t>(value));
+    for (int16_t value : unit.pb)
+        put_u32(out, static_cast<uint16_t>(value));
+    for (int16_t value : unit.pc)
+        put_u32(out, static_cast<uint16_t>(value));
+    for (int16_t value : unit.pd)
+        put_u32(out, static_cast<uint16_t>(value));
+    for (int32_t value : unit.refx) put_u32(out, static_cast<uint32_t>(value));
+    for (int32_t value : unit.refy) put_u32(out, static_cast<uint32_t>(value));
+    put_bytes(out, unit.win, sizeof(unit.win));
+    put_u8(out, unit.bg_mosaic_x); put_u8(out, unit.bg_mosaic_y);
+    put_u8(out, unit.obj_mosaic_x); put_u8(out, unit.obj_mosaic_y);
+    put_u32(out, unit.bldcnt); put_u32(out, unit.bldalpha);
+    put_u8(out, unit.eva); put_u8(out, unit.evb); put_u8(out, unit.evy);
+    for (int32_t value : unit.refx_internal)
+        put_u32(out, static_cast<uint32_t>(value));
+    for (int32_t value : unit.refy_internal)
+        put_u32(out, static_cast<uint32_t>(value));
+    put_u32(out, unit.capture);
+    put_u32(out, unit.master_bright);
+    put_u8(out, unit.capture_latch);
+}
+
+bool decode_gpu2d_unit(const std::vector<uint8_t>& payload, size_t& pos,
+                       NdsGpu2dUnitSaveState* unit) {
+    auto u16 = [&](uint16_t* value) {
+        uint32_t wide = 0;
+        if (!read_u32(payload, pos, &wide) || wide > UINT16_MAX) return false;
+        *value = static_cast<uint16_t>(wide);
+        return true;
+    };
+    auto s16 = [&](int16_t* value) {
+        uint16_t bits = 0;
+        if (!u16(&bits)) return false;
+        *value = static_cast<int16_t>(bits);
+        return true;
+    };
+    auto s32 = [&](int32_t* value) {
+        uint32_t bits = 0;
+        if (!read_u32(payload, pos, &bits)) return false;
+        *value = static_cast<int32_t>(bits);
+        return true;
+    };
+    auto bytes = [&](void* dst, size_t size) {
+        if (payload.size() - pos < size) return false;
+        std::memcpy(dst, payload.data() + pos, size);
+        pos += size;
+        return true;
+    };
+    if (!read_u32(payload, pos, &unit->dispcnt)) return false;
+    for (uint16_t& value : unit->bgcnt) if (!u16(&value)) return false;
+    for (uint16_t& value : unit->bgx) if (!u16(&value)) return false;
+    for (uint16_t& value : unit->bgy) if (!u16(&value)) return false;
+    for (int16_t& value : unit->pa) if (!s16(&value)) return false;
+    for (int16_t& value : unit->pb) if (!s16(&value)) return false;
+    for (int16_t& value : unit->pc) if (!s16(&value)) return false;
+    for (int16_t& value : unit->pd) if (!s16(&value)) return false;
+    for (int32_t& value : unit->refx) if (!s32(&value)) return false;
+    for (int32_t& value : unit->refy) if (!s32(&value)) return false;
+    if (!bytes(unit->win, sizeof(unit->win)) ||
+        !read_u8(payload, pos, &unit->bg_mosaic_x) ||
+        !read_u8(payload, pos, &unit->bg_mosaic_y) ||
+        !read_u8(payload, pos, &unit->obj_mosaic_x) ||
+        !read_u8(payload, pos, &unit->obj_mosaic_y) ||
+        !u16(&unit->bldcnt) || !u16(&unit->bldalpha) ||
+        !read_u8(payload, pos, &unit->eva) ||
+        !read_u8(payload, pos, &unit->evb) ||
+        !read_u8(payload, pos, &unit->evy)) return false;
+    for (int32_t& value : unit->refx_internal) if (!s32(&value)) return false;
+    for (int32_t& value : unit->refy_internal) if (!s32(&value)) return false;
+    return read_u32(payload, pos, &unit->capture) &&
+        u16(&unit->master_bright) &&
+        read_u8(payload, pos, &unit->capture_latch);
+}
+
+std::vector<uint8_t> encode_gpu2d(const NdsGpu2dSaveState& state) {
+    std::vector<uint8_t> out;
+    encode_gpu2d_unit(out, state.unit[0]);
+    encode_gpu2d_unit(out, state.unit[1]);
+    put_vec32(out, state.framebuffers);
+    put_u8(out, state.front);
+    put_u8(out, state.frame_capture_active);
+    put_u8(out, state.present_capture_active);
+    return out;
+}
+
+bool decode_gpu2d(const std::vector<uint8_t>& payload,
+                  NdsGpu2dSaveState* state) {
+    size_t pos = 0;
+    *state = NdsGpu2dSaveState{};
+    return decode_gpu2d_unit(payload, pos, &state->unit[0]) &&
+        decode_gpu2d_unit(payload, pos, &state->unit[1]) &&
+        read_vec32(payload, pos, &state->framebuffers) &&
+        read_u8(payload, pos, &state->front) &&
+        read_u8(payload, pos, &state->frame_capture_active) &&
+        read_u8(payload, pos, &state->present_capture_active) &&
+        pos == payload.size();
+}
+
+std::vector<uint8_t> encode_gpu3d(const NdsGpu3dSaveState& state) {
+    std::vector<uint8_t> out;
+    put_vec8(out, state.device);
+    put_u64(out, state.arm9_timestamp);
+    return out;
+}
+
+bool decode_gpu3d(const std::vector<uint8_t>& payload,
+                  NdsGpu3dSaveState* state) {
+    size_t pos = 0;
+    *state = NdsGpu3dSaveState{};
+    return read_vec8(payload, pos, &state->device) &&
+        read_u64(payload, pos, &state->arm9_timestamp) &&
+        pos == payload.size();
+}
+
 bool append_section(std::vector<Section>& sections, uint32_t tag,
                     std::vector<uint8_t> payload, std::string* error) {
     if (payload.empty()) {
@@ -727,7 +885,8 @@ bool append_section(std::vector<Section>& sections, uint32_t tag,
 bool known_section_tag(uint32_t tag) {
     return tag == kSectionIden || tag == kSectionSchd ||
         tag == kSectionMemr || tag == kSectionCp15 ||
-        tag == kSectionRtim || tag == kSectionIocr || tag == kSectionIopf;
+        tag == kSectionRtim || tag == kSectionIocr || tag == kSectionIopf ||
+        tag == kSectionVram || tag == kSectionGp2d || tag == kSectionGp3d;
 }
 
 bool atomic_write_file(const std::string& path,
@@ -976,8 +1135,16 @@ bool export_core_state(CoreState* out, std::string* error) {
     }
     cp15_savestate_export(&out->cp15);
     runtime_savestate_export(&out->runtime);
-    return io_savestate_export(&out->io) &&
-        io_peripheral_savestate_export(&out->peripherals);
+    if (!io_savestate_export(&out->io) ||
+        !io_peripheral_savestate_export(&out->peripherals) ||
+        !vram_savestate_export(&out->vram) ||
+        !gpu2d_savestate_export(&out->gpu2d) ||
+        !gpu3d_savestate_export(&out->gpu3d, error)) {
+        if (error && error->empty())
+            *error = "failed to export video savestate sections";
+        return false;
+    }
+    return true;
 }
 
 bool import_core_state(const CoreState& state, std::string* error) {
@@ -986,6 +1153,9 @@ bool import_core_state(const CoreState& state, std::string* error) {
         !runtime_savestate_import(state.runtime, error) ||
         !io_savestate_import(state.io, error) ||
         !io_peripheral_savestate_import(state.peripherals, error) ||
+        !vram_savestate_import(state.vram, error) ||
+        !gpu2d_savestate_import(state.gpu2d, error) ||
+        !gpu3d_savestate_import(state.gpu3d, error) ||
         !scheduler_savestate_import(state.scheduler, error))
         return false;
     bus_fast_refresh();
@@ -1032,7 +1202,10 @@ bool validate_core_state(const CoreState& state, std::string* error) {
             return fail("savestate scheduler state is invalid");
     }
     if (!io_savestate_validate(state.io, error) ||
-        !io_peripheral_savestate_validate(state.peripherals, error))
+        !io_peripheral_savestate_validate(state.peripherals, error) ||
+        !vram_savestate_validate(state.vram, error) ||
+        !gpu2d_savestate_validate(state.gpu2d, error) ||
+        !gpu3d_savestate_validate(state.gpu3d, error))
         return false;
     const uint64_t now = state.scheduler.system_timestamp;
     auto pending_not_in_past = [&](uint64_t deadline) {
@@ -1105,7 +1278,13 @@ bool nds_savestate_save_core(const std::string& path,
         !append_section(sections, kSectionIocr,
                         encode_io_core(core.io), error) ||
         !append_section(sections, kSectionIopf,
-                        encode_io_peripherals(core.peripherals), error))
+                        encode_io_peripherals(core.peripherals), error) ||
+        !append_section(sections, kSectionVram,
+                        encode_vram(core.vram), error) ||
+        !append_section(sections, kSectionGp2d,
+                        encode_gpu2d(core.gpu2d), error) ||
+        !append_section(sections, kSectionGp3d,
+                        encode_gpu3d(core.gpu3d), error))
         return false;
 
     return atomic_write_file(path, build_file(sections), error);
@@ -1173,6 +1352,21 @@ bool nds_savestate_load_core(const std::string& path,
     if (!find_section(sections, kSectionIopf, &payload) ||
         !decode_io_peripherals(payload, &loaded.peripherals)) {
         set_error(error, "IO peripheral section is missing or corrupt");
+        return false;
+    }
+    if (!find_section(sections, kSectionVram, &payload) ||
+        !decode_vram(payload, &loaded.vram)) {
+        set_error(error, "VRAM section is missing or corrupt");
+        return false;
+    }
+    if (!find_section(sections, kSectionGp2d, &payload) ||
+        !decode_gpu2d(payload, &loaded.gpu2d)) {
+        set_error(error, "GPU2D section is missing or corrupt");
+        return false;
+    }
+    if (!find_section(sections, kSectionGp3d, &payload) ||
+        !decode_gpu3d(payload, &loaded.gpu3d)) {
+        set_error(error, "GPU3D section is missing or corrupt");
         return false;
     }
     // Historical mutable flash is session-local after load. This override is

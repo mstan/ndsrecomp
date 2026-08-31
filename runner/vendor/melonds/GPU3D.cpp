@@ -409,6 +409,11 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
     {
         u32 index = UINT32_MAX;
         file->Var32(&index);
+        if (index != UINT32_MAX && index >= 4096)
+        {
+            file->Error = true;
+            return;
+        }
         LastStripPolygon = (index == UINT32_MAX) ? nullptr : &PolygonRAM[index];
     }
 
@@ -446,11 +451,21 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
             {
                 u32 index = UINT32_MAX;
                 file->Var32(&index);
+                if (index != UINT32_MAX && index >= 12288)
+                {
+                    file->Error = true;
+                    return;
+                }
                 poly->Vertices[j] = index == UINT32_MAX ? nullptr : &VertexRAM[index];
             }
         }
 
         file->Var32(&poly->NumVertices);
+        if (!file->Saving && poly->NumVertices > 10)
+        {
+            file->Error = true;
+            return;
+        }
 
         file->VarArray(poly->FinalZ, sizeof(s32)*10);
         file->VarArray(poly->FinalW, sizeof(s32)*10);
@@ -504,6 +519,11 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
 
     if (!file->Saving)
     {
+        if (CurRAMBank > 1)
+        {
+            file->Error = true;
+            return;
+        }
         ClipMatrixDirty = true;
         UpdateClipMatrix();
 
@@ -512,6 +532,11 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
     }
 
     file->Var32(&RenderNumPolygons);
+    if (!file->Saving && RenderNumPolygons > RenderPolygonRAM.size())
+    {
+        file->Error = true;
+        return;
+    }
     if (file->Saving)
     {
         for (const Polygon* p : RenderPolygonRAM)
@@ -527,6 +552,11 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
         {
             u32 index = UINT32_MAX;
             file->Var32(&index);
+            if (index != UINT32_MAX && index >= 4096)
+            {
+                file->Error = true;
+                return;
+            }
 
             RenderPolygonRAM[i] = index == UINT32_MAX ? nullptr : &PolygonRAM[index];
         }

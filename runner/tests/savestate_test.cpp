@@ -16,6 +16,8 @@
 void savestate_test_fail_next_io_import();
 void savestate_test_fail_next_peripheral_import_after_apply();
 void savestate_test_reset_io_state();
+void savestate_test_set_video_pattern(uint8_t seed);
+bool savestate_test_video_matches(uint8_t seed);
 
 namespace {
 
@@ -25,6 +27,9 @@ constexpr uint32_t kSectionSchd = 0x44484353u; // SCHD
 constexpr uint32_t kSectionRtim = 0x4D495452u; // RTIM
 constexpr uint32_t kSectionIocr = 0x52434F49u; // IOCR
 constexpr uint32_t kSectionIopf = 0x46504F49u; // IOPF
+constexpr uint32_t kSectionVram = 0x4D415256u; // VRAM
+constexpr uint32_t kSectionGp2d = 0x44325047u; // GP2D
+constexpr uint32_t kSectionGp3d = 0x44335047u; // GP3D
 constexpr size_t kEncodedArmCpuStateBytes =
     (16u + 1u + ARM_BANK_COUNT * 3u + 5u + 5u) * 4u;
 constexpr size_t kEncodedSchedulerCpuBlockBytes =
@@ -1050,6 +1055,72 @@ bool control_thread_is_not_quiescent_owner() {
     return ok;
 }
 
+bool video_sections_roundtrip_and_prevalidate() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-video.nss";
+    const std::filesystem::path replay =
+        std::filesystem::temp_directory_path() /
+        "ndsrecomp-savestate-video-replay.nss";
+    std::filesystem::remove(path);
+    std::filesystem::remove(replay);
+    reset_test_machine();
+    scheduler_reset_cpu(0, 0xFFFF0000u, 0xD3u);
+    scheduler_reset_cpu(1, 0x00000000u, 0xD3u);
+    const NdsSavestateIdentity identity{
+        "build-video", "0123456789abcdef0123456789abcdef01234567"};
+    std::string error;
+    savestate_test_set_video_pattern(0x31u);
+    bool ok = expect(nds_savestate_save_core(path.string(), identity, &error),
+                     error.c_str());
+
+    savestate_test_set_video_pattern(0x71u);
+    ok &= expect(nds_savestate_load_core(path.string(), identity, &error),
+                 error.c_str());
+    ok &= expect(savestate_test_video_matches(0x31u),
+                 "VRAM, mid-frame GPU2D capture, and GPU3D roundtrip");
+    ok &= expect(nds_savestate_save_core(replay.string(), identity, &error),
+                 error.c_str());
+    std::vector<uint8_t> original, repeated;
+    for (uint32_t tag : {kSectionVram, kSectionGp2d, kSectionGp3d}) {
+        ok &= expect(section_payload(path, tag, &original),
+                     "extract original video section") &&
+            expect(section_payload(replay, tag, &repeated),
+                   "extract repeated video section") &&
+            expect(original == repeated,
+                   "repeated video load/save is byte deterministic");
+    }
+    ok &= expect(section_payload(path, kSectionGp2d, &original),
+                 "extract GPU2D section for endian check") &&
+        expect_le32_at(original, 0u, 0x00010031u,
+                       "GPU2D DISPCNT is explicit little-endian");
+    ok &= expect(section_payload(path, kSectionGp3d, &original),
+                 "extract GPU3D section for endian check") &&
+        expect_le32_at(original, 0u, 6u,
+                       "GPU3D vendored payload length is explicit little-endian") &&
+        expect_le32_at(original, 10u, 0x55660031u,
+                       "GPU3D bridge timestamp is explicit little-endian");
+
+    // Two units occupy 152 bytes each, followed by the explicit framebuffer
+    // vector length and four 256x192 u32 framebuffers. `front` is the next
+    // byte. Recompute the section CRC so this reaches semantic prevalidation.
+    constexpr size_t kGpu2dFrontOffset =
+        2u * 152u + 4u + 4u * 256u * 192u * sizeof(uint32_t);
+    savestate_test_set_video_pattern(0x71u);
+    ok &= expect(patch_section_u8(path, kSectionGp2d,
+                                  kGpu2dFrontOffset, 7u),
+                 "patch invalid GPU2D front buffer") &&
+        expect(!nds_savestate_load_core(path.string(), identity, &error),
+               "invalid GPU2D section is rejected before apply") &&
+        expect(savestate_test_video_matches(0x71u),
+               "video prevalidation failure leaves all owners untouched");
+
+    std::filesystem::remove(path);
+    std::filesystem::remove(replay);
+    runtime_shutdown();
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -1063,5 +1134,6 @@ int main() {
     ok &= peripheral_roundtrip_rollback_and_deadlines();
     ok &= eligibility_hook_rejects_before_export();
     ok &= control_thread_is_not_quiescent_owner();
+    ok &= video_sections_roundtrip_and_prevalidate();
     return ok ? 0 : 1;
 }

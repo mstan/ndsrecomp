@@ -424,3 +424,13 @@ words are verified resident). While set:
 
 Cleared (the default), both sites behave byte-for-byte as `0009` left them, so
 this is inert for every title that does not opt in.
+
+## 0017-savestate-index-validation.patch
+
+`src/FIFO.h` and `src/GPU3D.cpp`: reject out-of-range FIFO metadata,
+geometry pointer indexes, polygon vertex counts, RAM-bank selectors, and render
+list counts while loading a vendored save-state stream. Upstream's serializer
+represents pointers as indexes but trusted those indexes before the runner
+could semantically validate the detached device. These checks do not change
+the stream format or any valid state; they make a checksum-recomputed corrupt
+`GP3D` section fail before it can construct or dereference an invalid pointer.

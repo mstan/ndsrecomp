@@ -789,6 +789,26 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
   add_test(NAME savestate_test COMMAND savestate_test)
 
+  add_executable(video_savestate_test
+      tests/video_savestate_test.cpp
+      tests/video_savestate_test_stubs.cpp
+      src/vram.cpp
+      src/gpu2d.cpp
+      src/gpu3d.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      vendor/melonds/GPU3D.cpp
+      vendor/melonds/GPU3D_Soft.cpp
+      vendor/melonds/Savestate.cpp)
+  target_include_directories(video_savestate_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  target_compile_definitions(video_savestate_test PRIVATE
+      NDS_BUILD_VIDEO_SAVESTATE_TEST=1)
+  add_test(NAME video_savestate_test COMMAND video_savestate_test)
+
   # AUXSPI backup-chip protocol: pins the write-enable latch's lifetime across
   # chip-select transfers, which is what silently dropped every cartridge save.
   add_executable(cart_backup_test

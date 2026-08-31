@@ -19,6 +19,7 @@
 #include "io.h"
 #include "gpu2d.h"
 #include "scheduler.h"
+#include "savestate.h"
 #include "state.h"
 #include "vram.h"
 #include "net/net_ring.h"
@@ -55,6 +56,64 @@ NdsGpu3dProfile g_gpu3d_profile{};
 using ProfileClock = std::chrono::steady_clock;
 bool profiling();
 void profile_add(uint64_t& dst, ProfileClock::time_point start);
+
+bool pointer_in_array(const void* pointer, const void* begin,
+                      size_t count, size_t element_size) {
+    if (!pointer) return false;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(pointer);
+    const uintptr_t first = reinterpret_cast<uintptr_t>(begin);
+    const uintptr_t bytes = count * element_size;
+    return value >= first && value < first + bytes &&
+        ((value - first) % element_size) == 0u;
+}
+
+bool validate_gpu3d_device(const melonDS::GPU3D& gpu,
+                           std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (gpu.CurRAMBank > 1u || gpu.NumVertices > 6144u ||
+        gpu.NumPolygons > 2048u || gpu.NumOpaquePolygons > gpu.NumPolygons ||
+        gpu.RenderNumPolygons > 2048u)
+        return fail("savestate GPU3D RAM state is invalid");
+    if (gpu.ProjMatrixStackPointer < 0 ||
+        gpu.ProjMatrixStackPointer > 1 ||
+        gpu.PosMatrixStackPointer < 0 ||
+        gpu.PosMatrixStackPointer > 63 ||
+        gpu.TexMatrixStackPointer < 0 ||
+        gpu.TexMatrixStackPointer > 1 ||
+        gpu.MatrixMode > 3u || gpu.VertexNum > 4u ||
+        gpu.VertexNumInPoly > 10u || gpu.ExecParamCount > 32u ||
+        gpu.ParamCount > 32u || gpu.TotalParams > 32u)
+        return fail("savestate GPU3D command state is invalid");
+    const melonDS::Vertex* expected_vertex =
+        &gpu.VertexRAM[gpu.CurRAMBank ? 6144u : 0u];
+    const melonDS::Polygon* expected_polygon =
+        &gpu.PolygonRAM[gpu.CurRAMBank ? 2048u : 0u];
+    if (gpu.CurVertexRAM != expected_vertex ||
+        gpu.CurPolygonRAM != expected_polygon)
+        return fail("savestate GPU3D active RAM pointer is invalid");
+    if (gpu.LastStripPolygon &&
+        !pointer_in_array(gpu.LastStripPolygon, gpu.PolygonRAM, 4096u,
+                          sizeof(gpu.PolygonRAM[0])))
+        return fail("savestate GPU3D strip pointer is invalid");
+    for (const melonDS::Polygon& polygon : gpu.PolygonRAM) {
+        if (polygon.NumVertices > 10u)
+            return fail("savestate GPU3D polygon vertex count is invalid");
+        for (uint32_t i = 0; i < polygon.NumVertices; ++i) {
+            if (!pointer_in_array(polygon.Vertices[i], gpu.VertexRAM, 12288u,
+                                  sizeof(gpu.VertexRAM[0])))
+                return fail("savestate GPU3D vertex pointer is invalid");
+        }
+    }
+    for (uint32_t i = 0; i < gpu.RenderNumPolygons; ++i) {
+        if (!pointer_in_array(gpu.RenderPolygonRAM[i], gpu.PolygonRAM, 4096u,
+                              sizeof(gpu.PolygonRAM[0])))
+            return fail("savestate GPU3D render pointer is invalid");
+    }
+    return true;
+}
 
 // Internal-resolution (HD) multiplier for the accelerated renderer. 4x of a
 // 448-wide adaptive raster is 1792x768; the compute renderer's tile and span
@@ -621,6 +680,133 @@ bool nds_gpu3d_run_trace_get(uint64_t count, NdsGxRunTraceEntry* out) {
     const NdsGxRunTraceEntry& e = g_gx_run_trace[(count - 1) % kGxRunTraceSize];
     if (e.count != count) return false;
     *out = e;
+    return true;
+}
+
+bool gpu3d_savestate_export(NdsGpu3dSaveState* out, std::string* error) {
+    if (!out) return false;
+    // GPU3D::DoSavestate waits for the software render thread before walking
+    // its pointer-rich geometry graph. The compute path has no CPU worker but
+    // can have an asynchronous readback; finish it before taking the device
+    // snapshot so no host command references state being replaced.
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_compute_readback_pending) compute_finish_readback();
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) glFinish();
+#endif
+    melonDS::Savestate state;
+    if (state.Error) {
+        if (error) *error = "failed to allocate GPU3D savestate buffer";
+        return false;
+    }
+    g_nds.GPU.GPU3D.DoSavestate(&state);
+    state.Finish();
+    if (state.Error || state.Length() == 0u) {
+        if (error) *error = "failed to serialize GPU3D device state";
+        return false;
+    }
+    const uint8_t* begin = static_cast<const uint8_t*>(state.Buffer());
+    out->device.assign(begin, begin + state.Length());
+    out->arm9_timestamp = g_nds.ARM9Timestamp;
+    return true;
+}
+
+bool gpu3d_savestate_validate(const NdsGpu3dSaveState& in,
+                              std::string* error) {
+    if (in.device.size() < 32u || in.device.size() > 32u * 1024u * 1024u) {
+        if (error) *error = "savestate GPU3D payload size is invalid";
+        return false;
+    }
+    auto read_le32 = [&](size_t offset) {
+        return static_cast<uint32_t>(in.device[offset]) |
+            (static_cast<uint32_t>(in.device[offset + 1]) << 8u) |
+            (static_cast<uint32_t>(in.device[offset + 2]) << 16u) |
+            (static_cast<uint32_t>(in.device[offset + 3]) << 24u);
+    };
+    // This bridge writes exactly one version-12 vendored section. Pin that
+    // ownership before invoking melonDS's generic section finder, whose
+    // compatibility behavior otherwise permits unrelated/reordered sections.
+    const uint16_t major = static_cast<uint16_t>(in.device[4]) |
+        (static_cast<uint16_t>(in.device[5]) << 8u);
+    const uint16_t minor = static_cast<uint16_t>(in.device[6]) |
+        (static_cast<uint16_t>(in.device[7]) << 8u);
+    if (std::memcmp(in.device.data(), "MELN", 4u) != 0 || major != 12u ||
+        minor > 1u || read_le32(8u) != in.device.size() ||
+        std::memcmp(in.device.data() + 16u, "GP3D", 4u) != 0 ||
+        read_le32(20u) != in.device.size() - 16u) {
+        if (error) *error = "savestate GPU3D section envelope is invalid";
+        return false;
+    }
+    // Decode into a detached device first. This both validates the vendored
+    // stream header/sections and reconstructs pointer indices without
+    // touching the live renderer. The top-level section CRC rejects corrupt
+    // bytes before this parser runs.
+    auto candidate = std::make_unique<melonDS::NDS>();
+    melonDS::Savestate state(const_cast<uint8_t*>(in.device.data()),
+                             static_cast<melonDS::u32>(in.device.size()),
+                             false);
+    if (state.Error) {
+        if (error) *error = "savestate GPU3D stream is invalid";
+        return false;
+    }
+    candidate->GPU.GPU3D.DoSavestate(&state);
+    if (state.Error) {
+        if (error) *error = "savestate GPU3D section is corrupt";
+        return false;
+    }
+    return validate_gpu3d_device(candidate->GPU.GPU3D, error);
+}
+
+bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
+                            std::string* error) {
+    if (!gpu3d_savestate_validate(in, error)) return false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_compute_readback_pending) compute_finish_readback();
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) glFinish();
+#endif
+    melonDS::Savestate state(const_cast<uint8_t*>(in.device.data()),
+                             static_cast<melonDS::u32>(in.device.size()),
+                             false);
+    g_nds.GPU.GPU3D.DoSavestate(&state);
+    if (state.Error || !validate_gpu3d_device(g_nds.GPU.GPU3D, error)) {
+        if (state.Error && error) *error = "failed to apply GPU3D device state";
+        return false;
+    }
+    g_nds.ARM9Timestamp = in.arm9_timestamp;
+
+    // Flat VRAM, texture cache entries, framebuffers and every GL object are
+    // host products. Invalidate them and rebuild the current raster from the
+    // restored render list; never persist handles, PBO fences, or pointers.
+    g_texture_flat_gen = 0;
+    g_texpal_flat_gen = 0;
+    std::memset(g_nds.GPU.VRAMFlat_Texture, 0,
+                sizeof g_nds.GPU.VRAMFlat_Texture);
+    std::memset(g_nds.GPU.VRAMFlat_TexPal, 0,
+                sizeof g_nds.GPU.VRAMFlat_TexPal);
+    auto& gpu = g_nds.GPU.GPU3D;
+    gpu.GetCurrentRenderer().Reset(g_nds.GPU);
+    gpu.RenderFrameIdentical = false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_compute_rendered_frame = false;
+    g_compute_readback_pending = false;
+    g_compute_frame_ready = false;
+    std::memset(g_compute_frame, 0, sizeof g_compute_frame);
+    std::memset(g_compute_attr_frame, 0, sizeof g_compute_attr_frame);
+#endif
+    if (!gpu.AbortFrame) {
+        gpu.GetCurrentRenderer().RenderFrame(g_nds.GPU);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        if (gpu.IsRendererAccelerated()) {
+            g_compute_rendered_frame = true;
+            compute_submit_readback();
+            compute_finish_readback();
+            if (g_compute_runtime_failed) {
+                if (error) *error =
+                    "failed to rebuild compute renderer after savestate load";
+                return false;
+            }
+        }
+#endif
+    }
     return true;
 }
 
