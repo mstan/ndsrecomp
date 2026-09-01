@@ -991,6 +991,31 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
+  # beads-yjp.70 phase 2A: the emitted inline code-fetch cost must equal
+  # runtime_code_cycles() exactly. Links the real bus/cp15 units (with the
+  # savestate test's device stubs) so it pins the runtime, not a model.
+  add_executable(code_cycles_fold_test
+      tests/code_cycles_fold_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      src/pc_profile.cpp)
+  target_include_directories(code_cycles_fold_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(code_cycles_fold_test)
+  target_link_libraries(code_cycles_fold_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME code_cycles_fold_test COMMAND code_cycles_fold_test)
+
   add_executable(gpu2d_window_test
       tests/gpu2d_window_test.cpp
       # The test #includes src/gpu2d.cpp wholesale, so it inherits the

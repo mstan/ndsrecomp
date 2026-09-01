@@ -386,5 +386,11 @@ bool cp15_savestate_import(const NdsCp15SaveState& in, std::string* error) {
     g_class_inputs_valid = false;
     cp15_class_sync();
     bus_fast_refresh();
+    // The restored timing generation could coincide with the one the ARM9
+    // code-fetch class was published for (nds_code_numc's validity token)
+    // while g_cp15's ITCM window is now different, so drop the publication
+    // explicitly — a CP15 *write* bumps the generation and needs no help,
+    // but an import rewinds it.
+    arm9_code_fast_invalidate();
     return true;
 }

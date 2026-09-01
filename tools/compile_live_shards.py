@@ -1132,6 +1132,11 @@ _TCC_EXTERN_RE = re.compile(rb'^(extern[ \t]+)(?!"C")', re.M)
 # to a link error (or worse, a private copy), so assert them up front.
 _TCC_REQUIRED_IMPORTS = (
     "g_cpu", "g_busf_main", "g_busf_itcm", "g_runtime_cycles",
+    # beads-yjp.70 phase 2A: the inline per-instruction code-fetch cost
+    # (nds_code_numc) reads these directly, so a tcc shard needs them as
+    # imports or it would link a private copy and charge the wrong cycles.
+    "g_last_code_pc", "g_cp15_timing_generation", "g_arm9_code_pub_gen",
+    "g_arm9_code_class_shift", "g_arm9_itcm_code_limit",
 )
 
 

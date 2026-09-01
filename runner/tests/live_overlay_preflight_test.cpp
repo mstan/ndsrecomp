@@ -14,6 +14,14 @@ extern "C" uint64_t g_insn_count[2] = {};
 extern "C" uint32_t g_insn_hook_armed = 0;
 extern "C" unsigned long long g_nds_fast_limit = 0;
 extern "C" unsigned char g_nds_unwinding = 0;
+// beads-yjp.70 phase 2A: a shard's inline per-instruction code-fetch cost
+// (nds_code_numc) reads these five words directly, so a REAL shard DLL built
+// against this image needs them defined and exported here too.
+extern "C" uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+extern "C" uint32_t g_cp15_timing_generation = 1u;
+extern "C" uint32_t g_arm9_code_pub_gen = 0u;
+extern "C" uint32_t g_arm9_code_class_shift = 0u;
+extern "C" uint32_t g_arm9_itcm_code_limit = 0u;
 NdsCpu g_nds_active = NDS_ARM9;
 NdsBusFastWin g_busf_main = {};
 NdsBusFastWin g_busf_itcm = {};

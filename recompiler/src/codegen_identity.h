@@ -51,7 +51,13 @@ namespace ndsrecomp {
 //     masked bytes inline when the write provably cannot change mode; tiny
 //     `bx lr` leaf bodies are expanded at direct BL sites behind the
 //     runtime_inline_leaf_admit gate.
-inline constexpr unsigned kCodegenVersion = 2;
+// 3 — beads-yjp.70 phase 2A: the per-instruction code-fetch cost is emitted
+//     as nds_code_numc(pc, NDS_ARM9_CODE_K(pc, thumb)) — a codegen-time
+//     packed per-class constant selected by the runtime's published ARM9
+//     code-timing class — instead of a runtime_code_cycles(pc) call, and
+//     condition guards call the inline arm_cond_passes_i. Emitted cycle
+//     counts and tick boundaries are unchanged.
+inline constexpr unsigned kCodegenVersion = 3;
 
 // The string `--codegen-identity` prints and the shard provider identity
 // folds. Tagged so that a hash of it can never collide with a bare integer

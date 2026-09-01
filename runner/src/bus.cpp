@@ -1076,10 +1076,42 @@ Arm9CodeTimingCache g_arm9_code_timing{};
 Arm9CodeTiming g_arm9_region_code_timing = Arm9CodeTiming::Other;
 bool g_arm9_region_code_timing_valid = false;
 
+// ── Published ARM9 code-fetch class (beads-yjp.70 phase 2A) ────────────
+// Generated code selects its per-instruction numC from a codegen-time
+// packed constant using these three words instead of calling
+// runtime_code_cycles() — see NDS_ARM9_CODE_K / nds_code_numc in
+// recompiler/armv4t/runtime_arm.h for the contract. They are published
+// wherever the latched class is (re)established, and invalidated by
+// setting g_arm9_code_pub_gen to a value that cannot match
+// g_cp15_timing_generation (which is never 0).
+extern "C" {
+uint32_t g_arm9_code_pub_gen = 0u;
+uint32_t g_arm9_code_class_shift = 0u;
+uint32_t g_arm9_itcm_code_limit = 0u;
+}
+
+static void arm9_code_fast_publish() {
+    g_arm9_itcm_code_limit = g_cp15.itcm_enable ? g_cp15.itcm_size : 0u;
+    if (!g_arm9_region_code_timing_valid) {
+        g_arm9_code_pub_gen = 0u;
+        return;
+    }
+    // The latched region class is only ever Cached/MainRam/Other (ITCM is
+    // decided per-address against g_arm9_itcm_code_limit), but byte 0 of
+    // the packed table carries the ITCM cost anyway, so even a class-0
+    // shift would select the right value.
+    g_arm9_code_class_shift =
+        8u * static_cast<uint32_t>(g_arm9_region_code_timing);
+    g_arm9_code_pub_gen = g_cp15_timing_generation;
+}
+
+extern "C" void arm9_code_fast_invalidate(void) { g_arm9_code_pub_gen = 0u; }
+
 static void reset_arm9_code_timing() {
     g_arm9_code_timing = {};
     g_arm9_region_code_timing = Arm9CodeTiming::Other;
     g_arm9_region_code_timing_valid = false;
+    g_arm9_code_pub_gen = 0u;
 }
 
 Arm9CodeTiming arm9_code_timing(uint32_t addr) {
@@ -1118,6 +1150,10 @@ Arm9CodeTiming arm9_current_code_timing(uint32_t addr) {
 Arm9CodeTiming arm9_latch_code_timing(uint32_t addr) {
     g_arm9_region_code_timing = arm9_code_timing(addr);
     g_arm9_region_code_timing_valid = true;
+    // Every taken branch lands here (arm9_refill_cycles), so republishing the
+    // inline code-fetch class costs three stores per control transfer and
+    // keeps the emitted fast path live across CP15 writes.
+    arm9_code_fast_publish();
     if (g_cp15.itcm_enable && addr < g_cp15.itcm_size)
         return Arm9CodeTiming::Itcm;
     return g_arm9_region_code_timing;
@@ -1384,8 +1420,18 @@ extern "C" uint32_t runtime_code_cycles(uint32_t pc) {
     // the firmware's Thumb BIOS IRQ-wait spin during the IPC handshake). This is
     // a true raw-zero (not a baseline absorption) â€” kept as-is.
     const bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
+    // NOTE: this early return must stay AHEAD of arm9_current_code_timing —
+    // that call latches the region class as a side effect when nothing has
+    // been latched yet, and the odd-halfword fetch must not do that.
     if (thumb && (pc & 2u)) return 0u;
     const Arm9CodeTiming timing = arm9_current_code_timing(pc);
+    // Republish for the emitted inline path (nds_code_numc): reaching this
+    // function from a bank means the publication was stale (a CP15 write bumped
+    // g_cp15_timing_generation, or nothing had been latched yet), and
+    // arm9_current_code_timing above has just re-established the latch. An
+    // odd-halfword Thumb fetch returns above without publishing; the next
+    // even-halfword instruction publishes for it.
+    arm9_code_fast_publish();
     if (timing == Arm9CodeTiming::Itcm) return 1u;   // ITCM
     // I-cache-served region: melonDS degrades the fetch to a flat averaged cost
     // (kCodeCacheTiming=3 at a 32-byte line boundary, else 1; un-shifted). This

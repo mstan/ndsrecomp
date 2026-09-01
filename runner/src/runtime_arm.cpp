@@ -1448,17 +1448,11 @@ void nds_restore_unwind_state() {
 
 // ── Condition codes (verbatim) ──────────────────────────────────────────
 extern "C" int arm_cond_passes(unsigned cond) {
-    const uint32_t n = cpsr_n(), z = cpsr_z(), c = cpsr_c(), v = cpsr_v();
-    switch (cond & 0xFu) {
-        case 0x0: return z != 0;                 case 0x1: return z == 0;
-        case 0x2: return c != 0;                 case 0x3: return c == 0;
-        case 0x4: return n != 0;                 case 0x5: return n == 0;
-        case 0x6: return v != 0;                 case 0x7: return v == 0;
-        case 0x8: return (c != 0) && (z == 0);   case 0x9: return (c == 0) || (z != 0);
-        case 0xA: return n == v;                 case 0xB: return n != v;
-        case 0xC: return (z == 0) && (n == v);   case 0xD: return (z != 0) || (n != v);
-        case 0xE: return 1;                      default:  return 0;  // NV
-    }
+    // Single contract, two spellings: the inline form in
+    // recompiler/armv4t/runtime_arm.h is the definition; this exported
+    // symbol stays for shards emitted before beads-yjp.70 phase 2A and
+    // for the C++ runtime's own callers.
+    return arm_cond_passes_i(cond);
 }
 
 // ── Shifters (verbatim) ─────────────────────────────────────────────────
