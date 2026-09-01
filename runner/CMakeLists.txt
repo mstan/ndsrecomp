@@ -902,6 +902,20 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   set_target_properties(live_overlay_preflight_test PROPERTIES ENABLE_EXPORTS ON)
+  if(WIN32)
+    # beads-yjp.68: the codegen-gate test builds a REAL shard DLL that binds to
+    # this executable's runner data symbols, exactly as a field shard binds to
+    # nds_runner.exe through src/runtime_exports.def. Same mechanism, smaller
+    # surface: an explicit .def names the exports, --out-implib names the
+    # import library the shard links against. ENABLE_EXPORTS alone produces
+    # neither under MinGW.
+    target_link_options(live_overlay_preflight_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_preflight_exports.def"
+        "-Wl,--out-implib,${CMAKE_CURRENT_BINARY_DIR}/liblive_overlay_preflight_test.dll.a")
+    set_property(TARGET live_overlay_preflight_test APPEND PROPERTY
+        LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_preflight_exports.def")
+  endif()
   if(CMAKE_DL_LIBS)
     target_link_libraries(live_overlay_preflight_test PRIVATE ${CMAKE_DL_LIBS})
   endif()
@@ -988,6 +1002,21 @@ ndsrecomp_link_tomlpp(frontend_config_test)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_wrapper_test.py"
                 --gcc "${CMAKE_C_COMPILER}"
                 --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-wrapper-work")
+    # beads-yjp.68: the producer-codegen load gate. A shard built at
+    # kCodegenVersion-1 must be refused OUTRIGHT and moved into the cache's
+    # quarantine subtree; one built at kCodegenVersion must pass the gate.
+    # Both halves are driven through the real loader (prepare_bank_dll) with
+    # real DLLs, because that is the only code path a cached shard can take.
+    add_test(
+        NAME live_shard_codegen_gate_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_codegen_gate_test.py"
+                --cc "${CMAKE_C_COMPILER}"
+                --runner-test "$<TARGET_FILE:live_overlay_preflight_test>"
+                --implib-dir "${CMAKE_CURRENT_BINARY_DIR}"
+                --codegen-identity-header
+                "${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/src/codegen_identity.h"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-codegen-gate-work")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       add_test(
           NAME live_overlay_linux_loader_test

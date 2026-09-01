@@ -199,8 +199,3 @@ bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
                                       const char* path_key,
                                       const NdsDispatchEntry* dispatch,
                                       unsigned dispatch_len);
-bool live_overlay_admit_bank_with_codegen_for_test(
-    int cpu, const char* bank_id, const char* candidate_id,
-    const char* generation_id, unsigned backend_tier,
-    unsigned producer_codegen_version, const char* path_key,
-    const NdsDispatchEntry* dispatch, unsigned dispatch_len);

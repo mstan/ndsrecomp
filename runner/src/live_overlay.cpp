@@ -1,4 +1,4 @@
-﻿#include "live_overlay.h"
+#include "live_overlay.h"
 
 #include <algorithm>
 #include <array>
@@ -151,14 +151,18 @@ enum class DiagKind : uint8_t {
     X(LoadClosureNotShared,        "load_closure_not_shared")                 \
     X(LoadRowsUnsorted,            "load_rows_unsorted")                      \
     X(LoadRowsDuplicate,           "load_rows_duplicate")                     \
-    X(LoadStaleStaticCovered,      "load_stale_static_covered")              \
+    /* beads-yjp.68: the shard's producer codegen version is not this          \
+       runner's ndsrecomp::kCodegenVersion. A live shard binds straight into   \
+       runner data symbols and is compiled against the runtime struct          \
+       layouts, so codegen_identity.h forbids EXECUTING it -- the whole bank   \
+       is refused at load and its files are moved aside. */                    \
+    X(LoadCodegenMismatch,         "load_codegen_mismatch")                   \
     /* commit_prepared_bank */                                                \
     X(LoadContentConflict,         "load_content_conflict")                   \
     X(DropDuplicateCandidate,      "drop_duplicate_candidate")                \
     X(DropDeclinedLowerTier,       "drop_declined_lower_tier")                \
     X(DropSupersededGeneration,    "drop_superseded_generation")              \
     X(DropRedundantSubset,         "drop_redundant_subset")                   \
-    X(DropStaleStaticRows,         "drop_stale_static_rows")                 \
     X(KeptDivergentGeneration,     "kept_divergent_generation")               \
     /* dispatch_validation_live, classified where ++bank->rejects happens */  \
     X(GuardRowNotOwned,            "guard_row_not_owned")                     \
@@ -241,7 +245,6 @@ struct LoadedBank {
     uint32_t exc_base = 0;
     const NdsDispatchEntry* dispatch = nullptr;
     unsigned dispatch_len = 0;
-    std::vector<NdsDispatchEntry> filtered_dispatch;
     uint64_t native_hits = 0u;
     uint64_t rejects = 0u;
     uint64_t content_identity = 0u;
@@ -397,6 +400,15 @@ struct State {
     // carried across on the PreparedError below and counted here when the
     // emulation thread drains them -- so this array has exactly one writer.
     std::array<uint64_t, kRejectReasonCount> reject_reasons = {};
+    // beads-yjp.68 quarantine batch, written by the prepare worker under
+    // publish_mutex and drained by the emulation thread so a launch that
+    // discards a whole stale cache prints ONE summary line instead of one per
+    // shard. `producer` is the version last seen; a cache mixing several old
+    // versions is reported by the last one, which is enough to say "not this
+    // runner's".
+    uint64_t quarantine_pending = 0;
+    uint64_t quarantine_failed = 0;
+    uint32_t quarantine_producer = 0;
     uint64_t rows_superseded = 0;
     uint64_t rows_superseding = 0;
     // Futility guard. A compile run that published shards and had EVERY one of
@@ -1485,32 +1497,89 @@ uint32_t backend_tier(const std::filesystem::path& path) {
     return 0u;
 }
 
-bool producer_codegen_stale(const LoadedBank& bank) {
-    return bank.producer_codegen_version < ndsrecomp::kCodegenVersion;
+// ---- beads-yjp.68: the producer-codegen load gate ------------------------
+//
+// A live shard is a native DLL that binds directly to runner data symbols and
+// was compiled against the runtime struct layouts of whatever recompiler
+// produced it. recompiler/src/codegen_identity.h states the consequence
+// plainly: executing a shard whose codegen assumptions differ from this
+// runner's is SILENT MEMORY CORRUPTION, not a bad frame. So the gate is
+// quarantine, not repair -- there is no subset of a mismatched shard's rows
+// that is safe to register.
+//
+// Where it runs matters as much as what it does. prepare_bank_dll() is the
+// ONE funnel every cached shard passes through on its way to the dispatch
+// index: the synchronous startup scan (live_overlay_register_cached_banks),
+// the post-reset rescan (live_overlay_poll_now -> queue_rescan_job), the hot
+// reload of a finished compiler run (run_finished_job) and the maintenance
+// rescan all end in enqueue_candidate -> prepare_worker_main ->
+// prepare_bank_dll. Rejecting here therefore makes the gate a property of the
+// BANK rather than of one adoption moment: a mismatched shard never becomes a
+// LoadedBank at all, so the re-registration loops over g_live.loaded
+// (register_loaded_bank) have nothing of its to put back. That is what the
+// first attempt at this got wrong -- it filtered rows once, at adoption,
+// against a transient predicate, and every re-registration path walked
+// straight past it.
+//
+// The ranges the rejected shard covered are simply absent from the dispatch
+// index, so the guest executes them in Tier 3 exactly as it would on a cold
+// cache. live_overlay_note_tier3() then triggers a compile with the CURRENT
+// provider identity and the range is republished as a fresh shard. No
+// special-casing is needed to "recompile the quarantined pcs"; the absence of
+// the rows IS the request.
+
+// Where a mismatched shard is moved so the next launch does not re-scan,
+// re-load and re-reject it, and so the cache does not grow without bound.
+//
+// Only the .dll/.so is moved. Nothing else in the cache is a per-shard
+// sidecar: <cache>/tcc/imp-*/ and <cache>/tcc/include-*/ are shared toolchain
+// artifacts, and <cache>/work/<key>/ is keyed by work_identity(), which folds
+// provider_id -- so a shard built under a different codegen identity has a
+// work directory the current producer can never collide with, and its
+// live-index.json capture entry is keyed the same way and can never be hit
+// again either. Leaving those in place costs one stale directory; deleting
+// them would risk removing a live producer's inputs.
+std::filesystem::path quarantine_dir(const std::filesystem::path& cache_dir,
+                                     uint32_t producer_codegen_version) {
+    return cache_dir / "quarantine" /
+        ("nds-codegen-v" + std::to_string(producer_codegen_version));
 }
 
-unsigned drop_stale_static_rows(LoadedBank& bank) {
-    if (!producer_codegen_stale(bank) || !bank.dispatch ||
-        bank.dispatch_len == 0u) {
-        return 0u;
-    }
-    bank.filtered_dispatch.clear();
-    bank.filtered_dispatch.reserve(bank.dispatch_len);
-    unsigned dropped = 0u;
-    for (unsigned i = 0u; i < bank.dispatch_len; ++i) {
-        const NdsDispatchEntry& row = bank.dispatch[i];
-        if (nds_dispatch_static_bank_covers(bank.cpu, row.addr, row.thumb)) {
-            ++dropped;
-            continue;
-        }
-        bank.filtered_dispatch.push_back(row);
-    }
-    if (dropped == 0u) return 0u;
-    bank.dispatch = bank.filtered_dispatch.empty()
-        ? nullptr
-        : bank.filtered_dispatch.data();
-    bank.dispatch_len = static_cast<unsigned>(bank.filtered_dispatch.size());
-    return dropped;
+// The quarantine subtree keeps the .dll suffix, so scan_cache() would happily
+// pick a quarantined shard straight back up. Every cache walk skips it.
+bool path_in_quarantine(const std::filesystem::path& cache_dir,
+                        const std::filesystem::path& path) {
+    if (cache_dir.empty()) return false;
+    return path_under_cache(cache_dir / "quarantine", path);
+}
+
+// Prepare-worker side, after the library has been unmapped: on Windows a
+// mapped image cannot be renamed, so close_library() must already have run.
+// A failure is not fatal -- the bank stays rejected either way, the shard is
+// simply re-rejected on the next launch.
+bool quarantine_shard(const std::filesystem::path& cache_dir,
+                      const std::filesystem::path& path,
+                      uint32_t producer_codegen_version) {
+    std::error_code ec;
+    const auto root = quarantine_dir(cache_dir, producer_codegen_version);
+    // Keep the backend namespace (<cache>/tcc/x.dll -> quarantine/vN/tcc/x.dll)
+    // so two backends' shards of the same generation cannot collide.
+    const std::string backend = path.parent_path().filename().string();
+    const auto dest_dir = backend.empty() ? root : root / backend;
+    std::filesystem::create_directories(dest_dir, ec);
+    if (ec) return false;
+    const auto dest = dest_dir / path.filename();
+    std::filesystem::rename(path, dest, ec);
+    if (!ec) return true;
+    // Different volume, or a lock we do not own: fall back to copy+remove so
+    // the original still leaves the scanned part of the cache.
+    ec.clear();
+    std::filesystem::copy_file(
+        path, dest, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    ec.clear();
+    std::filesystem::remove(path, ec);
+    return !ec;
 }
 
 // Runs on the prepare worker thread, so it must NOT touch the counters
@@ -1519,7 +1588,11 @@ unsigned drop_stale_static_rows(LoadedBank& bank) {
 bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
                       std::string& error, RejectReason& reason) {
 #if defined(_WIN32) || defined(__linux__)
-    if (!path_under_cache(g_live.cache_dir, path)) {
+    if (!path_under_cache(g_live.cache_dir, path) ||
+        // beads-yjp.68: already quarantined by the codegen gate. Nothing on
+        // the production path enqueues one, but the test seam and any future
+        // caller must not be able to smuggle one back in.
+        path_in_quarantine(g_live.cache_dir, path)) {
         reason = RejectReason::LoadPathOutsideCache;
         error = "published library outside live overlay cache: " +
             path_string(path);
@@ -1560,6 +1633,36 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
         return false;
     }
 
+    // THE LOAD GATE (beads-yjp.68). First question asked of a freshly mapped
+    // shard, before its metadata is even read: was it produced by THIS
+    // recompiler's code generator? A missing export answers 0 -- a provider
+    // too old to publish the field is exactly the provider whose shards this
+    // check exists to refuse, so absence is a mismatch, never a pass.
+    using CodegenFn = uint32_t (*)();
+    NativeLibrarySymbol codegen_proc =
+        library_symbol(bank, "nds_live_codegen_version");
+    CodegenFn codegen_fn = nullptr;
+    static_assert(sizeof(codegen_fn) == sizeof(codegen_proc));
+    std::memcpy(&codegen_fn, &codegen_proc, sizeof(codegen_fn));
+    bank.producer_codegen_version = codegen_fn ? codegen_fn() : 0u;
+    if (bank.producer_codegen_version != ndsrecomp::kCodegenVersion) {
+        const uint32_t producer = bank.producer_codegen_version;
+        close_library(bank);
+        const bool moved = quarantine_shard(g_live.cache_dir, canon_path,
+                                           producer);
+        {
+            std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+            ++g_live.quarantine_pending;
+            if (!moved) ++g_live.quarantine_failed;
+            g_live.quarantine_producer = producer;
+        }
+        reason = RejectReason::LoadCodegenMismatch;
+        error = "live bank was produced by codegen-v" +
+            std::to_string(producer) + ", runner is codegen-v" +
+            std::to_string(ndsrecomp::kCodegenVersion) + ": " + canon;
+        return false;
+    }
+
     using InfoFn = const NdsLiveBankInfo* (*)();
     NativeLibrarySymbol proc = library_symbol(bank, "nds_live_bank_info");
     InfoFn info_fn = nullptr;
@@ -1584,13 +1687,6 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     bank.backend_tier = backend_tier(path);
     bank.bank_id = info->bank_id ? info->bank_id : "";
     bank.candidate_id = info->candidate_id ? info->candidate_id : "";
-    using CodegenFn = uint32_t (*)();
-    NativeLibrarySymbol codegen_proc =
-        library_symbol(bank, "nds_live_codegen_version");
-    CodegenFn codegen_fn = nullptr;
-    static_assert(sizeof(codegen_fn) == sizeof(codegen_proc));
-    std::memcpy(&codegen_fn, &codegen_proc, sizeof(codegen_fn));
-    bank.producer_codegen_version = codegen_fn ? codegen_fn() : 0u;
     using GenerationFn = const char* (*)();
     NativeLibrarySymbol generation_proc =
         library_symbol(bank, "nds_live_generation_id");
@@ -1786,27 +1882,6 @@ bool commit_prepared_bank(LoadedBank bank) {
 // adopted by the unchanged commit path, or it is held dormant and re-queued
 // later. Nothing else may call commit_prepared_bank on the production path.
 void admit_prepared_bank(LoadedBank bank, const std::string& key) {
-    const unsigned stale_static_rows = drop_stale_static_rows(bank);
-    if (stale_static_rows != 0u) {
-        note_reject(RejectReason::DropStaleStaticRows);
-        std::fprintf(stderr,
-                     "[live-overlay] removed %u static-covered row(s) from "
-                     "stale codegen-v%u candidate %s; runner codegen-v%u\n",
-                     stale_static_rows, bank.producer_codegen_version,
-                     bank.candidate_id.c_str(), ndsrecomp::kCodegenVersion);
-        request_generation_compile();
-    }
-    if (producer_codegen_stale(bank) && bank.dispatch_len == 0u) {
-        g_live.last_error =
-            "stale live bank fully covered by static code: " +
-            bank.bank_id + "/" + bank.candidate_id;
-        ++g_live.banks_rejected;
-        note_reject(RejectReason::LoadStaleStaticCovered);
-#if defined(_WIN32) || defined(__linux__)
-        close_library(bank);
-#endif
-        return;
-    }
     if (!bank_guard_bytes_live(bank)) {
         note_dormant_candidate(bank, key);
 #if defined(_WIN32) || defined(__linux__)
@@ -1870,7 +1945,10 @@ bool make_queue_candidate(const std::filesystem::path& cache_dir,
                           const std::filesystem::path& path,
                           QueueCandidate& out) {
     if (!live_overlay_is_final_library_path(path) ||
-        !path_under_cache(cache_dir, path))
+        !path_under_cache(cache_dir, path) ||
+        // beads-yjp.68: a shard the codegen gate already moved aside. It is
+        // still a .dll under the cache root, so nothing else here excludes it.
+        path_in_quarantine(cache_dir, path))
         return false;
     std::error_code ec;
     auto canon_path = std::filesystem::weakly_canonical(path, ec);
@@ -1949,17 +2027,27 @@ std::vector<QueueCandidate> scan_cache(
     std::error_code ec;
     if (!std::filesystem::exists(cache_dir, ec)) return out;
     std::vector<CachedDllPath> paths;
-    for (const auto& entry :
-         std::filesystem::recursive_directory_iterator(cache_dir, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
+    const auto quarantine = cache_dir / "quarantine";
+    const std::string quarantine_key = path_key(quarantine);
+    auto it = std::filesystem::recursive_directory_iterator(cache_dir, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
         const auto path = entry.path();
-        if (!live_overlay_is_final_library_path(path)) continue;
-        const auto write_time = entry.last_write_time(ec);
-        if (ec) {
-            ec.clear();
+        // beads-yjp.68: never descend into the quarantine subtree. Its shards
+        // still look like published libraries; the whole point of moving them
+        // there was to stop paying to load and re-reject them every launch.
+        // `ec` belongs to the iterator alone; a per-entry stat failure must
+        // skip that entry, not end the walk.
+        std::error_code stat_ec;
+        if (entry.is_directory(stat_ec) && path_key(path) == quarantine_key) {
+            it.disable_recursion_pending();
             continue;
         }
+        if (!entry.is_regular_file(stat_ec)) continue;
+        if (!live_overlay_is_final_library_path(path)) continue;
+        const auto write_time = entry.last_write_time(stat_ec);
+        if (stat_ec) continue;
         paths.push_back({path, write_time, backend_tier(path)});
     }
     // Best backend FIRST (beads-lqa.40). When a cold scan finds both a tcc and
@@ -2765,6 +2853,38 @@ void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
     e.aux2 = new_value;
 }
 
+// beads-yjp.68: one line per batch of quarantined shards, not one per shard.
+// A player upgrading across a codegen bump discards their whole accumulated
+// cache in a single scan -- seven, or seven hundred, individual reject lines
+// say nothing the count does not. Emitted only once the prepare pipeline is
+// idle, so the number printed is the whole batch.
+void report_codegen_quarantine() {
+    uint64_t count = 0u;
+    uint64_t failed = 0u;
+    uint32_t producer = 0u;
+    {
+        std::lock_guard<std::mutex> lock(g_live.publish_mutex);
+        if (g_live.quarantine_pending == 0u) return;
+        if (g_live.prepare_in_flight != 0 || !g_live.prepare_queue.empty())
+            return;
+        count = g_live.quarantine_pending;
+        failed = g_live.quarantine_failed;
+        producer = g_live.quarantine_producer;
+        g_live.quarantine_pending = 0u;
+        g_live.quarantine_failed = 0u;
+    }
+    std::fprintf(stderr,
+                 "[live-overlay] quarantined %llu cached shard(s): producer "
+                 "codegen-v%u != runner codegen-v%u; their ranges fall back "
+                 "to Tier 3 and are recompiled%s\n",
+                 static_cast<unsigned long long>(count), producer,
+                 ndsrecomp::kCodegenVersion,
+                 failed != 0u
+                     ? " (WARNING: some files could not be moved aside and"
+                       " will be re-rejected next launch)"
+                     : "");
+}
+
 // The real poll. Every path that wants the overlay serviced RIGHT NOW calls
 // this: the countdown gate in live_overlay_poll() below, an explicit trigger,
 // and the debug server. See live_overlay_poll() for why the scheduler's
@@ -2806,6 +2926,7 @@ void live_overlay_poll_now() {
                                             std::memory_order_acquire)) {
         drain_maintenance_results();
     }
+    report_codegen_quarantine();
     // A finished run whose log has not been read yet has not had its shards
     // queued, so its verdict is not in yet either.
     if (!g_live.run_finish_pending) evaluate_run_futility();
@@ -2974,23 +3095,17 @@ bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
                                       const char* path_text,
                                       const NdsDispatchEntry* dispatch,
                                       unsigned dispatch_len) {
-    return live_overlay_admit_bank_with_codegen_for_test(
-        cpu, bank_id, candidate_id, generation_id, backend_tier,
-        ndsrecomp::kCodegenVersion, path_text, dispatch, dispatch_len);
-}
-
-bool live_overlay_admit_bank_with_codegen_for_test(
-        int cpu, const char* bank_id, const char* candidate_id,
-        const char* generation_id, unsigned backend_tier,
-        unsigned producer_codegen_version, const char* path_text,
-        const NdsDispatchEntry* dispatch, unsigned dispatch_len) {
     LoadedBank bank{};
     bank.bank_id = bank_id ? bank_id : "";
     bank.candidate_id = candidate_id ? candidate_id : "";
     bank.generation_id = generation_id && *generation_id
         ? generation_id : bank.candidate_id;
     bank.backend_tier = backend_tier;
-    bank.producer_codegen_version = producer_codegen_version;
+    // The real loader refuses anything else (beads-yjp.68), so an in-process
+    // seam that fabricated a bank at another version would be testing a state
+    // no bank can reach. The DLL-level gate has its own test:
+    // runner/tests/live_shard_codegen_gate_test.py.
+    bank.producer_codegen_version = ndsrecomp::kCodegenVersion;
     bank.cpu = cpu;
     bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
     bank.dispatch = dispatch;

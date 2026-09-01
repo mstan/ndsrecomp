@@ -1,0 +1,31 @@
+; beads-yjp.68: the runner-side symbols a live shard binds to, exported from
+; the preflight test executable so tests/live_shard_codegen_gate_test.py can
+; build a REAL shard DLL against it -- exactly as a field shard binds to
+; nds_runner.exe through src/runtime_exports.def.
+;
+; This is deliberately a SUBSET of src/runtime_exports.def: only the symbols
+; live_overlay_preflight_test.cpp actually defines may appear here, because a
+; .def naming a symbol the image does not define fails the link.
+EXPORTS
+    g_busf_itcm DATA
+    g_busf_main DATA
+    g_cpu DATA
+    g_insn_count DATA
+    g_insn_hook_armed DATA
+    g_nds_active DATA
+    g_nds_fast_limit DATA
+    g_nds_unwinding DATA
+    g_runtime_cycles DATA
+    arm9_refill_cycles
+    nds_register_dispatch
+    nds_unregister_dispatch
+    runtime_call_cancel_return
+    runtime_call_push_return
+    runtime_call_should_return
+    runtime_code_cycles
+    runtime_dispatch_bad_entry
+    runtime_dispatch_with_exchange
+    runtime_insn_slow
+    runtime_live_transfer
+    runtime_should_yield_slow
+    runtime_tick_slow

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,17 @@ const unsigned g_dispatch_nds_live_arm9_02000000_len = 1u;
 """
 
 
+def runner_codegen_version() -> int:
+    """ndsrecomp::kCodegenVersion, read from the header that declares it."""
+    header = ROOT / "recompiler" / "src" / "codegen_identity.h"
+    match = re.search(
+        r"inline\s+constexpr\s+unsigned\s+kCodegenVersion\s*=\s*(\d+)\s*;",
+        header.read_text(encoding="utf-8"))
+    if not match:
+        raise AssertionError(f"cannot read kCodegenVersion from {header}")
+    return int(match.group(1))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", required=True)
@@ -53,7 +65,11 @@ def main() -> int:
     wrapper = source / f"{bank}_live.c"
     stub.write_text(STUB, encoding="utf-8", newline="\n")
     tool.write_wrapper(wrapper, bank, "linux-loader-test",
-                       "linux-generation-test", "test", 9)
+                       "linux-generation-test", "test", 9,
+                       # beads-yjp.68: the runner refuses any other producer
+                       # codegen version outright, so an adoption test has to
+                       # publish the current one.
+                       runner_codegen_version())
     final = cache / f"{bank}_linux-loader-test.so"
     stage = final.with_suffix(".stage.so")
     command = [

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Compile generation-bound NDS RAM code pages into persistent live libraries.
 
 The coverage manifest associates each dispatch/resume observation with the
@@ -713,12 +713,36 @@ def recompiler_codegen_identity(args: argparse.Namespace) -> str:
     return value
 
 
+def recompiler_codegen_version(args: argparse.Namespace) -> int:
+    """The producer codegen version a shard publishes to the runner.
+
+    beads-yjp.68: THE single source of truth. The runner refuses to execute a
+    shard whose producer codegen version differs from its own
+    ndsrecomp::kCodegenVersion (recompiler/src/codegen_identity.h), so the
+    number a shard reports must be exactly that counter -- parsed out of the
+    `nds-codegen-vN` string the recompiler itself reports.
+
+    It must NOT be SHARD_CODEGEN_VERSION. That is this script's own
+    escape-hatch counter for emission changes codegen_fingerprint() cannot
+    see; it lives in a different namespace, is bumped for different reasons,
+    and only coincided with kCodegenVersion by accident. Publishing it as the
+    producer codegen version made the runner's gate compare two unrelated
+    counters.
+    """
+    identity = recompiler_codegen_identity(args)
+    # recompiler_codegen_identity() already enforced `nds-codegen-v[0-9]+`.
+    return int(identity[len("nds-codegen-v"):])
+
+
 # Bump when THIS script's contribution to a shard's compiled output changes in
 # a way codegen_fingerprint() cannot see -- for example when a recompiler flag
 # emitted below keeps its spelling but changes meaning in the recompiler. The
 # fingerprint already covers every edit to the emission functions themselves,
 # so this is the escape hatch, not the mechanism.
-SHARD_CODEGEN_VERSION = 2
+#
+# NOT the number a shard publishes as its producer codegen version -- see
+# recompiler_codegen_version() above.
+SHARD_CODEGEN_VERSION = 1
 
 # The emission surface: everything whose behaviour can change a byte of a
 # compiled shard. The fingerprint is the transitive closure of module-level
@@ -1020,7 +1044,8 @@ def shard_source_set(src_dir: Path, bank: str) -> list[Path]:
 
 
 def write_wrapper(path: Path, bank: str, candidate_id: str,
-                  generation_id: str, rom_sha1: str, cpu: int) -> None:
+                  generation_id: str, rom_sha1: str, cpu: int,
+                  codegen_version: int) -> None:
     cpu_token = "NDS_ARM9" if cpu == 9 else "NDS_ARM7"
     exc_base = "0xFFFF0000u" if cpu == 9 else "0x00000000u"
     path.write_text("\n".join([
@@ -1063,8 +1088,12 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
         f'    return "{generation_id}";',
         "}",
         "",
+        # beads-yjp.68: the recompiler's own kCodegenVersion, not this
+        # script's SHARD_CODEGEN_VERSION. The runner quarantines any shard
+        # whose value differs from ndsrecomp::kCodegenVersion, so the two
+        # sides must be reading the same counter.
         "NDS_LIVE_EXPORT uint32_t nds_live_codegen_version(void) {",
-        f"    return {SHARD_CODEGEN_VERSION}u;",
+        f"    return {codegen_version}u;",
         "}",
         "",
     ]), encoding="utf-8", newline="\n")
@@ -1309,7 +1338,8 @@ def compile_page(args: argparse.Namespace, page: dict, entries: list[dict],
     library = library_dir / f"{bank}_{candidate_id}{SHARED_LIBRARY_SUFFIX}"
     if not library.is_file():
         write_wrapper(shard_wrapper_path(src_dir, bank), bank, candidate_id,
-                      page_sha1, args.rom_sha1, cpu)
+                      page_sha1, args.rom_sha1, cpu,
+                      args.recompiler_codegen_version)
         bank_sources = generated_bank_sources(src_dir, bank)
         sources = shard_source_set(src_dir, bank)
         if len(bank_sources) < 2 or not all(path.is_file() for path in sources):
@@ -1466,6 +1496,10 @@ def main() -> int:
     if args.compiler == "tcc":
         (args.cache / "tcc").mkdir(parents=True, exist_ok=True)
     args.provider_id = provider_identity(args)
+    # beads-yjp.68: resolved once, here, so every wrapper this run emits
+    # publishes the same producer codegen version the runner will compare
+    # against its own ndsrecomp::kCodegenVersion.
+    args.recompiler_codegen_version = recompiler_codegen_version(args)
 
     manifest = load_json(args.manifest)
     if (not isinstance(manifest, dict) or

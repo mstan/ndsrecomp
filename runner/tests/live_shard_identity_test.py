@@ -206,7 +206,7 @@ def main() -> int:
 
     bumped = variant(
         work, "bumped", args.tool,
-        [("SHARD_CODEGEN_VERSION = 2", "SHARD_CODEGEN_VERSION = 3")])
+        [("SHARD_CODEGEN_VERSION = 1", "SHARD_CODEGEN_VERSION = 2")])
     check("shard_codegen_version_bump_moves_identity",
           bumped.provider_identity(namespace()) != reference)
 
