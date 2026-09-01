@@ -393,6 +393,12 @@ struct NdsFrontendLiveStats {
     uint8_t perf_governor_stage;
     uint32_t perf_governor_over_frames;
     uint32_t perf_governor_under_frames;
+    // Stage 2 is being held because this machine flapped out of it (see
+    // NdsPerfGovernorConfig::flap_engage_limit).
+    uint8_t perf_governor_held;
+    // Terminal: a stage could not be applied, so the governor stopped.
+    uint8_t perf_governor_apply_failed;
+    uint64_t perf_governor_transitions;
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
 

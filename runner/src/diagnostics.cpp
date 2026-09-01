@@ -3,6 +3,7 @@
 #include "diagnostics.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -224,7 +225,9 @@ void write_profile_totals_delta(const NdsSchedulerProfile& sched,
         "\"gpu3d_compute_sync_ns\":%llu,\"gpu3d_compute_sync_calls\":%llu,"
         "\"gpu3d_compute_submit_ns\":%llu,"
         "\"gpu3d_compute_submit_calls\":%llu,"
-        "\"gpu3d_compute_map_ns\":%llu,\"gpu3d_compute_map_calls\":%llu}",
+        "\"gpu3d_compute_map_ns\":%llu,\"gpu3d_compute_map_calls\":%llu,"
+        "\"gpu3d_compute_readback_ns\":%llu,"
+        "\"gpu3d_compute_readback_calls\":%llu}",
         (unsigned long long)sub_u64(sched.sampled_rounds,
                                     g_prev_sched.sampled_rounds),
         (unsigned long long)sub_u64(sched.rounds, g_prev_sched.rounds),
@@ -270,7 +273,11 @@ void write_profile_totals_delta(const NdsSchedulerProfile& sched,
         (unsigned long long)sub_u64(gpu3d.compute_map_ns,
                                     g_prev_gpu3d.compute_map_ns),
         (unsigned long long)sub_u64(gpu3d.compute_map_calls,
-                                    g_prev_gpu3d.compute_map_calls));
+                                    g_prev_gpu3d.compute_map_calls),
+        (unsigned long long)sub_u64(gpu3d.compute_readback_ns,
+                                    g_prev_gpu3d.compute_readback_ns),
+        (unsigned long long)sub_u64(gpu3d.compute_readback_calls,
+                                    g_prev_gpu3d.compute_readback_calls));
 }
 
 // The emu-time partition for this interval (emu_profile.h). Every bucket is
@@ -782,7 +789,8 @@ void nds_diagnostics_maybe_write_performance_sample(
         "\"adaptive\":%.3f,\"upload\":%.3f,\"draw\":%.3f,\"swap\":%.3f,"
         "\"drain\":%.3f},\"underruns_delta\":%llu,"
         "\"governor\":{\"stage\":%u,\"over_frames\":%u,"
-        "\"under_frames\":%u},"
+        "\"under_frames\":%u,\"held\":%s,\"apply_failed\":%s,"
+        "\"transitions\":%llu,\"compute_readback_ms\":%.3f},"
         "\"cycles\":{\"arm9\":%llu,\"arm7\":%llu},"
         "\"tier3_delta\":{\"arm9\":{\"entries\":%llu,"
         "\"instructions\":%llu,\"clean_ram_rejects\":%llu},"
@@ -811,6 +819,15 @@ void nds_diagnostics_maybe_write_performance_sample(
         stats.perf_governor_stage,
         stats.perf_governor_over_frames,
         stats.perf_governor_under_frames,
+        stats.perf_governor_held ? "true" : "false",
+        stats.perf_governor_apply_failed ? "true" : "false",
+        (unsigned long long)stats.perf_governor_transitions,
+        // The always-on readback stall: the quantity stage 1 defers.
+        frame_delta ? static_cast<double>(
+                          sub_u64(gpu3d.compute_readback_ns,
+                                  g_prev_gpu3d.compute_readback_ns)) /
+                          1000000.0 / static_cast<double>(frame_delta)
+                    : 0.0,
         (unsigned long long)sched_state.cycles[0],
         (unsigned long long)sched_state.cycles[1],
         (unsigned long long)sub_u64(tier3.entries[0],
@@ -1032,8 +1049,47 @@ void nds_diagnostics_note_perf_governor_transition(uint8_t from_stage,
     std::fflush(g_perf);
 }
 
+void nds_diagnostics_write_perf_governor_history() {
+    if (!g_perf) return;
+    // The ring is always-on, so this record exists even when every individual
+    // transition event above was written before the log was opened (or when a
+    // load reset the interval baselines). It is the retroactive query, not a
+    // second live feed.
+    std::array<NdsPerfGovernorTransition, kNdsPerfGovernorHistoryCapacity>
+        entries{};
+    const uint32_t count = nds_perf_governor_history(
+        entries.data(), kNdsPerfGovernorHistoryCapacity);
+    std::fprintf(g_perf,
+        "{\"kind\":\"governor_history\",\"ts_ms\":%llu,\"wall\":\"%s\","
+        "\"total\":%llu,\"capacity\":%u,\"transitions\":[",
+        (unsigned long long)unix_ms_now(),
+        json_escape(wall_clock_now().c_str()).c_str(),
+        (unsigned long long)nds_perf_governor_history_total(),
+        kNdsPerfGovernorHistoryCapacity);
+    for (uint32_t i = 0; i < count; ++i) {
+        const NdsPerfGovernorTransition& e = entries[i];
+        std::fprintf(g_perf,
+            "%s{\"frame\":%llu,\"ts_ms\":%llu,\"from_stage\":%u,"
+            "\"to_stage\":%u,\"reason\":\"%s\",\"held\":%s,"
+            "\"apply_failed\":%s}",
+            i ? "," : "",
+            (unsigned long long)e.frame_index,
+            (unsigned long long)e.ts_ms,
+            e.from_stage, e.to_stage,
+            json_escape(nds_perf_governor_reason_name(e.reason)).c_str(),
+            e.stage2_held ? "true" : "false",
+            e.apply_failed ? "true" : "false");
+    }
+    std::fprintf(g_perf, "]}\n");
+    std::fflush(g_perf);
+}
+
 void nds_diagnostics_stop_performance_log() {
     if (!g_perf) return;
+    // Last record in the bundle: the whole always-on transition ring, so a
+    // field report carries the governor's history even if the run never wrote
+    // an interval sample.
+    nds_diagnostics_write_perf_governor_history();
     std::fclose(g_perf);
     g_perf = nullptr;
 }

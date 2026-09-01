@@ -43,6 +43,10 @@ void nds_diagnostics_note_savestate(const char* action, unsigned slot,
 void nds_diagnostics_note_perf_governor_transition(uint8_t from_stage,
                                                    uint8_t to_stage,
                                                    const char* reason);
+// Dumps the always-on governor transition ring (perf_governor.h) into the
+// bundle. Called automatically when the performance log closes; exposed so a
+// caller can snapshot it mid-run.
+void nds_diagnostics_write_perf_governor_history();
 void nds_diagnostics_stop_performance_log();
 // Drop interval baselines after a historical load. The next sample primes a
 // fresh epoch instead of subtracting counters from the pre-load timeline.

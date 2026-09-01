@@ -326,7 +326,11 @@ void compute_submit_readback() {
 
 void compute_finish_readback() {
     if (!g_compute_readback_pending) return;
-    const auto start = profiling() ? ProfileClock::now()
+    // ALWAYS-ON: this stall is precisely the quantity governor stage 1 moves
+    // off the frame's critical path, so it cannot live behind NDS_PROFILE_GPU.
+    // One clock pair per frame is free next to the fence wait it brackets.
+    const auto readback_start = ProfileClock::now();
+    const auto start = profiling() ? readback_start
                                    : ProfileClock::time_point{};
     const size_t frame_bytes =
         static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
@@ -381,6 +385,8 @@ void compute_finish_readback() {
     compute_drop_fence();
     g_compute_readback_pending = false;
     const bool failed = compute_gl_stage_failed("frame readback map");
+    profile_add(g_gpu3d_profile.compute_readback_ns, readback_start);
+    ++g_gpu3d_profile.compute_readback_calls;
     if (profiling()) {
         profile_add(g_gpu3d_profile.compute_map_ns, start);
         profile_add(g_gpu3d_profile.compute_sync_ns, start);
@@ -679,6 +685,11 @@ bool nds_gpu3d_set_runtime_internal_scale(uint8_t scale) {
         g_internal_scale = scale;
         return true;
     }
+    // A terminal compute failure is not something a rebuild gets to erase:
+    // nds_gpu3d_use_compute_renderer() clears g_compute_runtime_failed, and
+    // the run is already unwinding on that flag. Refuse instead, which routes
+    // the caller into its own terminal state.
+    if (g_compute_runtime_failed) return false;
     if (!nds_compute_host_make_current()) return false;
     const uint8_t previous = g_internal_scale;
     if (g_compute_readback_pending) compute_finish_readback();
@@ -688,10 +699,20 @@ bool nds_gpu3d_set_runtime_internal_scale(uint8_t scale) {
         g_internal_scale = previous;
         return false;
     }
+    // Same sequence gpu3d_savestate_import() uses after installing a fresh
+    // renderer. Without it ComputeRenderer::RenderFrame early-returns on a
+    // static scene (!Texcache.Update() && RenderFrameIdentical), so the new
+    // renderer never writes its output and the 3D layer stays black until
+    // texture VRAM happens to be dirtied.
+    g_nds.GPU.GPU3D.GetCurrentRenderer().Reset(g_nds.GPU);
+    g_nds.GPU.GPU3D.RenderFrameIdentical = false;
     return true;
 #else
-    g_internal_scale = scale;
-    return scale == 1u;
+    // Nothing to scale: this build has no accelerated renderer, so the only
+    // raster is the native soft one. Report success so a governor stage (or a
+    // governor-off startup pass) is not turned into a fatal error.
+    (void)scale;
+    return true;
 #endif
 }
 
@@ -1346,14 +1367,21 @@ void nds_gpu3d_start_frame() {
         // Forced overlap queues at VCount215 and pays only any unfinished
         // portion of the copy at the next frame boundary.
         const bool same_frame = nds_gpu2d_requires_3d_readback();
-        if (g_compute_readback_pending && same_frame) compute_finish_readback();
+        // With the display-readback latency off (stage 0 / governor off) the
+        // pending drain is unconditional, exactly as before the governor
+        // existed: holding a pending readback across a direct-present frame is
+        // only correct when the latency mode is what deferred it.
+        const bool drain_pending = same_frame || !g_display_readback_latency;
+        if (g_compute_readback_pending && drain_pending)
+            compute_finish_readback();
         if (g_compute_rendered_frame) {
             if (same_frame || g_display_readback_latency)
                 compute_submit_readback();
             else
                 g_compute_rendered_frame = false;
         }
-        if (g_compute_readback_pending && same_frame) compute_finish_readback();
+        if (g_compute_readback_pending && drain_pending)
+            compute_finish_readback();
     }
 #endif
 }

@@ -84,6 +84,12 @@ struct NdsGpu3dProfile {
     uint64_t compute_submit_calls;
     uint64_t compute_map_ns;
     uint64_t compute_map_calls;
+    // ALWAYS-ON (unlike every field above, which needs NDS_PROFILE_GPU): the
+    // wall time compute_finish_readback() spends waiting for and consuming the
+    // pixel-pack readback. This is the cost governor stage 1 defers off the
+    // critical path, so the governor has to be able to read it in every build.
+    uint64_t compute_readback_ns;
+    uint64_t compute_readback_calls;
 };
 void nds_gpu3d_profile(NdsGpu3dProfile* out);
 void nds_gpu3d_debug_history_reset();

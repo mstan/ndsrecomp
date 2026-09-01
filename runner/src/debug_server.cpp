@@ -1,6 +1,7 @@
 #include "debug_server.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -1098,7 +1099,42 @@ std::string handle(const std::string& line) {
                ",\"perf_governor_over_frames\":" +
                std::to_string(s.perf_governor_over_frames) +
                ",\"perf_governor_under_frames\":" +
-               std::to_string(s.perf_governor_under_frames) + "}";
+               std::to_string(s.perf_governor_under_frames) +
+               ",\"perf_governor_held\":" +
+               std::to_string(s.perf_governor_held) +
+               ",\"perf_governor_apply_failed\":" +
+               std::to_string(s.perf_governor_apply_failed) +
+               ",\"perf_governor_transitions\":" +
+               std::to_string(s.perf_governor_transitions) + "}";
+    }
+    if (cmd == "governor_history") {
+        // Retroactive query over the always-on transition ring: every stage
+        // change since the run started (up to the ring capacity) with no
+        // arming step and no dependency on the performance log.
+        std::array<NdsPerfGovernorTransition,
+                   kNdsPerfGovernorHistoryCapacity> entries{};
+        const uint32_t count = nds_perf_governor_history(
+            entries.data(), kNdsPerfGovernorHistoryCapacity);
+        std::string out = "{\"total\":" +
+            std::to_string(nds_perf_governor_history_total()) +
+            ",\"capacity\":" +
+            std::to_string(kNdsPerfGovernorHistoryCapacity) +
+            ",\"transitions\":[";
+        for (uint32_t i = 0; i < count; ++i) {
+            const NdsPerfGovernorTransition& e = entries[i];
+            if (i) out += ",";
+            out += "{\"frame\":" + std::to_string(e.frame_index) +
+                   ",\"ts_ms\":" + std::to_string(e.ts_ms) +
+                   ",\"from_stage\":" + std::to_string(e.from_stage) +
+                   ",\"to_stage\":" + std::to_string(e.to_stage) +
+                   ",\"reason\":\"" +
+                   nds_perf_governor_reason_name(e.reason) + "\"" +
+                   ",\"held\":" + std::to_string(e.stage2_held ? 1 : 0) +
+                   ",\"apply_failed\":" +
+                   std::to_string(e.apply_failed ? 1 : 0) + "}";
+        }
+        out += "]}";
+        return out;
     }
     if (cmd == "title_patches") {
         const NdsTitlePatchDebugState s = nds_title_patches_debug_state();

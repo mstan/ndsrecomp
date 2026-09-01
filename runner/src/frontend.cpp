@@ -1579,11 +1579,15 @@ struct PresentationTicks {
     bool ok = true;
 };
 
+// All-or-nothing. The only fallible step is the renderer rebuild, so it runs
+// FIRST and nothing else is touched until it has succeeded: a failed apply
+// leaves the readback latency, the sample scale and the HD emit flag exactly
+// as the currently installed stage left them, so the caller can report the
+// stage that is actually running.
 bool apply_performance_governor_stage(
         const NdsFrontendOptions& options,
         FrontendPresentation& presentation,
         uint8_t stage) {
-    nds_gpu3d_set_display_readback_latency(stage >= 1u);
     const uint8_t target_scale =
         stage >= 2u ? 1u : options.internal_resolution;
     if (!nds_gpu3d_set_runtime_internal_scale(target_scale)) {
@@ -1592,23 +1596,11 @@ bool apply_performance_governor_stage(
                      static_cast<unsigned>(target_scale));
         return false;
     }
+    nds_gpu3d_set_display_readback_latency(stage >= 1u);
     presentation.sample_scale =
         stage >= 2u ? 1 : presentation.configured_sample_scale;
     nds_gpu2d_set_hd_emit(target_scale > 1u && presentation.gl_top);
     return true;
-}
-
-const char* performance_governor_transition_reason(
-        const NdsPerfGovernorState& state) {
-    switch (state.mode) {
-        case NdsPerfGovernorMode::ForceStage1:
-        case NdsPerfGovernorMode::ForceStage2:
-            return "forced";
-        case NdsPerfGovernorMode::Off:
-            return "off";
-        default:
-            return state.stage == 0u ? "recovered" : "over_budget";
-    }
 }
 
 void draw_virtual_stylus(SDL_Renderer* renderer, const SDL_Rect& destination,
@@ -1852,7 +1844,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     NdsPerfGovernorState perf_governor{};
     nds_perf_governor_init(&perf_governor,
                            options.perf_governor_mode);
-    if (!apply_performance_governor_stage(
+    // Governor off is byte-identical to the pre-governor frontend: the scale,
+    // the HD emit flag and the readback latency were all already established
+    // above from the options, so there is nothing to apply and no new way to
+    // fail at startup.
+    if (options.perf_governor_mode != NdsPerfGovernorMode::Off &&
+        !apply_performance_governor_stage(
             options, presentation, perf_governor.stage)) {
         destroy_presentation(presentation);
         SDL_Quit();
@@ -2227,16 +2224,21 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     NdsGpu3dProfile governor_gpu3d_profile{};
     nds_gpu3d_profile(&governor_gpu3d_profile);
     uint64_t governor_last_compute_map_ns =
-        governor_gpu3d_profile.compute_map_ns;
+        governor_gpu3d_profile.compute_readback_ns;
     g_live_stats = {};
     g_live_stats.active = 1;
     g_live_stats.freq = frequency;
     g_black_band = {};
     g_input_debug = {};
     nds_diagnostics_start_performance_log(options);
-    if (perf_governor.stage != 0u)
+    nds_perf_governor_history_reset();
+    if (perf_governor.stage != 0u) {
+        nds_perf_governor_record_transition(
+            0, perf_governor.stage, NdsPerfGovernorReason::Initial, 0,
+            false, false);
         nds_diagnostics_note_perf_governor_transition(
             0, perf_governor.stage, "initial");
+    }
     auto publish_input_debug = [&]() {
         g_input_debug.active = 1;
         g_input_debug.mph_prime_controls_available =
@@ -2566,8 +2568,28 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     if (result.success &&
                         state_command.action ==
                             NdsSavestateSlotAction::Load) {
-                        (void)apply_performance_governor_stage(
-                            options, presentation, perf_governor.stage);
+                        // gpu3d_savestate_import() clears the readback-latency
+                        // flag as part of installing a fresh renderer, so the
+                        // live stage has to be re-established. Skipped once the
+                        // governor is terminally disabled: the installed state
+                        // is then whatever survived the failure.
+                        if (!perf_governor.apply_failed &&
+                            options.perf_governor_mode !=
+                                NdsPerfGovernorMode::Off &&
+                            !apply_performance_governor_stage(
+                                options, presentation,
+                                perf_governor.stage)) {
+                            nds_perf_governor_mark_apply_failed(
+                                &perf_governor);
+                            nds_perf_governor_record_transition(
+                                perf_governor.stage, perf_governor.stage,
+                                NdsPerfGovernorReason::ApplyFailed,
+                                shown_frames, perf_governor.stage2_held,
+                                true);
+                            nds_diagnostics_note_perf_governor_transition(
+                                perf_governor.stage, perf_governor.stage,
+                                "apply_failed");
+                        }
                         blend_cache.valid = false;
                         // Guest input registers came from historical state;
                         // the live host controls become authoritative again
@@ -3162,13 +3184,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             audio_queue.underruns.load(std::memory_order_relaxed);
         NdsGpu3dProfile current_gpu3d_profile{};
         nds_gpu3d_profile(&current_gpu3d_profile);
+        // compute_readback_ns, not compute_map_ns: the latter only accumulates
+        // under NDS_PROFILE_GPU, so it read zero in every normal run.
         const uint64_t frame_compute_map_ns =
-            current_gpu3d_profile.compute_map_ns >=
+            current_gpu3d_profile.compute_readback_ns >=
                     governor_last_compute_map_ns
-                ? current_gpu3d_profile.compute_map_ns -
+                ? current_gpu3d_profile.compute_readback_ns -
                       governor_last_compute_map_ns
                 : 0u;
-        governor_last_compute_map_ns = current_gpu3d_profile.compute_map_ns;
+        governor_last_compute_map_ns =
+            current_gpu3d_profile.compute_readback_ns;
         NdsPerfGovernorSample governor_sample{};
         governor_sample.emu_ms =
             static_cast<double>(frame_emu_ticks) * 1000.0 /
@@ -3183,23 +3208,44 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 : 0u;
         governor_sample.compute_map_ms =
             static_cast<double>(frame_compute_map_ns) / 1000000.0;
+        // The drain is only a headroom signal when it is actually the pacing
+        // sleep this frame: no device, pre-playback and turbo frames all read
+        // ~0 for reasons that have nothing to do with load.
+        governor_sample.headroom_valid =
+            static_cast<bool>(audio) && audio_started && !turbo_active;
         governor_last_underruns = current_underruns;
         const uint8_t governor_stage_before = perf_governor.stage;
         if (nds_perf_governor_update(&perf_governor, governor_sample)) {
-            if (!apply_performance_governor_stage(
-                    options, presentation, perf_governor.stage)) {
-                const uint8_t failed_stage = perf_governor.stage;
-                perf_governor.stage = std::min<uint8_t>(
-                    governor_stage_before, 1u);
-                (void)apply_performance_governor_stage(
-                    options, presentation, perf_governor.stage);
+            const uint8_t requested_stage = perf_governor.stage;
+            NdsPerfGovernorReason reason = perf_governor.last_reason;
+            bool applied = apply_performance_governor_stage(
+                options, presentation, requested_stage);
+            if (!applied) {
+                // Nothing was mutated by the failed apply, so the previously
+                // installed stage is still the live one. Report that stage and
+                // stop deciding: retrying a failing rebuild every
+                // engage_frames forever is a hitch generator, not a recovery.
+                perf_governor.stage = governor_stage_before;
+                nds_perf_governor_mark_apply_failed(&perf_governor);
+                reason = NdsPerfGovernorReason::ApplyFailed;
                 std::fprintf(stderr,
-                             "[governor] stage %u apply failed; using %u\n",
-                             failed_stage, perf_governor.stage);
+                             "[governor] stage %u apply failed; "
+                             "governor disabled at stage %u\n",
+                             static_cast<unsigned>(requested_stage),
+                             static_cast<unsigned>(perf_governor.stage));
             }
-            nds_diagnostics_note_perf_governor_transition(
-                governor_stage_before, perf_governor.stage,
-                performance_governor_transition_reason(perf_governor));
+            // Never a no-op N->N transition. A failed apply is reported even
+            // when the stage did not move, because the terminal state is the
+            // information.
+            if (perf_governor.stage != governor_stage_before || !applied) {
+                nds_perf_governor_record_transition(
+                    governor_stage_before, perf_governor.stage, reason,
+                    shown_frames, perf_governor.stage2_held,
+                    perf_governor.apply_failed);
+                nds_diagnostics_note_perf_governor_transition(
+                    governor_stage_before, perf_governor.stage,
+                    nds_perf_governor_reason_name(reason));
+            }
         }
 
         ++shown_frames;
@@ -3219,6 +3265,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.perf_governor_over_frames = perf_governor.over_frames;
         g_live_stats.perf_governor_under_frames =
             perf_governor.under_frames;
+        g_live_stats.perf_governor_held = perf_governor.stage2_held ? 1u : 0u;
+        g_live_stats.perf_governor_apply_failed =
+            perf_governor.apply_failed ? 1u : 0u;
+        g_live_stats.perf_governor_transitions =
+            nds_perf_governor_history_total();
         const uint64_t counter = SDL_GetPerformanceCounter();
         if (!savestate_notice.empty() && counter >= savestate_notice_until)
             savestate_notice.clear();
@@ -3231,9 +3282,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             const double fps = static_cast<double>(fps_frames) / seconds;
             const std::string fps_text =
                 std::to_string(fps).substr(0, 4) + " FPS";
-            const std::string governor_text = perf_governor.stage
-                ? " - Gov S" + std::to_string(perf_governor.stage)
-                : "";
+            const std::string governor_text =
+                perf_governor.apply_failed
+                    ? " - Gov disabled (apply failed, S" +
+                          std::to_string(perf_governor.stage) + ")"
+                    : perf_governor.stage
+                    ? " - Gov S" + std::to_string(perf_governor.stage) +
+                          (perf_governor.stage2_held ? " held" : "")
+                    : "";
             const std::string top_title = !savestate_notice.empty()
                 ? "ndsrecomp - " + savestate_notice
                 : presentation.separate
