@@ -547,50 +547,69 @@ bool test_adaptive_helpers_match_serial() {
     nds_gpu2d_set_adaptive_workers(0);
     run_adaptive_frame(serial);
 
+    // Composited repeatedly rather than once. This fixture's frame is small
+    // enough that the calling thread can drain all 192 lines before a helper
+    // wakes from its condition-variable wait, so a single frame is not a
+    // reliable witness that the helpers ran -- and a test that asserts they
+    // did on one frame is just flaky. Repeating exercises many different
+    // interleavings and gives the pool time to participate at all: every
+    // frame must equal the serial reference, and the helpers must have taken
+    // lines somewhere across the run.
+    constexpr int kFrames = 24;
+    uint64_t helper_lines = 0;
+    uint64_t band_frames = 0;
+    uint64_t serial_frames = 0;
+    int mismatched = 0;
     AdaptiveRun threaded{};
     nds_gpu2d_set_adaptive_workers(3);
-    run_adaptive_frame(threaded);
+    for (int i = 0; i < kFrames; ++i) {
+        run_adaptive_frame(threaded);
+        helper_lines += threaded.helper_lines;
+        band_frames += threaded.band_frames;
+        serial_frames += threaded.serial_frames;
+        if (threaded.surface != serial.surface ||
+            threaded.hd_top != serial.hd_top ||
+            threaded.hd_below != serial.hd_below ||
+            threaded.width != serial.width ||
+            threaded.hd_valid != serial.hd_valid)
+            ++mismatched;
+    }
     nds_gpu2d_set_adaptive_workers(0);
 
     std::fprintf(stderr,
-        "[adaptive] width serial=%u threaded=%u | surface_eq=%d hd serial=%d "
-        "threaded=%d hd_top_eq=%d hd_below_eq=%d\n",
-        serial.width, threaded.width,
-        (int)(serial.surface == threaded.surface),
-        (int)serial.hd_valid, (int)threaded.hd_valid,
-        (int)(serial.hd_top == threaded.hd_top),
-        (int)(serial.hd_below == threaded.hd_below));
+        "[adaptive] width=%u hd=%d | %d of %d threaded frames differed from "
+        "the serial reference\n",
+        serial.width, (int)serial.hd_valid, mismatched, kFrames);
     std::fprintf(stderr,
         "[adaptive] serial band=%llu serial_frames=%llu helper_lines=%llu | "
-        "threaded band=%llu serial_frames=%llu helper_lines=%llu\n",
+        "threaded band=%llu serial_frames=%llu helper_lines=%llu of %d\n",
         (unsigned long long)serial.band_frames,
         (unsigned long long)serial.serial_frames,
         (unsigned long long)serial.helper_lines,
-        (unsigned long long)threaded.band_frames,
-        (unsigned long long)threaded.serial_frames,
-        (unsigned long long)threaded.helper_lines);
+        (unsigned long long)band_frames,
+        (unsigned long long)serial_frames,
+        (unsigned long long)helper_lines, kFrames * 192);
 
     // The scene must be the widened, HD-emitting one, or the comparison is
     // vacuous.
     if (!require(serial.width == 448u)) return false;
-    if (!require(threaded.width == 448u)) return false;
-    if (!require(serial.hd_valid && threaded.hd_valid)) return false;
+    if (!require(serial.hd_valid)) return false;
     // ... and it must not be a flat fill.
     if (!require(std::adjacent_find(serial.surface.begin(),
                                     serial.surface.end(),
                                     std::not_equal_to<uint32_t>()) !=
                  serial.surface.end()))
         return false;
-    // With no helpers every line runs on the calling thread; with helpers the
-    // band pool must actually have taken some.
+    // With no helpers every line runs on the calling thread.
     if (!require(serial.helper_lines == 0u)) return false;
-    if (!require(threaded.band_frames == 1u)) return false;
-    if (!require(threaded.serial_frames == 0u)) return false;
-    if (!require(threaded.helper_lines > 0u)) return false;
+    if (!require(serial.serial_frames == 1u)) return false;
+    // With helpers the band path must be the one taken, and the helpers must
+    // have executed lines.
+    if (!require(band_frames == static_cast<uint64_t>(kFrames))) return false;
+    if (!require(serial_frames == 0u)) return false;
+    if (!require(helper_lines > 0u)) return false;
     // The whole point.
-    if (!require(serial.surface == threaded.surface)) return false;
-    if (!require(serial.hd_top == threaded.hd_top)) return false;
-    if (!require(serial.hd_below == threaded.hd_below)) return false;
+    if (!require(mismatched == 0)) return false;
     return true;
 }
 
