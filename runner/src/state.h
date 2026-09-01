@@ -74,8 +74,6 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base);
 extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                                         unsigned len);
-extern "C" bool nds_dispatch_static_bank_covers(int cpu, uint32_t pc,
-                                                uint8_t thumb);
 // Both registration calls are emulation-thread-only (see the convention
 // comment in runtime_arm.cpp). Debug builds pin the first caller's thread;
 // call this to re-pin if emulation ever moves to another thread.

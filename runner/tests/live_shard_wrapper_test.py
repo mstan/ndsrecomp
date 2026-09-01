@@ -25,6 +25,11 @@ import compile_live_shards as tool  # noqa: E402
 
 ROM_SHA1 = "0123456789abcdef0123456789abcdef01234567"
 
+# Deliberately not equal to SHARD_CODEGEN_VERSION or to any plausible
+# kCodegenVersion: a wrapper that ignored the argument and emitted either
+# constant instead would still pass a matching-number assertion.
+PROBE_CODEGEN_VERSION = 4242
+
 # A minimal stand-in for the generated bank: one dispatch row plus the data
 # imports every live bank binds to runner storage.
 STUB = """
@@ -72,8 +77,13 @@ def build(work: Path, gcc: str, cpu: int, static_cpu: int) -> Path:
     src.mkdir(parents=True, exist_ok=True)
     (src / "stub.c").write_text(STUB % {"bank": bank}, encoding="utf-8")
     wrapper = src / f"{bank}_live.c"
+    # beads-yjp.68: the producer codegen version is the recompiler's
+    # kCodegenVersion, handed in by the caller. This stub build has no
+    # recompiler, so it names its own probe value and asserts the wrapper
+    # published exactly that -- see live_shard_codegen_gate_test.py for the
+    # test that it is the RECOMPILER's number and not SHARD_CODEGEN_VERSION.
     tool.write_wrapper(wrapper, bank, "candidate-test", "generation-test",
-                       ROM_SHA1, cpu)
+                       ROM_SHA1, cpu, PROBE_CODEGEN_VERSION)
     suffix = ".dll" if sys.platform == "win32" else ".so"
     dll = src / f"{bank}{suffix}"
     command = [
@@ -158,8 +168,9 @@ def main() -> int:
         assert bank.cpu == expected_static, "metadata cpu should be 0/1"
         assert bank.static_cpu == expected_static, (
             f"cpu {cpu} wrapper reported static_cpu {bank.static_cpu}")
-        assert codegen_version(dll) == tool.SHARD_CODEGEN_VERSION, (
-            "wrapper must publish the producer codegen version")
+        assert codegen_version(dll) == PROBE_CODEGEN_VERSION, (
+            "wrapper must publish the producer codegen version it was given, "
+            f"got {codegen_version(dll)}")
 
     # The whole point of the field: it follows -DNDS_STATIC_CPU, not the
     # metadata, so a build that disagrees is visible to the runner instead
