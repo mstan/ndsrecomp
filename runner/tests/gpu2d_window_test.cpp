@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <vector>
 
 // Compile the production implementation into this focused test with device
 // stubs below. This keeps the OBJ-window and compose assertions on the exact
@@ -463,6 +465,135 @@ bool test_capture_serializes_and_matches() {
     return true;
 }
 
+// The adaptive (widened) presentation compositor runs its 192 lines on a band
+// pool of helper threads. Every line's writes are indexed by y -- the
+// destination row and the HD layer surfaces at (y * width + x) * 2 -- so any
+// execution order must produce the identical frame. This pins that: the same
+// scene composited with 0 helpers and with 3 must be byte-identical, in the
+// presented surface AND in the HD layer surfaces the accelerated presenter
+// consumes.
+struct AdaptiveRun {
+    std::vector<uint32_t> surface;
+    std::vector<uint32_t> hd_top;
+    std::vector<uint32_t> hd_below;
+    uint16_t width = 0;
+    bool hd_valid = false;
+    uint64_t band_frames = 0;
+    uint64_t serial_frames = 0;
+    uint64_t helper_lines = 0;
+};
+
+void run_adaptive_frame(AdaptiveRun& out) {
+    nds_gpu2d_reset();
+    nds_gpu2d_profile_reset();
+    g_lcdc_mapped = false;
+    g_3d_output_width = 448;
+    g_3d_render_xpos = 0;
+    g_3d_render_polygon_count = 4096;
+    g_palette.fill(0);
+    g_oam.fill(0);
+    // Backdrop plus a text-BG palette so the HUD layer is not all transparent.
+    write16(g_palette, 0, 0x3DEFu);
+    for (size_t i = 1; i < 16; ++i)
+        write16(g_palette, i * 2u, static_cast<uint16_t>(0x8000u | (i * 0x0421u)));
+    // A 3D line with a mix of opaque, semi-transparent and fully transparent
+    // pixels, so the layer resolution actually has something to resolve and
+    // the skybox/black-run scan sees both cases.
+    for (size_t i = 0; i < g_3d_line.size(); ++i) {
+        const uint32_t alpha = (i % 7u == 0u) ? 0u : ((i % 5u) + 1u) * 6u;
+        g_3d_line[i] = static_cast<uint32_t>((i * 0x00010203u) & 0x003F3F3Fu) |
+                       (alpha << 24);
+    }
+    // Two visible OBJ sprites, so render_obj_line has real work per line.
+    set_obj(0, 0x0020u, 0x4010u, 0x0200u);
+    set_obj(1, 0x0060u, 0x40A0u, 0x0401u);
+
+    Unit& u = g_unit[0];
+    // Display mode 1 (composite), BG0 = 3D, BG0/BG1 enabled, OBJ enabled.
+    u.dispcnt = 0x00010000u | 0x8u | 0x100u | 0x200u | 0x1000u;
+    u.bgcnt[0] = 0;
+    u.bgcnt[1] = 0x0001u;   // text BG, priority 1
+    u.master_bright = 0;
+    u.capture = 0;
+    g_unit[1].dispcnt = 0x00010000u;
+
+    nds_gpu2d_start_frame();
+    for (int y = 0; y < 192; ++y) nds_gpu2d_render_scanline(y);
+    nds_gpu2d_finish_frame();
+
+    nds_gpu2d_set_hd_emit(true);
+    nds_gpu2d_invalidate_hd_frame();
+    uint16_t width = 0;
+    const uint32_t* const fb = nds_gpu2d_adaptive_framebuffer(0, &width);
+    out.width = width;
+    out.surface.assign(fb, fb + static_cast<size_t>(width) * 192u);
+    NdsGpu2dHdFrame hd{};
+    out.hd_valid = nds_gpu2d_hd_frame_peek(&hd);
+    if (out.hd_valid) {
+        const size_t words = static_cast<size_t>(hd.width) * 192u * 2u;
+        out.hd_top.assign(hd.top_pixels, hd.top_pixels + words);
+        out.hd_below.assign(hd.below_pixels, hd.below_pixels + words);
+    }
+    NdsGpu2dProfile prof{};
+    nds_gpu2d_profile(&prof);
+    out.band_frames = prof.adaptive_band_frames;
+    out.serial_frames = prof.adaptive_serial_frames;
+    out.helper_lines = prof.adaptive_helper_lines;
+    nds_gpu2d_set_hd_emit(false);
+}
+
+bool test_adaptive_helpers_match_serial() {
+    AdaptiveRun serial{};
+    nds_gpu2d_set_adaptive_workers(0);
+    run_adaptive_frame(serial);
+
+    AdaptiveRun threaded{};
+    nds_gpu2d_set_adaptive_workers(3);
+    run_adaptive_frame(threaded);
+    nds_gpu2d_set_adaptive_workers(0);
+
+    std::fprintf(stderr,
+        "[adaptive] width serial=%u threaded=%u | surface_eq=%d hd serial=%d "
+        "threaded=%d hd_top_eq=%d hd_below_eq=%d\n",
+        serial.width, threaded.width,
+        (int)(serial.surface == threaded.surface),
+        (int)serial.hd_valid, (int)threaded.hd_valid,
+        (int)(serial.hd_top == threaded.hd_top),
+        (int)(serial.hd_below == threaded.hd_below));
+    std::fprintf(stderr,
+        "[adaptive] serial band=%llu serial_frames=%llu helper_lines=%llu | "
+        "threaded band=%llu serial_frames=%llu helper_lines=%llu\n",
+        (unsigned long long)serial.band_frames,
+        (unsigned long long)serial.serial_frames,
+        (unsigned long long)serial.helper_lines,
+        (unsigned long long)threaded.band_frames,
+        (unsigned long long)threaded.serial_frames,
+        (unsigned long long)threaded.helper_lines);
+
+    // The scene must be the widened, HD-emitting one, or the comparison is
+    // vacuous.
+    if (!require(serial.width == 448u)) return false;
+    if (!require(threaded.width == 448u)) return false;
+    if (!require(serial.hd_valid && threaded.hd_valid)) return false;
+    // ... and it must not be a flat fill.
+    if (!require(std::adjacent_find(serial.surface.begin(),
+                                    serial.surface.end(),
+                                    std::not_equal_to<uint32_t>()) !=
+                 serial.surface.end()))
+        return false;
+    // With no helpers every line runs on the calling thread; with helpers the
+    // band pool must actually have taken some.
+    if (!require(serial.helper_lines == 0u)) return false;
+    if (!require(threaded.band_frames == 1u)) return false;
+    if (!require(threaded.serial_frames == 0u)) return false;
+    if (!require(threaded.helper_lines > 0u)) return false;
+    // The whole point.
+    if (!require(serial.surface == threaded.surface)) return false;
+    if (!require(serial.hd_top == threaded.hd_top)) return false;
+    if (!require(serial.hd_below == threaded.hd_below)) return false;
+    return true;
+}
+
 // Minimal device implementations required by the production renderer object.
 uint16_t nds_powercontrol9() { return 0x8002u; }
 const uint8_t* nds_vram_renderer_palette(int) { return g_palette.data(); }
@@ -497,5 +628,6 @@ int main() {
     if (!test_compose_window_effects()) return 8;
     if (!test_obj_window_coverage()) return 9;
     if (!test_capture_serializes_and_matches()) return 10;
+    if (!test_adaptive_helpers_match_serial()) return 11;
     return 0;
 }

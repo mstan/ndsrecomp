@@ -1217,7 +1217,8 @@ std::string handle(const std::string& line) {
         } else if (action == "key") {
             ok = nds_frontend_debug_key(
                 json_str(line, "key").c_str(),
-                json_bool(line, "down", true));
+                json_bool(line, "down", true),
+                json_bool(line, "shift", false));
         } else if (action == "mouse") {
             const std::string named = json_str(line, "button");
             uint8_t button = mouse_button_from_string(named);
@@ -1279,6 +1280,41 @@ std::string handle(const std::string& line) {
                ",\"worst_row_count\":" +
                std::to_string(capture.worst_row_count) +
                ",\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
+    }
+    // Query into the always-on presented-frame digest ring (frontend.h). The
+    // ring records from process start when NDS_FRAME_HASH=1; this only reads a
+    // window out of it, so nothing is armed here and no frame before the probe
+    // connected is missing.
+    if (cmd == "frame_digests") {
+        const uint64_t count = nds_frontend_frame_digest_count();
+        const uint64_t from = json_u64(line, "from", 0);
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "count", 256));
+        if (max > 4096u) max = 4096u;
+        std::vector<NdsFrontendFrameDigest> entries(max);
+        const uint32_t got =
+            nds_frontend_frame_digests(from, max, entries.data());
+        std::string out = "{\"enabled\":" +
+            std::to_string(nds_frontend_frame_digest_enabled() ? 1 : 0) +
+            ",\"count\":" + std::to_string(count) +
+            ",\"from\":" + std::to_string(from) +
+            ",\"digests\":[";
+        for (uint32_t i = 0; i < got; ++i) {
+            const NdsFrontendFrameDigest& d = entries[i];
+            char b[256];
+            std::snprintf(b, sizeof(b),
+                "%s{\"frame\":%llu,\"top\":\"%016llx\","
+                "\"bottom\":\"%016llx\",\"hd\":\"%016llx\","
+                "\"tw\":%u,\"bw\":%u,\"flags\":%u,\"epoch\":%u}",
+                i ? "," : "",
+                (unsigned long long)d.frame,
+                (unsigned long long)d.top_hash,
+                (unsigned long long)d.bottom_hash,
+                (unsigned long long)d.hd_hash,
+                d.top_width, d.bottom_width, d.flags, d.epoch);
+            out += b;
+        }
+        out += "]}";
+        return out;
     }
     if (cmd == "framebuffer_sync") {
         NdsFrontendLiveStats stats{};
@@ -1440,6 +1476,12 @@ std::string handle(const std::string& line) {
                std::to_string(gpu.fence_helped_lines) +
                ",\"staged_captures\":" +
                std::to_string(gpu.staged_captures) +
+               ",\"adaptive_band_frames\":" +
+               std::to_string(gpu.adaptive_band_frames) +
+               ",\"adaptive_serial_frames\":" +
+               std::to_string(gpu.adaptive_serial_frames) +
+               ",\"adaptive_helper_lines\":" +
+               std::to_string(gpu.adaptive_helper_lines) +
                ",\"fence_drains\":" + fence_drains +
                ",\"fenced_lines\":" + fenced_lines +
                ",\"render_ns\":" + std::to_string(gpu.render_ns) +

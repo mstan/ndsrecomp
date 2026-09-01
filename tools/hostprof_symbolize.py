@@ -155,10 +155,24 @@ NAME_RULES = [
      r"|ComputeRenderer|ClipAgainstPlane|YSort|Vertex|Polygon)"
      r"|(?:^|::)nds_compute|(?:^|::)nds_texture"
      r"|(?:^|::)compute_finish_readback|(?:^|::)compute_", "gpu3d"),
+    # The file rule above already catches everything in gpu2d.cpp that keeps
+    # line info. These name rules exist for the ones that do not: GCC emits
+    # `.constprop`/`.isra` clones for the hot compositor helpers, and those
+    # clones frequently have no usable file/line, which parked
+    # composite_adaptive_line -- 4.5% of the emu thread on its own -- under
+    # "other" and made the 2D category read far smaller than it was.
     (r"(?:^|::)nds_gpu2d|render_scanline|(?:^|::)compose|draw_bg"
      r"|draw_sprite|draw_obj|(?:^|::)decode_bg_line"
      r"|(?:^|::)render_engine_line|(?:^|::)render_obj_line"
-     r"|(?:^|::)nds_tick_display", "gpu2d"),
+     r"|(?:^|::)nds_tick_display"
+     r"|(?:^|::)composite_adaptive_line|(?:^|::)composite_adaptive_frame"
+     r"|(?:^|::)band_worker_main|(?:^|::)submit_line|(?:^|::)latch_line"
+     r"|(?:^|::)render_line_job|(?:^|::)drain_pool|(?:^|::)worker_main"
+     r"|(?:^|::)apply_staged_capture|(?:^|::)merge_scratch"
+     r"|(?:^|::)decode_text_line|(?:^|::)decode_affine_line"
+     r"|(?:^|::)decode_extended_line|(?:^|::)direct_scene_class"
+     r"|(?:^|::)prepare_direct_frame|(?:^|::)hd_meta"
+     r"|(?:^|::)line_forceblank|(?:^|::)line_general_path", "gpu2d"),
     (r"(?:^|::)nds_spu|(?:^|::)spu_|audio_callback|SDL_Audio|(?:^|::)SPU"
      r"|(?:^|::)nds_tick_spu", "audio"),
     (r"(?:^|::)live_overlay", "live_overlay"),

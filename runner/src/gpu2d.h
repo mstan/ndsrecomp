@@ -49,6 +49,13 @@ inline void nds_gpu2d_read_fence() {
 // same latch/execute sequence with the execute taken immediately.
 void nds_gpu2d_set_threaded(bool enabled, unsigned workers);
 bool nds_gpu2d_threaded();
+// Helper threads for the adaptive (widened) presentation compositor, which is
+// a separate, purely presentation-side per-line pass run at present time --
+// not part of the scanline ring. 0 keeps it entirely on the calling thread.
+// The calling thread always participates and always waits for completion, so
+// this changes only where the work runs, never which frame is presented.
+void nds_gpu2d_set_adaptive_workers(unsigned helpers);
+unsigned nds_gpu2d_adaptive_workers();
 void nds_gpu2d_shutdown_workers();
 
 void nds_gpu2d_reset();
@@ -141,6 +148,9 @@ void nds_gpu2d_set_hd_emit(bool enabled);
 // Valid only after nds_gpu2d_adaptive_framebuffer() has run for this frame,
 // which is where the surfaces are filled.
 bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out);
+// Same snapshot without the consumption counter bump, for observers (the
+// presented-frame digest ring) that must not look like a presenter.
+bool nds_gpu2d_hd_frame_peek(NdsGpu2dHdFrame* out);
 // Must be called by the frontend once per presented frame, before deciding
 // whether to run the adaptive compositor at all. The adaptive path is skipped
 // entirely on direct-present frames, so without this the surfaces from the
@@ -215,6 +225,12 @@ struct NdsGpu2dProfile {
     uint64_t fence_wait_ns;
     uint64_t fence_helped_lines;
     uint64_t staged_captures;
+    // Adaptive (widened presentation) compositor band pool: frames composited
+    // with worker help, frames that had to stay serial because no wide-3D
+    // snapshot matched, and lines the helpers took off the calling thread.
+    uint64_t adaptive_band_frames;
+    uint64_t adaptive_serial_frames;
+    uint64_t adaptive_helper_lines;
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);
 void nds_gpu2d_profile_reset();

@@ -103,6 +103,15 @@ void nds_profile_report(std::FILE* out) {
         }
         std::fprintf(out, "   (drains/lines)\n");
     }
+    if (gpu_profile.adaptive_band_frames ||
+        gpu_profile.adaptive_serial_frames) {
+        std::fprintf(out,
+            "  GPU2D adaptive compositor: band=%llu frames serial=%llu "
+            "frames helper_lines=%llu\n",
+            (unsigned long long)gpu_profile.adaptive_band_frames,
+            (unsigned long long)gpu_profile.adaptive_serial_frames,
+            (unsigned long long)gpu_profile.adaptive_helper_lines);
+    }
     if (gpu_profile.scanlines) {
         std::fprintf(out,
             "  GPU2D profile: %.3f seconds (A %.3f, B %.3f, OBJ %.3f) "
