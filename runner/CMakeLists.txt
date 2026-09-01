@@ -411,6 +411,7 @@ add_executable(nds_runner
     src/diagnostics.cpp
     src/dispatch_timing.cpp
     src/emu_profile.cpp
+    src/pc_profile.cpp
     src/host_info.cpp
     src/profile_report.cpp
     src/scheduler.cpp
@@ -781,7 +782,10 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/spu.cpp
       src/runtime_arm.cpp
       src/dispatch_timing.cpp
-      src/emu_profile.cpp)
+      src/emu_profile.cpp
+      # scheduler_run_round() samples both cores' parked PCs into the always-on
+      # histogram, whose table lives in this translation unit.
+      src/pc_profile.cpp)
   target_include_directories(savestate_test PRIVATE
       src
       vendor/melonds

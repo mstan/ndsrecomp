@@ -29,6 +29,7 @@
 #include "GPU3D_Soft.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "GPU3D_Compute.h"
+#include "ComputeHost.h"
 #endif
 
 namespace {
@@ -134,6 +135,32 @@ uint32_t g_compute_attr_frame[kComputeMaxWidth * 192u] = {};
 uint32_t g_compute_scrolled_line[kComputeMaxWidth] = {};
 uint32_t g_compute_scrolled_attr_line[kComputeMaxWidth] = {};
 
+// ── Native 3D readback (see compute_submit_readback) ────────────────────
+// ARB_buffer_storage is core in GL 4.4; the host context floor is 4.3 and
+// the vendored glad loader is generated with no extensions, so both the
+// entry point and the flag values are declared here and resolved through
+// the host context at renderer start.
+#ifndef GL_MAP_PERSISTENT_BIT
+#define GL_MAP_PERSISTENT_BIT 0x0040
+#endif
+#ifndef GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT
+#define GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT 0x00004000
+#endif
+typedef void (APIENTRYP NdsGlBufferStorageProc)(GLenum, GLsizeiptr,
+                                                const void*, GLbitfield);
+
+// Readback destination. Non-zero only when persistent mapping is available;
+// otherwise the renderer's own PBO plus glMapBuffer is used and these stay
+// empty. g_compute_pbo_map is a permanent CPU view of g_compute_pbo.
+GLuint g_compute_pbo = 0;
+const uint32_t* g_compute_pbo_map = nullptr;
+size_t g_compute_pbo_bytes = 0;
+// Completion of the queued pack, in both readback modes.
+GLsync g_compute_fence = nullptr;
+// Emitted once at renderer start so a field diagnostics bundle says which
+// readback path produced its numbers.
+const char* g_compute_readback_mode = "glMapBuffer";
+
 void clear_compute_gl_errors() {
     while (glGetError() != GL_NO_ERROR) {}
 }
@@ -162,6 +189,79 @@ bool compute_readback_overlap() {
     return enabled;
 }
 
+// Both readback modes carry a fence; dropping it is always safe because a
+// dropped fence only means the next consume has nothing to wait on, and a
+// consume only runs while a readback is pending.
+void compute_drop_fence() {
+    if (!g_compute_fence) return;
+    glDeleteSync(g_compute_fence);
+    g_compute_fence = nullptr;
+}
+
+bool compute_gl_has_extension(const char* name) {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; ++i) {
+        const char* extension = reinterpret_cast<const char*>(
+            glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (extension && std::strcmp(extension, name) == 0) return true;
+    }
+    return false;
+}
+
+// Requires a current context; every caller either owns one or has never
+// created the objects being released.
+void compute_readback_shutdown() {
+    compute_drop_fence();
+    if (g_compute_pbo) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+        if (g_compute_pbo_map) glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glDeleteBuffers(1, &g_compute_pbo);
+    }
+    g_compute_pbo = 0;
+    g_compute_pbo_map = nullptr;
+    g_compute_pbo_bytes = 0;
+    g_compute_readback_mode = "glMapBuffer";
+}
+
+// A persistently mapped pixel-pack buffer removes the per-frame
+// glMapBuffer/glUnmapBuffer round trip from the emu thread entirely: the CPU
+// view is established once here, and the only per-frame synchronisation left
+// is an explicit fence wait on the pack itself. Auto-detected, never a user
+// knob -- implementations without ARB_buffer_storage keep the renderer's own
+// PBO and the original map path, which produces byte-identical pixels.
+void compute_readback_init(uint32_t render_width) {
+    compute_readback_shutdown();
+    const size_t bytes =
+        static_cast<size_t>(render_width) * 192u * sizeof(uint32_t);
+    auto buffer_storage = reinterpret_cast<NdsGlBufferStorageProc>(
+        compute_gl_has_extension("GL_ARB_buffer_storage")
+            ? nds_compute_host_gl_proc("glBufferStorage")
+            : nullptr);
+    if (!buffer_storage) return;
+    clear_compute_gl_errors();
+    // No GL_MAP_COHERENT_BIT: coherent storage is the write-combined path
+    // meant for CPU->GPU streaming, and this buffer is read by the CPU. The
+    // explicit GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT at submit is what makes
+    // the pack visible through the mapping.
+    const GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT;
+    glGenBuffers(1, &g_compute_pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+    buffer_storage(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(bytes),
+                   nullptr, flags);
+    void* mapped = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+                                    static_cast<GLsizeiptr>(bytes), flags);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    g_compute_pbo_map = static_cast<const uint32_t*>(mapped);
+    g_compute_pbo_bytes = bytes;
+    if (!mapped || compute_gl_stage_failed("persistent readback buffer")) {
+        compute_readback_shutdown();
+        return;
+    }
+    g_compute_readback_mode = "persistent map";
+}
+
 void compute_readback_failed(const char* stage) {
     g_compute_rendered_frame = false;
     g_compute_readback_pending = false;
@@ -181,7 +281,32 @@ void compute_submit_readback() {
     // Order the compute shader's image stores before queuing the low-resolution
     // texture copy into its pixel-pack buffer.
     glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-    renderer.PrepareCaptureFrame();
+    if (g_compute_pbo_map) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+        glBindTexture(GL_TEXTURE_2D, nds_gpu3d_compute_output_texture());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE,
+                      nullptr);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        // Persistent, non-coherent mapping: the pack's writes only become
+        // visible through the CPU view once this barrier has retired, and
+        // the fence below is what tells us it has.
+        glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+    } else {
+        renderer.PrepareCaptureFrame();
+    }
+    // KICK THE GPU. Everything above -- the whole compute dispatch chain
+    // RenderFrame just queued as well as this pack -- is still sitting in the
+    // driver's client-side command buffer, and nothing in the rest of the
+    // frame forces a flush before the readback is consumed at the next frame
+    // boundary. Without this the GPU did not start the frame until the
+    // consumer's glMapBuffer flushed it, so the emu thread paid the entire
+    // render latency synchronously and the "overlap" window overlapped
+    // nothing. The fence is created before the flush so the flush submits it
+    // too, and it gives the consumer something to wait on that is not the
+    // buffer object itself.
+    compute_drop_fence();
+    g_compute_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
     g_compute_rendered_frame = false;
     const bool failed =
         compute_gl_stage_failed("frame render/readback submit");
@@ -202,18 +327,46 @@ void compute_finish_readback() {
     if (!g_compute_readback_pending) return;
     const auto start = profiling() ? ProfileClock::now()
                                    : ProfileClock::time_point{};
-    // PrepareCaptureFrame left the renderer's PBO bound. Mapping waits only
-    // for copy work that did not finish during the scanline overlap.
-    void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-    bool valid = mapped != nullptr;
+    const size_t frame_bytes =
+        static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
+        192u * sizeof(uint32_t);
+    // The pack was flushed at submit, so whatever is left here is only the
+    // portion of the GPU's frame that did not fit in the ~48 scanlines of
+    // guest emulation plus the present that separate the two points.
+    bool valid = true;
+    const void* mapped = nullptr;
+    if (g_compute_pbo_map) {
+        if (g_compute_fence) {
+            // GL_SYNC_FLUSH_COMMANDS_BIT is redundant after the submit-side
+            // glFlush and costs nothing; it keeps this correct if a future
+            // caller ever submits without flushing.
+            constexpr GLuint64 kReadbackTimeoutNs = 5ull * 1000000000ull;
+            const GLenum status = glClientWaitSync(
+                g_compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT,
+                kReadbackTimeoutNs);
+            if (status == GL_WAIT_FAILED || status == GL_TIMEOUT_EXPIRED)
+                valid = false;
+        }
+        if (valid && frame_bytes <= g_compute_pbo_bytes)
+            mapped = g_compute_pbo_map;
+        else
+            valid = false;
+    } else {
+        // PrepareCaptureFrame left the renderer's PBO bound.
+        mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        valid = mapped != nullptr;
+    }
     if (mapped) {
-        const size_t frame_bytes =
-            static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
-            192u * sizeof(uint32_t);
-        std::memcpy(g_compute_frame, mapped, frame_bytes);
+        // Single streaming pass. The readback surface is up to 448x192x4 and
+        // is walked once per frame on the emu thread, so splitting it into a
+        // memcpy followed by an in-place rewrite cost an extra read and an
+        // extra write of the whole frame for no benefit: the polygon id the
+        // attribute plane needs is derived from the same word the colour
+        // plane keeps.
+        const uint32_t* const src = static_cast<const uint32_t*>(mapped);
         const size_t pixel_count = frame_bytes / sizeof(uint32_t);
         for (size_t i = 0; i < pixel_count; ++i) {
-            const uint32_t packed = g_compute_frame[i];
+            const uint32_t packed = src[i];
             const uint32_t polygon_id =
                 ((packed >> 6) & 0x03u) |
                 (((packed >> 14) & 0x03u) << 2) |
@@ -221,8 +374,10 @@ void compute_finish_readback() {
             g_compute_attr_frame[i] = polygon_id << 24;
             g_compute_frame[i] = packed & 0xFF3F3F3Fu;
         }
-        if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE) valid = false;
+        if (!g_compute_pbo_map &&
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE) valid = false;
     }
+    compute_drop_fence();
     g_compute_readback_pending = false;
     const bool failed = compute_gl_stage_failed("frame readback map");
     if (profiling()) {
@@ -419,6 +574,11 @@ void nds_gpu3d_use_soft_renderer(bool threaded) {
     if (!renderer) {
         auto replacement = std::make_unique<melonDS::SoftRenderer>();
         renderer = replacement.get();
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        // Release the readback objects while the outgoing accelerated
+        // renderer's context is still the current one.
+        compute_readback_shutdown();
+#endif
         g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(replacement));
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         g_compute_rendered_frame = false;
@@ -582,6 +742,9 @@ bool nds_gpu3d_use_compute_renderer() {
     std::fprintf(stderr, "[gpu3d] compute readback overlap: %s\n",
                  compute_readback_overlap() ? "on" : "off");
     g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(renderer));
+    compute_readback_init(render_width);
+    std::fprintf(stderr, "[gpu3d] compute readback buffer: %s\n",
+                 g_compute_readback_mode);
     g_compute_rendered_frame = false;
     g_compute_readback_pending = false;
     g_compute_frame_ready = false;

@@ -32,6 +32,14 @@ void nds_diagnostics_start_performance_log(
     const NdsFrontendOptions& options);
 void nds_diagnostics_maybe_write_performance_sample(
     const NdsFrontendLiveStats& stats);
+// Append one savestate event to the open performance log. `action` is the
+// verb as the frontend knows it ("save"/"load"), and the record carries the
+// slot, the outcome and the same ts_ms/wall stamps as every perf record, so a
+// bundle can be read as a timeline: this is where the machine's history was
+// discontinuous. No-op when the log is closed; a savestate never depends on
+// diagnostics being enabled.
+void nds_diagnostics_note_savestate(const char* action, unsigned slot,
+                                    bool ok);
 void nds_diagnostics_stop_performance_log();
 // Drop interval baselines after a historical load. The next sample primes a
 // fresh epoch instead of subtracting counters from the pre-load timeline.

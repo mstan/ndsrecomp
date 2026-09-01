@@ -28,6 +28,7 @@
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
+#include "pc_profile.h"
 #include "net/net_ring.h"
 #include "wifi_net.h"
 #include "runtime_arm.h"
@@ -597,7 +598,10 @@ std::string handle(const std::string& line) {
         return out + "}";
     }
     if (cmd == "live_overlay_status") {
-        live_overlay_poll();
+        // The unconditional body, not the scheduler's countdown gate: a probe
+        // asking for status wants the state as of now, including whatever a
+        // finished compiler child has left to be drained.
+        live_overlay_poll_now();
         return live_overlay_status_json();
     }
     if (cmd == "live_overlay_diagnostics") {
@@ -1256,6 +1260,25 @@ std::string handle(const std::string& line) {
     // rounds/sampled_rounds. Snapshot twice and subtract, like its
     // neighbours -- there is no arm/reset.
     if (cmd == "emu_attrib") return nds_emu_profile_json();
+    // WHERE the guest is, the companion question to emu_attrib's "which
+    // subsystem is expensive" (pc_profile.h). Always-on per-CPU histograms;
+    // read-only, so no execution guard applies and both are answerable in play
+    // mode while the frontend owns execution. Whole-run totals -- snapshot
+    // twice and subtract for an interval, exactly like its neighbours; there
+    // is nothing to arm and nothing to reset.
+    //
+    // "kind":"park" (the default, and what this command meant before exec
+    // existed) is the round-boundary PC, which answers HALT SHARE and is
+    // dominated by idle loops. "kind":"exec" is the dispatch-entry PC, which
+    // is the one that ranks hot entry points. Defaulting to park keeps every
+    // existing probe's meaning byte-for-byte.
+    if (cmd == "pc_hot") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const NdsPcHotKind kind =
+            nds_pc_profile_kind_from_name(json_str(line, "kind").c_str());
+        return nds_pc_profile_json(
+            kind, cpu, static_cast<unsigned>(json_u64(line, "top", 32)));
+    }
     // B2 direct linking: whether the per-callsite link slots are live
     // right now (they are gated off under deep trace) and how the
     // literal transfers actually resolved. Snapshot-twice-and-subtract

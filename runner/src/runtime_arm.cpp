@@ -37,6 +37,7 @@
 #include "dispatch_timing.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
+#include "pc_profile.h"
 
 // ── Dispatch-composition counters (always on; see dispatch_stats.h) ─────
 NdsDispatchStats g_nds_dispatch_stats[2] = {};
@@ -760,6 +761,26 @@ uint32_t g_link_epoch = 1u;
 uint64_t g_link_hits[2]{};
 uint64_t g_link_resolves[2]{};
 uint64_t g_link_falls[2]{};
+// beads-yjp.67 inline-leaf accounting. `admits` counts expansions actually
+// run inline; `falls` counts sites that dropped to the faithful link call
+// because the slot was unresolved, the resolution named a different body, or
+// the content guard had moved.
+uint64_t g_inline_leaf_admits[2]{};
+uint64_t g_inline_leaf_falls[2]{};
+
+bool configured_inline_leaves() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NDS_INLINE_LEAVES");
+        if (!value || (value[0] == '1' && value[1] == '\0')) return true;
+        if (value[0] == '0' && value[1] == '\0') return false;
+        std::fprintf(stderr,
+                     "invalid NDS_INLINE_LEAVES value (expected 0 or 1); "
+                     "running every inlined leaf through the dispatcher\n");
+        return false;
+    }();
+    return enabled;
+}
+bool g_inline_leaves = true;
 
 bool configured_direct_link() {
     static const bool enabled = [] {
@@ -1562,6 +1583,26 @@ void runtime_dispatch_impl(uint32_t target_pc, NdsLinkSlot* linked) {
         // preserving bit 1 manufactures impossible entries such as BIOS 0x2.
         uint32_t pc = target_pc & (thumb ? ~1u : ~3u);
         ++g_nds_dispatch_stats[g_nds_active].dispatch_total;
+        // WHICH guest code is being entered (pc_profile.h, NDS_PC_HOT_EXEC).
+        // This one line is the whole exec population, and it sits here rather
+        // than at any of the callers because THIS is the funnel: every way
+        // guest code can be reached -- a static bank body, a live-overlay bank,
+        // a Tier-3 stretch, a BIOS body, a B2 link-slot transfer, an
+        // exchange/literal transfer, a scheduler slice resume -- arrives as an
+        // iteration of this loop and increments the counter above. A hook at
+        // any caller would cover one path; a hook here cannot miss one.
+        //
+        // Deliberately NOT also at scheduler.cpp's resume_dispatch increment:
+        // a resume calls straight into this loop, so noting there as well would
+        // count resumed entries twice and inflate exactly the PCs a slice
+        // happens to restart on -- the park population's bias, reintroduced
+        // into the population that exists to avoid it.
+        //
+        // No clock, no region. The gate lives inside the note (a decrement and
+        // a predicted branch on the 99.2 percent of entries it skips) so the
+        // cost that remains is charged to the enclosing NDS_EMU_EXEC_* bucket,
+        // where the work it samples already is.
+        nds_pc_profile_note_exec(g_nds_active, pc);
         // Slice-preemption point. `pc` is a dispatch entry, so this is a safe
         // place to yield to the scheduler — including for loops whose back-edge
         // is an INDIRECT transfer (BX / pop pc / computed jump) and therefore
@@ -1771,23 +1812,74 @@ extern "C" void runtime_link_fallthrough(NdsLinkSlot* slot) {
     runtime_dispatch_impl(target_pc, slot);
 }
 
+// ── Inline-leaf admission (beads-yjp.67) ────────────────────────────────
+// A BL site that expanded a tiny `bx lr` leaf inline asks here whether the
+// copy may run for this transfer. Every check below is one the linked
+// dispatch path already performs before entering the same body, plus one
+// that path gets for free and this one must state: that the resolution is
+// the body we inlined.
+//
+//  1. NDS_INLINE_LEAVES / NDS_DIRECT_LINK off -> never admit. Either switch
+//     alone restores the faithful dispatch path for the whole process.
+//  2. link_slot_ready: the slot was resolved under the CURRENT link epoch
+//     (so no bank has registered or unregistered since) and CPSR.T still
+//     agrees with the mode the target was resolved in.
+//  3. slot->fn == expected: the ranked winner for this address is the very
+//     generated body whose bytes were inlined. An overlapping bank that
+//     out-ranks it — a live shard, an alias bank — fails here and takes the
+//     dispatcher, which enters ITS body rather than our copy.
+//  4. link_guard_live: the winner's content guard still matches the live
+//     backing-page generations, i.e. the guest has not written the leaf's
+//     bytes since they were proven identical. A write downgrades the site to
+//     the dispatcher on the very next call, which re-resolves and re-proves.
+//
+// The expansion therefore cannot outlive its proof, and a refusal is always
+// correct: the caller runs runtime_link_call instead.
+extern "C" int runtime_inline_leaf_admit(const NdsLinkSlot* slot,
+                                         void (*expected)(void)) {
+    if (g_inline_leaves && link_enabled() && slot->fn == expected &&
+        link_slot_ready(slot)) {
+        const LinkGuard* guard = static_cast<const LinkGuard*>(slot->guard);
+        if (!guard || link_guard_live(guard)) {
+            // Keep live_overlay's native-hit accounting identical to the
+            // linked dispatch this replaces. Without it a live bank whose
+            // bodies are reached only through inlined leaves would report
+            // zero native hits while running natively — an instrument going
+            // dark exactly where the new path took over. Free for static
+            // banks: their serial is 0 and the note returns immediately.
+            live_overlay_note_cached_hit(guard ? guard->serial : 0u);
+            ++g_inline_leaf_admits[g_nds_active];
+            return 1;
+        }
+    }
+    ++g_inline_leaf_falls[g_nds_active];
+    return 0;
+}
+
 extern "C" const char* nds_direct_link_json(void) {
     static std::string out;
-    char buf[320];
+    char buf[520];
     std::snprintf(buf, sizeof buf,
         "{\"enabled\":%s,\"deep_trace\":%s,\"epoch\":%u,"
-        "\"guards\":%zu,"
-        "\"arm9\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu},"
-        "\"arm7\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu}}",
+        "\"guards\":%zu,\"inline_leaves\":%s,"
+        "\"arm9\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu,"
+        "\"inline_leaf_admits\":%llu,\"inline_leaf_falls\":%llu},"
+        "\"arm7\":{\"hits\":%llu,\"resolves\":%llu,\"skipped\":%llu,"
+        "\"inline_leaf_admits\":%llu,\"inline_leaf_falls\":%llu}}",
         g_direct_link ? "true" : "false",
         g_runtime_deep_trace ? "true" : "false",
         g_link_epoch, g_link_guards.size(),
+        g_inline_leaves ? "true" : "false",
         static_cast<unsigned long long>(g_link_hits[0]),
         static_cast<unsigned long long>(g_link_resolves[0]),
         static_cast<unsigned long long>(g_link_falls[0]),
+        static_cast<unsigned long long>(g_inline_leaf_admits[0]),
+        static_cast<unsigned long long>(g_inline_leaf_falls[0]),
         static_cast<unsigned long long>(g_link_hits[1]),
         static_cast<unsigned long long>(g_link_resolves[1]),
-        static_cast<unsigned long long>(g_link_falls[1]));
+        static_cast<unsigned long long>(g_link_falls[1]),
+        static_cast<unsigned long long>(g_inline_leaf_admits[1]),
+        static_cast<unsigned long long>(g_inline_leaf_falls[1]));
     out = buf;
     return out.c_str();
 }
@@ -2131,6 +2223,9 @@ extern "C" void runtime_init(void*) {
     g_link_hits[0] = g_link_hits[1] = 0u;
     g_link_resolves[0] = g_link_resolves[1] = 0u;
     g_link_falls[0] = g_link_falls[1] = 0u;
+    g_inline_leaves = configured_inline_leaves();
+    g_inline_leaf_admits[0] = g_inline_leaf_admits[1] = 0u;
+    g_inline_leaf_falls[0] = g_inline_leaf_falls[1] = 0u;
 #if defined(NDS_PROFILE_HLE_HEAT)
     g_hle_heat.clear();
     g_hle_irq_epoch[0] = 0u;

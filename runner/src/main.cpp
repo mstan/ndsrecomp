@@ -332,6 +332,14 @@ std::filesystem::path exe_dir_from_argv(const char* argv0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // stderr is the runner's diagnostic stream and is read from files by
+    // harnesses and field-bundle collectors. Under Windows UCRT a redirected
+    // stderr becomes BLOCK buffered, so a force-killed process loses its tail
+    // and a live one shows a stale mid-line file -- which misreported a
+    // savestate load as never-happened during the 2026-08-31 Kanden A/B and
+    // cost the session an hour of phantom debugging. Unbuffered is what the C
+    // standard promises for stderr anyway; pay the syscall per line.
+    setvbuf(stderr, nullptr, _IONBF, 0);
     // Calibrate the dispatch-cost tick source before anything can dispatch.
     // It is lazily self-calibrating as a fallback, but the lazy path would
     // spend its calibration spin inside whichever dispatch happened to be
@@ -1551,7 +1559,21 @@ int main(int argc, char** argv) {
     if (!cli_savestate_dir.empty() && !rom_sha1.empty()) {
         frontend_options.savestate_directory =
             (std::filesystem::path(cli_savestate_dir) / rom_sha1).string();
-        frontend_options.savestate_build_id = NDS_RUNNER_BUILD_ID;
+        // Measurement escape hatch: savestate identity is build-exact
+        // (savestate.cpp load refuses any other build id), which is right for
+        // players but makes a cross-build A/B on a pinned state impossible --
+        // and a pinned state IS the perf methodology (the Kanden slots,
+        // beads-lqa.42). The override swaps only the IDENTITY the states are
+        // checked and stamped with; the diagnostics identity above still
+        // reports the real NDS_RUNNER_BUILD_ID, so perf bundles never lie
+        // about what code ran. Unset (the norm, and every shipped launcher)
+        // this is byte-for-byte the old behaviour.
+        const char* savestate_id_override =
+            std::getenv("NDS_SAVESTATE_BUILD_ID");
+        frontend_options.savestate_build_id =
+            (savestate_id_override && savestate_id_override[0])
+                ? savestate_id_override
+                : NDS_RUNNER_BUILD_ID;
         frontend_options.savestate_rom_sha1 = rom_sha1;
     }
     nds_diagnostics_set_versions(NDS_FRAMEWORK_VERSION, NDS_GAME_VERSION);

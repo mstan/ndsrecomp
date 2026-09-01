@@ -18,6 +18,7 @@
 #include "io.h"
 #include "gpu3d.h"
 #include "live_overlay.h"
+#include "pc_profile.h"
 #include "spu.h"
 #include "wifi.h"
 
@@ -334,10 +335,34 @@ void scheduler_run_round() {
     // cyc/insn) the ARM9 still retires too many instructions per iteration, so
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
+    // WHERE the two cores are (pc_profile.h), on its OWN 1-in-31 countdown and
+    // sampled BEFORE the emu-attribution round region opens. The first cut
+    // rode nds_emu_detail::g_sampling INSIDE the round region, which put the
+    // two hash inserts (each a likely cache miss into a 512 KB table) inside
+    // SCHED_OTHER on exactly the rounds that bucket is measured -- the
+    // gated-on-the-sampler bias emu_profile.h exists to avoid. Measured on the
+    // Kanden A/B: sched_other 0.59 -> 0.88 ms/f, pure artifact. Out here the
+    // real cost (~10 us/s) sits in no bucket and surfaces only as emu_attrib
+    // residual, which is where unattributed machinery belongs.
+    //
+    // The live register file is authoritative for whichever CPU is currently
+    // loaded; g_slot[cpu].state is only refreshed at a context switch, so for
+    // that core the slot copy is up to a round stale and would pile the
+    // histogram onto the last switch point.
+    {
+        static uint64_t pc_note_counter = 0;
+        if ((pc_note_counter++ % 31u) == 0u) {
+            nds_pc_profile_note(0, g_cur == 0 ? g_cpu.R[15]
+                                              : g_slot[0].state.R[15]);
+            nds_pc_profile_note(1, g_cur == 1 ? g_cpu.R[15]
+                                              : g_slot[1].state.R[15]);
+        }
+    }
     // Opens the emu-attribution round (emu_profile.h). Its self time is
     // NDS_EMU_SCHED_OTHER -- the interleave machinery below that is not one of
     // the named phases. RAII because of the power-off early return further
-    // down, which must not leave the round region open.
+    // down, which must not leave the region open. Constructed AFTER the PC
+    // note above so the histogram's cost can never be charged to SCHED_OTHER.
     NdsEmuRound emu_round;
     const uint64_t modulus = profile_modulus();
     const bool sample = modulus && ((g_profile_rounds++ % modulus) == 0u);

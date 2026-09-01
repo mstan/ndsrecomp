@@ -2704,14 +2704,18 @@ void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
     e.aux2 = new_value;
 }
 
-void live_overlay_poll() {
+// The real poll. Every path that wants the overlay serviced RIGHT NOW calls
+// this: the countdown gate in live_overlay_poll() below, an explicit trigger,
+// and the debug server. See live_overlay_poll() for why the scheduler's
+// per-round call does not.
+void live_overlay_poll_now() {
 #if defined(_WIN32) || defined(__linux__)
     if (!g_live.enabled) return;
     // Past the enabled gate, so a session without live sharding pays nothing.
     // When it IS enabled this runs a queue reload, a bank publication, a
-    // futility evaluation and a GetExitCodeProcess syscall EVERY scheduler
-    // round, and it sits after the old sampled block closed at
-    // scheduler.cpp:471 -- so it was outside every existing bucket.
+    // futility evaluation and a GetExitCodeProcess syscall -- measured at
+    // 0.2-0.4 ms/frame in the NDS_EMU_OVERLAY bucket (MPH Kanden) back when
+    // the scheduler ran this body every round.
     NdsEmuScope emu_region(NDS_EMU_OVERLAY);
     // The persisted queue was read at configure time, off the emulation
     // thread. This is only the belt-and-braces path for a caller that
@@ -2790,6 +2794,39 @@ void live_overlay_poll() {
 #endif
 }
 
+// The scheduler's per-round hook. A scheduler round is ~1.7 us of emulated
+// time, so this is called ~600k times a second, and the body above was running
+// in full on every one of them: an atomic exchange pair, a futility
+// evaluation, a compile-cadence check and (with a child alive) a
+// GetExitCodeProcess syscall, measured at 0.2-0.4 ms/frame in the
+// NDS_EMU_OVERLAY bucket on MPH Kanden. Nothing that body does is
+// round-granular -- it services a background compiler whose jobs take seconds
+// -- so the round rate bought nothing and cost a measurable share of the frame.
+//
+// A countdown gate, not a wall-clock check: reading a clock here would put
+// back a large part of the cost the gate exists to remove, and the round rate
+// is stable enough that 1024 rounds is a bounded ~1.7 ms of emulated time --
+// a bank becomes visible at most that late, which is invisible next to a
+// compile that took seconds to produce it.
+//
+// The enabled early-out stays FIRST so a session without live sharding still
+// pays nothing at all, and the gated-out call must not open the
+// NDS_EMU_OVERLAY region: two rdtsc reads per round to measure a countdown is
+// the exact bias emu_profile.h warns about, and the bucket would then report
+// instrumentation rather than work.
+//
+// Modulo-of-a-counter rather than a decrement so the FIRST call after start-up
+// fires: the one-shot cache re-registration and the persisted-queue reload
+// live in that body, and there is no reason to delay them (same shape as
+// NdsEmuRound's sampler).
+void live_overlay_poll() {
+    if (!g_live.enabled) return;
+    static uint64_t poll_counter = 0;
+    constexpr uint64_t kPollInterval = 1024u;
+    if ((poll_counter++ % kPollInterval) != 0u) return;
+    live_overlay_poll_now();
+}
+
 bool live_overlay_trigger_now() {
     if (!g_live.enabled) return false;
     if (!activation_delay_elapsed()) return false;
@@ -2805,7 +2842,10 @@ bool live_overlay_trigger_now() {
                                            : g_live.futility_reason.c_str());
     }
     ++g_live.trigger_requests;
-    live_overlay_poll();
+    // Straight to the body, never through the countdown gate: an explicit
+    // trigger means "now", and landing on a gated-out call would defer the
+    // commissioned run by up to 1024 rounds for no reason.
+    live_overlay_poll_now();
     return true;
 }
 

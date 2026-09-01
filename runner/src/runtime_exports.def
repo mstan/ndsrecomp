@@ -72,6 +72,7 @@ EXPORTS
     runtime_hle_profile_begin
     runtime_hle_profile_end
     runtime_init
+    runtime_inline_leaf_admit
     runtime_insn_fp
     runtime_insn_slow
     runtime_mem_cycles

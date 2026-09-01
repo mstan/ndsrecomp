@@ -2463,6 +2463,22 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     presentation_window_focused[index] = true;
                 focus_release_pending = false;
             }
+            // NDS_DEBUG_KEYEV=1: trace every polled keyboard event to stderr.
+            // Exists because an injected key that vanishes between
+            // SDL_PushEvent (debug pump, counted) and this loop is otherwise
+            // undiagnosable -- the 2026-08-31 A/B session lost an evening leg
+            // to exactly that.
+            static const bool debug_keyev = [] {
+                const char* v = std::getenv("NDS_DEBUG_KEYEV");
+                return v && v[0] == '1';
+            }();
+            if (debug_keyev &&
+                (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)) {
+                std::fprintf(stderr, "[keyev] type=%u scancode=%d repeat=%d\n",
+                             (unsigned)event.type,
+                             (int)sdl_event_scancode(event),
+                             (int)event.key.repeat);
+            }
             if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 const SDL_Scancode scancode = sdl_event_scancode(event);
                 NdsSavestateSlotCommand state_command{};
@@ -2482,6 +2498,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         frequency * 4u;
                     std::fprintf(stderr, "[savestate] %s\n",
                                  result.message.c_str());
+                    // Same instant into the perf log. stderr is not in a field
+                    // bundle and carries no timestamp; a load re-primes every
+                    // diagnostic baseline, so a bundle that cannot see where
+                    // the loads were reads the re-priming as a performance
+                    // event.
+                    nds_diagnostics_note_savestate(
+                        state_command.action == NdsSavestateSlotAction::Save
+                            ? "save" : "load",
+                        state_command.slot, result.success);
                     if (result.success &&
                         state_command.action ==
                             NdsSavestateSlotAction::Load) {

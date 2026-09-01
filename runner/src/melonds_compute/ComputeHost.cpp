@@ -780,6 +780,12 @@ bool nds_compute_host_active()
     return g_active;
 }
 
+NdsGlProc nds_compute_host_gl_proc(const char* name)
+{
+    if (!g_context || !name || !*name) return nullptr;
+    return reinterpret_cast<NdsGlProc>(SDL_GL_GetProcAddress(name));
+}
+
 const char* nds_compute_host_gl_renderer()
 {
     return g_gl_renderer;

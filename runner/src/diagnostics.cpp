@@ -18,6 +18,7 @@
 #include "gpu3d.h"
 #include "host_info.h"
 #include "live_overlay.h"
+#include "pc_profile.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "melonds_compute/ComputeHost.h"
 #endif
@@ -56,6 +57,15 @@ NdsSchedulerProfile g_prev_sched{};
 NdsGpu2dProfile g_prev_gpu2d{};
 NdsGpu3dProfile g_prev_gpu3d{};
 NdsEmuProfile g_prev_emu{};
+// Previous full PC-histogram snapshot per population per CPU (pc_profile.h).
+// Two megabytes of BSS for the four, copied once per 2 s interval: the
+// alternative -- keeping only the previous top-N -- cannot produce a correct
+// delta, because a PC that was outside the previous top-N has no baseline and
+// would be reported with its whole run total the first interval it becomes
+// hot, which is exactly the "cumulative total read as an interval" defect
+// profile_totals_delta exists to undo. Slots never move, so the delta is a
+// per-slot subtraction.
+NdsPcHotTable g_prev_pc[NDS_PC_HOT_KIND_COUNT][2];
 
 std::string json_escape(const char* text) {
     std::string out;
@@ -123,6 +133,38 @@ std::string overlay_reject_json(const NdsLiveOverlaySummary& overlay) {
     }
     out += '}';
     return out;
+}
+
+// Wall-clock stamps for every emitted record (beads: field bundles).
+//
+// WHY BOTH. The log's own time base is stats.now_ticks, a performance counter
+// with an arbitrary origin, so nothing in a bundle could be aligned with
+// anything outside it: a player saying "it hitched right after I saved" or a
+// crash-dump timestamp or the live-overlay compiler's own log lines could only
+// be matched by counting frame gaps and hoping. ts_ms is the machine-readable
+// key (unix epoch milliseconds, monotonic across the session in practice and
+// directly diffable); wall is the same instant in the form a human reads off a
+// screen recording, so a report that says "17:42:03" lands on a record without
+// anyone converting anything.
+uint64_t unix_ms_now() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+// Localtime, matching run_stamp()'s zone, so the filename and the records
+// inside the file cannot disagree about which day it is.
+std::string wall_clock_now() {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    char buf[16];
+    if (!std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm)) return "";
+    return buf;
 }
 
 std::string run_stamp() {
@@ -405,6 +447,57 @@ void write_timing_delta(const NdsDispatchTiming& now,
     std::fputs("}}", g_perf);
 }
 
+// The hottest guest PCs of THIS interval, per CPU, for one population
+// (pc_profile.h). Answers the question emu_attrib structurally cannot:
+// exec_arm9 is the biggest bucket -- which guest code. Pairs rather than
+// objects because eight of them appear in every record for each of two
+// populations and the key names would be three times the payload; the order
+// is [pc, count].
+//
+// BOTH populations ship, because they answer different questions and the
+// difference is not derivable from either one alone:
+//
+//   pc_hot_delta  -- round-boundary PCs. Counts are out of
+//                    emu_attrib.rounds/31, and in a normally-paced title they
+//                    are dominated by the idle/halt loops, which is the
+//                    measurement: the top entry's share IS the halt share.
+//   pc_exec_delta -- dispatch-entry PCs, one sample per kNdsPcExecGate
+//                    entries. Entry-frequency weighted, never time weighted;
+//                    this is the list that ranks hot entry points.
+//
+// Top EIGHT each because a per-interval record is read by eye first: the full
+// tables are available on demand over the debug server's pc_hot command
+// ("kind":"park"|"exec"), and a bundle wanting more depth wants the shard/bank
+// map, not more rows here.
+void write_pc_delta(NdsPcHotKind kind) {
+    static const char* const kNames[2] = {"arm9", "arm7"};
+    std::fputc('{', g_perf);
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        const NdsPcHotTable& now = nds_pc_profile_table(kind, cpu);
+        NdsPcHotEntry top[8];
+        const unsigned count =
+            nds_pc_profile_top_delta(now, &g_prev_pc[kind][cpu], top, 8u);
+        std::fprintf(g_perf, "%s\"%s\":[", cpu ? "," : "", kNames[cpu]);
+        for (unsigned i = 0; i < count; ++i) {
+            std::fprintf(g_perf, "%s[%u,%llu]", i ? "," : "",
+                         top[i].pc, (unsigned long long)top[i].count);
+        }
+        std::fputc(']', g_perf);
+    }
+    std::fputc('}', g_perf);
+}
+
+// Re-baseline both populations for both CPUs. One helper, called from every
+// place the other g_prev_* baselines are taken -- a population baselined in
+// three of the four places would emit one wrong interval after a savestate
+// load, and nothing would go red.
+void snapshot_pc_baselines() {
+    for (int kind = 0; kind < NDS_PC_HOT_KIND_COUNT; ++kind)
+        for (int cpu = 0; cpu < 2; ++cpu)
+            g_prev_pc[kind][cpu] =
+                nds_pc_profile_table(static_cast<NdsPcHotKind>(kind), cpu);
+}
+
 void write_hist_delta(const uint64_t now[7], const uint64_t before[7]) {
     std::fputc('[', g_perf);
     for (int i = 0; i < 7; ++i) {
@@ -508,8 +601,13 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
     const std::string gpu_renderer = nds_host_gpu_renderer_string();
     NdsLiveOverlaySummary overlay{};
     live_overlay_summary(&overlay);
+    const std::string session_wall = wall_clock_now();
     std::fprintf(g_perf,
-        "{\"kind\":\"session\",\"build_id\":\"%s\","
+        // ts_ms/wall on the session record as well as every perf record: the
+        // session line is the anchor a bundle is read from, and without a
+        // wall-clock origin the whole file is a timeline with no zero.
+        "{\"kind\":\"session\",\"ts_ms\":%llu,\"wall\":\"%s\","
+        "\"build_id\":\"%s\","
         "\"framework_version\":\"%s\",\"game_version\":\"%s\","
         "\"rom_sha1\":\"%s\","
         "\"rom_name\":\"%s\",\"rom_game_code\":\"%s\","
@@ -544,6 +642,8 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         "\"mph_prime_unified_window_focus\":%s,"
         "\"network_enabled\":%s,\"wfc_enabled\":%s,"
         "\"local_wireless_enabled\":%s}}\n",
+        (unsigned long long)unix_ms_now(),
+        json_escape(session_wall.c_str()).c_str(),
         json_escape(g_build_id.c_str()).c_str(),
         json_escape(g_framework_version.c_str()).c_str(),
         json_escape(g_game_version.c_str()).c_str(),
@@ -598,6 +698,9 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         options.network.wfc_enabled ? "true" : "false",
         options.local_wireless.enabled ? "true" : "false");
     std::fflush(g_perf);
+    // Baselines for the first interval's pc_hot_delta and pc_exec_delta, taken
+    // with every other prev-state snapshot below.
+    snapshot_pc_baselines();
     g_last_ticks = 0;
     g_prev_frontend = {};
     g_prev_tier3 = tier3_stats();
@@ -634,6 +737,7 @@ void nds_diagnostics_maybe_write_performance_sample(
         nds_gpu2d_profile(&g_prev_gpu2d);
         nds_gpu3d_profile(&g_prev_gpu3d);
         nds_emu_profile(&g_prev_emu);
+        snapshot_pc_baselines();
         return;
     }
     if (g_last_ticks != 0) {
@@ -665,8 +769,13 @@ void nds_diagnostics_maybe_write_performance_sample(
     NdsEmuProfile emu{};
     nds_emu_profile(&emu);
 
+    const std::string sample_wall = wall_clock_now();
     std::fprintf(g_perf,
-        "{\"kind\":\"perf\",\"frames\":%llu,\"frame_delta\":%llu,"
+        // Wall clock first, so a record can be located by eye or by a
+        // timestamp from outside the log (a savestate event below, a crash
+        // dump, a screen recording) without counting frame gaps.
+        "{\"kind\":\"perf\",\"ts_ms\":%llu,\"wall\":\"%s\","
+        "\"frames\":%llu,\"frame_delta\":%llu,"
         "\"fps\":%.3f,\"ms_per_frame\":{\"emu\":%.3f,\"present\":%.3f,"
         "\"adaptive\":%.3f,\"upload\":%.3f,\"draw\":%.3f,\"swap\":%.3f,"
         "\"drain\":%.3f},\"underruns_delta\":%llu,"
@@ -675,6 +784,8 @@ void nds_diagnostics_maybe_write_performance_sample(
         "\"instructions\":%llu,\"clean_ram_rejects\":%llu},"
         "\"arm7\":{\"entries\":%llu,\"instructions\":%llu,"
         "\"clean_ram_rejects\":%llu}},\"dispatch_delta\":{\"arm9\":",
+        (unsigned long long)unix_ms_now(),
+        json_escape(sample_wall.c_str()).c_str(),
         (unsigned long long)stats.frames,
         (unsigned long long)frame_delta,
         fps,
@@ -837,6 +948,19 @@ void nds_diagnostics_maybe_write_performance_sample(
     write_emu_attrib(emu, frame_delta,
                      per_frame_ms(sub_u64(stats.emu_ticks, before.emu_ticks),
                                   frame_delta, stats.freq));
+    // Emitted right after emu_attrib because it is read with it: emu_attrib
+    // says which bucket, the two pc blocks say which guest code inside it --
+    // pc_hot_delta how idle each core was, pc_exec_delta which entry points
+    // carried the dispatches. Both, always: reading either alone is how the
+    // first cut of this block spent a field session reporting the idle loop as
+    // "the hottest code in the game".
+    std::fprintf(g_perf, ",\"pc_hot_delta\":");
+    write_pc_delta(NDS_PC_HOT_PARK);
+    std::fprintf(g_perf, ",\"pc_exec_delta\":");
+    write_pc_delta(NDS_PC_HOT_EXEC);
+    // Register-address keys with bit 31 = write, not PCs; see NDS_PC_HOT_MMIO.
+    std::fprintf(g_perf, ",\"mmio_hot_delta\":");
+    write_pc_delta(NDS_PC_HOT_MMIO);
     std::fprintf(g_perf, "}\n");
     std::fflush(g_perf);
 
@@ -852,6 +976,38 @@ void nds_diagnostics_maybe_write_performance_sample(
     g_prev_gpu2d = gpu2d;
     g_prev_gpu3d = gpu3d;
     g_prev_emu = emu;
+    snapshot_pc_baselines();
+}
+
+void nds_diagnostics_note_savestate(const char* action, unsigned slot,
+                                    bool ok) {
+    // No-op with the log closed (diagnostics disabled, or a shortcut pressed
+    // after shutdown). A savestate must never depend on diagnostics being on.
+    if (!g_perf) return;
+    // WHY THIS IS IN THE PERF LOG AT ALL. A savestate load is the single
+    // largest discontinuity a session can contain: it resets every host-history
+    // accumulator (nds_savestate_reset_host_history), re-primes the interval
+    // baselines, and hands the machine a different workload from one frame to
+    // the next. Reading a bundle without knowing where those instants were
+    // means attributing a load's re-priming to a "dip", and locating them by
+    // frame-gap forensics is exactly the guesswork field diagnostics exist to
+    // remove. A save is cheaper but no less confusing: it writes a file
+    // mid-frame and shows up as one slow interval with no other cause.
+    //
+    // Emitted as its own {"kind":"event"} line rather than a field on the next
+    // perf record: the events are asynchronous to the 2 s cadence, several can
+    // land inside one interval, and a consumer that only knows "perf" records
+    // skips an unknown kind without breaking.
+    std::fprintf(g_perf,
+        "{\"kind\":\"event\",\"event\":\"savestate_%s\",\"slot\":%u,"
+        "\"ok\":%s,\"ts_ms\":%llu,\"wall\":\"%s\"}\n",
+        json_escape(action ? action : "unknown").c_str(), slot,
+        ok ? "true" : "false", (unsigned long long)unix_ms_now(),
+        json_escape(wall_clock_now().c_str()).c_str());
+    // Flushed like every other record: a bundle is usually collected after a
+    // crash or a hang, and the events worth locating are the ones nearest the
+    // end of the file.
+    std::fflush(g_perf);
 }
 
 void nds_diagnostics_stop_performance_log() {
@@ -873,4 +1029,12 @@ void nds_diagnostics_reset_performance_history() {
     g_prev_gpu2d = {};
     g_prev_gpu3d = {};
     g_prev_emu = {};
+    // RE-PRIMED, not zeroed, unlike every baseline above it. Those mirror
+    // accumulators that nds_savestate_reset_host_history() has just reset to
+    // zero, so a zero baseline is the correct one. The PC histogram is never
+    // reset (pc_profile.h: no reset, ever), so zeroing its baseline would make
+    // the next interval report the whole run's counts as if they were one
+    // interval's -- the same "cumulative read as a delta" defect that made the
+    // 2026-08-28 profile_totals unusable.
+    snapshot_pc_baselines();
 }
