@@ -65,6 +65,18 @@ typedef enum NdsCpu { NDS_ARM9 = 0, NDS_ARM7 = 1 } NdsCpu;
 extern NdsCpu g_nds_active;
 #endif
 
+// ALWAYS_INLINE, not merely `static inline`. Measured on the MPH ARM9 banks:
+// with plain `static inline`, GCC -O3 declined to inline the tiny
+// per-instruction helpers into the generated bank bodies and emitted a LOCAL
+// out-of-line copy instead, keeping exactly the call the fast path exists to
+// remove. Defined here (rather than beside the first user) because the bus /
+// data-timing fast paths further down need it too.
+#if defined(__GNUC__)
+#define NDS_MACHINERY_INLINE static inline __attribute__((always_inline))
+#else
+#define NDS_MACHINERY_INLINE static inline
+#endif
+
 // Nintendo DS runner dispatch ABI.  Runtime-materialized firmware can reuse
 // the same virtual address for different code generations, so generated rows
 // may carry an exact byte validation for the function they enter.  Immutable
@@ -382,8 +394,102 @@ static inline void bus_write_u8(uint32_t addr, uint8_t val) {
 // returns the ARM7TDMI multiply operand wait. Both mirror the IR
 // interpreter (the timing oracle) exactly. `width` is 1/2/4 bytes;
 // `sequential`/`signed_variant` are 0/1 flags.
+//
+// FUSED TIMED ACCESS (beads-yjp.70 phase 2 B). Generated code calls
+// runtime_mem_cycles(ea,...) and then bus_read/write_*(ea) back to back for
+// every guest load/store, so BOTH have to be inline or the pair costs two
+// out-of-line calls and two region decodes per access. The bus half already
+// was (nds_busf_classify above); this is the timing half. The common cases
+// are reproduced here from published DATA only:
+//
+//   ARM9: ITCM / DTCM (g_memt_* mirrors of the PROGRAMMED TCM span),
+//         D-cacheable (one load + bit test in the page-granular CP15
+//         bitmap), main RAM, palette+VRAM, generic uncached.
+//   ARM7: main RAM (16-bit bus), VRAM, and every "fast" 32-bit-bus region
+//         (BIOS / WRAM / I/O / void), which is a constant 1.
+//
+// Everything whose cost depends on live I/O registers — the GBA slot
+// (EXMEMCNT waitstates + slot ownership) and the ARM7 Wi-Fi window
+// (WIFIWAITCNT + POWCNT7) — falls through to runtime_mem_cycles_slow, as
+// does every access while the mem-timing profile build is selected or
+// while the CP15 regions are in a sub-page encoding the bitmap cannot
+// represent (g_cp15_class_ready == 0).
+//
+// This is ONE model with two spellings, never two models: the fallback in
+// runner/src/bus.cpp is the same arithmetic, and
+// runner/tests/mem_timing_test.cpp sweeps every region boundary for widths
+// 1/2/4, seq 0/1, both CPUs and several CP15 configurations asserting this
+// path == runtime_mem_cycles_reference() exactly. NO guest-visible cycle
+// value changes.
+uint32_t runtime_mem_cycles_slow(uint32_t addr, uint32_t width,
+                                 uint32_t sequential);
+// Per-CPU last data-access address; arm7_cycle_combine reads it. Published
+// as DATA so the inline path records it without a call.
+extern uint32_t g_last_data_addr[2];
+// TCM placement as the data-timing model sees it (NOT the g_busf_* window
+// bounds, which are clamped to the allocated backing). Republished by
+// bus_fast_refresh() from every path that can move TCM.
+extern uint32_t g_memt_itcm_limit;   // itcm_enable ? itcm_size : 0
+extern uint32_t g_memt_dtcm_base;
+extern uint32_t g_memt_dtcm_size;    // dtcm_enable ? dtcm_size : 0
+// Page-granular (4 KiB) CP15 cacheability: bit (page & 7) of byte
+// [page >> 3], page = addr >> 12. Rebuilt from cp15.cpp on CP15
+// control/cacheability/region writes. g_cp15_class_ready == 0 means the
+// programmed regions are not page-granular and every consumer must use the
+// reference MPU walk instead.
+extern uint8_t g_cp15_dcache_page[1u << 17];
+extern uint8_t g_cp15_icache_page[1u << 17];
+extern uint32_t g_cp15_class_ready;
+
+#ifdef NDS_RUNTIME_ABI_SHIMS
 uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
                             uint32_t sequential);
+#else
+NDS_MACHINERY_INLINE uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
+                                                 uint32_t sequential) {
+#if defined(NDS_PROFILE_MEM_TIMING)
+    // The profile build counts every access by region; keep one code path.
+    return runtime_mem_cycles_slow(addr, width, sequential);
+#else
+    if (g_nds_active == NDS_ARM9) {
+        g_last_data_addr[0] = addr;
+        if (addr < g_memt_itcm_limit) return 1u;              // ITCM
+        if (g_memt_dtcm_size != 0u && addr >= g_memt_dtcm_base &&
+            addr - g_memt_dtcm_base < g_memt_dtcm_size)
+            return 1u;                                        // DTCM
+        if (!g_cp15_class_ready)
+            return runtime_mem_cycles_slow(addr, width, sequential);
+        {
+            const uint32_t page = addr >> 12u;
+            if ((g_cp15_dcache_page[page >> 3u] >> (page & 7u)) & 1u)
+                return sequential ? 1u : 3u;                  // averaged D-cache
+        }
+        if (addr - 0x08000000u < 0x03000000u)                 // GBA slot: EXMEMCNT
+            return runtime_mem_cycles_slow(addr, width, sequential);
+        {
+            const uint32_t main_ram = (addr - 0x02000000u) < 0x01000000u;
+            const uint32_t pal_vram = (addr - 0x05000000u) < 0x02000000u;
+            if (sequential) return (main_ram || pal_vram) ? 4u : 2u;
+            if (width >= 4u) return main_ram ? 18u : (pal_vram ? 10u : 8u);
+            return main_ram ? 16u : 8u;
+        }
+    }
+    g_last_data_addr[1] = addr;
+    // ARM7. melonDS: single 8/16-bit transfers always cost the region's N16;
+    // only 32-bit transfers see N32/S32 (16-bit bus => N32=N16+S16,
+    // S32=2*S16).
+    if (addr - 0x02000000u < 0x01000000u)                     // main RAM {8,1,16}
+        return (width >= 4u) ? (sequential ? 2u : 9u) : 8u;
+    if (addr - 0x06000000u < 0x01000000u)                     // VRAM {1,1,16}
+        return (width >= 4u) ? 2u : 1u;
+    if (addr - 0x04800000u < 0x00010000u ||                   // Wi-Fi: WIFIWAITCNT
+        addr - 0x08000000u < 0x03000000u)                     // GBA slot: EXMEMCNT
+        return runtime_mem_cycles_slow(addr, width, sequential);
+    return 1u;                       // BIOS / WRAM / I/O / void {1,1,32}
+#endif
+}
+#endif  // NDS_RUNTIME_ABI_SHIMS
+
 uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
                             uint32_t extra);
 
@@ -528,8 +634,25 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // targets remain fatal. This deliberately bypasses candidate lookup to avoid
 // recursively selecting the same malformed owner row.
 void runtime_dispatch_bad_entry(uint32_t target_pc);
+// Live-overlay control-transfer diagnostic ring. Emitted at every guest
+// control transfer, and disarmed in every normal play session, so the
+// disarmed case is one load + one not-taken branch (beads-yjp.70 phase 2 B).
+// g_runtime_live_transfer_trace is the published mirror of the live-overlay
+// transfer_trace flag; the tail re-tests it, so the armed path is identical.
+extern uint32_t g_runtime_live_transfer_trace;
+void runtime_live_transfer_slow(uint32_t source_pc, uint32_t target_pc,
+                                uint32_t transfer_type);
+#ifdef NDS_RUNTIME_ABI_SHIMS
 void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
                            uint32_t transfer_type);
+#else
+NDS_MACHINERY_INLINE void runtime_live_transfer(uint32_t source_pc,
+                                               uint32_t target_pc,
+                                               uint32_t transfer_type) {
+    if (!g_runtime_live_transfer_trace) return;
+    runtime_live_transfer_slow(source_pc, target_pc, transfer_type);
+}
+#endif
 
 #define NDS_LIVE_TRANSFER_B         1u
 #define NDS_LIVE_TRANSFER_BL        2u
@@ -571,8 +694,23 @@ uint32_t runtime_deferred_cycles_take(void);
 // only; it never routes execution or substitutes for missing codegen.
 // RUNTIME_TRACE_CALL aux values:
 //   1 push, 2 top-frame return, 3 no match, 4 cancel, 5 non-local return.
+// Disarmed (the interactive frontend: g_runtime_deep_trace == 0) this must
+// cost ONE not-taken branch, not a five-argument call — generated code emits
+// it at every guest store and every branch. The recording body is out of
+// line in runtime_arm.cpp; the armed behaviour is byte-identical.
+void runtime_trace_event_slow(uint32_t kind, uint32_t pc, uint32_t addr,
+                              uint32_t value, uint32_t aux);
+#ifdef NDS_RUNTIME_ABI_SHIMS
 void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
                          uint32_t value, uint32_t aux);
+#else
+NDS_MACHINERY_INLINE void runtime_trace_event(uint32_t kind, uint32_t pc,
+                                              uint32_t addr, uint32_t value,
+                                              uint32_t aux) {
+    if (!g_runtime_deep_trace) return;
+    runtime_trace_event_slow(kind, pc, addr, value, aux);
+}
+#endif
 void runtime_trace_reset(void);
 void runtime_trace_dump_recent(uint32_t max_entries);
 
@@ -677,11 +815,8 @@ bool runtime_unwinding(void);
 // heuristic must be overridden rather than trusted. The heuristic is
 // reasonable in general -- these bank functions are enormous -- which is
 // exactly why it has to be told about this case explicitly.
-#if defined(__GNUC__)
-#define NDS_MACHINERY_INLINE static inline __attribute__((always_inline))
-#else
-#define NDS_MACHINERY_INLINE static inline
-#endif
+// (NDS_MACHINERY_INLINE itself is defined near the top of this header, next
+// to NDS_STATIC_CPU, because the bus / data-timing fast paths need it too.)
 NDS_MACHINERY_INLINE void runtime_tick(uint32_t cycles) {
     const unsigned long long next = g_runtime_cycles + cycles;
     if (next < g_nds_fast_limit) { g_runtime_cycles = next; return; }

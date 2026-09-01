@@ -450,7 +450,9 @@ void unmapped(uint32_t addr, bool write, uint32_t width, uint32_t value) {
 // Per-CPU last code-fetch PC, for the sequential/non-sequential distinction in
 // runtime_code_cycles (a sequential fetch is far cheaper than a branch/refill).
 uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
-uint32_t g_last_data_addr[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+// C linkage + declared in runtime_arm.h: the inline data-timing fast path
+// records the last data address itself (arm7_cycle_combine reads it).
+extern "C" uint32_t g_last_data_addr[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
 static void reset_arm9_code_timing();
 
 void bus_init() {
@@ -508,9 +510,22 @@ NdsBusFastWin g_busf_dtcm = {};
 uint32_t g_busf_itcm_limit = 0;
 uint32_t g_busf_dtcm_base = 0;
 uint32_t g_busf_dtcm_limit = 0;
+// TCM placement as the DATA-TIMING model sees it (beads-yjp.70 phase 2 B).
+// Deliberately NOT the g_busf_* window bounds above: those are clamped to
+// the physically allocated backing (DTCM 16 KiB) because they serve bytes,
+// while runtime_mem_cycles charges the ARM9's TCM cost over the full
+// PROGRAMMED virtual span. Published from bus_fast_refresh(), which every
+// path that can move TCM already calls (bus_init, CP15 c1/c9 writes,
+// cp15_reset, CP15 savestate import).
+uint32_t g_memt_itcm_limit = 0;   // itcm_enable ? itcm_size : 0
+uint32_t g_memt_dtcm_base = 0;
+uint32_t g_memt_dtcm_size = 0;    // dtcm_enable ? dtcm_size : 0
 }
 
 void bus_fast_refresh() {
+    g_memt_itcm_limit = g_cp15.itcm_enable ? g_cp15.itcm_size : 0u;
+    g_memt_dtcm_base = g_cp15.dtcm_base;
+    g_memt_dtcm_size = g_cp15.dtcm_enable ? g_cp15.dtcm_size : 0u;
     if (g_main_ram.empty()) {
         // Boot ordering: cp15_reset can run before bus_init has allocated
         // the backings. Leave every window disabled; bus_init's own
@@ -753,6 +768,19 @@ bool bus_range_has_write_provenance(uint32_t addr, uint32_t size) {
 }
 
 uint32_t bus_exec_page_generation(uint32_t addr) {
+    // Fast path over the published fast-map windows (beads-yjp.70 phase 2 B).
+    // The dispatch guard calls this once per validated page on every bank
+    // entry, and the slow route is a full resolve() region decode followed by
+    // generation_for_ptr()'s linear scan over five backings comparing raw
+    // pointers. A window carries the SAME parallel generation vector at the
+    // SAME page index (bus_fast_refresh publishes it from the same
+    // g_*_generation vector, offset the same way), and window acceptance is a
+    // subset of resolve()'s, so this returns the identical value or defers.
+    {
+        uint32_t off = 0u;
+        const NdsBusFastWin* w = nds_busf_classify(addr, &off);
+        if (w && w->data && w->gen) return w->gen[off >> kExecPageShift];
+    }
     uint8_t* ptr = resolve(addr, 1u);
     if (ptr) return page_generation_for_ptr(ptr);
     return nds_vram_exec_page_generation(
@@ -1149,8 +1177,21 @@ inline uint32_t arm9_gba_slot_cycles(uint32_t addr, uint32_t width,
 // ordinary instruction costs are additive. Taken branches instead use the
 // target-region-dependent arm7_refill_cycles() at the actual transfer site,
 // so no data-side calibration discount is needed.
-extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
-                                       uint32_t sequential) {
+//
+// FAST PATH (beads-yjp.70 phase 2 B): this body is now the FALLBACK. The
+// common cases — ARM9 ITCM / DTCM / D-cacheable / main RAM / palette+VRAM /
+// generic uncached, ARM7 main RAM / VRAM / fast (BIOS,WRAM,IO,void) — are
+// reproduced as a handful of inline instructions by runtime_mem_cycles() in
+// recompiler/armv4t/runtime_arm.h, over the same TCM mirrors and the same
+// page-granular CP15 cacheability bitmap. Anything that depends on live I/O
+// register state (the GBA slot's EXMEMCNT waitstates, the Wi-Fi region's
+// WIFIWAITCNT), and anything at all while the mem-timing profile build is
+// selected, still lands here. Both spellings are ONE model: any change to
+// this function must be made in the inline path too, and
+// runner/tests/mem_timing_test.cpp sweeps every region boundary to prove
+// they agree bit-for-bit.
+extern "C" uint32_t runtime_mem_cycles_slow(uint32_t addr, uint32_t width,
+                                            uint32_t sequential) {
     g_last_data_addr[g_nds_active == NDS_ARM9 ? 0 : 1] = addr;
     if (g_nds_active != NDS_ARM9) {
         Arm7Region r = arm7_region(addr);
@@ -1213,6 +1254,34 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
     mem_timing_note(0u, width, sequential, region, data);
 #endif
     return data;                // raw numD in ARM9 clock units
+}
+
+// The ORIGINAL runtime_mem_cycles body, retained verbatim (minus the
+// profile-counter hooks) as the equivalence oracle for
+// runner/tests/mem_timing_test.cpp: it resolves cacheability through the
+// per-access MPU region WALK rather than the page bitmap, and it never
+// consults the inline fast path's published mirrors, so a bug in either
+// derived structure shows up as a mismatch.
+extern "C" uint32_t runtime_mem_cycles_reference(uint32_t addr, uint32_t width,
+                                                uint32_t sequential) {
+    if (g_nds_active != NDS_ARM9) {
+        Arm7Region r = arm7_region(addr);
+        uint32_t n32 = arm7_n32(r);
+        uint32_t s32 = arm7_s32(r);
+        return (width >= 4u) ? (sequential ? s32 : n32) : r.n16;
+    }
+    if (g_cp15.itcm_enable && addr < g_cp15.itcm_size) return 1u;
+    if (g_cp15.dtcm_enable && addr >= g_cp15.dtcm_base &&
+        addr - g_cp15.dtcm_base < g_cp15.dtcm_size)
+        return 1u;
+    if (cp15_data_cacheable_reference(addr)) return sequential ? 1u : 3u;
+    if (addr >= 0x08000000u && addr < 0x0B000000u)
+        return arm9_gba_slot_cycles(addr, width, sequential != 0u);
+    const bool main_ram = addr >= 0x02000000u && addr < 0x03000000u;
+    const bool pal_vram = addr >= 0x05000000u && addr < 0x07000000u;
+    if (sequential) return (main_ram || pal_vram) ? 4u : 2u;
+    if (width >= 4u) return main_ram ? 18u : (pal_vram ? 10u : 8u);
+    return main_ram ? 16u : 8u;
 }
 
 #if defined(NDS_PROFILE_MEM_TIMING)

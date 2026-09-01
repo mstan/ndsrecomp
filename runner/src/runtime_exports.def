@@ -19,6 +19,9 @@ EXPORTS
     bus_write_u8_slow
     bus_write_u16_slow
     bus_write_u32_slow
+    g_cp15_class_ready DATA
+    g_cp15_dcache_page DATA
+    g_cp15_icache_page DATA
     g_busf_dtcm DATA
     g_busf_dtcm_base DATA
     g_busf_dtcm_limit DATA
@@ -29,6 +32,10 @@ EXPORTS
     g_busf_wram_lo DATA
     g_cpu DATA
     g_insn_count DATA
+    g_last_data_addr DATA
+    g_memt_dtcm_base DATA
+    g_memt_dtcm_size DATA
+    g_memt_itcm_limit DATA
     g_insn_hook_armed DATA
     g_nds_active DATA
     g_nds_fast_limit DATA
@@ -37,6 +44,7 @@ EXPORTS
     g_runtime_cycles DATA
     g_runtime_deep_trace DATA
     g_runtime_insn_trace DATA
+    g_runtime_live_transfer_trace DATA
     nds_register_hle_profile_descriptors
     runtime_call_cancel_return
     runtime_call_push_return
@@ -63,6 +71,7 @@ EXPORTS
     runtime_dispatch_miss
     runtime_dispatch_with_exchange
     runtime_live_transfer
+    runtime_live_transfer_slow
     runtime_note_live_write
     runtime_discovery_note_static
     runtime_exception_return
@@ -76,6 +85,7 @@ EXPORTS
     runtime_insn_fp
     runtime_insn_slow
     runtime_mem_cycles
+    runtime_mem_cycles_slow
     runtime_mrs_cpsr
     runtime_mrs_spsr
     runtime_msr_cpsr
@@ -95,6 +105,7 @@ EXPORTS
     runtime_trace_copy_recent
     runtime_trace_dump_recent
     runtime_trace_event
+    runtime_trace_event_slow
     runtime_trace_reset
     runtime_unimplemented_op
     runtime_unwinding

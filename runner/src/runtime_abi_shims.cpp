@@ -44,3 +44,31 @@ extern "C" bool runtime_should_yield(void) {
 }
 
 extern "C" bool runtime_unwinding(void) { return g_nds_unwinding != 0u; }
+
+// ── beads-yjp.70 phase 2 B: the data-timing and trace-event fast paths ──
+// Same contract, same two reasons. `runtime_mem_cycles` and
+// `runtime_trace_event` became inline in runtime_arm.h (a fused timed access
+// and a disarmed-flag test respectively); both names stay exported for
+// shards already published on disk, and this is the only TU that defines
+// them. The bodies are the inline bodies, reached by defining
+// NDS_RUNTIME_ABI_SHIMS above — which suppresses the inline definitions, so
+// these forward to the same out-of-line tails the inline path uses. A shard
+// that predates the change therefore gets EXACTLY the model it got before
+// (the full fallback), and one recompiled after it inlines the fast path
+// from the header over the runner's own published DATA.
+extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
+                                       uint32_t sequential) {
+    return runtime_mem_cycles_slow(addr, width, sequential);
+}
+
+extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
+                                    uint32_t value, uint32_t aux) {
+    if (!g_runtime_deep_trace) return;
+    runtime_trace_event_slow(kind, pc, addr, value, aux);
+}
+
+extern "C" void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
+                                      uint32_t transfer_type) {
+    if (!g_runtime_live_transfer_trace) return;
+    runtime_live_transfer_slow(source_pc, target_pc, transfer_type);
+}

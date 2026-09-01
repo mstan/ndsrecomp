@@ -557,6 +557,17 @@ def main() -> int:
     ap.add_argument("--no-addr2line", action="store_true",
                     help="skip addr2line; classify from symbol names only")
     ap.add_argument("--json", help="also write the tables as JSON here")
+    ap.add_argument("--callers", metavar="SYMBOL",
+                    help="attribute a leaf: print the parent-frame chains of "
+                         "every sample whose LEAF symbol matches SYMBOL "
+                         "(substring, case-insensitive). Answers 'who calls "
+                         "this' for a symbol the source grep cannot find -- "
+                         "an ntdll or SDL entry point reached from somewhere "
+                         "in our own code. Reads the same always-on ring "
+                         "dump; nothing is armed or re-run.")
+    ap.add_argument("--caller-depth", type=int, default=6,
+                    help="how many parent frames of each chain to print "
+                         "(default 6)")
     args = ap.parse_args()
 
     dump = Dump(args.dump)
@@ -573,6 +584,7 @@ def main() -> int:
     stop_counts: Counter[int] = Counter()
     depth_hist: Counter[int] = Counter()
     role_counts: Counter[int] = Counter()
+    caller_stacks: list[tuple[int, ...]] = []
     total = 0
     qpc_lo = qpc_hi = None
     for qpc, _tid, depth, r, stop, frames in dump.samples(role):
@@ -586,6 +598,11 @@ def main() -> int:
             qpc_hi = qpc
         if depth:
             self_counts[frames[0]] += 1
+            if args.callers:
+                # Keep the WHOLE stack of every sample, keyed by leaf address.
+                # Resolution happens after the symbol tables are built, so the
+                # match is on names, not on a guessed address.
+                caller_stacks.append(tuple(frames))
         # Inclusive: once per sample per distinct address, so a recursive frame
         # is not counted N times for one sample.
         for addr in set(frames):
@@ -597,6 +614,8 @@ def main() -> int:
 
     # Group every address that appears at all by module.
     wanted = set(self_counts) | set(incl_counts)
+    for chain in caller_stacks:
+        wanted.update(chain)
     by_module: dict[str, list[int]] = defaultdict(list)
     addr_module: dict[int, dict | None] = {}
     for addr in wanted:
@@ -757,6 +776,49 @@ def main() -> int:
                           f"   [{module}]" if module else ""))
         print()
 
+    caller_report: list[dict] = []
+    if args.callers:
+        # WHY THIS EXISTS. A leaf symbol with self time and no caller in the
+        # source tree (a bare ntdll/SDL entry point) is unactionable: you
+        # cannot hoist a call you cannot find. The always-on ring already
+        # holds the parent frames of every sample it took, so the attribution
+        # is a QUERY over the recorded window -- never an arm-then-capture.
+        needle = args.callers.lower()
+        chains: Counter[tuple[str, ...]] = Counter()
+        leaf_labels: Counter[str] = Counter()
+        matched = 0
+        for chain in caller_stacks:
+            leaf_label = resolve(chain[0])[1]
+            if needle not in leaf_label.lower():
+                continue
+            matched += 1
+            leaf_labels[leaf_label] += 1
+            parents = []
+            for addr in chain[1:1 + max(args.caller_depth, 0)]:
+                module, label, _loc, _cat = resolve(addr)
+                parents.append(f"{label} [{module}]" if module else label)
+            chains[tuple(parents)] += 1
+        print(f"── CALLERS of {args.callers!r} "
+              "───────────────────────────────────────────")
+        print(f"leaf samples       {matched} "
+              f"({100.0 * matched / total:.2f}% of role samples)")
+        if not matched:
+            print("(no sample in this dump has a leaf matching that symbol; "
+                  "note --role defaults to emu)")
+        for label, c in leaf_labels.most_common():
+            print(f"  leaf  {c:>8}  {100.0 * c / total:6.2f}%  {label}")
+        print()
+        for i, (parents, c) in enumerate(chains.most_common(args.top), 1):
+            share = 100.0 * c / total
+            print(f"  #{i} {c} sample(s), {share:.2f}% of role samples")
+            if not parents:
+                print("      <no parent frame -- unwind stopped at the leaf>")
+            for d, label in enumerate(parents, 1):
+                print(f"      ^{d} {label}")
+            caller_report.append({"samples": c, "share_pct": share,
+                                  "parents": list(parents)})
+        print()
+
     if args.json:
         out = {
             "dump": args.dump,
@@ -774,6 +836,9 @@ def main() -> int:
                 {"module": m, "symbol": s, "samples": c}
                 for (m, s), c in incl_by_symbol.most_common(args.top * 4)],
         }
+        if args.callers:
+            out["callers_of"] = args.callers
+            out["caller_chains"] = caller_report
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2, sort_keys=True)
             f.write("\n")
