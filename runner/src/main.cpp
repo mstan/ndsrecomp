@@ -29,6 +29,7 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
+#include "host_profile.h"
 #include "diagnostics.h"
 #include "dispatch_timing.h"
 #include "emu_profile.h"
@@ -1160,6 +1161,18 @@ int main(int argc, char** argv) {
     if (!diagnostics_enabled) coverage_manifest_disabled = true;
     nds_diagnostics_enable_profile_environment();
 
+    // Always-on host CPU sampler (host_profile.h). Started HERE -- before the
+    // BIOS/firmware load, before boot(), before the first frame -- because the
+    // whole contract of an always-on ring is that the interesting window is
+    // already inside it when someone thinks to ask. Deliberately not gated on
+    // --diagnostics: a diagnostics-off session still gets the debug-server
+    // query surface, and the sampler is the only host-symbol attribution the
+    // runner has. NDS_HOSTPROF=off opts out and then allocates nothing.
+    //
+    // This call also registers the calling thread -- the emu/frontend thread --
+    // as the primary sampling target.
+    nds_hostprof_start();
+
     // Resolve the network config to backend-ready numeric form. Provider
     // name -> table lookup, optional dns_server string -> IPv4, matching
     // the pipeline documented in wifi_net.h's NdsWifiNetworkConfig.
@@ -2132,6 +2145,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
         const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
+        // After the frontend has closed the performance log (and with it
+        // written the hostprof bundle), so the dump covers the whole session
+        // including its last frames.
+        nds_hostprof_stop();
         const bool save_ok = nds_io_flush_cartridge_save();
         const bool firmware_ok = nds_io_flush_firmware_save();
         write_coverage_manifest();

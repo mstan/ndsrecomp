@@ -47,6 +47,11 @@ void nds_diagnostics_note_perf_governor_transition(uint8_t from_stage,
 // bundle. Called automatically when the performance log closes; exposed so a
 // caller can snapshot it mid-run.
 void nds_diagnostics_write_perf_governor_history();
+// Dumps the always-on host CPU sample ring (host_profile.h) as a sidecar file
+// next to the perf log and appends a {"kind":"hostprof"} record naming it,
+// carrying the sampler status and an inline top-40. Called automatically when
+// the performance log closes.
+void nds_diagnostics_write_hostprof_bundle();
 void nds_diagnostics_stop_performance_log();
 // Drop interval baselines after a historical load. The next sample primes a
 // fresh epoch instead of subtracting counters from the pre-load timeline.

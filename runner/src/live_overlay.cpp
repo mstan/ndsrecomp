@@ -1,4 +1,5 @@
 #include "live_overlay.h"
+#include "host_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -1928,11 +1929,23 @@ void maintenance_worker_main();
 void ensure_workers() {
     if (!g_live.prepare_thread.joinable()) {
         g_live.prepare_stop = false;
-        g_live.prepare_thread = std::thread(prepare_worker_main);
+        // Both live-overlay workers register with the always-on host sampler
+        // (host_profile.h): a live compile competing with the emu thread for
+        // cores is exactly the kind of cost that is invisible in a guest-side
+        // profile, and yjp.56 (live-compiler starvation) is that shape.
+        g_live.prepare_thread = std::thread([] {
+            NdsHostProfThreadScope hostprof_scope(
+                NDS_HOSTPROF_ROLE_LIVE_COMPILER);
+            prepare_worker_main();
+        });
     }
     if (!g_live.maint_thread.joinable()) {
         g_live.maint_stop = false;
-        g_live.maint_thread = std::thread(maintenance_worker_main);
+        g_live.maint_thread = std::thread([] {
+            NdsHostProfThreadScope hostprof_scope(
+                NDS_HOSTPROF_ROLE_LIVE_COMPILER);
+            maintenance_worker_main();
+        });
     }
 }
 

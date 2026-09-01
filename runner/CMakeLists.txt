@@ -412,6 +412,9 @@ add_executable(nds_runner
     src/dispatch_timing.cpp
     src/emu_profile.cpp
     src/pc_profile.cpp
+    src/host_prof_ring.cpp
+    src/host_unwind_x64.cpp
+    src/host_profile.cpp
     src/host_info.cpp
     src/perf_governor.cpp
     src/profile_report.cpp
@@ -766,6 +769,19 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_include_directories(perf_governor_test PRIVATE src)
   add_test(NAME perf_governor_test COMMAND perf_governor_test)
 
+  # Always-on host CPU sampler (host_profile.h). Three things are gated here:
+  # the sample ring's residency/eviction/tear rules, the leaf histogram, and --
+  # the one that actually needs proving -- the x64 .pdata/.xdata unwinder, both
+  # against a synthetic table the test builds itself AND against the OS's own
+  # RtlCaptureStackBackTrace over real compiler-generated prologues.
+  add_executable(host_prof_test
+      tests/host_prof_test.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
+      src/host_profile.cpp)
+  target_include_directories(host_prof_test PRIVATE src)
+  add_test(NAME host_prof_test COMMAND host_prof_test)
+
   add_executable(battery_save_test
       tests/battery_save_test.cpp
       src/battery_save.cpp)
@@ -828,6 +844,12 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/gpu3d.cpp
       src/dispatch_timing.cpp
       src/emu_profile.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
       vendor/melonds/GPU3D.cpp
       vendor/melonds/GPU3D_Soft.cpp
       vendor/melonds/Savestate.cpp)
@@ -896,7 +918,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       # live_overlay_poll() opens an NDS_EMU_OVERLAY region, whose accumulators
       # and tick calibration live in these two translation units.
       src/emu_profile.cpp
-      src/dispatch_timing.cpp)
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
   target_include_directories(live_overlay_preflight_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
@@ -942,7 +970,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       # NDS_EMU_RASTER2D region in nds_gpu2d_render_scanline and needs the
       # accumulators and tick calibration those two units define.
       src/emu_profile.cpp
-      src/dispatch_timing.cpp)
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
   target_include_directories(gpu2d_window_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t

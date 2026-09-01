@@ -1,4 +1,5 @@
 #include "gpu2d.h"
+#include "host_profile.h"
 #include "gpu2d_window.h"
 
 #include <algorithm>
@@ -1811,6 +1812,13 @@ uint32_t g_staged_bank_mask = 0;
 uint64_t g_capture_apply_index = 0;
 
 void worker_main(Pool* pool, LineScratch* sc) {
+    // Registered with the always-on host sampler so that emu-thread time spent
+    // WAITING on this pool is attributable to the pool's own host symbols
+    // rather than showing up as an unexplained gap in the emu profile
+    // (host_profile.h). Scoped: the pool is torn down and rebuilt when the
+    // worker count changes, and a leaked slot would cost a failing suspend
+    // every tick thereafter.
+    NdsHostProfThreadScope hostprof_scope(NDS_HOSTPROF_ROLE_RENDER);
     for (;;) {
         uint64_t index = 0;
         bool have = false;

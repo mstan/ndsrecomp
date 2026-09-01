@@ -23,6 +23,7 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "hle_profile.h"
+#include "host_profile.h"
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
 #include "emu_profile.h"
@@ -1320,6 +1321,52 @@ std::string handle(const std::string& line) {
             nds_pc_profile_kind_from_name(json_str(line, "kind").c_str());
         return nds_pc_profile_json(
             kind, cpu, static_cast<unsigned>(json_u64(line, "top", 32)));
+    }
+    // The HOST side of the same question, and the only surface here that
+    // names host symbols at all (host_profile.h). pc_hot says which GUEST
+    // code is hot; emu_attrib says which guest-side subsystem is expensive;
+    // neither can say whether the ~36 host cycles per guest cycle are going
+    // into dispatch lookup, bus decode, an MMIO handler, the scheduler, gpu3d,
+    // gpu2d, audio or a generated body. This one can, in every build, for
+    // every title, after the fact.
+    //
+    // Always-on: there is nothing to arm. `window_sec` <= 0 means the whole
+    // run (answered from the running leaf histogram); a positive window is
+    // answered from the sample ring, scanning back only as far as it reaches.
+    // RIPs come back with module + RVA; names need
+    // tools/hostprof_symbolize.py against a dump, because the runner does not
+    // carry a symbol table.
+    if (cmd == "hostprof_top") {
+        return nds_hostprof_top_json(
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0,
+            static_cast<unsigned>(json_u64(line, "top", 40)));
+    }
+    // Is the sampler on, at what rate, how much history does it hold, and what
+    // is it costing? Asked before trusting a table, and the answer carries the
+    // observer's own measured overhead.
+    if (cmd == "hostprof_status") return nds_hostprof_status_json();
+    // Write the ring for a window plus the module map (base/size/path of the
+    // exe and every loaded module, shard DLLs included) so the RVAs can be
+    // symbolized offline. Forward slashes in the path: the request parser is a
+    // flat scanner that does not unescape, exactly as for coverage_manifest.
+    //
+    // window_ms <= 0 dumps the whole resident ring; end_ms_ago shifts the
+    // window's end backwards, so an arbitrary [t0,t1] is
+    // window_ms = t1-t0, end_ms_ago = now-t1.
+    if (cmd == "hostprof_dump") {
+        const std::string path = json_str(line, "path");
+        if (path.empty()) return "{\"error\":\"hostprof_dump needs a path\"}";
+        char error[256] = {};
+        std::string extra;
+        const double window_sec =
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0;
+        const double end_sec_ago =
+            static_cast<double>(json_i64(line, "end_ms_ago", 0)) / 1000.0;
+        if (!nds_hostprof_dump(path.c_str(), window_sec, end_sec_ago, error,
+                               sizeof(error), &extra))
+            return "{\"ok\":false,\"error\":\"" + json_escape(error) + "\"}";
+        return "{\"ok\":true,\"path\":\"" + json_escape(path) + "\"" + extra +
+               "}";
     }
     // B2 direct linking: whether the per-callsite link slots are live
     // right now (they are gated off under deep trace) and how the

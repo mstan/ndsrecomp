@@ -1,4 +1,5 @@
 #include "frontend.h"
+#include "host_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -620,6 +621,15 @@ void SDLCALL audio_stream_underrun_callback(void* userdata,
 using NdsAudioDevice = SDL_AudioDeviceID;
 
 void SDLCALL audio_callback(void* userdata, Uint8* stream, int len) {
+    // SDL owns this thread, so it cannot be registered at creation; it
+    // registers itself the first time it runs instead. One thread_local test
+    // per callback, and the whole point is that a mixing stall or an underrun
+    // storm becomes attributable to host symbols (host_profile.h).
+    static thread_local bool hostprof_registered = false;
+    if (!hostprof_registered) {
+        hostprof_registered = true;
+        nds_hostprof_register_current_thread(NDS_HOSTPROF_ROLE_AUDIO);
+    }
     auto* queue = static_cast<AudioQueue*>(userdata);
     std::memset(stream, 0, static_cast<size_t>(len));
     if (!queue || len <= 0) return;
