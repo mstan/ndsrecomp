@@ -54,11 +54,16 @@ uint32_t nds_gpu3d_compute_output_texture();
 // produces and no accuracy path observes the change. Only the direct GPU
 // presenter consumes the extra density.
 //
-// Must be set before nds_gpu3d_use_compute_renderer(): the scale is a baked
-// shader constant and sizes every framebuffer allocation. Returns false for
-// an out-of-range scale (valid range 1..4) or after the renderer exists.
+// nds_gpu3d_set_internal_scale() must be set before
+// nds_gpu3d_use_compute_renderer(): the scale is a baked shader constant and
+// sizes every framebuffer allocation. The runtime setter rebuilds the active
+// accelerated renderer for the governor path. Both return false for an
+// out-of-range scale (valid range 1..4).
 bool nds_gpu3d_set_internal_scale(uint8_t scale);
+bool nds_gpu3d_set_runtime_internal_scale(uint8_t scale);
 uint8_t nds_gpu3d_internal_scale();
+void nds_gpu3d_set_display_readback_latency(bool enabled);
+bool nds_gpu3d_display_readback_latency();
 // Presentation handle for the high-resolution RGBA8 surface, whose channels
 // carry the same RGB6/alpha5 values as the integer surface above, normalized
 // by 63 and 31. Zero unless an accelerated renderer is active at scale > 1.

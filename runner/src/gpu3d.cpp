@@ -123,6 +123,7 @@ bool validate_gpu3d_device(const melonDS::GPU3D& gpu,
 constexpr uint8_t kMaxInternalScale = 4u;
 uint8_t g_internal_scale = 1u;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+bool g_display_readback_latency = false;
 bool g_compute_rendered_frame = false;
 bool g_compute_readback_pending = false;
 bool g_compute_frame_ready = false;
@@ -665,6 +666,35 @@ bool nds_gpu3d_set_internal_scale(uint8_t scale) {
     return true;
 }
 
+bool nds_gpu3d_set_runtime_internal_scale(uint8_t scale) {
+    if (scale < 1u || scale > kMaxInternalScale) return false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    if (!renderer) {
+        g_internal_scale = scale;
+        return true;
+    }
+    if (renderer->GetScaleFactor() == scale) {
+        g_internal_scale = scale;
+        return true;
+    }
+    if (!nds_compute_host_make_current()) return false;
+    const uint8_t previous = g_internal_scale;
+    if (g_compute_readback_pending) compute_finish_readback();
+    glFinish();
+    g_internal_scale = scale;
+    if (!nds_gpu3d_use_compute_renderer()) {
+        g_internal_scale = previous;
+        return false;
+    }
+    return true;
+#else
+    g_internal_scale = scale;
+    return scale == 1u;
+#endif
+}
+
 uint8_t nds_gpu3d_internal_scale() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
@@ -676,6 +706,22 @@ uint8_t nds_gpu3d_internal_scale() {
     return 1u;
 #else
     return 1u;
+#endif
+}
+
+void nds_gpu3d_set_display_readback_latency(bool enabled) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_display_readback_latency = enabled;
+#else
+    (void)enabled;
+#endif
+}
+
+bool nds_gpu3d_display_readback_latency() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    return g_display_readback_latency;
+#else
+    return false;
 #endif
 }
 
@@ -955,6 +1001,7 @@ bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
     gpu.GetCurrentRenderer().Reset(g_nds.GPU);
     gpu.RenderFrameIdentical = false;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_display_readback_latency = false;
     g_compute_rendered_frame = false;
     g_compute_readback_pending = false;
     g_compute_frame_ready = false;
@@ -1120,13 +1167,20 @@ void nds_gpu3d_vcount215() {
     // See nds_gpu3d_vcount144. The compute submit/sync/map buckets in
     // NdsGpu3dProfile are a breakdown of this region, not an addend to it.
     NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
+        g_display_readback_latency && g_compute_readback_pending)
+        compute_finish_readback();
+#endif
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         if (g_nds.GPU.GPU3D.IsRendererAccelerated())
             g_compute_rendered_frame = true;
-        if (g_compute_rendered_frame && compute_readback_overlap() &&
-            nds_gpu2d_requires_3d_readback())
+        if (g_compute_rendered_frame &&
+            (compute_readback_overlap() || g_display_readback_latency) &&
+            (nds_gpu2d_requires_3d_readback() ||
+             g_display_readback_latency))
             compute_submit_readback();
 #endif
         return;
@@ -1140,8 +1194,9 @@ void nds_gpu3d_vcount215() {
     profile_add(g_gpu3d_profile.vcount215_ns, start);
     ++g_gpu3d_profile.vcount215_calls;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_compute_rendered_frame && compute_readback_overlap() &&
-        nds_gpu2d_requires_3d_readback())
+    if (g_compute_rendered_frame &&
+        (compute_readback_overlap() || g_display_readback_latency) &&
+        (nds_gpu2d_requires_3d_readback() || g_display_readback_latency))
         compute_submit_readback();
 #endif
 }
@@ -1290,14 +1345,15 @@ void nds_gpu3d_start_frame() {
         // Reference mode reproduces the original immediate submit+map here.
         // Forced overlap queues at VCount215 and pays only any unfinished
         // portion of the copy at the next frame boundary.
-        if (g_compute_readback_pending) compute_finish_readback();
+        const bool same_frame = nds_gpu2d_requires_3d_readback();
+        if (g_compute_readback_pending && same_frame) compute_finish_readback();
         if (g_compute_rendered_frame) {
-            if (nds_gpu2d_requires_3d_readback())
+            if (same_frame || g_display_readback_latency)
                 compute_submit_readback();
             else
                 g_compute_rendered_frame = false;
         }
-        if (g_compute_readback_pending) compute_finish_readback();
+        if (g_compute_readback_pending && same_frame) compute_finish_readback();
     }
 #endif
 }

@@ -1030,6 +1030,7 @@ struct FrontendPresentation {
     uint32_t window_ids[2]{};
     int screen_widths[2]{kScreenWidth, kScreenWidth};
     int canvas_width = kScreenWidth;
+    int configured_sample_scale = 1;
     int sample_scale = 1;
 };
 
@@ -1406,8 +1407,9 @@ bool create_presentation(const NdsFrontendOptions& options,
     const int aa_scale = options.antialiasing >= 8 ? 4 :
                          options.antialiasing >= 4 ? 3 :
                          options.antialiasing >= 2 ? 2 : 1;
-    presentation.sample_scale =
+    presentation.configured_sample_scale =
         std::max<int>(options.supersampling, aa_scale);
+    presentation.sample_scale = presentation.configured_sample_scale;
     for (int screen = 0; screen < 2; ++screen) {
         const uint8_t bit = static_cast<uint8_t>(1u << screen);
         if ((options.adaptive_screens & bit) &&
@@ -1559,7 +1561,7 @@ void render_screen(FrontendPresentation& presentation, int screen,
                    const SDL_Rect& destination) {
     SDL_Renderer* renderer = presentation.renderers[screen];
     SDL_Texture* source = presentation.textures[screen];
-    if (presentation.sample_targets[screen]) {
+    if (presentation.sample_scale > 1 && presentation.sample_targets[screen]) {
         SDL_SetRenderTarget(renderer, presentation.sample_targets[screen]);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
@@ -1576,6 +1578,38 @@ struct PresentationTicks {
     uint64_t swap = 0;
     bool ok = true;
 };
+
+bool apply_performance_governor_stage(
+        const NdsFrontendOptions& options,
+        FrontendPresentation& presentation,
+        uint8_t stage) {
+    nds_gpu3d_set_display_readback_latency(stage >= 1u);
+    const uint8_t target_scale =
+        stage >= 2u ? 1u : options.internal_resolution;
+    if (!nds_gpu3d_set_runtime_internal_scale(target_scale)) {
+        std::fprintf(stderr,
+                     "[governor] could not apply internal scale %u\n",
+                     static_cast<unsigned>(target_scale));
+        return false;
+    }
+    presentation.sample_scale =
+        stage >= 2u ? 1 : presentation.configured_sample_scale;
+    nds_gpu2d_set_hd_emit(target_scale > 1u && presentation.gl_top);
+    return true;
+}
+
+const char* performance_governor_transition_reason(
+        const NdsPerfGovernorState& state) {
+    switch (state.mode) {
+        case NdsPerfGovernorMode::ForceStage1:
+        case NdsPerfGovernorMode::ForceStage2:
+            return "forced";
+        case NdsPerfGovernorMode::Off:
+            return "off";
+        default:
+            return state.stage == 0u ? "recovered" : "over_budget";
+    }
+}
 
 void draw_virtual_stylus(SDL_Renderer* renderer, const SDL_Rect& destination,
                          float stylus_x, float stylus_y) {
@@ -1759,10 +1793,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     // the same native surface every faithful consumer reads, so a run without
     // the GPU presenter is a valid way to prove that invariance holds. Only
     // the visible benefit needs gl_top, so that is what the notice says.
-    if (!nds_gpu3d_set_internal_scale(options.internal_resolution)) {
+    const uint8_t initial_internal_resolution =
+        options.perf_governor_mode == NdsPerfGovernorMode::ForceStage2
+            ? 1u
+            : options.internal_resolution;
+    if (!nds_gpu3d_set_internal_scale(initial_internal_resolution)) {
         std::fprintf(stderr,
                      "[sdl] internal resolution %ux is unavailable\n",
-                     static_cast<unsigned>(options.internal_resolution));
+                     static_cast<unsigned>(initial_internal_resolution));
         destroy_presentation(presentation);
         SDL_Quit();
         return 1;
@@ -1776,7 +1814,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     }
     // The adaptive compositor only pays for the extra per-pixel stores when
     // something can consume them.
-    nds_gpu2d_set_hd_emit(options.internal_resolution > 1 &&
+    nds_gpu2d_set_hd_emit(initial_internal_resolution > 1 &&
                           presentation.gl_top);
     nds_texture_upscale_set_factor(options.texture_upscale);
 
@@ -1810,6 +1848,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             "automatic fallback to threaded soft\n");
     }
 #endif
+
+    NdsPerfGovernorState perf_governor{};
+    nds_perf_governor_init(&perf_governor,
+                           options.perf_governor_mode);
+    if (!apply_performance_governor_stage(
+            options, presentation, perf_governor.stage)) {
+        destroy_presentation(presentation);
+        SDL_Quit();
+        return 1;
+    }
 
     // "Frame interpolation (experimental)" — docs/frame_interpolation.md.
     // Resolved here, after the compute-renderer fallback above, because that
@@ -2175,12 +2223,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     uint64_t phase_draw_ticks = 0;
     uint64_t phase_swap_ticks = 0;
     uint64_t phase_drain_ticks = 0;
+    uint64_t governor_last_underruns = 0;
+    NdsGpu3dProfile governor_gpu3d_profile{};
+    nds_gpu3d_profile(&governor_gpu3d_profile);
+    uint64_t governor_last_compute_map_ns =
+        governor_gpu3d_profile.compute_map_ns;
     g_live_stats = {};
     g_live_stats.active = 1;
     g_live_stats.freq = frequency;
     g_black_band = {};
     g_input_debug = {};
     nds_diagnostics_start_performance_log(options);
+    if (perf_governor.stage != 0u)
+        nds_diagnostics_note_perf_governor_transition(
+            0, perf_governor.stage, "initial");
     auto publish_input_debug = [&]() {
         g_input_debug.active = 1;
         g_input_debug.mph_prime_controls_available =
@@ -2510,6 +2566,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     if (result.success &&
                         state_command.action ==
                             NdsSavestateSlotAction::Load) {
+                        (void)apply_performance_governor_stage(
+                            options, presentation, perf_governor.stage);
                         blend_cache.valid = false;
                         // Guest input registers came from historical state;
                         // the live host controls become authoritative again
@@ -2942,14 +3000,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             running = false;
             break;
         }
+        uint64_t frame_emu_ticks = 0;
         {
-            const uint64_t emu_ticks = SDL_GetPerformanceCounter() - phase0;
-            phase_emu_ticks += emu_ticks;
-            if (emu_ticks > max_emu_ticks) {
-                max_emu_ticks = emu_ticks;
+            frame_emu_ticks = SDL_GetPerformanceCounter() - phase0;
+            phase_emu_ticks += frame_emu_ticks;
+            if (frame_emu_ticks > max_emu_ticks) {
+                max_emu_ticks = frame_emu_ticks;
                 max_emu_frame = shown_frames;
             }
-            if (emu_ticks * 1000u > frequency * 32u) ++slow_frames_32ms;
+            if (frame_emu_ticks * 1000u > frequency * 32u)
+                ++slow_frames_32ms;
         }
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         if (nds_gpu3d_compute_runtime_failed()) {
@@ -3083,7 +3143,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 audio, audio_queue, audio_started, audio_pace_floor,
                 audio_queue_error);
         }
-        phase_drain_ticks += SDL_GetPerformanceCounter() - phase2;
+        const uint64_t frame_drain_ticks =
+            SDL_GetPerformanceCounter() - phase2;
+        phase_drain_ticks += frame_drain_ticks;
         audio_max_queue = std::max(audio_max_queue, queued);
         if (audio && !audio_started && !turbo_active &&
             queued >= audio_start_threshold) {
@@ -3096,6 +3158,50 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             audio_pace_floor = audio_start_threshold;
         }
 
+        const uint64_t current_underruns =
+            audio_queue.underruns.load(std::memory_order_relaxed);
+        NdsGpu3dProfile current_gpu3d_profile{};
+        nds_gpu3d_profile(&current_gpu3d_profile);
+        const uint64_t frame_compute_map_ns =
+            current_gpu3d_profile.compute_map_ns >=
+                    governor_last_compute_map_ns
+                ? current_gpu3d_profile.compute_map_ns -
+                      governor_last_compute_map_ns
+                : 0u;
+        governor_last_compute_map_ns = current_gpu3d_profile.compute_map_ns;
+        NdsPerfGovernorSample governor_sample{};
+        governor_sample.emu_ms =
+            static_cast<double>(frame_emu_ticks) * 1000.0 /
+            static_cast<double>(frequency);
+        governor_sample.drain_ms =
+            static_cast<double>(frame_drain_ticks) * 1000.0 /
+            static_cast<double>(frequency);
+        governor_sample.budget_ms = 1000.0 / 60.0;
+        governor_sample.underruns_delta =
+            current_underruns >= governor_last_underruns
+                ? current_underruns - governor_last_underruns
+                : 0u;
+        governor_sample.compute_map_ms =
+            static_cast<double>(frame_compute_map_ns) / 1000000.0;
+        governor_last_underruns = current_underruns;
+        const uint8_t governor_stage_before = perf_governor.stage;
+        if (nds_perf_governor_update(&perf_governor, governor_sample)) {
+            if (!apply_performance_governor_stage(
+                    options, presentation, perf_governor.stage)) {
+                const uint8_t failed_stage = perf_governor.stage;
+                perf_governor.stage = std::min<uint8_t>(
+                    governor_stage_before, 1u);
+                (void)apply_performance_governor_stage(
+                    options, presentation, perf_governor.stage);
+                std::fprintf(stderr,
+                             "[governor] stage %u apply failed; using %u\n",
+                             failed_stage, perf_governor.stage);
+            }
+            nds_diagnostics_note_perf_governor_transition(
+                governor_stage_before, perf_governor.stage,
+                performance_governor_transition_reason(perf_governor));
+        }
+
         ++shown_frames;
         ++fps_frames;
         g_live_stats.frames = shown_frames;
@@ -3106,10 +3212,13 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         g_live_stats.draw_ticks = phase_draw_ticks;
         g_live_stats.swap_ticks = phase_swap_ticks;
         g_live_stats.drain_ticks = phase_drain_ticks;
-        g_live_stats.underruns =
-            audio_queue.underruns.load(std::memory_order_relaxed);
+        g_live_stats.underruns = current_underruns;
         g_live_stats.real_presents = shown_frames;
         g_live_stats.synthetic_presents = synthetic_presents;
+        g_live_stats.perf_governor_stage = perf_governor.stage;
+        g_live_stats.perf_governor_over_frames = perf_governor.over_frames;
+        g_live_stats.perf_governor_under_frames =
+            perf_governor.under_frames;
         const uint64_t counter = SDL_GetPerformanceCounter();
         if (!savestate_notice.empty() && counter >= savestate_notice_until)
             savestate_notice.clear();
@@ -3122,16 +3231,21 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             const double fps = static_cast<double>(fps_frames) / seconds;
             const std::string fps_text =
                 std::to_string(fps).substr(0, 4) + " FPS";
+            const std::string governor_text = perf_governor.stage
+                ? " - Gov S" + std::to_string(perf_governor.stage)
+                : "";
             const std::string top_title = !savestate_notice.empty()
                 ? "ndsrecomp - " + savestate_notice
                 : presentation.separate
-                ? "ndsrecomp - Top Screen - " + fps_text
-                : "ndsrecomp firmware preview - " + fps_text;
+                ? "ndsrecomp - Top Screen - " + fps_text + governor_text
+                : "ndsrecomp firmware preview - " + fps_text +
+                      governor_text;
             SDL_SetWindowTitle(presentation.windows[0],
                                top_title.c_str());
             if (presentation.separate) {
                 const std::string bottom_title =
-                    "ndsrecomp - Bottom Screen - " + fps_text;
+                    "ndsrecomp - Bottom Screen - " + fps_text +
+                    governor_text;
                 SDL_SetWindowTitle(presentation.windows[1],
                                    bottom_title.c_str());
             }

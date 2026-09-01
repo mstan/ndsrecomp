@@ -1092,7 +1092,13 @@ std::string handle(const std::string& line) {
                ",\"underruns\":" + std::to_string(s.underruns) +
                ",\"real_presents\":" + std::to_string(s.real_presents) +
                ",\"synthetic_presents\":" +
-               std::to_string(s.synthetic_presents) + "}";
+               std::to_string(s.synthetic_presents) +
+               ",\"perf_governor_stage\":" +
+               std::to_string(s.perf_governor_stage) +
+               ",\"perf_governor_over_frames\":" +
+               std::to_string(s.perf_governor_over_frames) +
+               ",\"perf_governor_under_frames\":" +
+               std::to_string(s.perf_governor_under_frames) + "}";
     }
     if (cmd == "title_patches") {
         const NdsTitlePatchDebugState s = nds_title_patches_debug_state();

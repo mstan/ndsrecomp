@@ -638,6 +638,7 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         "\"adaptive_width_top\":%u,\"adaptive_width_bottom\":%u,"
         "\"internal_resolution\":%u,"
         "\"texture_upscale\":%u,\"supersampling\":%u,\"antialiasing\":%u,"
+        "\"performance_governor\":\"%s\","
         "\"relative_mouse_touch\":%s,\"mph_prime_controls\":%s,"
         "\"mph_prime_unified_window_focus\":%s,"
         "\"network_enabled\":%s,\"wfc_enabled\":%s,"
@@ -691,6 +692,7 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         options.adaptive_max_width[0], options.adaptive_max_width[1],
         options.internal_resolution, options.texture_upscale,
         options.supersampling, options.antialiasing,
+        nds_perf_governor_mode_name(options.perf_governor_mode),
         options.relative_mouse_touch ? "true" : "false",
         options.mph_prime_controls ? "true" : "false",
         options.mph_prime_unified_window_focus ? "true" : "false",
@@ -779,6 +781,8 @@ void nds_diagnostics_maybe_write_performance_sample(
         "\"fps\":%.3f,\"ms_per_frame\":{\"emu\":%.3f,\"present\":%.3f,"
         "\"adaptive\":%.3f,\"upload\":%.3f,\"draw\":%.3f,\"swap\":%.3f,"
         "\"drain\":%.3f},\"underruns_delta\":%llu,"
+        "\"governor\":{\"stage\":%u,\"over_frames\":%u,"
+        "\"under_frames\":%u},"
         "\"cycles\":{\"arm9\":%llu,\"arm7\":%llu},"
         "\"tier3_delta\":{\"arm9\":{\"entries\":%llu,"
         "\"instructions\":%llu,\"clean_ram_rejects\":%llu},"
@@ -804,6 +808,9 @@ void nds_diagnostics_maybe_write_performance_sample(
         per_frame_ms(sub_u64(stats.drain_ticks, before.drain_ticks),
                      frame_delta, stats.freq),
         (unsigned long long)sub_u64(stats.underruns, before.underruns),
+        stats.perf_governor_stage,
+        stats.perf_governor_over_frames,
+        stats.perf_governor_under_frames,
         (unsigned long long)sched_state.cycles[0],
         (unsigned long long)sched_state.cycles[1],
         (unsigned long long)sub_u64(tier3.entries[0],
@@ -1007,6 +1014,21 @@ void nds_diagnostics_note_savestate(const char* action, unsigned slot,
     // Flushed like every other record: a bundle is usually collected after a
     // crash or a hang, and the events worth locating are the ones nearest the
     // end of the file.
+    std::fflush(g_perf);
+}
+
+void nds_diagnostics_note_perf_governor_transition(uint8_t from_stage,
+                                                   uint8_t to_stage,
+                                                   const char* reason) {
+    if (!g_perf) return;
+    std::fprintf(g_perf,
+        "{\"kind\":\"event\",\"event\":\"performance_governor_transition\","
+        "\"from_stage\":%u,\"to_stage\":%u,\"reason\":\"%s\","
+        "\"ts_ms\":%llu,\"wall\":\"%s\"}\n",
+        from_stage, to_stage,
+        json_escape(reason ? reason : "").c_str(),
+        (unsigned long long)unix_ms_now(),
+        json_escape(wall_clock_now().c_str()).c_str());
     std::fflush(g_perf);
 }
 

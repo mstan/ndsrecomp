@@ -447,6 +447,7 @@ int main(int argc, char** argv) {
     std::string cli_live_overlay_command;
     std::string cli_live_overlay_cache;
     std::string cli_savestate_dir;
+    std::string cli_perf_governor;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -635,6 +636,8 @@ int main(int argc, char** argv) {
             cli_live_overlay_cache = argv[++i];
         } else if (a == "--savestate-dir" && i + 1 < argc) {
             cli_savestate_dir = argv[++i];
+        } else if (a == "--performance-governor" && i + 1 < argc) {
+            cli_perf_governor = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -690,6 +693,7 @@ int main(int argc, char** argv) {
                 "[--live-overlay-auto-delay-ms N] "
                 "[--live-overlay-auto-cooldown-ms N] "
                 "[--savestate-dir DIR] "
+                "[--performance-governor auto|off|stage1|stage2] "
                 "[--force-tier3 | NDS_FORCE_TIER3=1]\n",
                 argv[0]);
             return 0;
@@ -803,6 +807,16 @@ int main(int argc, char** argv) {
                          "(expected 0, 2, 4, or 8)\n");
             return 2;
         }
+    }
+    if (const char* value = std::getenv("NDS_PERFORMANCE_GOVERNOR")) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(value, &mode)) {
+            std::fprintf(stderr,
+                         "invalid NDS_PERFORMANCE_GOVERNOR "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
     }
     if (const char* value = std::getenv("NDS_FRAME_INTERPOLATION")) {
         if (!nds_parse_frame_interpolation(
@@ -921,6 +935,16 @@ int main(int argc, char** argv) {
                      "invalid --antialiasing "
                      "(expected 0, 2, 4, or 8)\n");
         return 2;
+    }
+    if (!cli_perf_governor.empty()) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(cli_perf_governor.c_str(), &mode)) {
+            std::fprintf(stderr,
+                         "invalid --performance-governor "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
     }
     if (!cli_frame_interpolation.empty() &&
         !nds_parse_frame_interpolation(

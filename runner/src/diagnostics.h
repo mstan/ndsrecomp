@@ -40,6 +40,9 @@ void nds_diagnostics_maybe_write_performance_sample(
 // diagnostics being enabled.
 void nds_diagnostics_note_savestate(const char* action, unsigned slot,
                                     bool ok);
+void nds_diagnostics_note_perf_governor_transition(uint8_t from_stage,
+                                                   uint8_t to_stage,
+                                                   const char* reason);
 void nds_diagnostics_stop_performance_log();
 // Drop interval baselines after a historical load. The next sample primes a
 // fresh epoch instead of subtracting counters from the pre-load timeline.

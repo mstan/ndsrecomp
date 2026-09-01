@@ -2370,7 +2370,9 @@ bool nds_gpu2d_direct_present_frame_active() {
 }
 
 bool nds_gpu2d_requires_3d_readback() {
-    return !g_direct_frame_active;
+    if (g_frame_capture_active) return true;
+    return !g_direct_frame_active &&
+           !nds_gpu3d_display_readback_latency();
 }
 
 void nds_gpu2d_force_cpu_frames(uint32_t frames) {
