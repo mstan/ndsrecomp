@@ -65,6 +65,14 @@ void cp15_reset();
 // True if ARM9 code fetches from addr are I-cache-served (per-PU-region, C1 bit12).
 bool cp15_code_cacheable(uint32_t addr);
 bool cp15_data_cacheable(uint32_t addr);
+// The original per-access MPU region walks (see cp15.cpp). Kept as the
+// fallback for region encodings the page bitmap cannot represent and as
+// the oracle runner/tests/mem_timing_test.cpp sweeps the bitmap against.
+bool cp15_code_cacheable_reference(uint32_t addr);
+bool cp15_data_cacheable_reference(uint32_t addr);
+// Force a cacheability-bitmap resync (tests only; production syncs from
+// the CP15 write / reset / savestate-import paths).
+void cp15_class_rebuild_for_test();
 
 // ── Dispatch + run control (implemented in runtime_arm.cpp) ─────────────
 // Layout-compatible with the generated <bank>_dispatch.c table entries.

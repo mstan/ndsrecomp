@@ -289,6 +289,83 @@ def main():
             fail("the shard compiler writes the deadline; it is published "
                  "only by the runner")
 
+    # ── Fused timed access / disarmed-flag fast paths (yjp.70 ph2 B) ─────
+    # Same shape of claim as the deadline above, and the same failure mode: a
+    # refactor that quietly un-inlines one of these, or forgets one of the
+    # published DATA symbols the inline reads, restores the per-access call
+    # while every functional test still passes.
+    bus_cpp = (ROOT / "runner/src/bus.cpp").read_text(encoding="utf-8",
+                                                      errors="replace")
+    cp15_cpp = (ROOT / "runner/src/cp15.cpp").read_text(encoding="utf-8",
+                                                        errors="replace")
+    for name in ("runtime_mem_cycles", "runtime_trace_event",
+                 "runtime_live_transfer"):
+        if not re.search(r"NDS_MACHINERY_INLINE\s+\w+\s+" + name + r"\s*\(",
+                         header):
+            fail(f"{name} is no longer a forced-inline header fast path; the "
+                 "per-access / per-store / per-transfer call it exists to "
+                 "remove is back")
+        if not re.search(r"^\s*" + name + r"_slow\s*$", exports, re.M):
+            fail(f"{name}_slow is not exported; a recompiled shard inlining "
+                 "the header could not reach the faithful tail")
+        # The pre-inline ABI symbol must still exist for shards on disk.
+        if not re.search(r"#ifdef NDS_RUNTIME_ABI_SHIMS", header):
+            fail("the shard ABI shim guard is gone from the header")
+        if name not in shims:
+            fail(f"{name} is no longer exported out-of-line for old shards")
+    # The disarmed cases must be a FLAG TEST and nothing else -- no ring
+    # bookkeeping, no second call, in the inline.
+    trace_inline = body(header, "runtime_trace_event")
+    if "g_runtime_deep_trace" not in trace_inline or             "runtime_trace_event_slow" not in trace_inline:
+        fail("runtime_trace_event's inline lost its disarmed test or its "
+             "out-of-line tail")
+    transfer_inline = body(header, "runtime_live_transfer")
+    if "g_runtime_live_transfer_trace" not in transfer_inline or             "runtime_live_transfer_slow" not in transfer_inline:
+        fail("runtime_live_transfer's inline lost its disarmed test or its "
+             "out-of-line tail")
+    # Every piece of published derived state the timed-access inline reads
+    # must be a column-0 `extern` (tcc shard rewrite) AND a DATA export (so a
+    # shard reads the RUNNER's storage, not a private zeroed copy -- a private
+    # g_cp15_class_ready would silently make every shard access take the
+    # fallback, and a private g_memt_* would mis-time TCM).
+    for symbol in ("g_last_data_addr", "g_memt_itcm_limit", "g_memt_dtcm_base",
+                   "g_memt_dtcm_size", "g_cp15_dcache_page",
+                   "g_cp15_icache_page", "g_cp15_class_ready",
+                   "g_runtime_live_transfer_trace"):
+        if not any(line.startswith("extern ") and symbol in line
+                   for line in header.splitlines()):
+            fail(f"{symbol} is not declared at column 0 with a leading "
+                 "`extern`; tcc-built shards would not import it")
+        if not re.search(r"^\s*" + symbol + r"\s+DATA\s*$", exports, re.M):
+            fail(f"{symbol} is not a DATA export; a shard would get a "
+                 "private copy instead of the runner's storage")
+    # The equivalence oracle must stay in the tree: mem_timing_test proves the
+    # inline path against these, and without them it proves nothing.
+    if "runtime_mem_cycles_reference" not in bus_cpp:
+        fail("runtime_mem_cycles_reference is gone; mem_timing_test has no "
+             "oracle to sweep the inline timing path against")
+    for ref in ("cp15_data_cacheable_reference", "cp15_code_cacheable_reference"):
+        if ref not in cp15_cpp:
+            fail(f"{ref} is gone; the page-granular cacheability bitmap has "
+                 "no oracle and no fallback for sub-page MPU regions")
+    # The bitmap is derived state: it must refuse to answer when it cannot
+    # represent the programmed regions, and every consumer must honour that.
+    if "g_cp15_class_ready = exact" not in cp15_cpp:
+        fail("the cacheability bitmap no longer records whether it exactly "
+             "represents the MPU regions")
+    for fn in ("cp15_data_cacheable", "cp15_code_cacheable"):
+        walk = body(cp15_cpp, fn)
+        if "g_cp15_class_ready" not in walk or "_reference" not in walk:
+            fail(f"{fn} no longer falls back to the reference walk when the "
+                 "page bitmap cannot represent the regions")
+    # TCM timing mirrors are republished from the ONE function every TCM-moving
+    # path already calls. If they move elsewhere, some path will miss them.
+    refresh = body(bus_cpp, "bus_fast_refresh")
+    for symbol in ("g_memt_itcm_limit", "g_memt_dtcm_base", "g_memt_dtcm_size"):
+        if symbol not in refresh:
+            fail(f"{symbol} is not republished from bus_fast_refresh; a CP15 "
+                 "TCM write would leave the inline timing path stale")
+
     # ── B2 validated direct linking (beads-yjp.45) ───────────────────────
     # The win is a data-locality change, not a semantic one. Every assertion
     # here pins one clause of that safety argument. A refactor that deletes

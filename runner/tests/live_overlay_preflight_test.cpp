@@ -22,7 +22,14 @@ extern "C" uint32_t runtime_code_cycles(uint32_t) { return 0; }
 extern "C" uint32_t arm9_refill_cycles(uint32_t) { return 0; }
 extern "C" void runtime_dispatch_bad_entry(uint32_t) {}
 extern "C" void runtime_dispatch_with_exchange(uint32_t) {}
-extern "C" void runtime_live_transfer(uint32_t, uint32_t, uint32_t) {}
+// runtime_live_transfer became an inline disarmed-flag test in runtime_arm.h
+// (beads-yjp.70 phase 2 B), so what a shard compiled today imports is the
+// published flag and the out-of-line tail -- which is what this harness has
+// to provide, exactly as it already provides runtime_tick_slow /
+// runtime_should_yield_slow rather than their inline spellings.
+// (g_runtime_live_transfer_trace itself comes from the REAL live_overlay.cpp,
+// which this target links; only the runtime-side tail is stubbed here.)
+extern "C" void runtime_live_transfer_slow(uint32_t, uint32_t, uint32_t) {}
 extern "C" void runtime_call_push_return(uint32_t) {}
 extern "C" int runtime_call_should_return(uint32_t) { return 0; }
 extern "C" void runtime_call_cancel_return(uint32_t) {}
