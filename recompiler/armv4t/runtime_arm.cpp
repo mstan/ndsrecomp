@@ -619,6 +619,18 @@ extern "C" void runtime_link_fallthrough(NdsLinkSlot* slot) {
     runtime_dispatch(slot->target_pc & ~1u);
 }
 
+// Inline-leaf admission. Slots never resolve in this reference runtime (see
+// above), so no expansion is ever admitted and every call site takes its
+// faithful runtime_link_call path — the same end state NDS_INLINE_LEAVES=0
+// produces in the runner. Nothing is approximated here; the guest's own
+// recompiled leaf body still runs, just through the dispatcher.
+extern "C" int runtime_inline_leaf_admit(const NdsLinkSlot* slot,
+                                         void (*expected)(void)) {
+    (void)slot;
+    (void)expected;
+    return 0;
+}
+
 extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;

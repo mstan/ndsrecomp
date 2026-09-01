@@ -470,6 +470,159 @@ const ResolvedHleRoutine* find_hle_routine(
     return nullptr;
 }
 
+// ── Tiny-leaf inlining pass (beads-yjp.67) ───────────────────────────────
+//
+// A "tiny leaf" is a guest function that is entirely a straight-line
+// computation ending in `bx lr`: no calls, no branches, no block transfers,
+// no coprocessor or SWI traffic, no PC writes, and no other use of LR. The
+// OS interrupt-mask pair the MPH fight leans on
+// (OS_DisableInterrupts / OS_RestoreInterrupts, five instructions each) is
+// the archetype, and it is 52 percent of all ARM9 dispatch entries in that
+// scene: every call paid a link-slot dispatch round trip plus a resume-switch
+// entry to run five instructions.
+//
+// Recognizing the SHAPE rather than the addresses keeps this general: any
+// title's mask/lock/getter leaves qualify, on either CPU, in ARM or THUMB.
+//
+// Constraints and why each one is here:
+//   * Terminator is exactly an unconditional `bx lr`, and it is the last
+//     instruction of the body. Anything else can leave the expansion without
+//     a fall-through point.
+//   * No instruction other than the terminator may READ OR WRITE LR. The
+//     expansion relies on LR still holding the call site's return address at
+//     the terminator (the terminator re-checks that and dispatches if it
+//     does not, so a violation is caught rather than mis-executed — but a
+//     leaf that manipulates LR would take that slow path every time, which
+//     is worse than not inlining it).
+//   * No instruction may write PC, be conditional, or be undefined: the
+//     expansion is a straight line with no labels, so there is nothing for
+//     an intra-leaf transfer to target.
+//   * Only plain data processing, PSR transfer, multiply and single
+//     load/store ops are admitted. Block transfers, SWP, SWI and coprocessor
+//     ops are excluded — they either carry side effects the expansion would
+//     have to model or (LDM/STM) can touch LR through a register list.
+//   * An HLE-profiled body is never inlined: its descriptor wrapper is the
+//     measurement surface and inlining would make its callers invisible.
+bool inline_leaf_op_allowed(armv4t::IrOp op) {
+    switch (op) {
+        case armv4t::IrOp::AND: case armv4t::IrOp::EOR:
+        case armv4t::IrOp::SUB: case armv4t::IrOp::RSB:
+        case armv4t::IrOp::ADD: case armv4t::IrOp::ADC:
+        case armv4t::IrOp::SBC: case armv4t::IrOp::RSC:
+        case armv4t::IrOp::TST: case armv4t::IrOp::TEQ:
+        case armv4t::IrOp::CMP: case armv4t::IrOp::CMN:
+        case armv4t::IrOp::ORR: case armv4t::IrOp::MOV:
+        case armv4t::IrOp::BIC: case armv4t::IrOp::MVN:
+        case armv4t::IrOp::MRS: case armv4t::IrOp::MSR:
+        case armv4t::IrOp::CLZ:
+        case armv4t::IrOp::MUL: case armv4t::IrOp::MLA:
+        case armv4t::IrOp::LDR: case armv4t::IrOp::STR:
+        case armv4t::IrOp::LDRB: case armv4t::IrOp::STRB:
+        case armv4t::IrOp::LDRH: case armv4t::IrOp::STRH:
+        case armv4t::IrOp::LDRSB: case armv4t::IrOp::LDRSH:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Every register slot an admitted op can name. Conservative by
+// construction: a slot that is unused for a given op reads as whatever the
+// decoder left there, so a false positive costs an un-inlined leaf, never a
+// wrong expansion.
+bool inline_leaf_touches_lr(const armv4t::Instr& ins) {
+    if (ins.rd == 14u || ins.rn == 14u || ins.rs == 14u || ins.rm == 14u)
+        return true;
+    if (ins.op2.kind == armv4t::Op2::Kind::Shifted) {
+        if (ins.op2.shifted.rm == 14u) return true;
+        if (ins.op2.shifted.by_register && ins.op2.shifted.imm_or_rs == 14u)
+            return true;
+    }
+    if (ins.mem.rn == 14u) return true;
+    if (ins.mem.by_register && ins.mem.reg_offset.rm == 14u) return true;
+    return false;
+}
+
+std::unordered_map<uint64_t, armv4t::InlineLeaf> build_inline_leaves(
+        const std::vector<Function>& funcs, const SuperblockPlan& superblocks,
+        const uint8_t* rom, std::size_t rom_size, uint32_t rom_base,
+        const BankNames& names, unsigned max_insns,
+        const std::vector<ResolvedHleRoutine>& hle_routines,
+        const std::unordered_set<uint64_t>& pruned_keys,
+        unsigned* leaf_count) {
+    std::unordered_map<uint64_t, armv4t::InlineLeaf> leaves;
+    if (max_insns == 0u) return leaves;
+    for (std::size_t index = 0; index < funcs.size(); ++index) {
+        const Function& fn = funcs[index];
+        const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
+        if (fn.end_addr <= fn.addr) continue;
+        const uint32_t span = fn.end_addr - fn.addr;
+        if (span % step != 0u) continue;
+        const uint32_t count = span / step;
+        if (count < 2u || count > max_insns) continue;
+        // A leaf whose dispatch row this bank does not own cannot be
+        // admitted at run time (the resolution would name someone else's
+        // body), so there is no point expanding it.
+        if (pruned_keys.count(function_key(fn.addr, fn.mode)) != 0u) continue;
+
+        const uint32_t source = fn.source_addr ? fn.source_addr : fn.addr;
+        if (source < rom_base ||
+            uint64_t{source - rom_base} + span > rom_size) {
+            continue;
+        }
+        const std::size_t base_off = source - rom_base;
+
+        armv4t::InlineLeaf leaf;
+        leaf.addr = fn.addr;
+        leaf.thumb = (fn.mode == CpuMode::Thumb);
+        bool ok = true;
+        for (uint32_t i = 0; i < count && ok; ++i) {
+            const uint32_t pc = fn.addr + i * step;
+            const std::size_t off = base_off + i * step;
+            armv4t::Instr ins;
+            if (fn.mode == CpuMode::Thumb) {
+                const uint16_t hw = static_cast<uint16_t>(
+                    rom[off] | (rom[off + 1] << 8));
+                ins = armv4t::ThumbDecoder::decode(hw, pc);
+            } else {
+                const uint32_t w = static_cast<uint32_t>(rom[off])
+                    | (static_cast<uint32_t>(rom[off + 1]) << 8)
+                    | (static_cast<uint32_t>(rom[off + 2]) << 16)
+                    | (static_cast<uint32_t>(rom[off + 3]) << 24);
+                ins = armv4t::ArmDecoder::decode(w, pc);
+            }
+            if (ins.is_undefined || ins.cond != armv4t::Cond::AL) {
+                ok = false;
+                break;
+            }
+            if (i + 1u == count) {
+                // Terminator.
+                ok = ins.op == armv4t::IrOp::BX && ins.rm == 14u;
+                leaf.terminator_pc = pc;
+                break;
+            }
+            if (!inline_leaf_op_allowed(ins.op) || ins.is_pc_writing ||
+                ins.is_branch || ins.is_call || ins.is_indirect ||
+                inline_leaf_touches_lr(ins) || ins.rd == 15u) {
+                ok = false;
+                break;
+            }
+            leaf.body.push_back(ins);
+        }
+        if (!ok) continue;
+
+        const std::size_t leader = superblocks.leader[index];
+        if (find_hle_routine(hle_routines, funcs[leader]) ||
+            find_hle_routine(hle_routines, fn)) {
+            continue;
+        }
+        leaf.owner_symbol = names.fn_prefix + funcs[leader].name;
+        leaves.emplace(function_key(fn.addr, fn.mode), std::move(leaf));
+    }
+    if (leaf_count) *leaf_count = static_cast<unsigned>(leaves.size());
+    return leaves;
+}
+
 // Emit one guest function's body. Decodes every word in [addr, end_addr)
 // and lowers it via the codegen, with a pre-pass that (1) marks
 // in-function backward branch targets so a `L_<pc>:` label is emitted for
@@ -504,7 +657,11 @@ void emit_function_body(std::FILE* f, const Function& fn,
                             func_names_by_key,
                         bool emit_entry_switch,
                         bool local_fallthrough,
-                        bool trace_live_transfers) {
+                        bool trace_live_transfers,
+                        bool msr_fast_path,
+                        const std::unordered_map<uint64_t, armv4t::InlineLeaf>*
+                            inline_leaves,
+                        unsigned* inline_leaf_sites) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
     ctx.names_by_key = &func_names_by_key;
@@ -512,6 +669,9 @@ void emit_function_body(std::FILE* f, const Function& fn,
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
     ctx.trace_live_transfers = trace_live_transfers;
+    ctx.msr_fast_path = msr_fast_path;
+    ctx.inline_leaves = inline_leaves;
+    ctx.inline_leaf_sites = inline_leaf_sites;
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
 
     // Every decoded instruction is a resumable static entry. Normal calls
@@ -968,7 +1128,11 @@ void write_bank_body(const std::string& dir,
                      bool allow_direct_calls,
                      bool trace_live_transfers,
                      const SuperblockPlan& superblocks,
-                     const std::vector<ResolvedHleRoutine>& hle_routines) {
+                     const std::vector<ResolvedHleRoutine>& hle_routines,
+                     bool msr_fast_path,
+                     const std::unordered_map<uint64_t, armv4t::InlineLeaf>&
+                         inline_leaves,
+                     unsigned* inline_leaf_sites) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     // Direct C calls stay within a body shard. Cross-shard transfers use the
     // normal runtime dispatcher, which keeps shards independently compilable
@@ -996,12 +1160,28 @@ void write_bank_body(const std::string& dir,
         "   is never consulted at runtime — an unlowered op aborts via\n"
         "   runtime_unimplemented_op (PRINCIPLES.md). */\n"
         "#include \"runtime_arm.h\"\n\n");
+    std::unordered_set<std::string> shard_bodies;
     for (std::size_t index = first; index < last; ++index) {
         if (superblocks.leader[index] != index) continue;
         std::fprintf(f, "void %s%s(void);\n", names.fn_prefix.c_str(),
                      funcs[index].name.c_str());
+        shard_bodies.insert(names.fn_prefix + funcs[index].name);
     }
     std::fputs("\n", f);
+
+    // An inline-leaf expansion names the leaf's OWNING generated body, so the
+    // runtime can confirm its own resolution picked exactly that body before
+    // the copy is allowed to run. That reference must resolve inside THIS
+    // shard: a body shard is compiled standalone by the live-shard pipeline,
+    // and naming a symbol another shard defines would leave it unresolved at
+    // link time. Same reason direct C calls are restricted to one shard —
+    // shards stay independently compilable. So a leaf whose owner is emitted
+    // elsewhere simply is not inlined here; its call sites keep the ordinary
+    // link call.
+    std::unordered_map<uint64_t, armv4t::InlineLeaf> shard_leaves;
+    for (const auto& entry : inline_leaves)
+        if (shard_bodies.count(entry.second.owner_symbol) != 0u)
+            shard_leaves.emplace(entry.first, entry.second);
     for (std::size_t index = first; index < last; ++index) {
         if (superblocks.leader[index] != index) continue;
         const auto& fn = funcs[index];
@@ -1038,7 +1218,9 @@ void write_bank_body(const std::string& dir,
             emit_function_body(
                 f, funcs[member], rom, rom_size, rom_base, name_by_key,
                 !coalesced, member + 1u < block_end,
-                trace_live_transfers);
+                trace_live_transfers, msr_fast_path,
+                shard_leaves.empty() ? nullptr : &shard_leaves,
+                inline_leaf_sites);
         }
         std::fprintf(f, "}\n\n");
         if (hle) {
@@ -1075,6 +1257,10 @@ int main(int argc, char** argv) {
     bool stable_address_shards = false;
     unsigned shards = 1u;
     uint32_t max_function_bytes = 0u;
+    bool msr_fast_path = true;
+    // Tiny-leaf inlining budget, in guest instructions INCLUDING the
+    // terminating `bx lr` (beads-yjp.67). 0 disables the pass entirely.
+    unsigned inline_leaf_max_insns = 8u;
     // Answered before anything else is parsed and before any input is
     // required: the live-shard provider identity asks a bare recompiler
     // binary what its emission semantics are, with no config and no image.
@@ -1111,6 +1297,9 @@ int main(int argc, char** argv) {
             std::strtoul(next(), nullptr, 0));
         else if (a == "--max-function-bytes") max_function_bytes =
             static_cast<uint32_t>(std::strtoul(next(), nullptr, 0));
+        else if (a == "--no-msr-fast-path") msr_fast_path = false;
+        else if (a == "--inline-leaf-max-insns") inline_leaf_max_insns =
+            static_cast<unsigned>(std::strtoul(next(), nullptr, 0));
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
     if (config_path.empty() || bin_path.empty()) {
@@ -1420,6 +1609,13 @@ int main(int argc, char** argv) {
                         "preceding rows=%zu\n",
                         superblocks.merged_edges, preceding.keys.size());
         unsigned emitted_shards = 0u;
+        unsigned inline_leaf_count = 0u;
+        unsigned inline_leaf_sites = 0u;
+        const std::unordered_map<uint64_t, armv4t::InlineLeaf> inline_leaves =
+            build_inline_leaves(funcs, superblocks, bin.data(), bin.size(),
+                                cfg.program.load_address, names,
+                                inline_leaf_max_insns, hle_routines,
+                                pruned_keys, &inline_leaf_count);
         if (!dispatch_only) {
             write_bank_header(out_dir, funcs, names);
             if (shards == 0u) shards = 1u;
@@ -1440,7 +1636,10 @@ int main(int argc, char** argv) {
                                     validated_live_direct_calls,
                                 validate_live_bytes,
                                 superblocks,
-                                hle_routines);
+                                hle_routines,
+                                msr_fast_path,
+                                inline_leaves,
+                                &inline_leaf_sites);
                 ++emitted_shards;
             };
             if (stable_address_shards) {
@@ -1502,6 +1701,17 @@ int main(int argc, char** argv) {
                     out_dir.c_str(),
                     names.body.c_str(), names.header.c_str(),
                     names.dispatch.c_str());
+        // Report the pass rather than asserting it: a leaf that stops
+        // qualifying (a decoder change, a new terminator shape, a superblock
+        // merge) shows up as the count moving, not as silent inaction.
+        std::printf("[emit] inline leaves: %u eligible (<= %u insns), "
+                    "%u BL site%s expanded%s\n",
+                    inline_leaf_count, inline_leaf_max_insns,
+                    inline_leaf_sites, inline_leaf_sites == 1u ? "" : "s",
+                    inline_leaf_max_insns == 0u ? " [pass disabled]" : "");
+        if (!msr_fast_path)
+            std::printf("[emit] MSR CPSR fast path DISABLED "
+                        "(--no-msr-fast-path)\n");
         return 0;
     }
 
