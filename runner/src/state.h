@@ -57,7 +57,10 @@ struct Cp15State {
     uint32_t dtcm_size;        // bytes
 };
 extern Cp15State g_cp15;
-extern uint32_t g_cp15_timing_generation;
+// g_cp15_timing_generation is declared in recompiler/armv4t/runtime_arm.h
+// (with C linkage): generated code reads it to validate the published ARM9
+// code-fetch class — see NDS_ARM9_CODE_K / nds_code_numc there. Declaring it
+// here as well would give the same object two language linkages.
 uint32_t cp15_debug_mpu_region(unsigned index);
 uint32_t cp15_debug_cache_cfg(unsigned index);
 

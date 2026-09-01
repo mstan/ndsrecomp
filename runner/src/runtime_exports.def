@@ -1,6 +1,7 @@
 EXPORTS
     arm7_cycle_combine
     arm7_refill_cycles
+    arm9_code_fast_invalidate
     arm9_refill_cycles
     arm_cond_passes
     arm_set_nz
@@ -19,6 +20,9 @@ EXPORTS
     bus_write_u8_slow
     bus_write_u16_slow
     bus_write_u32_slow
+    g_arm9_code_class_shift DATA
+    g_arm9_code_pub_gen DATA
+    g_arm9_itcm_code_limit DATA
     g_busf_dtcm DATA
     g_busf_dtcm_base DATA
     g_busf_dtcm_limit DATA
@@ -27,9 +31,11 @@ EXPORTS
     g_busf_main DATA
     g_busf_wram_hi DATA
     g_busf_wram_lo DATA
+    g_cp15_timing_generation DATA
     g_cpu DATA
     g_insn_count DATA
     g_insn_hook_armed DATA
+    g_last_code_pc DATA
     g_nds_active DATA
     g_nds_fast_limit DATA
     g_nds_unwinding DATA

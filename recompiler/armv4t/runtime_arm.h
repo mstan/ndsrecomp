@@ -397,6 +397,114 @@ uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
 // See docs/scheduler_design.md "Cycle-model design".
 uint32_t runtime_code_cycles(uint32_t pc);
 
+// ── Inline ARM9 code-fetch cost (beads-yjp.70 phase 2A) ─────────────────
+//
+// runtime_code_cycles() was called once per emitted instruction (13,180
+// calls in one MPH ARM9 bank) and cost 7.3% of the emulation thread. For a
+// FIXED pc and instruction-set state its result is a pure function of ONE
+// small dynamic quantity — the ARM9 code-timing class in force for that
+// fetch — because every other input is static per pc:
+//
+//   * the Thumb "free second half" rule (numC = 0 for an odd halfword) is
+//     decided by pc & 2 and the body's ISA, both compile-time constants;
+//   * the I-cache line term ((pc + (thumb?4:8)) & 0x1F) ? 1 : 3 is a
+//     function of pc alone;
+//   * ITCM = 1, main RAM = 18, other = 8 are constants.
+//
+// So the four possible values — indexed by the Arm9CodeTiming class
+// (Itcm=0, Cached=1, MainRam=2, Other=3) — are known at CODEGEN time and
+// pack into one 32-bit literal, one byte per class: NDS_ARM9_CODE_K below.
+// The whole per-instruction cost then becomes "select one byte of a
+// literal with the current class", and the class is read from three
+// published words instead of being re-derived per instruction:
+//
+//   g_arm9_code_class_shift  8 * the class LATCHED for the executing code
+//                            region (melonDS ARMv5::RegionCodeCycles, a
+//                            JumpTo snapshot — see arm9_latch_code_timing).
+//   g_arm9_itcm_code_limit   itcm_enable ? itcm_size : 0. CodeRead32 checks
+//                            the LIVE ITCM mapping before RegionCodeCycles,
+//                            so this test is per-address, not latched.
+//   g_arm9_code_pub_gen      the g_cp15_timing_generation the two words
+//                            above were published for; 0 = "not published".
+//                            Every CP15 write that can move the timing map
+//                            bumps the generation, and a savestate import
+//                            zeroes this, so a mismatch is the complete
+//                            invalidation signal: on mismatch the inline
+//                            path falls back to the ORIGINAL out-of-line
+//                            runtime_code_cycles(), which republishes.
+//
+// This is a fold of the code-fetch DERIVATION only. It deliberately does
+// NOT fold cycles across a straight-line run: runtime_tick() is the IRQ /
+// PPU boundary, so summing several instructions' costs into one tick would
+// move guest-visible interrupt delivery. Per-instruction ticks are
+// unchanged; only the cost of computing numC moves.
+extern uint32_t g_last_code_pc[2];
+extern uint32_t g_cp15_timing_generation;
+extern uint32_t g_arm9_code_pub_gen;
+extern uint32_t g_arm9_code_class_shift;
+extern uint32_t g_arm9_itcm_code_limit;
+// Drop the publication (used by the CP15 savestate import, which restores a
+// generation counter and so could otherwise re-validate a stale publish).
+void arm9_code_fast_invalidate(void);
+
+// The per-(pc, ISA) packed numC table. Byte i is numC for Arm9CodeTiming
+// class i. ZERO is the "Thumb odd halfword" sentinel (numC = 0 for every
+// class); no real table is 0 because byte 0 (ITCM) is always 1.
+#define NDS_ARM9_CODE_K(pc, thumb)                                          \
+    ((((thumb) != 0) && (((pc) & 2u) != 0u))                                \
+        ? 0u                                                                \
+        : (0x08120001u |                                                    \
+           (((((pc) + (((thumb) != 0) ? 4u : 8u)) & 0x1Fu) != 0u)           \
+                ? 0x0100u : 0x0300u)))
+
+#if defined(__GNUC__)
+#define NDS_HOT_INLINE static inline __attribute__((always_inline))
+#else
+#define NDS_HOT_INLINE static inline
+#endif
+
+// Per-instruction code-fetch cost. `k` MUST be NDS_ARM9_CODE_K(pc, thumb)
+// for this instruction (a compile-time constant). Returns exactly what
+// runtime_code_cycles(pc) returns — pinned by
+// runner/tests/code_cycles_fold_test.cpp over every class, ISA and pc
+// parity. The ARM7 branch is the unchanged call (its result is live at the
+// exception-return tick site, and its g_last_code_pc[1] store is read by
+// arm7_cycle_combine); under -DNDS_STATIC_CPU it folds away entirely, so an
+// ARM9 bank keeps only the fast path and an ARM7 bank keeps only the call.
+NDS_HOT_INLINE uint32_t nds_code_numc(uint32_t pc, uint32_t k) {
+    if (g_nds_active != NDS_ARM9) return runtime_code_cycles(pc);
+    if (g_arm9_code_pub_gen != g_cp15_timing_generation)
+        return runtime_code_cycles(pc);
+    g_last_code_pc[0] = pc;
+    if (k == 0u) return 0u;                       // Thumb odd halfword
+    if (pc < g_arm9_itcm_code_limit) return 1u;   // live ITCM mapping
+    return (k >> g_arm9_code_class_shift) & 0xFFu;
+}
+
+// ── Inline condition evaluation (beads-yjp.70 phase 2A) ─────────────────
+// arm_cond_passes() is a pure function of four CPSR bits, but it was a
+// cross-TU call at every conditional instruction (0.9% self on the MPH
+// ARM9 fight). Generated code passes a LITERAL cond, so inlining folds the
+// switch to the one or two flag tests that condition actually needs.
+// This is the SINGLE definition of the contract: the exported out-of-line
+// arm_cond_passes() (runner/src/runtime_arm.cpp,
+// recompiler/armv4t/runtime_arm.cpp) now delegates here, so the two
+// spellings cannot drift, and shards emitted before this change keep
+// calling the exported symbol.
+NDS_HOT_INLINE int arm_cond_passes_i(unsigned cond) {
+    const uint32_t n = cpsr_n(), z = cpsr_z(), c = cpsr_c(), v = cpsr_v();
+    switch (cond & 0xFu) {
+        case 0x0: return z != 0;                 case 0x1: return z == 0;
+        case 0x2: return c != 0;                 case 0x3: return c == 0;
+        case 0x4: return n != 0;                 case 0x5: return n == 0;
+        case 0x6: return v != 0;                 case 0x7: return v == 0;
+        case 0x8: return (c != 0) && (z == 0);   case 0x9: return (c == 0) || (z != 0);
+        case 0xA: return n == v;                 case 0xB: return n != v;
+        case 0xC: return (z == 0) && (n == v);   case 0xD: return (z != 0) || (n != v);
+        case 0xE: return 1;                      default:  return 0;  // NV
+    }
+}
+
 // Taken-branch / PC-write pipeline refill. `target` includes the destination
 // ISA in bit 0 (Thumb when set); each helper returns its CPU's clock units.
 uint32_t arm7_refill_cycles(uint32_t target);
