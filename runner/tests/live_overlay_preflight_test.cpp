@@ -541,6 +541,35 @@ int main(int argc, char** argv) {
         return 1;
     live_overlay_shutdown();
 
+#if defined(_WIN32) || defined(__linux__)
+    // ---- first auto trigger is reachable by real MPH multiplayer --------
+    //
+    // A cold mp_bots_blank route observed only ~70-95 Tier-3 executions before
+    // drain. The former 100k first-trigger threshold meant runtime TCC never
+    // even launched: the cache stayed empty with runs_started=0, not because
+    // compilation failed but because it was never commissioned.
+    live_overlay_configure(true, true, 0u, 0u, 0u, "some-provider-command",
+                           "live-overlay-test-cache-does-not-exist", "test");
+    const unsigned long long auto_failed_before = status_number("runs_failed");
+    for (int i = 0; i < 63; ++i)
+        live_overlay_note_tier3(NDS_ARM9, 0x02000000u + i * 4u);
+    live_overlay_poll();
+    if (!expect(status_number("runs_failed") == auto_failed_before,
+                "63 Tier-3 hits must not yet auto-commission the provider"))
+        return 1;
+    live_overlay_note_tier3(NDS_ARM9, 0x02000100u);
+    for (int i = 0;
+         i < 500 && status_number("runs_failed") == auto_failed_before;
+         ++i) {
+        live_overlay_poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!expect(status_number("runs_failed") == auto_failed_before + 1u,
+                "64 Tier-3 hits must auto-commission the provider"))
+        return 1;
+    live_overlay_shutdown();
+#endif
+
     // ---- futility guard is UNCHANGED by the queue policy ----------------
     //
     // The drain path exists to commission more work sooner. A provider proven

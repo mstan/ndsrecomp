@@ -44,9 +44,9 @@ extern char** environ;
 
 namespace {
 
-constexpr uint64_t kFirstTriggerTier3 = 100000u;
-constexpr uint64_t kRetriggerTier3 = 250000u;
-constexpr uint64_t kNoProgressRetriggerTier3 = 5000000u;
+constexpr uint64_t kFirstTriggerTier3 = 64u;
+constexpr uint64_t kRetriggerTier3 = 4096u;
+constexpr uint64_t kNoProgressRetriggerTier3 = 65536u;
 constexpr uint32_t kDiagRingSize = 4096u;
 
 // ---- Adaptive queue policy (beads-yjp.51) ---------------------------------
