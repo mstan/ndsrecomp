@@ -102,6 +102,12 @@ def info(dll: Path) -> BankInfo:
     return module.nds_live_bank_info().contents
 
 
+def codegen_version(dll: Path) -> int:
+    module = ctypes.CDLL(str(dll))
+    module.nds_live_codegen_version.restype = ctypes.c_uint32
+    return int(module.nds_live_codegen_version())
+
+
 def check_tcc_command(work: Path) -> None:
     commands: list[list[str]] = []
     original_run = tool.run
@@ -144,13 +150,16 @@ def main() -> int:
     check_tcc_command(args.work)
 
     for cpu, expected_static in ((9, 0), (7, 1)):
-        bank = info(build(args.work, args.gcc, cpu, expected_static))
+        dll = build(args.work, args.gcc, cpu, expected_static)
+        bank = info(dll)
         assert bank.abi_version == tool.ABI_VERSION, (
             f"wrapper published ABI {bank.abi_version}, tool mirrors "
             f"{tool.ABI_VERSION}")
         assert bank.cpu == expected_static, "metadata cpu should be 0/1"
         assert bank.static_cpu == expected_static, (
             f"cpu {cpu} wrapper reported static_cpu {bank.static_cpu}")
+        assert codegen_version(dll) == tool.SHARD_CODEGEN_VERSION, (
+            "wrapper must publish the producer codegen version")
 
     # The whole point of the field: it follows -DNDS_STATIC_CPU, not the
     # metadata, so a build that disagrees is visible to the runner instead

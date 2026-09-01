@@ -1033,6 +1033,30 @@ extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
     }
 }
 
+extern "C" bool nds_dispatch_static_bank_covers(int cpu, uint32_t pc,
+                                                uint8_t thumb) {
+    NDS_ASSERT_DISPATCH_THREAD("nds_dispatch_static_bank_covers");
+    const CpuCtx& ctx = g_ctx[cpu & 1];
+    const uint64_t wanted = (uint64_t{pc} << 1u) | uint64_t{thumb != 0u};
+    auto it = std::lower_bound(
+        ctx.dispatch_index.begin(), ctx.dispatch_index.end(), wanted,
+        [](const DispatchEntry* entry, uint64_t value) {
+            return nds_dispatch_entry_key(entry) < value;
+        });
+    for (; it != ctx.dispatch_index.end() &&
+           nds_dispatch_entry_key(*it) == wanted; ++it) {
+        const DispatchEntry* entry = *it;
+        if (live_overlay_candidate_serial(cpu, entry) != 0u) continue;
+        const NdsStaticValidation* validation = entry->validation;
+        if (validation &&
+            !dispatch_validation_live(validation, pc, thumb != 0u, nullptr)) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
 extern "C" void nds_register_hle_profile_descriptors(
         int cpu, const NdsHleProfileDescriptor* const* descriptors,
         unsigned count) {

@@ -25,6 +25,7 @@
 #include "runtime_arm.h"
 #include "state.h"
 #include "emu_profile.h"
+#include "../../recompiler/src/codegen_identity.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -150,12 +151,14 @@ enum class DiagKind : uint8_t {
     X(LoadClosureNotShared,        "load_closure_not_shared")                 \
     X(LoadRowsUnsorted,            "load_rows_unsorted")                      \
     X(LoadRowsDuplicate,           "load_rows_duplicate")                     \
+    X(LoadStaleStaticCovered,      "load_stale_static_covered")              \
     /* commit_prepared_bank */                                                \
     X(LoadContentConflict,         "load_content_conflict")                   \
     X(DropDuplicateCandidate,      "drop_duplicate_candidate")                \
     X(DropDeclinedLowerTier,       "drop_declined_lower_tier")                \
     X(DropSupersededGeneration,    "drop_superseded_generation")              \
     X(DropRedundantSubset,         "drop_redundant_subset")                   \
+    X(DropStaleStaticRows,         "drop_stale_static_rows")                 \
     X(KeptDivergentGeneration,     "kept_divergent_generation")               \
     /* dispatch_validation_live, classified where ++bank->rejects happens */  \
     X(GuardRowNotOwned,            "guard_row_not_owned")                     \
@@ -238,6 +241,7 @@ struct LoadedBank {
     uint32_t exc_base = 0;
     const NdsDispatchEntry* dispatch = nullptr;
     unsigned dispatch_len = 0;
+    std::vector<NdsDispatchEntry> filtered_dispatch;
     uint64_t native_hits = 0u;
     uint64_t rejects = 0u;
     uint64_t content_identity = 0u;
@@ -245,6 +249,7 @@ struct LoadedBank {
     // backend-blind â€” a bank is a bank â€” but when two of them cover the exact
     // same generation the better code generator must win. See backend_tier().
     uint32_t backend_tier = 0u;
+    uint32_t producer_codegen_version = 0u;
     bool registered = false;
     bool superseded = false;
 #if defined(_WIN32)
@@ -1480,6 +1485,34 @@ uint32_t backend_tier(const std::filesystem::path& path) {
     return 0u;
 }
 
+bool producer_codegen_stale(const LoadedBank& bank) {
+    return bank.producer_codegen_version < ndsrecomp::kCodegenVersion;
+}
+
+unsigned drop_stale_static_rows(LoadedBank& bank) {
+    if (!producer_codegen_stale(bank) || !bank.dispatch ||
+        bank.dispatch_len == 0u) {
+        return 0u;
+    }
+    bank.filtered_dispatch.clear();
+    bank.filtered_dispatch.reserve(bank.dispatch_len);
+    unsigned dropped = 0u;
+    for (unsigned i = 0u; i < bank.dispatch_len; ++i) {
+        const NdsDispatchEntry& row = bank.dispatch[i];
+        if (nds_dispatch_static_bank_covers(bank.cpu, row.addr, row.thumb)) {
+            ++dropped;
+            continue;
+        }
+        bank.filtered_dispatch.push_back(row);
+    }
+    if (dropped == 0u) return 0u;
+    bank.dispatch = bank.filtered_dispatch.empty()
+        ? nullptr
+        : bank.filtered_dispatch.data();
+    bank.dispatch_len = static_cast<unsigned>(bank.filtered_dispatch.size());
+    return dropped;
+}
+
 // Runs on the prepare worker thread, so it must NOT touch the counters
 // directly: it reports the cause through `reason` and the emulation thread
 // records it when it drains prepare_errors.
@@ -1551,6 +1584,13 @@ bool prepare_bank_dll(const std::filesystem::path& path, LoadedBank& bank,
     bank.backend_tier = backend_tier(path);
     bank.bank_id = info->bank_id ? info->bank_id : "";
     bank.candidate_id = info->candidate_id ? info->candidate_id : "";
+    using CodegenFn = uint32_t (*)();
+    NativeLibrarySymbol codegen_proc =
+        library_symbol(bank, "nds_live_codegen_version");
+    CodegenFn codegen_fn = nullptr;
+    static_assert(sizeof(codegen_fn) == sizeof(codegen_proc));
+    std::memcpy(&codegen_fn, &codegen_proc, sizeof(codegen_fn));
+    bank.producer_codegen_version = codegen_fn ? codegen_fn() : 0u;
     using GenerationFn = const char* (*)();
     NativeLibrarySymbol generation_proc =
         library_symbol(bank, "nds_live_generation_id");
@@ -1746,6 +1786,27 @@ bool commit_prepared_bank(LoadedBank bank) {
 // adopted by the unchanged commit path, or it is held dormant and re-queued
 // later. Nothing else may call commit_prepared_bank on the production path.
 void admit_prepared_bank(LoadedBank bank, const std::string& key) {
+    const unsigned stale_static_rows = drop_stale_static_rows(bank);
+    if (stale_static_rows != 0u) {
+        note_reject(RejectReason::DropStaleStaticRows);
+        std::fprintf(stderr,
+                     "[live-overlay] removed %u static-covered row(s) from "
+                     "stale codegen-v%u candidate %s; runner codegen-v%u\n",
+                     stale_static_rows, bank.producer_codegen_version,
+                     bank.candidate_id.c_str(), ndsrecomp::kCodegenVersion);
+        request_generation_compile();
+    }
+    if (producer_codegen_stale(bank) && bank.dispatch_len == 0u) {
+        g_live.last_error =
+            "stale live bank fully covered by static code: " +
+            bank.bank_id + "/" + bank.candidate_id;
+        ++g_live.banks_rejected;
+        note_reject(RejectReason::LoadStaleStaticCovered);
+#if defined(_WIN32) || defined(__linux__)
+        close_library(bank);
+#endif
+        return;
+    }
     if (!bank_guard_bytes_live(bank)) {
         note_dormant_candidate(bank, key);
 #if defined(_WIN32) || defined(__linux__)
@@ -2913,12 +2974,23 @@ bool live_overlay_admit_bank_for_test(int cpu, const char* bank_id,
                                       const char* path_text,
                                       const NdsDispatchEntry* dispatch,
                                       unsigned dispatch_len) {
+    return live_overlay_admit_bank_with_codegen_for_test(
+        cpu, bank_id, candidate_id, generation_id, backend_tier,
+        ndsrecomp::kCodegenVersion, path_text, dispatch, dispatch_len);
+}
+
+bool live_overlay_admit_bank_with_codegen_for_test(
+        int cpu, const char* bank_id, const char* candidate_id,
+        const char* generation_id, unsigned backend_tier,
+        unsigned producer_codegen_version, const char* path_text,
+        const NdsDispatchEntry* dispatch, unsigned dispatch_len) {
     LoadedBank bank{};
     bank.bank_id = bank_id ? bank_id : "";
     bank.candidate_id = candidate_id ? candidate_id : "";
     bank.generation_id = generation_id && *generation_id
         ? generation_id : bank.candidate_id;
     bank.backend_tier = backend_tier;
+    bank.producer_codegen_version = producer_codegen_version;
     bank.cpu = cpu;
     bank.exc_base = cpu == NDS_ARM7 ? 0x00000000u : 0xFFFF0000u;
     bank.dispatch = dispatch;
@@ -3078,7 +3150,8 @@ std::string live_overlay_status_json() {
             << bank.serial << ",\"candidate_id\":\""
             << json_escape(bank.candidate_id) << "\",\"generation\":"
             << bank.generation << ",\"generation_id\":\""
-            << json_escape(bank.generation_id) << "\",\"native_hits\":"
+            << json_escape(bank.generation_id) << "\",\"codegen_version\":"
+            << bank.producer_codegen_version << ",\"native_hits\":"
             << bank.native_hits << ",\"rejects\":"
             << bank.rejects << ",\"registered\":"
             << (bank.registered ? "true" : "false")

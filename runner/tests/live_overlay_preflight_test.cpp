@@ -70,6 +70,12 @@ bool bus_range_has_write_provenance(uint32_t, uint32_t) { return g_bytes_live; }
 bool bus_live_bytes_equal(uint32_t, const uint8_t*, uint32_t) {
     return g_bytes_live;
 }
+bool g_static_cover_enabled = false;
+uint32_t g_static_cover_pc = 0u;
+extern "C" bool nds_dispatch_static_bank_covers(int, uint32_t pc,
+                                                uint8_t) {
+    return g_static_cover_enabled && pc == g_static_cover_pc;
+}
 
 namespace {
 
@@ -771,6 +777,65 @@ int main(int argc, char** argv) {
                 "registration; span ranking keeps the shared addresses with "
                 "the better bank without touching the index"))
         return 1;
+
+    // ---- beads-yjp.68: stale shard rows covered by static banks ----------
+    //
+    // A cached shard produced by an older codegen version must not shadow a
+    // current baked/static bank. Rows not covered by static code may remain
+    // registered as a gap-filling fallback, but covered rows are stripped
+    // before registration.
+    static const uint8_t stale_bytes[16] = {};
+    static const NdsStaticValidation stale_owner{
+        0x02200000u, sizeof(stale_bytes), stale_bytes};
+    const NdsDispatchEntry stale_rows[] = {
+        {0x02200000u, 0u, body_a, &stale_owner},
+        {0x02200004u, 0u, body_a, &stale_owner},
+    };
+    g_bytes_live = true;
+    g_static_cover_enabled = true;
+    g_static_cover_pc = 0x02200000u;
+    const unsigned stale_reg_before = g_registrations;
+    const unsigned long long stale_rejected_before =
+        status_number("banks_rejected");
+    if (!expect(!live_overlay_admit_bank_with_codegen_for_test(
+                    NDS_ARM9, "yjp68_bank", "cand-stale-covered",
+                    "generation-stale-covered", 2u, 1u,
+                    "C:/cache/gcc/stale-covered.dll", stale_rows, 1u),
+                "a stale shard fully covered by static code must not register"))
+        return 1;
+    if (!expect(g_registrations == stale_reg_before &&
+                status_number("banks_rejected") ==
+                    stale_rejected_before + 1ull &&
+                status_number("load_stale_static_covered") == 1ull &&
+                status_number("drop_stale_static_rows") == 1ull,
+                "fully covered stale rows must be counted as a load rejection"))
+        return 1;
+
+    if (!expect(live_overlay_admit_bank_with_codegen_for_test(
+                    NDS_ARM9, "yjp68_bank", "cand-stale-gap",
+                    "generation-stale-gap", 2u, 1u,
+                    "C:/cache/gcc/stale-gap.dll", stale_rows, 2u),
+                "a stale shard with at least one uncovered row may still fill "
+                "the gap"))
+        return 1;
+    if (!expect(g_registrations == stale_reg_before + 1u &&
+                status_count("\"candidate_id\":\"cand-stale-gap\"") == 1u &&
+                live_overlay_status_json().find("\"rows\":1") !=
+                    std::string::npos,
+                "partial stale registration must keep only uncovered rows"))
+        return 1;
+
+    const NdsDispatchEntry current_rows[] = {
+        {0x02200000u, 0u, body_b, &stale_owner},
+    };
+    if (!expect(live_overlay_admit_bank_for_test(
+                    NDS_ARM9, "yjp68_bank", "cand-current-covered",
+                    "generation-current-covered", 2u,
+                    "C:/cache/gcc/current-covered.dll", current_rows, 1u),
+                "a current-codegen shard should not be filtered by the stale "
+                "static coverage gate"))
+        return 1;
+    g_static_cover_enabled = false;
     live_overlay_shutdown();
 #endif
 

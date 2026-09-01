@@ -718,7 +718,7 @@ def recompiler_codegen_identity(args: argparse.Namespace) -> str:
 # emitted below keeps its spelling but changes meaning in the recompiler. The
 # fingerprint already covers every edit to the emission functions themselves,
 # so this is the escape hatch, not the mechanism.
-SHARD_CODEGEN_VERSION = 1
+SHARD_CODEGEN_VERSION = 2
 
 # The emission surface: everything whose behaviour can change a byte of a
 # compiled shard. The fingerprint is the transitive closure of module-level
@@ -1061,6 +1061,10 @@ def write_wrapper(path: Path, bank: str, candidate_id: str,
         "",
         "NDS_LIVE_EXPORT const char* nds_live_generation_id(void) {",
         f'    return "{generation_id}";',
+        "}",
+        "",
+        "NDS_LIVE_EXPORT uint32_t nds_live_codegen_version(void) {",
+        f"    return {SHARD_CODEGEN_VERSION}u;",
         "}",
         "",
     ]), encoding="utf-8", newline="\n")
