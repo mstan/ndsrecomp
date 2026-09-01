@@ -16,6 +16,7 @@ EXPORTS
     g_nds_fast_limit DATA
     g_nds_unwinding DATA
     g_runtime_cycles DATA
+    g_runtime_live_transfer_trace DATA
     arm9_refill_cycles
     nds_register_dispatch
     nds_unregister_dispatch
@@ -26,6 +27,6 @@ EXPORTS
     runtime_dispatch_bad_entry
     runtime_dispatch_with_exchange
     runtime_insn_slow
-    runtime_live_transfer
+    runtime_live_transfer_slow
     runtime_should_yield_slow
     runtime_tick_slow
