@@ -146,6 +146,84 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   accounting), and gating it would have made `--serve` byte-lock probes
   compare two identical unlinked legs. Structural regressions are pinned in
   `runner/tests/test_machinery_perf_guards.py`.
+- **B2b. Tiny-leaf body inlining at direct BL sites** (beads-yjp.67).
+  LANDED. Measured on MPH Kanden (beads-lqa.42): `OS_DisableInterrupts`
+  (0x020882E0) and `OS_RestoreInterrupts` (0x020882F4) — five-instruction
+  MRS/MSR `bx lr` leaves — were **52 percent of all ARM9 dispatch entries**
+  in the fight, ~1700 calls a frame, with the OS mutex family another 27
+  percent. Each call paid a B2 link-slot dispatch round trip plus a
+  69-case resume-switch entry to run five instructions.
+
+  The recompiler now recognizes the SHAPE — straight-line body, no calls
+  or branches, no block/SWP/SWI/coprocessor ops, no PC write, no
+  conditional, no use of LR other than the terminating unconditional
+  `bx lr`, body ≤ N instructions — and expands that body at direct `BL`
+  sites in the same body shard. `--inline-leaf-max-insns N` sets the
+  budget (default 8, `0` disables the pass); the recompiler prints
+  `[emit] inline leaves: E eligible, S BL sites expanded` per bank.
+
+  Soundness reuses B2's proof rather than adding one. Each expansion is
+  gated on `runtime_inline_leaf_admit(slot, owner)`, which admits only
+  when the call site's own link slot is resolved under the current link
+  epoch, `CPSR.T` still agrees, the resolution named **exactly the
+  generated body whose bytes were inlined** (so an overlapping bank that
+  out-ranks it never runs our copy), and that row's content guard is
+  still live. Anything else falls back to the unchanged `runtime_link_call`,
+  which re-resolves and re-proves. So a content-validated bank keeps its
+  byte-identity gate — this is why the pass is compatible with
+  `--validate-live-bytes` banks, where plain direct C calls are not.
+
+  The leaf keeps its own dispatch entry: other callers, the dispatch
+  table, Tier-3 hand-off and savestate resume all still enter it. A slice
+  yield inside an expansion resumes at the leaf's own entry (R15 is
+  published per instruction exactly as in the standalone body) and returns
+  through the ordinary non-matching-`bx` dispatch, because no call-return
+  push was made. Expansion is restricted to leaves whose owning body is
+  emitted in the SAME shard — a body shard is compiled standalone by the
+  live-shard pipeline, so naming another shard's symbol would leave it
+  unresolved, the same invariant that confines direct C calls to one
+  shard. Cross-shard and cross-bank leaves therefore keep the link call;
+  lifting that is the follow-up.
+
+  EMISSION CHANGED: `kCodegenVersion` 1 → 2, so every cached shard is
+  invalidated by design. `NDS_INLINE_LEAVES=0` (or `NDS_DIRECT_LINK=0`)
+  forces every expansion back through the dispatcher at run time, which
+  is the force-floor control for oracle probes. `nds_direct_link_json`
+  reports `inline_leaf_admits` / `inline_leaf_falls` per CPU; the admit
+  path also notes live-overlay native hits so a live bank reached only
+  through expansions still reports as running natively.
+
+  MPH regeneration counts: **1020 BL sites expanded across the 251 banks**,
+  of which mph_arm9 alone took 463 (304 eligible leaves) — 98 of the 325
+  sites calling 0x020882F4 and 75 of the 218 calling 0x020882E0, the rest
+  being cross-shard or cross-bank.
+
+  NOT DONE, and deliberately: calling `slot->fn()` straight from
+  `runtime_link_*` remains rejected for the reason recorded above (it
+  deletes the cross-shard slice-yield point, and for a literal branch it
+  turns a guest tail transfer into an unbounded host call chain).
+- **B2c. MSR/MRS CPSR field access without a runtime call** (beads-yjp.67).
+  LANDED. `mrs Rd, cpsr` compiled to a cross-TU call to
+  `runtime_mrs_cpsr()`, whose entire body is `return g_cpu.cpsr;` — the
+  generated banks are a separate translation unit, so the call could not
+  be inlined away. It now emits the field read; SPSR still routes through
+  the runtime, which has to select the mode's bank.
+
+  `msr cpsr_<fields>, x` called `runtime_msr_cpsr(value, mask)`. That
+  helper does NO IRQ recheck on either side of the write — a newly
+  unmasked IRQ is delivered at the next `runtime_tick` boundary, exactly
+  as the interpreter oracle delivers it — so enabling interrupts loses
+  nothing by staying inline. What the helper does do is expand the 4-bit
+  field mask, clamp it to the flags byte in User mode, merge, and swap
+  R13/R14 (plus R8..R12 on FIQ) when the MODE bits changed. All of that is
+  decidable at emit time: the mask is a compile-time constant, so the byte
+  mask is too, and a write can only change mode when the mask selects the
+  control byte. The emitter now writes the masked bytes inline when the
+  current mode is privileged and the merged value provably leaves
+  `CPSR[4:0]` alone (unconditionally for a flags-only mask, where the User
+  clamp is a no-op and the mode bits are not in the mask), and calls the
+  faithful helper in every other case. `--no-msr-fast-path` forces the
+  helper at every site.
 - **B3. Per-callsite monomorphic inline cache** for computed transfers
   (BX reg / LDR pc / LDM pc): a static per-site slot {target, fn,
   generation snapshot}; hit = compare + call, miss = dispatch + refill.

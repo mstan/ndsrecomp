@@ -1,6 +1,7 @@
 #include "debug_server.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
+#include "pc_profile.h"
 #include "net/net_ring.h"
 #include "wifi_net.h"
 #include "runtime_arm.h"
@@ -597,7 +599,10 @@ std::string handle(const std::string& line) {
         return out + "}";
     }
     if (cmd == "live_overlay_status") {
-        live_overlay_poll();
+        // The unconditional body, not the scheduler's countdown gate: a probe
+        // asking for status wants the state as of now, including whatever a
+        // finished compiler child has left to be drained.
+        live_overlay_poll_now();
         return live_overlay_status_json();
     }
     if (cmd == "live_overlay_diagnostics") {
@@ -1088,7 +1093,48 @@ std::string handle(const std::string& line) {
                ",\"underruns\":" + std::to_string(s.underruns) +
                ",\"real_presents\":" + std::to_string(s.real_presents) +
                ",\"synthetic_presents\":" +
-               std::to_string(s.synthetic_presents) + "}";
+               std::to_string(s.synthetic_presents) +
+               ",\"perf_governor_stage\":" +
+               std::to_string(s.perf_governor_stage) +
+               ",\"perf_governor_over_frames\":" +
+               std::to_string(s.perf_governor_over_frames) +
+               ",\"perf_governor_under_frames\":" +
+               std::to_string(s.perf_governor_under_frames) +
+               ",\"perf_governor_held\":" +
+               std::to_string(s.perf_governor_held) +
+               ",\"perf_governor_apply_failed\":" +
+               std::to_string(s.perf_governor_apply_failed) +
+               ",\"perf_governor_transitions\":" +
+               std::to_string(s.perf_governor_transitions) + "}";
+    }
+    if (cmd == "governor_history") {
+        // Retroactive query over the always-on transition ring: every stage
+        // change since the run started (up to the ring capacity) with no
+        // arming step and no dependency on the performance log.
+        std::array<NdsPerfGovernorTransition,
+                   kNdsPerfGovernorHistoryCapacity> entries{};
+        const uint32_t count = nds_perf_governor_history(
+            entries.data(), kNdsPerfGovernorHistoryCapacity);
+        std::string out = "{\"total\":" +
+            std::to_string(nds_perf_governor_history_total()) +
+            ",\"capacity\":" +
+            std::to_string(kNdsPerfGovernorHistoryCapacity) +
+            ",\"transitions\":[";
+        for (uint32_t i = 0; i < count; ++i) {
+            const NdsPerfGovernorTransition& e = entries[i];
+            if (i) out += ",";
+            out += "{\"frame\":" + std::to_string(e.frame_index) +
+                   ",\"ts_ms\":" + std::to_string(e.ts_ms) +
+                   ",\"from_stage\":" + std::to_string(e.from_stage) +
+                   ",\"to_stage\":" + std::to_string(e.to_stage) +
+                   ",\"reason\":\"" +
+                   nds_perf_governor_reason_name(e.reason) + "\"" +
+                   ",\"held\":" + std::to_string(e.stage2_held ? 1 : 0) +
+                   ",\"apply_failed\":" +
+                   std::to_string(e.apply_failed ? 1 : 0) + "}";
+        }
+        out += "]}";
+        return out;
     }
     if (cmd == "title_patches") {
         const NdsTitlePatchDebugState s = nds_title_patches_debug_state();
@@ -1256,6 +1302,25 @@ std::string handle(const std::string& line) {
     // rounds/sampled_rounds. Snapshot twice and subtract, like its
     // neighbours -- there is no arm/reset.
     if (cmd == "emu_attrib") return nds_emu_profile_json();
+    // WHERE the guest is, the companion question to emu_attrib's "which
+    // subsystem is expensive" (pc_profile.h). Always-on per-CPU histograms;
+    // read-only, so no execution guard applies and both are answerable in play
+    // mode while the frontend owns execution. Whole-run totals -- snapshot
+    // twice and subtract for an interval, exactly like its neighbours; there
+    // is nothing to arm and nothing to reset.
+    //
+    // "kind":"park" (the default, and what this command meant before exec
+    // existed) is the round-boundary PC, which answers HALT SHARE and is
+    // dominated by idle loops. "kind":"exec" is the dispatch-entry PC, which
+    // is the one that ranks hot entry points. Defaulting to park keeps every
+    // existing probe's meaning byte-for-byte.
+    if (cmd == "pc_hot") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const NdsPcHotKind kind =
+            nds_pc_profile_kind_from_name(json_str(line, "kind").c_str());
+        return nds_pc_profile_json(
+            kind, cpu, static_cast<unsigned>(json_u64(line, "top", 32)));
+    }
     // B2 direct linking: whether the per-callsite link slots are live
     // right now (they are gated off under deep trace) and how the
     // literal transfers actually resolved. Snapshot-twice-and-subtract

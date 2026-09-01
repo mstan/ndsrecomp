@@ -332,6 +332,14 @@ std::filesystem::path exe_dir_from_argv(const char* argv0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // stderr is the runner's diagnostic stream and is read from files by
+    // harnesses and field-bundle collectors. Under Windows UCRT a redirected
+    // stderr becomes BLOCK buffered, so a force-killed process loses its tail
+    // and a live one shows a stale mid-line file -- which misreported a
+    // savestate load as never-happened during the 2026-08-31 Kanden A/B and
+    // cost the session an hour of phantom debugging. Unbuffered is what the C
+    // standard promises for stderr anyway; pay the syscall per line.
+    setvbuf(stderr, nullptr, _IONBF, 0);
     // Calibrate the dispatch-cost tick source before anything can dispatch.
     // It is lazily self-calibrating as a fallback, but the lazy path would
     // spend its calibration spin inside whichever dispatch happened to be
@@ -439,6 +447,7 @@ int main(int argc, char** argv) {
     std::string cli_live_overlay_command;
     std::string cli_live_overlay_cache;
     std::string cli_savestate_dir;
+    std::string cli_perf_governor;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
@@ -627,6 +636,8 @@ int main(int argc, char** argv) {
             cli_live_overlay_cache = argv[++i];
         } else if (a == "--savestate-dir" && i + 1 < argc) {
             cli_savestate_dir = argv[++i];
+        } else if (a == "--performance-governor" && i + 1 < argc) {
+            cli_perf_governor = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -682,6 +693,7 @@ int main(int argc, char** argv) {
                 "[--live-overlay-auto-delay-ms N] "
                 "[--live-overlay-auto-cooldown-ms N] "
                 "[--savestate-dir DIR] "
+                "[--performance-governor auto|off|stage1|stage2] "
                 "[--force-tier3 | NDS_FORCE_TIER3=1]\n",
                 argv[0]);
             return 0;
@@ -795,6 +807,16 @@ int main(int argc, char** argv) {
                          "(expected 0, 2, 4, or 8)\n");
             return 2;
         }
+    }
+    if (const char* value = std::getenv("NDS_PERFORMANCE_GOVERNOR")) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(value, &mode)) {
+            std::fprintf(stderr,
+                         "invalid NDS_PERFORMANCE_GOVERNOR "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
     }
     if (const char* value = std::getenv("NDS_FRAME_INTERPOLATION")) {
         if (!nds_parse_frame_interpolation(
@@ -913,6 +935,16 @@ int main(int argc, char** argv) {
                      "invalid --antialiasing "
                      "(expected 0, 2, 4, or 8)\n");
         return 2;
+    }
+    if (!cli_perf_governor.empty()) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(cli_perf_governor.c_str(), &mode)) {
+            std::fprintf(stderr,
+                         "invalid --performance-governor "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
     }
     if (!cli_frame_interpolation.empty() &&
         !nds_parse_frame_interpolation(
@@ -1551,7 +1583,21 @@ int main(int argc, char** argv) {
     if (!cli_savestate_dir.empty() && !rom_sha1.empty()) {
         frontend_options.savestate_directory =
             (std::filesystem::path(cli_savestate_dir) / rom_sha1).string();
-        frontend_options.savestate_build_id = NDS_RUNNER_BUILD_ID;
+        // Measurement escape hatch: savestate identity is build-exact
+        // (savestate.cpp load refuses any other build id), which is right for
+        // players but makes a cross-build A/B on a pinned state impossible --
+        // and a pinned state IS the perf methodology (the Kanden slots,
+        // beads-lqa.42). The override swaps only the IDENTITY the states are
+        // checked and stamped with; the diagnostics identity above still
+        // reports the real NDS_RUNNER_BUILD_ID, so perf bundles never lie
+        // about what code ran. Unset (the norm, and every shipped launcher)
+        // this is byte-for-byte the old behaviour.
+        const char* savestate_id_override =
+            std::getenv("NDS_SAVESTATE_BUILD_ID");
+        frontend_options.savestate_build_id =
+            (savestate_id_override && savestate_id_override[0])
+                ? savestate_id_override
+                : NDS_RUNNER_BUILD_ID;
         frontend_options.savestate_rom_sha1 = rom_sha1;
     }
     nds_diagnostics_set_versions(NDS_FRAMEWORK_VERSION, NDS_GAME_VERSION);

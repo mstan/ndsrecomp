@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
         live_overlay_configure(true, false, 0u, 0u, 0u, "", argv[2], "test");
         live_overlay_register_cached_banks();
         for (int i = 0; i < 200; ++i) {
-            live_overlay_poll();
+            live_overlay_poll_now();
             if (live_overlay_status_json().find("\"banks_loaded\":1") !=
                 std::string::npos) {
                 live_overlay_shutdown();
@@ -161,6 +161,38 @@ int main(int argc, char** argv) {
                      live_overlay_status_json().c_str());
         live_overlay_shutdown();
         return 1;
+    }
+    // beads-yjp.68: drive the REAL loader over a real cache directory and
+    // print the status JSON, whatever the outcome. The gate under test lives
+    // in prepare_bank_dll(), which only a genuine DLL can reach, so the
+    // driver (tests/live_shard_codegen_gate_test.py) builds the shards and
+    // asserts on this JSON. Unlike --load-cache above it does not require
+    // adoption -- a rejection is exactly what half of the assertions want.
+    if (argc == 3 && std::strcmp(argv[1], "--load-cache-json") == 0) {
+        g_bytes_live = true;
+        live_overlay_configure(true, false, 0u, 0u, 0u, "", argv[2], "test");
+        live_overlay_register_cached_banks();
+        for (int i = 0; i < 400; ++i) {
+            live_overlay_poll_now();
+            if (status_number("banks_loaded") + status_number("banks_rejected")
+                    > 0ull &&
+                status_number("preparing_banks") == 0ull &&
+                status_number("ready_banks") == 0ull) {
+                // A few more polls so the quarantine summary line, which
+                // waits for the prepare pipeline to go idle, gets to print.
+                for (int j = 0; j < 10; ++j) {
+                    live_overlay_poll_now();
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(2));
+                }
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::printf("%s\n", live_overlay_status_json().c_str());
+        std::fflush(stdout);
+        live_overlay_shutdown();
+        return 0;
     }
 #if defined(__linux__)
     if (argc == 3 && std::strcmp(argv[1], "--spawn-command") == 0) {
@@ -176,7 +208,7 @@ int main(int argc, char** argv) {
                                "test");
         if (!live_overlay_trigger_now()) return 1;
         for (int i = 0; i < 1000; ++i) {
-            live_overlay_poll();
+            live_overlay_poll_now();
             if (status_number("runs_finished") == 1u &&
                 status_number("runs_failed") == 0u &&
                 live_overlay_status_json().find("\"busy\":false") !=
@@ -408,7 +440,7 @@ int main(int argc, char** argv) {
 
 #if defined(_WIN32) || defined(__linux__)
     const unsigned before_poll = g_registrations;
-    live_overlay_poll();
+    live_overlay_poll_now();
     if (!expect(g_registrations == before_poll + 1u,
                 "one poll after a reset should re-register the cached bank"))
         return 1;
@@ -424,6 +456,13 @@ int main(int argc, char** argv) {
     // overlay poll must not take the empty publish/maintenance queue locks.
     // These counters are bumped inside the drain functions, so this fails if
     // the poll goes back to unconditionally processing empty queues.
+    //
+    // Every poll in this file is live_overlay_poll_now(), the unconditional
+    // body, and NOT live_overlay_poll(), which is the scheduler's 1-in-1024
+    // countdown gate. Driving the gate here would make each assertion pass for
+    // the wrong reason -- 64 gated calls run the body at most once, so "no
+    // drains happened" would be true because nothing ran at all. The gate's
+    // own shape is pinned structurally in tests/test_emu_attrib_guards.py.
     live_overlay_configure(true, false, 0u, 0u, 0u, "",
                            "live-overlay-test-cache-does-not-exist", "test");
     live_overlay_register_cached_banks();
@@ -431,7 +470,7 @@ int main(int argc, char** argv) {
     uint64_t maint_drains_before = 0u;
     live_overlay_poll_drain_counts_for_test(&prepare_drains_before,
                                             &maint_drains_before);
-    for (int i = 0; i < 64; ++i) live_overlay_poll();
+    for (int i = 0; i < 64; ++i) live_overlay_poll_now();
     uint64_t prepare_drains_after = 0u;
     uint64_t maint_drains_after = 0u;
     live_overlay_poll_drain_counts_for_test(&prepare_drains_after,
@@ -553,7 +592,7 @@ int main(int argc, char** argv) {
     const unsigned long long auto_failed_before = status_number("runs_failed");
     for (int i = 0; i < 63; ++i)
         live_overlay_note_tier3(NDS_ARM9, 0x02000000u + i * 4u);
-    live_overlay_poll();
+    live_overlay_poll_now();
     if (!expect(status_number("runs_failed") == auto_failed_before,
                 "63 Tier-3 hits must not yet auto-commission the provider"))
         return 1;
@@ -561,7 +600,7 @@ int main(int argc, char** argv) {
     for (int i = 0;
          i < 500 && status_number("runs_failed") == auto_failed_before;
          ++i) {
-        live_overlay_poll();
+        live_overlay_poll_now();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!expect(status_number("runs_failed") == auto_failed_before + 1u,
@@ -592,7 +631,7 @@ int main(int argc, char** argv) {
     // that it is still counted exactly once.
     for (int i = 0; i < 500 && status_number("runs_failed") == control_before;
          ++i) {
-        live_overlay_poll();
+        live_overlay_poll_now();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (!expect(status_number("runs_failed") == control_before + 1u,
@@ -606,7 +645,7 @@ int main(int argc, char** argv) {
     live_overlay_note_backlog_for_test(500u, 1000u);
     const unsigned long long failed_before = status_number("runs_failed");
     const uint64_t started_before = live_overlay_runs_started_for_test();
-    for (int i = 0; i < 8; ++i) live_overlay_poll();
+    for (int i = 0; i < 8; ++i) live_overlay_poll_now();
     if (!expect(live_overlay_suppressed_for_test(),
                 "a backlog must not clear the futility suppression"))
         return 1;
@@ -764,6 +803,7 @@ int main(int argc, char** argv) {
                 "registration; span ranking keeps the shared addresses with "
                 "the better bank without touching the index"))
         return 1;
+
     live_overlay_shutdown();
 #endif
 

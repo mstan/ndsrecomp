@@ -504,6 +504,22 @@ typedef struct NdsLinkSlot {
 void runtime_link_call(NdsLinkSlot* slot);
 void runtime_link_branch(NdsLinkSlot* slot);
 void runtime_link_fallthrough(NdsLinkSlot* slot);
+
+// Tiny-leaf inline admission (beads-yjp.67). A BL site that expanded a
+// small `bx lr` leaf's body inline asks here whether it may run that copy
+// for THIS transfer. True only when the site's own link slot is resolved
+// under the current link epoch, the instruction-set state still agrees,
+// the resolution named exactly `expected` (the leaf's owning generated
+// body — so a different bank winning the address never runs our bytes),
+// and that row's content guard is still live. Those are the same checks a
+// linked dispatch makes before entering the same body, so the inline copy
+// is licensed by the same byte-identity proof.
+//
+// False is always safe and always available: the call site then performs
+// the ordinary runtime_link_call, which re-resolves the slot and re-proves
+// the bytes. NDS_INLINE_LEAVES=0 forces false everywhere, which makes a
+// build with inlined bodies run the faithful dispatch path end to end.
+int runtime_inline_leaf_admit(const NdsLinkSlot* slot, void (*expected)(void));
 void runtime_discovery_note_static(uint32_t pc, uint32_t thumb);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);

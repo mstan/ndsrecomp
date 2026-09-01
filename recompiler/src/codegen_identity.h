@@ -47,7 +47,11 @@ namespace ndsrecomp {
 //
 // 1 — beads-yjp.52: initial declared identity, captured at framework main
 //     c6122bd (live bank ABI 6, B2 per-callsite link slots).
-inline constexpr unsigned kCodegenVersion = 1;
+// 2 — beads-yjp.67: MRS CPSR reads the field inline; MSR CPSR writes the
+//     masked bytes inline when the write provably cannot change mode; tiny
+//     `bx lr` leaf bodies are expanded at direct BL sites behind the
+//     runtime_inline_leaf_admit gate.
+inline constexpr unsigned kCodegenVersion = 2;
 
 // The string `--codegen-identity` prints and the shard provider identity
 // folds. Tagged so that a hash of it can never collide with a bare integer

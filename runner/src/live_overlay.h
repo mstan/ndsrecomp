@@ -67,7 +67,15 @@ void live_overlay_publish_bank_for_test(int cpu,
 void live_overlay_note_write(int cpu, uint32_t pc, uint32_t addr,
                              uint32_t width, uint32_t old_value,
                              uint32_t new_value);
+// The scheduler's per-round hook: a cheap countdown gate that runs the real
+// poll body every 1024th call. The body is not round-granular work (it
+// services a background compiler whose jobs take seconds) and running it every
+// round cost 0.2-0.4 ms/frame in the NDS_EMU_OVERLAY bucket.
 void live_overlay_poll();
+// The poll body itself, unconditionally. For callers that mean "service the
+// overlay NOW": an explicit trigger, the debug server, and any test that
+// asserts on what one poll does.
+void live_overlay_poll_now();
 bool live_overlay_trigger_now();
 std::string live_overlay_status_json();
 std::string live_overlay_diagnostics_json(uint32_t max_entries);

@@ -482,6 +482,7 @@ const uint32_t* nds_gpu3d_wide_line(int) { return g_3d_line.data(); }
 const uint32_t* nds_gpu3d_wide_attr_line(int) { return g_3d_line.data(); }
 uint16_t nds_gpu3d_render_xpos() { return g_3d_render_xpos; }
 uint32_t nds_gpu3d_render_polygon_count() { return g_3d_render_polygon_count; }
+bool nds_gpu3d_display_readback_latency() { return false; }
 bool nds_title_patches_mph_adaptive_centered_native() { return false; }
 void nds_gpu3d_set_render_xpos(uint16_t) {}
 

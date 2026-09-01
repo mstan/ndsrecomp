@@ -4,6 +4,7 @@
 #include <string>
 
 #include "cartridge_config.h"
+#include "perf_governor.h"
 
 // Run the native, human-facing firmware preview. The emulation remains on the
 // same scheduler/device path used by the deterministic debug verifier; SDL is
@@ -289,6 +290,7 @@ struct NdsFrontendOptions {
     NdsCartridgeSaveConfig cartridge_save{};
     NdsNetworkOptions network{};
     NdsLocalWirelessOptions local_wireless{};
+    NdsPerfGovernorMode perf_governor_mode = NdsPerfGovernorMode::Auto;
     // Populated only after the cartridge identity is verified. This directory
     // is already per-ROM; input events never supply arbitrary filenames.
     std::string savestate_directory;
@@ -388,6 +390,15 @@ struct NdsFrontendLiveStats {
     // requested and active, which makes it a direct harness assertion.
     uint64_t real_presents;
     uint64_t synthetic_presents;
+    uint8_t perf_governor_stage;
+    uint32_t perf_governor_over_frames;
+    uint32_t perf_governor_under_frames;
+    // Stage 2 is being held because this machine flapped out of it (see
+    // NdsPerfGovernorConfig::flap_engage_limit).
+    uint8_t perf_governor_held;
+    // Terminal: a stage could not be applied, so the governor stopped.
+    uint8_t perf_governor_apply_failed;
+    uint64_t perf_governor_transitions;
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
 

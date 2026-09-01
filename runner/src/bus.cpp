@@ -25,6 +25,7 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "mem_timing_profile.h"
+#include "pc_profile.h"
 #include "wifi.h"
 #include "vram.h"
 #include "emu_profile.h"
@@ -418,8 +419,17 @@ uint8_t* resolve(uint32_t addr, uint32_t len) {
 // I/O space (0x04000000-0x04FFFFFF) routes to the register model (io.cpp).
 bool is_io(uint32_t addr) { return (addr >= 0x04000000u && addr < 0x05000000u); }
 
-uint32_t io_read(uint32_t addr, uint32_t width) { return nds_io_read(addr, width); }
+// The two calls below are the whole CPU slow-path I/O funnel, which makes
+// them the right place for the MMIO population of pc_profile.h: emu_attrib's
+// NDS_EMU_BUS_MMIO bucket prices exactly the accesses that pass through here,
+// and the histogram names the registers behind that price. Gated inside the
+// note (1-in-kNdsPcMmioGate), no clock, no region.
+uint32_t io_read(uint32_t addr, uint32_t width) {
+    nds_pc_profile_note_mmio(g_nds_active, addr, false);
+    return nds_io_read(addr, width);
+}
 void io_write(uint32_t addr, uint32_t value, uint32_t width) {
+    nds_pc_profile_note_mmio(g_nds_active, addr, true);
     nds_io_write(addr, value, width);
 }
 

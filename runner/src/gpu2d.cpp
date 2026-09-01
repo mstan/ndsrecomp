@@ -2370,7 +2370,21 @@ bool nds_gpu2d_direct_present_frame_active() {
 }
 
 bool nds_gpu2d_requires_3d_readback() {
-    return !g_direct_frame_active;
+    // Capture is tested LIVE, the same way direct_scene_class() does, not via
+    // the frame latch: g_frame_capture_active is sampled at line 0 cycle 0,
+    // but Unit::capture_latch is only set by latch_line() at y == 0 from the
+    // HBlank sweep (~cycle 1584). A guest write to DISPCAPCNT bit31 inside
+    // that window leaves the latch set with the frame flag clear, and skipping
+    // the readback there would let apply_staged_capture write the PREVIOUS
+    // frame's 3D pixels into guest VRAM - a guest-visible divergence. The
+    // latched flag is OR'd in as well so a capture that has already been
+    // consumed for this frame still forces the synchronous path.
+    const Unit& unit = g_unit[0];
+    if ((unit.capture & 0x80000000u) != 0u || unit.capture_latch ||
+        g_frame_capture_active)
+        return true;
+    return !g_direct_frame_active &&
+           !nds_gpu3d_display_readback_latency();
 }
 
 void nds_gpu2d_force_cpu_frames(uint32_t frames) {
