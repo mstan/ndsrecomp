@@ -429,6 +429,14 @@ bool PcapAdapterHasIpv4(const melonDS::AdapterData& adapter) {
     return false;
 }
 
+bool PcapAdapterHasLinkLocalIpv4(const melonDS::AdapterData& adapter) {
+    return adapter.IP_v4[0] == 169u && adapter.IP_v4[1] == 254u;
+}
+
+bool PcapAdapterHasLoopbackIpv4(const melonDS::AdapterData& adapter) {
+    return adapter.IP_v4[0] == 127u;
+}
+
 std::string PcapAdapterIpv4String(const melonDS::AdapterData& adapter) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
@@ -478,6 +486,28 @@ bool IsPcapAdapterProbablyVirtual(const melonDS::AdapterData& adapter) {
         }
     }
     return false;
+}
+
+const char* PcapAdapterUnsuitableReason(
+    const melonDS::AdapterData& adapter,
+    bool allow_explicit_virtual_adapter) {
+    const bool loopback = (adapter.Flags & PCAP_IF_LOOPBACK) != 0u;
+    const bool up = (adapter.Flags & PCAP_IF_UP) != 0u;
+    const bool running = (adapter.Flags & PCAP_IF_RUNNING) != 0u;
+    if (loopback) return "adapter is loopback";
+    if (!up) return "adapter is not up";
+    if (!running) return "adapter is not running";
+    if (!PcapAdapterHasMac(adapter)) return "adapter has no MAC address";
+    if (!PcapAdapterHasIpv4(adapter)) return "adapter has no IPv4 address";
+    if (PcapAdapterHasLinkLocalIpv4(adapter))
+        return "adapter IPv4 is link-local/APIPA";
+    if (PcapAdapterHasLoopbackIpv4(adapter))
+        return "adapter IPv4 is loopback";
+    if (!allow_explicit_virtual_adapter &&
+        IsPcapAdapterProbablyVirtual(adapter)) {
+        return "adapter appears to be virtual/VPN";
+    }
+    return nullptr;
 }
 
 bool MacEqual(const uint8_t* a, const std::array<uint8_t, 6>& b) {
@@ -577,23 +607,37 @@ bool IsPcapRequiredBroadcastFrame(const uint8_t* data, int len,
 
 const melonDS::AdapterData* ChoosePcapAdapter(
     const std::vector<melonDS::AdapterData>& adapters,
-    const std::string& requested) {
+    const std::string& requested,
+    std::string* rejection_reason) {
     if (!requested.empty()) {
         for (const melonDS::AdapterData& adapter : adapters) {
-            if (PcapAdapterNameMatches(adapter, requested)) return &adapter;
+            if (!PcapAdapterNameMatches(adapter, requested)) continue;
+
+            const char* reason =
+                PcapAdapterUnsuitableReason(adapter, true);
+            if (reason) {
+                if (rejection_reason) {
+                    *rejection_reason = std::string(reason) + ": " +
+                        PcapAdapterIpv4String(adapter);
+                }
+                return nullptr;
+            }
+            return &adapter;
+        }
+        if (rejection_reason) {
+            *rejection_reason = "no adapter matched requested name";
         }
         return nullptr;
     }
 
     for (const melonDS::AdapterData& adapter : adapters) {
-        const bool loopback = (adapter.Flags & PCAP_IF_LOOPBACK) != 0u;
-        const bool up = (adapter.Flags & PCAP_IF_UP) != 0u;
-        const bool running = (adapter.Flags & PCAP_IF_RUNNING) != 0u;
-        if (!loopback && up && running && PcapAdapterHasMac(adapter) &&
-            PcapAdapterHasIpv4(adapter) &&
-            !IsPcapAdapterProbablyVirtual(adapter)) {
+        if (!PcapAdapterUnsuitableReason(adapter, false)) {
             return &adapter;
         }
+    }
+    if (rejection_reason) {
+        *rejection_reason =
+            "no suitable physical adapter with a routable IPv4 address";
     }
     return nullptr;
 }
@@ -1849,17 +1893,23 @@ melonDS::Wifi* nds_wifi3d_attach() {
 
             std::vector<melonDS::AdapterData> adapters =
                 pcap_lib->GetAdapters();
+            std::string pcap_rejection_reason;
             const melonDS::AdapterData* selected =
-                ChoosePcapAdapter(adapters, g_network_config.pcap_adapter);
+                ChoosePcapAdapter(adapters, g_network_config.pcap_adapter,
+                                  &pcap_rejection_reason);
             if (!selected) {
                 std::fprintf(stderr,
                     "[wifi_net] --network-backend pcap could not select an "
-                    "adapter%s%s%s\n",
+                    "adapter%s%s%s: %s. Single-client WFC menu probes should "
+                    "use --network-backend slirp; pcap requires a real LAN "
+                    "adapter with DHCP reachability.\n",
                     g_network_config.pcap_adapter.empty() ? "" :
                         " matching '",
                     g_network_config.pcap_adapter.empty() ? "" :
                         g_network_config.pcap_adapter.c_str(),
-                    g_network_config.pcap_adapter.empty() ? "" : "'");
+                    g_network_config.pcap_adapter.empty() ? "" : "'",
+                    pcap_rejection_reason.empty() ? "no suitable adapter" :
+                        pcap_rejection_reason.c_str());
                 LogPcapAdapters(adapters);
                 std::exit(2);
             }

@@ -23,7 +23,7 @@ param(
     [int] $PortA = 19866,
     [int] $PortB = 19867,
     [ValidateSet('slirp', 'pcap')]
-    [string] $NetworkBackend = 'pcap',
+    [string] $NetworkBackend = 'slirp',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
     [switch] $Force
