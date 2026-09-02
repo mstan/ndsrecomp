@@ -201,6 +201,7 @@ ERROR_CODE_LABEL_REGION = (4, 224, 94, 240)
 ERROR_CODE_LABEL_THRESHOLD = 5.0
 MIN_CLASSIFICATION_MARGIN = 3.0
 SEARCH_PLACEHOLDER_DIFF_THRESHOLD = 3.0
+SEARCH_PLAYER_LIST_REGION = (0, 200, 256, 336)
 PREPARED_LOGIN_PROGRESS_MAX_EXTRA = 36000
 PREPARED_POST_LOGIN_DIALOG_MAX_EXTRA = 12000
 WFC_SERVICE_UDP_PORTS = {27900}
@@ -759,6 +760,11 @@ def summarize_online_transport(report: dict[str, Any]) -> dict[str, Any]:
          for entry in search_safety),
         default=0.0,
     )
+    max_search_player_list_diff = max(
+        (entry.get("player_list_diff_from_empty_search_baseline", 0.0)
+         for entry in search_safety),
+        default=0.0,
+    )
     search_threshold = SEARCH_PLACEHOLDER_DIFF_THRESHOLD
     if search_safety:
         search_threshold = search_safety[0].get(
@@ -805,8 +811,10 @@ def summarize_online_transport(report: dict[str, Any]) -> dict[str, Any]:
         "search_safety": {
             "checks": len(search_safety),
             "max_diff_from_empty_search_baseline": round(max_search_diff, 3),
+            "max_player_list_diff_from_empty_search_baseline":
+                round(max_search_player_list_diff, 3),
             "threshold": search_threshold,
-            "passed": max_search_diff <= search_threshold,
+            "passed": max_search_player_list_diff <= search_threshold,
         },
         "stage_summaries": stage_summaries,
         "notes": [
@@ -829,6 +837,8 @@ def print_online_transport_summary(summary: dict[str, Any]) -> None:
             "search_safety="
             f"checks={search.get('checks')} "
             f"max_diff={search.get('max_diff_from_empty_search_baseline')} "
+            f"max_player_list_diff="
+            f"{search.get('max_player_list_diff_from_empty_search_baseline')} "
             f"threshold={search.get('threshold')} "
             f"passed={search.get('passed')}"
         )
@@ -1031,9 +1041,11 @@ def check_no_players_found(client: DebugClient, shots_dir: Path, label: str,
     """Courtesy stop condition (see module docstring). This project has no
     committed reference image for a "players found" state (none has been
     observed), so this deliberately does NOT try to positive-match one. It
-    fails closed instead: compare the current frame to this run's own
-    initial empty-search placeholder, and stop if the screen changed enough
-    that a human should inspect it before any further input.
+    fails closed instead: compare the opponent rows to this run's own
+    initial empty-search placeholder, and stop if that player-list content
+    changed enough that a human should inspect it before any further input.
+    The bottom cancel arrow appears after search starts, so whole-frame diffs
+    are too broad and false-positive on normal empty search UI motion.
     """
     img = capture_rgb(client)
     shots_dir.mkdir(parents=True, exist_ok=True)
@@ -1041,11 +1053,12 @@ def check_no_players_found(client: DebugClient, shots_dir: Path, label: str,
     img.save(path)
     if baseline_img is None:
         return img
-    diff = mean_abs_diff(img, baseline_img, "full")
+    diff = mean_abs_diff_box(img, baseline_img, SEARCH_PLAYER_LIST_REGION)
     if diff > SEARCH_PLACEHOLDER_DIFF_THRESHOLD:
         raise PlayersFoundError(
             f"{label}: search screen changed from empty-search baseline "
-            f"(diff={diff:.2f}, threshold={SEARCH_PLACEHOLDER_DIFF_THRESHOLD}); "
+            f"(player-list diff={diff:.2f}, "
+            f"threshold={SEARCH_PLACEHOLDER_DIFF_THRESHOLD}); "
             f"screenshot: {path}")
     return img
 
@@ -1264,6 +1277,9 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
                 "vblank9": target_v,
                 "diff_from_empty_search_baseline": mean_abs_diff(
                     img, search_baseline, "full"),
+                "player_list_diff_from_empty_search_baseline":
+                    mean_abs_diff_box(
+                        img, search_baseline, SEARCH_PLAYER_LIST_REGION),
                 "threshold": SEARCH_PLACEHOLDER_DIFF_THRESHOLD,
             })
             if hit.get("terminal") or hit.get("stalled"):
@@ -1286,6 +1302,10 @@ def run_full_scenario(port: int, shots_dir: Path, stall: int = STALL_DEFAULT,
             "vblank9": client.cmd("event_counts").get("vblank9"),
             "diff_from_empty_search_baseline": mean_abs_diff(
                 pre_cancel_img, search_baseline, "full"),
+            "player_list_diff_from_empty_search_baseline":
+                mean_abs_diff_box(
+                    pre_cancel_img, search_baseline,
+                    SEARCH_PLAYER_LIST_REGION),
             "threshold": SEARCH_PLACEHOLDER_DIFF_THRESHOLD,
         })
 
