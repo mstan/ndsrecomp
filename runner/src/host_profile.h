@@ -79,9 +79,10 @@ void nds_hostprof_stop();
 bool nds_hostprof_running();
 
 // Register the CALLING thread as a sampling target. The thread registers itself
-// rather than being registered by someone else so that the sampler can take the
-// thread's stack top from GetCurrentThreadStackLimits() -- that bound is what
-// makes the suspended-window memcpy provably in-bounds without a VirtualQuery.
+// rather than being registered by someone else so that the sampler can take
+// BOTH ends of the thread's stack reservation from GetCurrentThreadStackLimits()
+// -- those bounds are what make the suspended-window memcpy provably in-bounds
+// without a VirtualQuery.
 //
 // The emu thread is registered by nds_hostprof_start(). Render/audio/live
 // compiler threads are optional: register them and time the emu thread spends
@@ -157,3 +158,29 @@ unsigned nds_hostprof_self_stack(uint64_t* out_frames, unsigned max,
 // Force a module-map refresh (normally done by the sampler thread every 2 s).
 // The self-stack hook needs a map, and a test has no sampler thread.
 bool nds_hostprof_refresh_modules();
+
+// ── beads-yjp.70 regression hooks ────────────────────────────────────────
+//
+// Both exist because the module map is built from a SNAPSHOT of the loaded
+// module list, so anything in it may already have been FreeLibrary'd by the
+// time the map is built or read -- a live-overlay shard being quarantined or
+// superseded, a provider DLL the OS probes and drops during startup. A
+// dereference of an unmapped page in this file kills the process instantly and
+// silently (no SEH in a MinGW build), which is the crash these hooks pin.
+
+// Run the snapshot-time header + unwind-table parse against an arbitrary
+// [base, size) as if the module list had just named it. Pass the base of a DLL
+// you have just unloaded (or any unmapped address): this MUST return false
+// rather than fault. Returns whether usable unwind data was found, and reports
+// how much of it was copied.
+bool nds_hostprof_probe_module_parse(uint64_t base, uint64_t size,
+                                     uint32_t* out_pdata_size,
+                                     uint64_t* out_copy_bytes);
+
+// Run a walk whose innermost pc is `pc` through the SAME module-map read
+// environment a real sample uses, with no stack slice at all -- so what it
+// exercises is purely the module side: the .pdata lookup and every
+// UNWIND_INFO read. A pc in a module that has been unloaded must cost a stop
+// reason, never a fault. Returns the frame count and fills `out_stop`.
+unsigned nds_hostprof_probe_walk_at(uint64_t pc, uint64_t* out_frames,
+                                    unsigned max, uint8_t* out_stop);

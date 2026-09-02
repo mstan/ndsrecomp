@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -83,6 +84,10 @@ bool nds_hostprof_write_bundle(const char*, char* error, unsigned error_cap,
 }
 unsigned nds_hostprof_self_stack(uint64_t*, unsigned, uint8_t*) { return 0; }
 bool nds_hostprof_refresh_modules() { return false; }
+bool nds_hostprof_probe_module_parse(uint64_t, uint64_t, uint32_t*,
+                                     uint64_t*) { return false; }
+unsigned nds_hostprof_probe_walk_at(uint64_t, uint64_t*, unsigned,
+                                    uint8_t*) { return 0; }
 
 #else   // NDS_HOSTPROF_SUPPORTED
 
@@ -185,10 +190,22 @@ struct Target {
     HANDLE handle = nullptr;
     DWORD tid = 0;
     NdsHostProfRole role = NDS_HOSTPROF_ROLE_OTHER;
-    // The high end of the thread's stack reservation, taken once at
-    // registration. This is the whole reason a thread registers ITSELF: with
-    // the stack top known, the suspended-window memcpy is provably in bounds
-    // and needs no VirtualQuery (a syscall) inside the window.
+    // The thread's stack reservation, taken once at registration. This is the
+    // whole reason a thread registers ITSELF: with the bounds known, the
+    // suspended-window memcpy is provably in bounds and needs no VirtualQuery
+    // (a syscall) inside the window.
+    //
+    // BOTH ends are recorded (beads-yjp.70). Bounding only the top proves
+    // nothing on its own: the copy runs from RSP upward, so a sampled RSP that
+    // is not in this thread's stack at all -- a thread caught in the sliver
+    // where it is still suspendable but its stack is already gone, or any
+    // GetThreadContext result we would rather not trust -- yields a huge
+    // `avail` and a 64 KB read of unmapped memory. GetCurrentThreadStackLimits
+    // reports the whole RESERVATION (its low end is the deallocation base, not
+    // the currently committed limit), so a live thread's RSP is always inside
+    // [stack_low, stack_top) no matter how deep it has grown, and rejecting
+    // anything outside cannot drop a legitimate sample.
+    uint64_t stack_low = 0;
     uint64_t stack_top = 0;
     uint8_t* stack_copy = nullptr;   // preallocated; never allocated in-window
     uint64_t copy_base = 0;
@@ -222,6 +239,9 @@ std::atomic<uint64_t> g_suspend_qpc{0};
 std::atomic<uint64_t> g_walk_qpc{0};
 std::atomic<uint64_t> g_suspend_fail{0};
 std::atomic<uint64_t> g_context_fail{0};
+// Samples whose RSP was not inside the target's own stack reservation, so the
+// suspended-window copy was refused rather than reading unmapped memory.
+std::atomic<uint64_t> g_stack_reject{0};
 std::atomic<uint64_t> g_stop_counts[NDS_HOST_UNWIND_STOP_COUNT];
 std::atomic<uint64_t> g_role_counts[NDS_HOSTPROF_ROLE_COUNT];
 
@@ -288,20 +308,54 @@ std::string narrow(const wchar_t* w) {
 }
 
 // ── Module map ──────────────────────────────────────────────────────────
+//
+// GUARDED READ OF A MODULE IMAGE (beads-yjp.70).
+//
+// Building the map means reading each module's PE headers and unwind tables
+// out of its MAPPED IMAGE. The module list itself is a SNAPSHOT: by the time
+// these reads run, any DLL in it may already have been FreeLibrary'd -- a
+// live-overlay shard (live_overlay.cpp close_library), a graphics/Winsock
+// provider DLL the OS probes and drops during startup, anything. A plain
+// dereference of an unmapped page raises an access violation, and this
+// process installs no SEH (GCC has no __try/__except), so it dies instantly
+// and silently -- which is precisely the failure this function used to cause:
+// the sampler faulted while the main thread was mid-fprintf, tearing its
+// WriteFile in half.
+//
+// ReadProcessMemory against our OWN process is the guarded read: for an
+// unmapped or protected range it returns FALSE rather than raising. It is a
+// syscall, but every caller here runs on the sampler's 0.5 Hz map refresh,
+// OUTSIDE the suspended window, so the cost is not on any measured path.
+bool safe_read(uint64_t addr, void* dst, size_t len) {
+    if (len == 0u || addr == 0u || addr + len < addr) return false;
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(),
+                           reinterpret_cast<const void*>(
+                               static_cast<uintptr_t>(addr)),
+                           dst, len, &got))
+        return false;
+    return got == len;
+}
+
+// Reads the module's exception directory. Returns with pdata_rva/pdata_size
+// left at zero for anything it cannot read or does not trust -- an unreadable
+// module simply contributes no unwind data, which costs a truncated walk and
+// never a fault.
 void parse_exception_dir(ModuleEntry& e) {
     if (e.size < 0x1000u) return;
-    const uint8_t* img = reinterpret_cast<const uint8_t*>(
-        static_cast<uintptr_t>(e.base));
-    if (img[0] != 'M' || img[1] != 'Z') return;
+    uint8_t mz[2] = {0, 0};
+    if (!safe_read(e.base, mz, sizeof(mz))) return;
+    if (mz[0] != 'M' || mz[1] != 'Z') return;
     uint32_t lfanew = 0;
-    std::memcpy(&lfanew, img + 0x3C, 4);
-    if (lfanew + sizeof(IMAGE_NT_HEADERS64) > e.size) return;
-    const IMAGE_NT_HEADERS64* nt =
-        reinterpret_cast<const IMAGE_NT_HEADERS64*>(img + lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-    if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return;
+    if (!safe_read(e.base + 0x3Cu, &lfanew, 4)) return;
+    if (static_cast<uint64_t>(lfanew) + sizeof(IMAGE_NT_HEADERS64) > e.size)
+        return;
+    IMAGE_NT_HEADERS64 nt{};
+    if (!safe_read(e.base + lfanew, &nt, sizeof(nt))) return;
+    if (nt.Signature != IMAGE_NT_SIGNATURE) return;
+    if (nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return;
     const IMAGE_DATA_DIRECTORY& d =
-        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
     if (!d.VirtualAddress || !d.Size) return;
     if (static_cast<uint64_t>(d.VirtualAddress) + d.Size > e.size) return;
     e.pdata_rva = d.VirtualAddress;
@@ -314,31 +368,72 @@ void parse_exception_dir(ModuleEntry& e) {
 // because a chained UNWIND_INFO can reference a blob no .pdata entry names
 // directly, and a copy that is 100 KB too big is free while a copy 4 bytes too
 // small is a wrong answer.
+//
+// COPY, NOT PIN (beads-yjp.70). The other way to stop an unload from faulting
+// a walk is to take a loader reference on every mapped module and hold it for
+// the lifetime of the map entry. That is rejected because it FIGHTS
+// live_overlay's unload semantics: quarantine_shard() renames and then deletes
+// the shard file immediately after close_library() (live_overlay.cpp:1558
+// spells out the requirement -- "a mapped image cannot be renamed, so
+// close_library() must already have run" -- and the supersede path at
+// live_overlay.cpp:1651-1652 and 1830-1852 does exactly that). An extra
+// reference held by the profiler would keep the image mapped and the file
+// locked, so the rename would fail and a quarantined or superseded shard would
+// be left in the cache to be picked back up. A profiler must never change the
+// behaviour of the thing it profiles. Copying is also strictly stronger: the
+// map entry becomes self-contained, so a walk touches NO foreign image memory
+// at all (see env_read) rather than merely delaying the unmap.
+//
+// Every read below is guarded, because the module list is a snapshot and the
+// module may already be gone by the time we get here. An unreadable module
+// yields no copy, which costs a truncated walk (stop = READ_FAILED) and never
+// a fault.
 void build_unwind_copy(ModuleEntry& e) {
     e.copy.clear();
     e.copy_lo = e.copy_hi = 0;
     if (e.direct || !e.pdata_size) return;
-    const uint8_t* img = reinterpret_cast<const uint8_t*>(
-        static_cast<uintptr_t>(e.base));
+
     uint32_t lfanew = 0;
-    std::memcpy(&lfanew, img + 0x3C, 4);
-    const IMAGE_NT_HEADERS64* nt =
-        reinterpret_cast<const IMAGE_NT_HEADERS64*>(img + lfanew);
-    const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
-    const unsigned section_count = nt->FileHeader.NumberOfSections;
+    if (!safe_read(e.base + 0x3Cu, &lfanew, 4)) return;
+    if (static_cast<uint64_t>(lfanew) + sizeof(IMAGE_NT_HEADERS64) > e.size)
+        return;
+    IMAGE_NT_HEADERS64 nt{};
+    if (!safe_read(e.base + lfanew, &nt, sizeof(nt))) return;
+    if (nt.Signature != IMAGE_NT_SIGNATURE) return;
+
+    // The section table follows the optional header, whose length the file
+    // header declares. Bound it against the image before reading, so a torn or
+    // hostile header cannot walk us off the end.
+    const unsigned section_count = nt.FileHeader.NumberOfSections;
+    const uint64_t sect_rva = static_cast<uint64_t>(lfanew) +
+                              offsetof(IMAGE_NT_HEADERS64, OptionalHeader) +
+                              nt.FileHeader.SizeOfOptionalHeader;
+    const uint64_t sect_bytes =
+        static_cast<uint64_t>(section_count) * sizeof(IMAGE_SECTION_HEADER);
+    std::vector<IMAGE_SECTION_HEADER> sections;
+    if (section_count && sect_rva + sect_bytes <= e.size) {
+        sections.resize(section_count);
+        if (!safe_read(e.base + sect_rva, sections.data(),
+                       static_cast<size_t>(sect_bytes)))
+            sections.clear();
+    }
 
     uint64_t lo = e.pdata_rva;
     uint64_t hi = static_cast<uint64_t>(e.pdata_rva) + e.pdata_size;
+    // One guarded read of the whole .pdata block rather than a syscall per
+    // entry: a shard's table is a few KB and this runs at 0.5 Hz.
     const uint32_t entries = e.pdata_size / 12u;
+    std::vector<uint8_t> pdata(e.pdata_size);
+    if (!safe_read(e.base + e.pdata_rva, pdata.data(), pdata.size())) return;
     for (uint32_t i = 0; i < entries; ++i) {
         uint32_t unwind = 0;
-        std::memcpy(&unwind, img + e.pdata_rva + i * 12u + 8u, 4);
+        std::memcpy(&unwind, pdata.data() + i * 12u + 8u, 4);
         if (!unwind || unwind >= e.size) continue;
         if (unwind < lo) lo = unwind;
         if (static_cast<uint64_t>(unwind) + 1u > hi) hi = unwind + 1u;
     }
     // Grow to whole sections.
-    for (unsigned s = 0; s < section_count; ++s) {
+    for (unsigned s = 0; s < sections.size(); ++s) {
         const uint64_t s_lo = sections[s].VirtualAddress;
         const uint64_t s_hi = s_lo + std::max<uint64_t>(
             sections[s].Misc.VirtualSize, sections[s].SizeOfRawData);
@@ -348,7 +443,9 @@ void build_unwind_copy(ModuleEntry& e) {
     }
     if (hi > e.size) hi = e.size;
     if (hi <= lo) return;
-    e.copy.assign(img + lo, img + hi);
+    std::vector<uint8_t> buf(static_cast<size_t>(hi - lo));
+    if (!safe_read(e.base + lo, buf.data(), buf.size())) return;
+    e.copy = std::move(buf);
     e.copy_lo = e.base + lo;
     e.copy_hi = e.base + hi;
 }
@@ -422,6 +519,20 @@ struct ReadCtx {
     uint64_t stack_hi;
 };
 
+// THE WALK TOUCHES NO FOREIGN IMAGE MEMORY (beads-yjp.70). Every read a walk
+// can make is served from one of exactly three places, and none of them can be
+// unmapped underneath it:
+//
+//   1. the suspended-window stack copy (private, preallocated, and now bounded
+//      at both ends by the target's own stack reservation),
+//   2. the MAIN executable's image, read in place -- the process image is
+//      never unmapped and every page of a mapped PE view is committed, which
+//      matters because on a title build its .pdata/.xdata are tens of MB,
+//   3. the private per-module unwind copy taken at snapshot time under guarded
+//      reads (build_unwind_copy).
+//
+// Anything else returns false, which the unwinder reports as READ_FAILED. So a
+// module that vanishes mid-walk costs a truncated stack and nothing more.
 bool env_read(void* c, uint64_t addr, void* dst, uint32_t len) {
     const ReadCtx* rc = static_cast<const ReadCtx*>(c);
     if (len == 0u || addr + len < addr) return false;
@@ -483,9 +594,10 @@ void sample_target(Target& t) {
     const BOOL got = GetThreadContext(t.handle, &t.ctx);
     uint32_t copied = 0;
     uint64_t rsp = 0;
+    bool stack_rejected = false;
     if (got) {
         rsp = t.ctx.Rsp;
-        if (rsp && rsp < t.stack_top) {
+        if (rsp >= t.stack_low && rsp < t.stack_top) {
             const uint64_t avail = t.stack_top - rsp;
             copied = static_cast<uint32_t>(
                 std::min<uint64_t>(avail, kStackCopyBytes));
@@ -493,12 +605,20 @@ void sample_target(Target& t) {
                         reinterpret_cast<const void*>(
                             static_cast<uintptr_t>(rsp)),
                         copied);
+        } else {
+            // Counted, not logged, and counted OUTSIDE the window: this is a
+            // real observation about the sampled thread, so it belongs in the
+            // overhead table rather than being silently indistinguishable
+            // from a shallow stack.
+            stack_rejected = true;
         }
     }
     ResumeThread(t.handle);
     const uint64_t t1 = qpc();
     // ── PHASE B: everything else, on the copy ────────────────────────────
     g_suspend_qpc.fetch_add(t1 - t0, std::memory_order_relaxed);
+    if (stack_rejected)
+        g_stack_reject.fetch_add(1u, std::memory_order_relaxed);
     if (!got) {
         g_context_fail.fetch_add(1u, std::memory_order_relaxed);
         return;
@@ -707,6 +827,7 @@ void nds_hostprof_register_current_thread(NdsHostProfRole role) {
         t.handle = dup;
         t.tid = tid;
         t.role = role;
+        t.stack_low = static_cast<uint64_t>(low);
         t.stack_top = static_cast<uint64_t>(high);
         t.copy_base = 0;
         t.copy_len = 0;
@@ -792,7 +913,8 @@ std::string overhead_json() {
     std::snprintf(buf, sizeof(buf),
         "{\"ticks\":%llu,\"samples\":%llu,\"suspended_ms\":%.3f,"
         "\"walk_ms\":%.3f,\"suspended_us_per_sample\":%.3f,"
-        "\"suspend_fail\":%llu,\"context_fail\":%llu}",
+        "\"suspend_fail\":%llu,\"context_fail\":%llu,"
+        "\"stack_reject\":%llu}",
         (unsigned long long)ticks, (unsigned long long)samples,
         static_cast<double>(susp) * to_ms,
         static_cast<double>(walk) * to_ms,
@@ -800,7 +922,8 @@ std::string overhead_json() {
                       static_cast<double>(samples)
                 : 0.0,
         (unsigned long long)g_suspend_fail.load(std::memory_order_relaxed),
-        (unsigned long long)g_context_fail.load(std::memory_order_relaxed));
+        (unsigned long long)g_context_fail.load(std::memory_order_relaxed),
+        (unsigned long long)g_stack_reject.load(std::memory_order_relaxed));
     return buf;
 }
 
@@ -1166,6 +1289,45 @@ bool nds_hostprof_write_bundle(const char* path, char* error,
                                unsigned error_cap,
                                std::string* out_summary_json) {
     return dump_impl(path, 0.0, 0.0, error, error_cap, out_summary_json);
+}
+
+// ── beads-yjp.70 regression hooks ────────────────────────────────────────
+bool nds_hostprof_probe_module_parse(uint64_t base, uint64_t size,
+                                     uint32_t* out_pdata_size,
+                                     uint64_t* out_copy_bytes) {
+    ensure_config();
+    if (out_pdata_size) *out_pdata_size = 0u;
+    if (out_copy_bytes) *out_copy_bytes = 0u;
+    // Exactly what refresh_modules_locked() does to a freshly snapshotted
+    // entry, on a caller-supplied range and without touching the live map.
+    ModuleEntry e;
+    e.base = base;
+    e.size = size;
+    e.direct = false;
+    parse_exception_dir(e);
+    build_unwind_copy(e);
+    if (out_pdata_size) *out_pdata_size = e.pdata_size;
+    if (out_copy_bytes) *out_copy_bytes = static_cast<uint64_t>(e.copy.size());
+    return e.pdata_size != 0u && !e.copy.empty();
+}
+
+unsigned nds_hostprof_probe_walk_at(uint64_t pc, uint64_t* out_frames,
+                                    unsigned max, uint8_t* out_stop) {
+    ensure_config();
+    if (out_stop) *out_stop = static_cast<uint8_t>(NDS_HOST_UNWIND_READ_FAILED);
+    if (!out_frames || max == 0u) return 0u;
+    NdsHostUnwindRegs regs{};
+    regs.rip = pc;
+    // No stack slice at all: any step that wants a return address reports
+    // READ_FAILED instead of reading memory. What is under test is the module
+    // side -- env_pdata plus every UNWIND_INFO read env_read serves.
+    NdsHostUnwindStop stop = NDS_HOST_UNWIND_DEPTH;
+    std::lock_guard<std::mutex> lock(g_modules_mutex);
+    ReadCtx rc{nullptr, 0, 0};
+    NdsHostUnwindEnv env{env_read, env_pdata, &rc};
+    const unsigned n = nds_host_unwind(env, regs, out_frames, max, &stop);
+    if (out_stop) *out_stop = static_cast<uint8_t>(stop);
+    return n;
 }
 
 #endif  // NDS_HOSTPROF_SUPPORTED

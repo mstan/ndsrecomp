@@ -547,6 +547,135 @@ void test_sampler_end_to_end() {
     CHECK(!nds_hostprof_running());
 }
 
+// ── beads-yjp.70: an unloaded module must never fault the sampler ────────
+//
+// THE CRASH THIS PINS. The module map is built from a SNAPSHOT of the loaded
+// module list, and the map is then built by READING each module's PE headers
+// and unwind tables out of its mapped image. Between the snapshot and those
+// reads, any DLL in the list may already be gone: live_overlay quarantines and
+// supersedes shards by calling close_library() and then renaming the file
+// (live_overlay.cpp:1558 requires the unmap to have happened first), and the OS
+// itself loads and drops provider DLLs during startup. This process installs no
+// SEH -- GCC has no __try/__except -- so a single dereference of an unmapped
+// page terminates it instantly and silently, mid-syscall on whatever unrelated
+// thread happened to be running. That is exactly how the p2-all runner died:
+// the sampler faulted while the main thread was inside the WriteFile for its
+// "[identity] persisted MAC" line, and the log ends 82 bytes into a 113-byte
+// write with no diagnostics and no WER event.
+//
+// So the test does the unsafe thing on purpose: load a real DLL, prove the map
+// can parse and walk it, FreeLibrary it, and then drive BOTH sampler-side
+// paths at its now-unmapped address range. Neither may fault, and each must
+// report an enumerated stop reason instead.
+#if defined(_WIN32) && defined(__x86_64__) && defined(NDS_HOST_PROF_PROBE_DLL)
+
+// SizeOfImage straight from the mapped headers: the map's own snapshot gets
+// this from the module list, and the probe takes a [base, size) the same way.
+uint64_t image_size_of(HMODULE mod) {
+    const uint8_t* img = reinterpret_cast<const uint8_t*>(mod);
+    uint32_t lfanew = 0;
+    std::memcpy(&lfanew, img + 0x3C, 4);
+    const IMAGE_NT_HEADERS64* nt =
+        reinterpret_cast<const IMAGE_NT_HEADERS64*>(img + lfanew);
+    return nt->OptionalHeader.SizeOfImage;
+}
+
+bool range_is_mapped(uint64_t base) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(base)),
+                      &mbi, sizeof(mbi)))
+        return false;
+    return mbi.State == MEM_COMMIT;
+}
+
+void test_unloaded_module_does_not_fault() {
+    const char* dll_path = NDS_HOST_PROF_PROBE_DLL;
+    HMODULE mod = LoadLibraryA(dll_path);
+    if (!mod) {
+        std::fprintf(stderr,
+                     "host_prof_test: could not load probe DLL %s (err %lu)\n",
+                     dll_path, GetLastError());
+        ++g_failures;
+        return;
+    }
+    const uint64_t base = reinterpret_cast<uint64_t>(mod);
+    const uint64_t size = image_size_of(mod);
+    CHECK(size >= 0x1000u);
+
+    // A pc a few bytes into a real prologue, so the walk has to read the
+    // module's .pdata and its UNWIND_INFO rather than bailing at env_pdata.
+    FARPROC fn = GetProcAddress(mod, "nds_probe_frame");
+    CHECK(fn != nullptr);
+    const uint64_t pc = reinterpret_cast<uint64_t>(fn) + 8u;
+
+    // (1) MAPPED: the snapshot-time parse finds and copies real unwind data.
+    uint32_t pdata_size = 0;
+    uint64_t copy_bytes = 0;
+    const bool parsed =
+        nds_hostprof_probe_module_parse(base, size, &pdata_size, &copy_bytes);
+    CHECK(parsed);
+    CHECK(pdata_size > 0u);
+    CHECK(copy_bytes > 0u);
+
+    // (2) MAPPED: the map sees the module and a walk through it terminates on
+    // an enumerated stop. With no stack slice the chain cannot continue past
+    // the first return address, so READ_FAILED is the expected, clean answer --
+    // what matters is that the module side resolved at all, i.e. NOT NO_MODULE.
+    CHECK(nds_hostprof_refresh_modules());
+    uint64_t frames[32];
+    uint8_t stop = 0xFFu;
+    unsigned n = nds_hostprof_probe_walk_at(pc, frames, 32u, &stop);
+    CHECK(n >= 1u);
+    CHECK_EQ(frames[0], pc);
+    CHECK(stop < NDS_HOST_UNWIND_STOP_COUNT);
+    CHECK(stop != NDS_HOST_UNWIND_NO_MODULE);
+
+    // (3) Unload it. Everything below reads an address range that the loader
+    // has taken away, which is the whole point.
+    CHECK(FreeLibrary(mod));
+    if (range_is_mapped(base)) {
+        // Something else in the process holds a reference (a debugger, a
+        // shim). The test cannot prove anything in that state, so say so
+        // rather than passing vacuously.
+        std::fprintf(stderr, "host_prof_test: probe DLL still mapped after "
+                             "FreeLibrary; unload assertions skipped\n");
+        return;
+    }
+
+    // (4) STALE MAP, module gone: the walk is served entirely from the private
+    // unwind copy taken while it was mapped, so it still must not fault. This
+    // is the property that makes COPYING the right choice over pinning the
+    // module -- pinning would have kept the image mapped and broken
+    // live_overlay's rename-after-close_library quarantine path.
+    stop = 0xFFu;
+    n = nds_hostprof_probe_walk_at(pc, frames, 32u, &stop);
+    CHECK(n >= 1u);
+    CHECK_EQ(frames[0], pc);
+    CHECK(stop < NDS_HOST_UNWIND_STOP_COUNT);
+
+    // (5) THE REGRESSION. The snapshot-time parse run against the unmapped
+    // range -- the precise sequence the crash hit, a module named by a
+    // snapshot and unloaded before the parse read it. Before the fix these two
+    // calls dereferenced the freed image and killed the process; now they must
+    // report "nothing usable here" and return.
+    pdata_size = 0;
+    copy_bytes = 0;
+    CHECK(!nds_hostprof_probe_module_parse(base, size, &pdata_size,
+                                           &copy_bytes));
+    CHECK_EQ(pdata_size, 0u);
+    CHECK_EQ(copy_bytes, 0u);
+
+    // (6) A refresh drops the module, after which the pc resolves to nothing.
+    CHECK(nds_hostprof_refresh_modules());
+    stop = 0xFFu;
+    n = nds_hostprof_probe_walk_at(pc, frames, 32u, &stop);
+    CHECK_EQ(n, 1u);
+    CHECK_EQ(frames[0], pc);
+    CHECK_EQ(stop, NDS_HOST_UNWIND_NO_MODULE);
+}
+
+#endif  // _WIN32 && __x86_64__ && NDS_HOST_PROF_PROBE_DLL
+
 #endif  // _WIN32 && __x86_64__
 
 }  // namespace
@@ -561,6 +690,9 @@ int main() {
 #if defined(_WIN32) && defined(__x86_64__)
     test_live_unwind_matches_os();
     test_sampler_end_to_end();
+#if defined(NDS_HOST_PROF_PROBE_DLL)
+    test_unloaded_module_does_not_fault();
+#endif
 #endif
     if (g_failures)
         std::fprintf(stderr, "host_prof_test: %d failure(s)\n", g_failures);

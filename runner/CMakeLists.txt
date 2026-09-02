@@ -780,6 +780,19 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/host_unwind_x64.cpp
       src/host_profile.cpp)
   target_include_directories(host_prof_test PRIVATE src)
+  if(WIN32)
+    # beads-yjp.70: a scratch DLL with REAL toolchain-emitted unwind data, so
+    # the test can load it, walk it, FreeLibrary it, and then drive both
+    # sampler-side reads at its unmapped range. A module that vanishes out from
+    # under the module map used to fault the sampler and kill the process
+    # silently (no SEH in a MinGW build); this is the gate on that.
+    add_library(host_prof_probe_dll MODULE tests/host_prof_probe_dll.c)
+    set_target_properties(host_prof_probe_dll PROPERTIES
+        PREFIX "" OUTPUT_NAME "host_prof_probe")
+    add_dependencies(host_prof_test host_prof_probe_dll)
+    target_compile_definitions(host_prof_test PRIVATE
+        "NDS_HOST_PROF_PROBE_DLL=\"$<TARGET_FILE:host_prof_probe_dll>\"")
+  endif()
   add_test(NAME host_prof_test COMMAND host_prof_test)
 
   add_executable(battery_save_test
