@@ -1,4 +1,5 @@
 #include "frontend.h"
+#include "host_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -38,6 +39,84 @@ namespace {
 NdsFrontendLiveStats g_live_stats{};
 NdsFrontendBlackBandCapture g_black_band{};
 NdsFrontendInputDebugState g_input_debug{};
+
+// ---- Presented-frame digest ring (frontend.h) ----------------------------
+constexpr uint32_t kFrameDigestRing = 8192;   // ~136 s at 60 fps
+NdsFrontendFrameDigest g_frame_digests[kFrameDigestRing];
+std::atomic<uint64_t> g_frame_digest_count{0};
+// Incremented on every successful savestate LOAD. Two processes launched
+// independently present a different number of frames before the load lands, so
+// the epoch, not the frame index, is what aligns their digest streams.
+uint32_t g_frame_digest_epoch = 0;
+// Latched once, at the first present, from the environment: the ring covers
+// the whole process life or none of it. Never armed by a probe.
+int g_frame_digest_enabled = -1;
+
+bool frame_digest_enabled() {
+    if (g_frame_digest_enabled < 0) {
+        const char* const value = std::getenv("NDS_FRAME_HASH");
+        g_frame_digest_enabled =
+            (value && value[0] == '1' && value[1] == '\0') ? 1 : 0;
+    }
+    return g_frame_digest_enabled != 0;
+}
+
+// FNV-1a over 32-bit words. Chosen for being trivially reproducible from a
+// Python-side reimplementation, not for cryptographic strength.
+uint64_t digest_words(const uint32_t* words, size_t count, uint64_t seed) {
+    uint64_t h = seed;
+    for (size_t i = 0; i < count; ++i) {
+        h ^= words[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+void record_frame_digest(uint64_t frame, const uint32_t* top, uint32_t top_w,
+                         const uint32_t* bottom, uint32_t bottom_w,
+                         bool direct_present) {
+    if (!frame_digest_enabled()) return;
+    NdsGpu2dHdFrame hd{};
+    const bool have_hd = nds_gpu2d_hd_frame_peek(&hd);
+    NdsFrontendFrameDigest entry{};
+    entry.frame = frame;
+    entry.top_width = top_w;
+    entry.bottom_width = bottom_w;
+    entry.flags = (direct_present ? NDS_FRAME_DIGEST_DIRECT_PRESENT : 0u) |
+                  (have_hd ? NDS_FRAME_DIGEST_HD : 0u);
+    entry.epoch = g_frame_digest_epoch;
+    // On a direct-present frame the top surface lives on the GPU and
+    // `top_pixels` is still the 256-wide native framebuffer, while `top_width`
+    // has already been widened for the presenter's geometry. Hashing top_width
+    // words would read past the native buffer.
+    const uint32_t top_hash_width = direct_present ? 256u : top_w;
+    if (top)
+        entry.top_hash = digest_words(
+            top, static_cast<size_t>(top_hash_width) * 192u,
+            1469598103934665603ull);
+    if (bottom)
+        entry.bottom_hash = digest_words(
+            bottom, static_cast<size_t>(bottom_w) * 192u,
+            1469598103934665603ull);
+    if (have_hd && hd.top_pixels && hd.below_pixels) {
+        const size_t words = static_cast<size_t>(hd.width) * 192u * 2u;
+        uint64_t h = digest_words(hd.top_pixels, words,
+                                  1469598103934665603ull);
+        h = digest_words(hd.below_pixels, words, h);
+        const uint32_t tail[7] = {
+            hd.width, hd.priority_3d, hd.order_3d, hd.bldcnt,
+            hd.master_bright,
+            static_cast<uint32_t>(hd.eva) | (uint32_t{hd.evb} << 8) |
+                (uint32_t{hd.evy} << 16),
+            hd.render_xpos,
+        };
+        entry.hd_hash = digest_words(tail, 7, h);
+    }
+    const uint64_t index =
+        g_frame_digest_count.load(std::memory_order_relaxed);
+    g_frame_digests[index % kFrameDigestRing] = entry;
+    g_frame_digest_count.store(index + 1, std::memory_order_release);
+}
 
 void observe_top_black_bands(const uint32_t* pixels, uint64_t frame) {
     if (!g_black_band.enabled || !pixels) return;
@@ -620,6 +699,15 @@ void SDLCALL audio_stream_underrun_callback(void* userdata,
 using NdsAudioDevice = SDL_AudioDeviceID;
 
 void SDLCALL audio_callback(void* userdata, Uint8* stream, int len) {
+    // SDL owns this thread, so it cannot be registered at creation; it
+    // registers itself the first time it runs instead. One thread_local test
+    // per callback, and the whole point is that a mixing stall or an underrun
+    // storm becomes attributable to host symbols (host_profile.h).
+    static thread_local bool hostprof_registered = false;
+    if (!hostprof_registered) {
+        hostprof_registered = true;
+        nds_hostprof_register_current_thread(NDS_HOSTPROF_ROLE_AUDIO);
+    }
     auto* queue = static_cast<AudioQueue*>(userdata);
     std::memset(stream, 0, static_cast<size_t>(len));
     if (!queue || len <= 0) return;
@@ -2591,6 +2679,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                                 "apply_failed");
                         }
                         blend_cache.valid = false;
+                        // A load re-primes the machine, so it also opens a new
+                        // digest epoch: it is the only alignment point two
+                        // independently launched processes share, since
+                        // shown_frames at load time is wall-clock dependent.
+                        ++g_frame_digest_epoch;
                         // Guest input registers came from historical state;
                         // the live host controls become authoritative again
                         // before the restored machine executes a round.
@@ -3134,6 +3227,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
         phase_swap_ticks += presentation_ticks.swap;
+        // Digest the exact surfaces the presenter was handed, after the
+        // present so the hash cost is never inside a measured present phase.
+        record_frame_digest(shown_frames, top_pixels, top_width,
+                            bottom_pixels, bottom_width,
+                            nds_gpu2d_direct_present_frame_active());
         if (interpolation_active &&
             !nds_gpu2d_direct_present_frame_active()) {
             cache_presented_frame(blend_cache, 0, top_pixels, top_width);
@@ -3448,7 +3546,7 @@ bool nds_frontend_request_exit() {
 #endif
 }
 
-bool nds_frontend_debug_key(const char* key_name, bool down) {
+bool nds_frontend_debug_key(const char* key_name, bool down, bool shift) {
 #if defined(NDS_HAVE_SDL3) || defined(NDS_HAVE_SDL2)
     if (!g_input_debug.active || !key_name || key_name[0] == '\0')
         return false;
@@ -3465,6 +3563,13 @@ bool nds_frontend_debug_key(const char* key_name, bool down) {
     event.key.down = down;
 #endif
     event.key.repeat = 0;
+    // Modifier state: savestate SAVE is Shift+F<slot> while LOAD is the bare
+    // F-key, so an injected key that cannot carry Shift can only ever load.
+#if defined(NDS_HAVE_SDL3)
+    event.key.mod = shift ? SDL_KMOD_LSHIFT : SDL_KMOD_NONE;
+#else
+    event.key.keysym.mod = shift ? KMOD_LSHIFT : KMOD_NONE;
+#endif
     sdl_set_event_scancode(event, key);
     const bool pushed = sdl_push_event(event);
     if (pushed) ++g_input_debug.debug_key_events;
@@ -3473,6 +3578,7 @@ bool nds_frontend_debug_key(const char* key_name, bool down) {
 #else
     (void)key_name;
     (void)down;
+    (void)shift;
     return false;
 #endif
 }
@@ -3614,4 +3720,32 @@ void nds_frontend_black_band_scan(bool enabled, bool reset) {
 
 void nds_frontend_black_band_capture(NdsFrontendBlackBandCapture* out) {
     if (out) *out = g_black_band;
+}
+
+bool nds_frontend_frame_digest_enabled() { return frame_digest_enabled(); }
+
+uint64_t nds_frontend_frame_digest_count() {
+    return g_frame_digest_count.load(std::memory_order_acquire);
+}
+
+uint32_t nds_frontend_frame_digests(uint64_t from, uint32_t max,
+                                    NdsFrontendFrameDigest* out) {
+    if (!out || !max) return 0;
+    const uint64_t count =
+        g_frame_digest_count.load(std::memory_order_acquire);
+    if (from >= count) return 0;
+    // The oldest sequence index still resident. A reader that asks for an
+    // evicted window gets nothing rather than a torn mixture of generations.
+    const uint64_t oldest =
+        count > kFrameDigestRing ? count - kFrameDigestRing : 0;
+    if (from < oldest) from = oldest;
+    uint32_t copied = 0;
+    for (uint64_t i = from; i < count && copied < max; ++i, ++copied)
+        out[copied] = g_frame_digests[i % kFrameDigestRing];
+    // Re-check: a wrap during the copy would have overwritten the head of the
+    // window. Only possible if the caller asked for ~2 minutes of history.
+    const uint64_t after =
+        g_frame_digest_count.load(std::memory_order_acquire);
+    if (after - from > kFrameDigestRing) return 0;
+    return copied;
 }

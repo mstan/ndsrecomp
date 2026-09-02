@@ -1,4 +1,5 @@
 #include "live_overlay.h"
+#include "host_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -1928,11 +1929,23 @@ void maintenance_worker_main();
 void ensure_workers() {
     if (!g_live.prepare_thread.joinable()) {
         g_live.prepare_stop = false;
-        g_live.prepare_thread = std::thread(prepare_worker_main);
+        // Both live-overlay workers register with the always-on host sampler
+        // (host_profile.h): a live compile competing with the emu thread for
+        // cores is exactly the kind of cost that is invisible in a guest-side
+        // profile, and yjp.56 (live-compiler starvation) is that shape.
+        g_live.prepare_thread = std::thread([] {
+            NdsHostProfThreadScope hostprof_scope(
+                NDS_HOSTPROF_ROLE_LIVE_COMPILER);
+            prepare_worker_main();
+        });
     }
     if (!g_live.maint_thread.joinable()) {
         g_live.maint_stop = false;
-        g_live.maint_thread = std::thread(maintenance_worker_main);
+        g_live.maint_thread = std::thread([] {
+            NdsHostProfThreadScope hostprof_scope(
+                NDS_HOSTPROF_ROLE_LIVE_COMPILER);
+            maintenance_worker_main();
+        });
     }
 }
 
@@ -2587,6 +2600,7 @@ void live_overlay_configure(bool enabled, bool auto_trigger,
     g_live.enabled = enabled;
     g_live.auto_trigger = auto_trigger;
     g_live.transfer_trace = false;
+    g_runtime_live_transfer_trace = 0u;
     g_live.initial_cache_scan_done = false;
     g_live.activation_delay_ms = activation_delay_ms;
     g_live.auto_start_delay_ms = auto_start_delay_ms;
@@ -2741,8 +2755,17 @@ void live_overlay_register_cached_banks() {
     g_live.initial_cache_scan_done = true;
 }
 
+// Published as C-linkage DATA (declared in runtime_arm.h, exported for live
+// shards) so the generated per-control-transfer site is a load and a
+// not-taken branch instead of two out-of-line calls -- runtime_live_transfer
+// -> live_overlay_note_transfer -- for a ring that is disarmed in every
+// normal play session (beads-yjp.70 phase 2 B). This flag is the ONLY
+// mirror of g_live.transfer_trace and must move with it.
+extern "C" uint32_t g_runtime_live_transfer_trace = 0u;
+
 void live_overlay_set_transfer_trace(bool enabled) {
     g_live.transfer_trace = enabled;
+    g_runtime_live_transfer_trace = enabled ? 1u : 0u;
     g_live.transfer_diag_seen = 0u;
     g_live.transfer_diag_samples = 0u;
 }

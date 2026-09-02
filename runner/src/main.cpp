@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "state.h"
@@ -29,6 +30,7 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
+#include "host_profile.h"
 #include "diagnostics.h"
 #include "dispatch_timing.h"
 #include "emu_profile.h"
@@ -1160,6 +1162,18 @@ int main(int argc, char** argv) {
     if (!diagnostics_enabled) coverage_manifest_disabled = true;
     nds_diagnostics_enable_profile_environment();
 
+    // Always-on host CPU sampler (host_profile.h). Started HERE -- before the
+    // BIOS/firmware load, before boot(), before the first frame -- because the
+    // whole contract of an always-on ring is that the interesting window is
+    // already inside it when someone thinks to ask. Deliberately not gated on
+    // --diagnostics: a diagnostics-off session still gets the debug-server
+    // query surface, and the sampler is the only host-symbol attribution the
+    // runner has. NDS_HOSTPROF=off opts out and then allocates nothing.
+    //
+    // This call also registers the calling thread -- the emu/frontend thread --
+    // as the primary sampling target.
+    nds_hostprof_start();
+
     // Resolve the network config to backend-ready numeric form. Provider
     // name -> table lookup, optional dns_server string -> IPv4, matching
     // the pipeline documented in wifi_net.h's NdsWifiNetworkConfig.
@@ -1388,11 +1402,14 @@ int main(int argc, char** argv) {
                  gpu3d_threaded ? "on" : "off");
 
     // GPU2D per-scanline rendering on worker threads, driven from a per-line
-    // latch. Off by default until the byte-lock and scenario gates have run
-    // on it; the inline path is the identical latch/execute sequence with the
-    // execute taken immediately, so 0 is not a separate code path.
+    // latch. ON by default (beads-yjp.70 phase 2C). The inline path is the
+    // identical latch/execute sequence with the execute taken immediately, so
+    // 0 is not a separate code path, and the threaded path is byte-locked
+    // against it by the presented-frame digest ring (NDS_FRAME_HASH=1) and by
+    // gpu2d_window_test's threaded/inline comparison. NDS_GPU2D_THREADED=0
+    // puts the 2D raster back on the emu thread.
     // See docs/device_work_parallelization.md.
-    bool gpu2d_threaded = false;
+    bool gpu2d_threaded = true;
     if (const char* value = std::getenv("NDS_GPU2D_THREADED")) {
         if (value[0] == '0' && value[1] == '\0') {
             gpu2d_threaded = false;
@@ -1404,7 +1421,10 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    unsigned gpu2d_workers = 1;
+    // Two workers cover 192 lines comfortably: the emu thread is the sole
+    // producer of latches, so extra workers buy only tail coverage while
+    // widening every fence drain.
+    unsigned gpu2d_workers = 2;
     if (const char* value = std::getenv("NDS_GPU2D_WORKERS")) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(value, &end, 10);
@@ -1418,6 +1438,34 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "[gpu2d] threaded scanline render: %s (workers: %u)\n",
                  gpu2d_threaded ? "on" : "off", gpu2d_workers);
+
+    // Helper threads for the adaptive (widened) presentation compositor: 192
+    // lines at the widened output width plus the HD layer surfaces, run at
+    // present time. It was the single largest 2D item left on the emu thread.
+    // The calling thread still participates and still waits for the last
+    // line, so the presented frame and its latency are unchanged; only the
+    // wall time shrinks.
+    //
+    // Scaled off the host: 3 helpers (4 renderers) on an 8+ thread box, 1 on
+    // 4..7, none below that, so a small host is never oversubscribed by the
+    // scanline pool plus this one plus the 3D soft renderer.
+    const unsigned host_threads = std::thread::hardware_concurrency();
+    unsigned gpu2d_adaptive_workers =
+        host_threads >= 8u ? 3u : (host_threads >= 4u ? 1u : 0u);
+    if (const char* value = std::getenv("NDS_GPU2D_ADAPTIVE_WORKERS")) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (!end || *end || parsed > 16ul) {
+            std::fprintf(stderr, "invalid NDS_GPU2D_ADAPTIVE_WORKERS value "
+                                 "(expected 0..16)\n");
+            return 2;
+        }
+        gpu2d_adaptive_workers = static_cast<unsigned>(parsed);
+    }
+    std::fprintf(stderr,
+                 "[gpu2d] adaptive compositor helpers: %u "
+                 "(host threads: %u)\n",
+                 gpu2d_adaptive_workers, host_threads);
 
     if (cli_generated_firmware) frontend_options.generated_firmware = true;
     if (cli_freebios) frontend_options.freebios = true;
@@ -2089,6 +2137,7 @@ int main(int argc, char** argv) {
         }
         nds_gpu3d_set_threaded(gpu3d_threaded);
         nds_gpu2d_set_threaded(gpu2d_threaded, gpu2d_workers);
+        nds_gpu2d_set_adaptive_workers(gpu2d_adaptive_workers);
     };
     boot();
 
@@ -2132,6 +2181,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
         const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
+        // After the frontend has closed the performance log (and with it
+        // written the hostprof bundle), so the dump covers the whole session
+        // including its last frames.
+        nds_hostprof_stop();
         const bool save_ok = nds_io_flush_cartridge_save();
         const bool firmware_ok = nds_io_flush_firmware_save();
         write_coverage_manifest();

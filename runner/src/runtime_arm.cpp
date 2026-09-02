@@ -1205,8 +1205,15 @@ extern "C" void runtime_set_deep_trace(uint32_t on) {
     nds_insn_hook_recompute();
 }
 
-extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
-                                    uint32_t value, uint32_t aux) {
+// Out-of-line recording body. The disarmed test moved into the inline
+// runtime_trace_event() in runtime_arm.h (beads-yjp.70 phase 2 B) so the
+// generated per-store / per-branch site is a load and a not-taken branch
+// rather than a five-argument call. The test is repeated here because the
+// pre-inline shard ABI symbol and every non-inlined caller land directly on
+// this body, and the ring must never record while disarmed.
+extern "C" void runtime_trace_event_slow(uint32_t kind, uint32_t pc,
+                                        uint32_t addr, uint32_t value,
+                                        uint32_t aux) {
     // The trace ring is diagnostic state, not guest-visible state. Avoid all
     // recording overhead during normal play; the debug server can enable it
     // live with the deep_trace command when a trace is needed.
@@ -1441,17 +1448,11 @@ void nds_restore_unwind_state() {
 
 // ── Condition codes (verbatim) ──────────────────────────────────────────
 extern "C" int arm_cond_passes(unsigned cond) {
-    const uint32_t n = cpsr_n(), z = cpsr_z(), c = cpsr_c(), v = cpsr_v();
-    switch (cond & 0xFu) {
-        case 0x0: return z != 0;                 case 0x1: return z == 0;
-        case 0x2: return c != 0;                 case 0x3: return c == 0;
-        case 0x4: return n != 0;                 case 0x5: return n == 0;
-        case 0x6: return v != 0;                 case 0x7: return v == 0;
-        case 0x8: return (c != 0) && (z == 0);   case 0x9: return (c == 0) || (z != 0);
-        case 0xA: return n == v;                 case 0xB: return n != v;
-        case 0xC: return (z == 0) && (n == v);   case 0xD: return (z != 0) || (n != v);
-        case 0xE: return 1;                      default:  return 0;  // NV
-    }
+    // Single contract, two spellings: the inline form in
+    // recompiler/armv4t/runtime_arm.h is the definition; this exported
+    // symbol stays for shards emitted before beads-yjp.70 phase 2A and
+    // for the C++ runtime's own callers.
+    return arm_cond_passes_i(cond);
 }
 
 // ── Shifters (verbatim) ─────────────────────────────────────────────────
@@ -1884,8 +1885,15 @@ extern "C" const char* nds_direct_link_json(void) {
     return out.c_str();
 }
 
-extern "C" void runtime_live_transfer(uint32_t source_pc, uint32_t target_pc,
-                                      uint32_t transfer_type) {
+// Out-of-line tail. The disarmed test moved into the inline
+// runtime_live_transfer() in runtime_arm.h (beads-yjp.70 phase 2 B): generated
+// banks call here for EVERY control transfer, and the diagnostic ring behind
+// it is disarmed in every normal play session, so the disarmed case must not
+// pay two calls. live_overlay_note_transfer re-tests the flag, so the armed
+// behaviour is unchanged and this body stays correct on its own.
+extern "C" void runtime_live_transfer_slow(uint32_t source_pc,
+                                           uint32_t target_pc,
+                                           uint32_t transfer_type) {
     live_overlay_note_transfer(g_nds_active, source_pc, target_pc, g_cpu.R[14],
                                g_cpu.cpsr, transfer_type);
 }

@@ -356,31 +356,11 @@ void* g_bus_handle = nullptr;
 // ── Condition codes ────────────────────────────────────────────────
 
 extern "C" int arm_cond_passes(unsigned cond) {
-    // The condition codes are 4 bits. AL / NV are the unconditional
-    // bands.
-    const uint32_t n = cpsr_n();
-    const uint32_t z = cpsr_z();
-    const uint32_t c = cpsr_c();
-    const uint32_t v = cpsr_v();
-    switch (cond & 0xFu) {
-        case 0x0: return z != 0;                            // EQ
-        case 0x1: return z == 0;                            // NE
-        case 0x2: return c != 0;                            // CS/HS
-        case 0x3: return c == 0;                            // CC/LO
-        case 0x4: return n != 0;                            // MI
-        case 0x5: return n == 0;                            // PL
-        case 0x6: return v != 0;                            // VS
-        case 0x7: return v == 0;                            // VC
-        case 0x8: return (c != 0) && (z == 0);              // HI
-        case 0x9: return (c == 0) || (z != 0);              // LS
-        case 0xA: return n == v;                            // GE
-        case 0xB: return n != v;                            // LT
-        case 0xC: return (z == 0) && (n == v);              // GT
-        case 0xD: return (z != 0) || (n != v);              // LE
-        case 0xE: return 1;                                 // AL
-        case 0xF: return 0;                                 // NV (ARMv4T: never)
-        default:  return 0;
-    }
+    // Single contract, two spellings: the inline form in
+    // recompiler/armv4t/runtime_arm.h is the definition; this exported
+    // symbol stays for shards emitted before beads-yjp.70 phase 2A and
+    // for the C++ runtime's own callers.
+    return arm_cond_passes_i(cond);
 }
 
 // ── Bus accessors ──────────────────────────────────────────────────

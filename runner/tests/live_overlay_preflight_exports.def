@@ -7,15 +7,21 @@
 ; live_overlay_preflight_test.cpp actually defines may appear here, because a
 ; .def naming a symbol the image does not define fails the link.
 EXPORTS
+    g_arm9_code_class_shift DATA
+    g_arm9_code_pub_gen DATA
+    g_arm9_itcm_code_limit DATA
     g_busf_itcm DATA
     g_busf_main DATA
+    g_cp15_timing_generation DATA
     g_cpu DATA
     g_insn_count DATA
     g_insn_hook_armed DATA
+    g_last_code_pc DATA
     g_nds_active DATA
     g_nds_fast_limit DATA
     g_nds_unwinding DATA
     g_runtime_cycles DATA
+    g_runtime_live_transfer_trace DATA
     arm9_refill_cycles
     nds_register_dispatch
     nds_unregister_dispatch
@@ -26,6 +32,6 @@ EXPORTS
     runtime_dispatch_bad_entry
     runtime_dispatch_with_exchange
     runtime_insn_slow
-    runtime_live_transfer
+    runtime_live_transfer_slow
     runtime_should_yield_slow
     runtime_tick_slow

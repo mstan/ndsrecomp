@@ -23,6 +23,7 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "hle_profile.h"
+#include "host_profile.h"
 #include "dispatch_stats.h"
 #include "dispatch_timing.h"
 #include "emu_profile.h"
@@ -1216,7 +1217,8 @@ std::string handle(const std::string& line) {
         } else if (action == "key") {
             ok = nds_frontend_debug_key(
                 json_str(line, "key").c_str(),
-                json_bool(line, "down", true));
+                json_bool(line, "down", true),
+                json_bool(line, "shift", false));
         } else if (action == "mouse") {
             const std::string named = json_str(line, "button");
             uint8_t button = mouse_button_from_string(named);
@@ -1279,6 +1281,41 @@ std::string handle(const std::string& line) {
                std::to_string(capture.worst_row_count) +
                ",\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
     }
+    // Query into the always-on presented-frame digest ring (frontend.h). The
+    // ring records from process start when NDS_FRAME_HASH=1; this only reads a
+    // window out of it, so nothing is armed here and no frame before the probe
+    // connected is missing.
+    if (cmd == "frame_digests") {
+        const uint64_t count = nds_frontend_frame_digest_count();
+        const uint64_t from = json_u64(line, "from", 0);
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "count", 256));
+        if (max > 4096u) max = 4096u;
+        std::vector<NdsFrontendFrameDigest> entries(max);
+        const uint32_t got =
+            nds_frontend_frame_digests(from, max, entries.data());
+        std::string out = "{\"enabled\":" +
+            std::to_string(nds_frontend_frame_digest_enabled() ? 1 : 0) +
+            ",\"count\":" + std::to_string(count) +
+            ",\"from\":" + std::to_string(from) +
+            ",\"digests\":[";
+        for (uint32_t i = 0; i < got; ++i) {
+            const NdsFrontendFrameDigest& d = entries[i];
+            char b[256];
+            std::snprintf(b, sizeof(b),
+                "%s{\"frame\":%llu,\"top\":\"%016llx\","
+                "\"bottom\":\"%016llx\",\"hd\":\"%016llx\","
+                "\"tw\":%u,\"bw\":%u,\"flags\":%u,\"epoch\":%u}",
+                i ? "," : "",
+                (unsigned long long)d.frame,
+                (unsigned long long)d.top_hash,
+                (unsigned long long)d.bottom_hash,
+                (unsigned long long)d.hd_hash,
+                d.top_width, d.bottom_width, d.flags, d.epoch);
+            out += b;
+        }
+        out += "]}";
+        return out;
+    }
     if (cmd == "framebuffer_sync") {
         NdsFrontendLiveStats stats{};
         nds_frontend_live_stats(&stats);
@@ -1320,6 +1357,52 @@ std::string handle(const std::string& line) {
             nds_pc_profile_kind_from_name(json_str(line, "kind").c_str());
         return nds_pc_profile_json(
             kind, cpu, static_cast<unsigned>(json_u64(line, "top", 32)));
+    }
+    // The HOST side of the same question, and the only surface here that
+    // names host symbols at all (host_profile.h). pc_hot says which GUEST
+    // code is hot; emu_attrib says which guest-side subsystem is expensive;
+    // neither can say whether the ~36 host cycles per guest cycle are going
+    // into dispatch lookup, bus decode, an MMIO handler, the scheduler, gpu3d,
+    // gpu2d, audio or a generated body. This one can, in every build, for
+    // every title, after the fact.
+    //
+    // Always-on: there is nothing to arm. `window_sec` <= 0 means the whole
+    // run (answered from the running leaf histogram); a positive window is
+    // answered from the sample ring, scanning back only as far as it reaches.
+    // RIPs come back with module + RVA; names need
+    // tools/hostprof_symbolize.py against a dump, because the runner does not
+    // carry a symbol table.
+    if (cmd == "hostprof_top") {
+        return nds_hostprof_top_json(
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0,
+            static_cast<unsigned>(json_u64(line, "top", 40)));
+    }
+    // Is the sampler on, at what rate, how much history does it hold, and what
+    // is it costing? Asked before trusting a table, and the answer carries the
+    // observer's own measured overhead.
+    if (cmd == "hostprof_status") return nds_hostprof_status_json();
+    // Write the ring for a window plus the module map (base/size/path of the
+    // exe and every loaded module, shard DLLs included) so the RVAs can be
+    // symbolized offline. Forward slashes in the path: the request parser is a
+    // flat scanner that does not unescape, exactly as for coverage_manifest.
+    //
+    // window_ms <= 0 dumps the whole resident ring; end_ms_ago shifts the
+    // window's end backwards, so an arbitrary [t0,t1] is
+    // window_ms = t1-t0, end_ms_ago = now-t1.
+    if (cmd == "hostprof_dump") {
+        const std::string path = json_str(line, "path");
+        if (path.empty()) return "{\"error\":\"hostprof_dump needs a path\"}";
+        char error[256] = {};
+        std::string extra;
+        const double window_sec =
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0;
+        const double end_sec_ago =
+            static_cast<double>(json_i64(line, "end_ms_ago", 0)) / 1000.0;
+        if (!nds_hostprof_dump(path.c_str(), window_sec, end_sec_ago, error,
+                               sizeof(error), &extra))
+            return "{\"ok\":false,\"error\":\"" + json_escape(error) + "\"}";
+        return "{\"ok\":true,\"path\":\"" + json_escape(path) + "\"" + extra +
+               "}";
     }
     // B2 direct linking: whether the per-callsite link slots are live
     // right now (they are gated off under deep trace) and how the
@@ -1393,6 +1476,12 @@ std::string handle(const std::string& line) {
                std::to_string(gpu.fence_helped_lines) +
                ",\"staged_captures\":" +
                std::to_string(gpu.staged_captures) +
+               ",\"adaptive_band_frames\":" +
+               std::to_string(gpu.adaptive_band_frames) +
+               ",\"adaptive_serial_frames\":" +
+               std::to_string(gpu.adaptive_serial_frames) +
+               ",\"adaptive_helper_lines\":" +
+               std::to_string(gpu.adaptive_helper_lines) +
                ",\"fence_drains\":" + fence_drains +
                ",\"fenced_lines\":" + fenced_lines +
                ",\"render_ns\":" + std::to_string(gpu.render_ns) +

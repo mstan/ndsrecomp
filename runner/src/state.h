@@ -57,7 +57,10 @@ struct Cp15State {
     uint32_t dtcm_size;        // bytes
 };
 extern Cp15State g_cp15;
-extern uint32_t g_cp15_timing_generation;
+// g_cp15_timing_generation is declared in recompiler/armv4t/runtime_arm.h
+// (with C linkage): generated code reads it to validate the published ARM9
+// code-fetch class — see NDS_ARM9_CODE_K / nds_code_numc there. Declaring it
+// here as well would give the same object two language linkages.
 uint32_t cp15_debug_mpu_region(unsigned index);
 uint32_t cp15_debug_cache_cfg(unsigned index);
 
@@ -65,6 +68,14 @@ void cp15_reset();
 // True if ARM9 code fetches from addr are I-cache-served (per-PU-region, C1 bit12).
 bool cp15_code_cacheable(uint32_t addr);
 bool cp15_data_cacheable(uint32_t addr);
+// The original per-access MPU region walks (see cp15.cpp). Kept as the
+// fallback for region encodings the page bitmap cannot represent and as
+// the oracle runner/tests/mem_timing_test.cpp sweeps the bitmap against.
+bool cp15_code_cacheable_reference(uint32_t addr);
+bool cp15_data_cacheable_reference(uint32_t addr);
+// Force a cacheability-bitmap resync (tests only; production syncs from
+// the CP15 write / reset / savestate-import paths).
+void cp15_class_rebuild_for_test();
 
 // ── Dispatch + run control (implemented in runtime_arm.cpp) ─────────────
 // Layout-compatible with the generated <bank>_dispatch.c table entries.

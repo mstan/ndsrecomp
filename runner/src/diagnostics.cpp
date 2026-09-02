@@ -18,6 +18,7 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "host_info.h"
+#include "host_profile.h"
 #include "live_overlay.h"
 #include "pc_profile.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
@@ -1084,12 +1085,49 @@ void nds_diagnostics_write_perf_governor_history() {
     std::fflush(g_perf);
 }
 
+void nds_diagnostics_write_hostprof_bundle() {
+    if (!g_perf) return;
+    // The host CPU sampler's whole resident ring plus the module map, as a
+    // sidecar next to the perf log. It is a separate FILE rather than a JSONL
+    // record because it is 36 MB of fixed-width binary samples -- inlining that
+    // as JSON would make the perf log unreadable and cost an order of magnitude
+    // in size. The record written here is the pointer to it, so a bundle is
+    // still self-describing.
+    //
+    // The module BASES only mean anything for this run (ASLR), which is exactly
+    // why they must be captured with the samples and not reconstructed later.
+    const std::string path =
+        nds_diagnostics_run_base("hostprof") + ".ndshp";
+    char error[256] = {};
+    std::string extra;
+    const bool ok = nds_hostprof_write_bundle(path.c_str(), error,
+                                              sizeof(error), &extra);
+    std::fprintf(g_perf,
+        "{\"kind\":\"hostprof\",\"ts_ms\":%llu,\"wall\":\"%s\",\"ok\":%s,"
+        "\"path\":\"%s\",\"error\":\"%s\"%s,\"status\":%s,\"top\":%s}\n",
+        (unsigned long long)unix_ms_now(),
+        json_escape(wall_clock_now().c_str()).c_str(),
+        ok ? "true" : "false",
+        json_escape(path.c_str()).c_str(),
+        json_escape(error).c_str(),
+        ok ? extra.c_str() : "",
+        nds_hostprof_status_json().c_str(),
+        // A top-40 inline as well: the binary dump is the complete answer but
+        // needs the offline symbolizer, and a reader skimming the bundle should
+        // still see the shape of the host profile without running a tool.
+        nds_hostprof_top_json(0.0, 40).c_str());
+    std::fflush(g_perf);
+    if (ok)
+        std::fprintf(stderr, "[diagnostics] wrote %s\n", path.c_str());
+}
+
 void nds_diagnostics_stop_performance_log() {
     if (!g_perf) return;
-    // Last record in the bundle: the whole always-on transition ring, so a
-    // field report carries the governor's history even if the run never wrote
-    // an interval sample.
+    // Last records in the bundle: the whole always-on governor transition ring
+    // and the whole always-on host CPU sample ring, so a field report carries
+    // both histories even if the run never wrote an interval sample.
     nds_diagnostics_write_perf_governor_history();
+    nds_diagnostics_write_hostprof_bundle();
     std::fclose(g_perf);
     g_perf = nullptr;
 }

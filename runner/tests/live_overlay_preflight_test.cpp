@@ -14,6 +14,14 @@ extern "C" uint64_t g_insn_count[2] = {};
 extern "C" uint32_t g_insn_hook_armed = 0;
 extern "C" unsigned long long g_nds_fast_limit = 0;
 extern "C" unsigned char g_nds_unwinding = 0;
+// beads-yjp.70 phase 2A: a shard's inline per-instruction code-fetch cost
+// (nds_code_numc) reads these five words directly, so a REAL shard DLL built
+// against this image needs them defined and exported here too.
+extern "C" uint32_t g_last_code_pc[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+extern "C" uint32_t g_cp15_timing_generation = 1u;
+extern "C" uint32_t g_arm9_code_pub_gen = 0u;
+extern "C" uint32_t g_arm9_code_class_shift = 0u;
+extern "C" uint32_t g_arm9_itcm_code_limit = 0u;
 NdsCpu g_nds_active = NDS_ARM9;
 NdsBusFastWin g_busf_main = {};
 NdsBusFastWin g_busf_itcm = {};
@@ -22,7 +30,14 @@ extern "C" uint32_t runtime_code_cycles(uint32_t) { return 0; }
 extern "C" uint32_t arm9_refill_cycles(uint32_t) { return 0; }
 extern "C" void runtime_dispatch_bad_entry(uint32_t) {}
 extern "C" void runtime_dispatch_with_exchange(uint32_t) {}
-extern "C" void runtime_live_transfer(uint32_t, uint32_t, uint32_t) {}
+// runtime_live_transfer became an inline disarmed-flag test in runtime_arm.h
+// (beads-yjp.70 phase 2 B), so what a shard compiled today imports is the
+// published flag and the out-of-line tail -- which is what this harness has
+// to provide, exactly as it already provides runtime_tick_slow /
+// runtime_should_yield_slow rather than their inline spellings.
+// (g_runtime_live_transfer_trace itself comes from the REAL live_overlay.cpp,
+// which this target links; only the runtime-side tail is stubbed here.)
+extern "C" void runtime_live_transfer_slow(uint32_t, uint32_t, uint32_t) {}
 extern "C" void runtime_call_push_return(uint32_t) {}
 extern "C" int runtime_call_should_return(uint32_t) { return 0; }
 extern "C" void runtime_call_cancel_return(uint32_t) {}

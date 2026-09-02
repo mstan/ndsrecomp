@@ -5,6 +5,7 @@
 // slots). The vendored translation units are unmodified melonDS 1.0rc.
 
 #include "gpu3d.h"
+#include "host_profile.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -527,7 +528,12 @@ struct Thread {
 };
 
 Thread* Thread_Create(std::function<void()> func) {
-    return new Thread{std::thread(std::move(func))};
+    // Wrapped so the 3D worker registers itself with the always-on host
+    // sampler; the same reason as the 2D pool (host_profile.h).
+    return new Thread{std::thread([f = std::move(func)]() mutable {
+        NdsHostProfThreadScope hostprof_scope(NDS_HOSTPROF_ROLE_RENDER);
+        f();
+    })};
 }
 
 void Thread_Free(Thread* thread) { delete thread; }

@@ -412,6 +412,9 @@ add_executable(nds_runner
     src/dispatch_timing.cpp
     src/emu_profile.cpp
     src/pc_profile.cpp
+    src/host_prof_ring.cpp
+    src/host_unwind_x64.cpp
+    src/host_profile.cpp
     src/host_info.cpp
     src/perf_governor.cpp
     src/profile_report.cpp
@@ -766,6 +769,32 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_include_directories(perf_governor_test PRIVATE src)
   add_test(NAME perf_governor_test COMMAND perf_governor_test)
 
+  # Always-on host CPU sampler (host_profile.h). Three things are gated here:
+  # the sample ring's residency/eviction/tear rules, the leaf histogram, and --
+  # the one that actually needs proving -- the x64 .pdata/.xdata unwinder, both
+  # against a synthetic table the test builds itself AND against the OS's own
+  # RtlCaptureStackBackTrace over real compiler-generated prologues.
+  add_executable(host_prof_test
+      tests/host_prof_test.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
+      src/host_profile.cpp)
+  target_include_directories(host_prof_test PRIVATE src)
+  if(WIN32)
+    # beads-yjp.70: a scratch DLL with REAL toolchain-emitted unwind data, so
+    # the test can load it, walk it, FreeLibrary it, and then drive both
+    # sampler-side reads at its unmapped range. A module that vanishes out from
+    # under the module map used to fault the sampler and kill the process
+    # silently (no SEH in a MinGW build); this is the gate on that.
+    add_library(host_prof_probe_dll MODULE tests/host_prof_probe_dll.c)
+    set_target_properties(host_prof_probe_dll PROPERTIES
+        PREFIX "" OUTPUT_NAME "host_prof_probe")
+    add_dependencies(host_prof_test host_prof_probe_dll)
+    target_compile_definitions(host_prof_test PRIVATE
+        "NDS_HOST_PROF_PROBE_DLL=\"$<TARGET_FILE:host_prof_probe_dll>\"")
+  endif()
+  add_test(NAME host_prof_test COMMAND host_prof_test)
+
   add_executable(battery_save_test
       tests/battery_save_test.cpp
       src/battery_save.cpp)
@@ -803,6 +832,33 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
   add_test(NAME savestate_test COMMAND savestate_test)
 
+  # Bit-exactness rail for the fused timed-access fast path (yjp.70 ph2 B):
+  # sweeps every region boundary / width / seq / CPU / CP15 configuration
+  # asserting the inline path == the retained reference implementations.
+  # Same link set as savestate_test: the real bus + CP15 + runtime, device
+  # calls stubbed.
+  add_executable(mem_timing_test
+      tests/mem_timing_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      src/pc_profile.cpp)
+  target_include_directories(mem_timing_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(mem_timing_test)
+  target_link_libraries(mem_timing_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME mem_timing_test COMMAND mem_timing_test)
+
   add_executable(savestate_slots_test
       tests/savestate_slots_test.cpp
       src/savestate_slots.cpp)
@@ -828,6 +884,12 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/gpu3d.cpp
       src/dispatch_timing.cpp
       src/emu_profile.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
       vendor/melonds/GPU3D.cpp
       vendor/melonds/GPU3D_Soft.cpp
       vendor/melonds/Savestate.cpp)
@@ -896,7 +958,13 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       # live_overlay_poll() opens an NDS_EMU_OVERLAY region, whose accumulators
       # and tick calibration live in these two translation units.
       src/emu_profile.cpp
-      src/dispatch_timing.cpp)
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
   target_include_directories(live_overlay_preflight_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
@@ -936,13 +1004,44 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
+  # beads-yjp.70 phase 2A: the emitted inline code-fetch cost must equal
+  # runtime_code_cycles() exactly. Links the real bus/cp15 units (with the
+  # savestate test's device stubs) so it pins the runtime, not a model.
+  add_executable(code_cycles_fold_test
+      tests/code_cycles_fold_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      src/pc_profile.cpp)
+  target_include_directories(code_cycles_fold_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(code_cycles_fold_test)
+  target_link_libraries(code_cycles_fold_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME code_cycles_fold_test COMMAND code_cycles_fold_test)
+
   add_executable(gpu2d_window_test
       tests/gpu2d_window_test.cpp
       # The test #includes src/gpu2d.cpp wholesale, so it inherits the
       # NDS_EMU_RASTER2D region in nds_gpu2d_render_scanline and needs the
       # accumulators and tick calibration those two units define.
       src/emu_profile.cpp
-      src/dispatch_timing.cpp)
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
   target_include_directories(gpu2d_window_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
