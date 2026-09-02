@@ -1162,6 +1162,12 @@ std::string handle(const std::string& line) {
                std::to_string(s.mph_prime_controls_available) +
                ",\"mph_prime_controls_active\":" +
                std::to_string(s.mph_prime_controls_active) +
+               ",\"virtual_stylus_available\":" +
+               std::to_string(s.virtual_stylus_available) +
+               ",\"virtual_stylus_active\":" +
+               std::to_string(s.virtual_stylus_active) +
+               ",\"virtual_stylus_tap_held\":" +
+               std::to_string(s.virtual_stylus_tap_held) +
                ",\"relative_mouse_captured\":" +
                std::to_string(s.relative_mouse_captured) +
                ",\"keyboard_pressed\":" +

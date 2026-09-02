@@ -487,6 +487,13 @@ MphPadBinding parse_mph_pad_binding(const std::string& value,
     return {};
 }
 
+bool pad_binding_matches(const MphPadBinding& binding,
+                         MphPadInputKind kind,
+                         SDL_GameControllerButton button) {
+    if (binding.kind != kind) return false;
+    return kind != MphPadInputKind::Button || binding.button == button;
+}
+
 MphPadBindingSet make_mph_pad_bindings(
     const NdsMphPrimeControlBindings& source) {
     MphPadBindingSet set{};
@@ -2036,6 +2043,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     const bool mph_prime_unified_window_focus =
         mph_prime_controls_available &&
         options.mph_prime_unified_window_focus;
+    const bool virtual_stylus_available =
+        options.virtual_stylus.enabled && !mph_prime_controls_available;
     MphPrimeBindingSet mph_prime_bindings{};
     MphPadBindingSet mph_pad_bindings{};
     if (mph_prime_controls_available) {
@@ -2051,6 +2060,49 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             "virtual stylus sensitivity=%u%%\n",
             static_cast<unsigned>(
                 options.mph_virtual_stylus_sensitivity));
+    }
+    MphPrimeBinding virtual_stylus_binding =
+        parse_mph_prime_binding(options.virtual_stylus.binding);
+    MphPrimeBinding virtual_stylus_tap_binding =
+        parse_mph_prime_binding(options.virtual_stylus.tap_binding);
+    bool virtual_stylus_hold_recognized = true;
+    bool virtual_stylus_tap_recognized = true;
+    MphPadBinding virtual_stylus_pad_hold =
+        parse_mph_pad_binding(options.virtual_stylus.pad_hold_binding,
+                              &virtual_stylus_hold_recognized);
+    MphPadBinding virtual_stylus_pad_tap =
+        parse_mph_pad_binding(options.virtual_stylus.pad_tap_binding,
+                              &virtual_stylus_tap_recognized);
+    if (virtual_stylus_available &&
+        ((virtual_stylus_binding.kind == MphPrimeInputKind::None &&
+          binding_name_lower(options.virtual_stylus.binding) != "none" &&
+          binding_name_lower(options.virtual_stylus.binding) != "unbound") ||
+         (virtual_stylus_tap_binding.kind == MphPrimeInputKind::None &&
+          binding_name_lower(options.virtual_stylus.tap_binding) != "none" &&
+          binding_name_lower(options.virtual_stylus.tap_binding) != "unbound") ||
+         !virtual_stylus_hold_recognized ||
+         !virtual_stylus_tap_recognized)) {
+        std::fprintf(stderr,
+            "[sdl] invalid Virtual Stylus binding "
+            "(key=%s tap=%s pad_hold=%s pad_tap=%s)\n",
+            options.virtual_stylus.binding.c_str(),
+            options.virtual_stylus.tap_binding.c_str(),
+            options.virtual_stylus.pad_hold_binding.c_str(),
+            options.virtual_stylus.pad_tap_binding.c_str());
+        destroy_presentation(presentation);
+        SDL_Quit();
+        return 1;
+    }
+    if (virtual_stylus_available) {
+        std::fprintf(stderr,
+            "[sdl] Virtual Stylus: hold %s or %s; tap %s/%s or mouse left; "
+            "sensitivity=%u%% pad=%u%%\n",
+            options.virtual_stylus.binding.c_str(),
+            options.virtual_stylus.pad_hold_binding.c_str(),
+            options.virtual_stylus.tap_binding.c_str(),
+            options.virtual_stylus.pad_tap_binding.c_str(),
+            static_cast<unsigned>(options.virtual_stylus.sensitivity),
+            static_cast<unsigned>(options.virtual_stylus.pad_sensitivity));
     }
 
     SDL_GameController* controller = open_first_controller();
@@ -2094,6 +2146,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     // engaging while used and idling back out so the touchscreen and menus
     // keep working when the sticks rest.
     bool mph_prime_pad_engaged = false;
+    bool virtual_stylus_pointer_held = false;
+    bool virtual_stylus_pad_held = false;
+    bool virtual_stylus_tap_held = false;
+    bool virtual_stylus_capture_owned = false;
+    float virtual_stylus_pad_rem_x = 0.0f;
+    float virtual_stylus_pad_rem_y = 0.0f;
+    bool virtual_stylus_pad_trigger_left_held = false;
+    bool virtual_stylus_pad_trigger_right_held = false;
     int mph_pad_idle_frames = 0;
     float mph_pad_aim_rem_x = 0.0f;
     float mph_pad_aim_rem_y = 0.0f;
@@ -2105,6 +2165,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
     auto mph_prime_active = [&]() {
         return mph_prime_controls_available &&
                (relative_mouse.captured() || mph_prime_pad_engaged);
+    };
+    auto virtual_stylus_active = [&]() {
+        return virtual_stylus_available &&
+               (virtual_stylus_pointer_held || virtual_stylus_pad_held);
     };
     auto update_mph_prime_pressed = [&]() {
         uint16_t mask = 0;
@@ -2213,6 +2277,100 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             ++mph_prime_mouse_downs;
         return consumed;
     };
+    auto release_virtual_stylus_capture = [&]() {
+        if (!virtual_stylus_capture_owned) return;
+        if (!relative_mouse.captured()) {
+            sdl_set_relative_mouse_mode(presentation.windows[0], false);
+            SDL_CaptureMouse(SDL_FALSE);
+        }
+        virtual_stylus_capture_owned = false;
+    };
+    auto clear_virtual_stylus = [&]() {
+        virtual_stylus_pointer_held = false;
+        virtual_stylus_pad_held = false;
+        virtual_stylus_tap_held = false;
+        virtual_stylus_pad_rem_x = 0.0f;
+        virtual_stylus_pad_rem_y = 0.0f;
+        nds_set_touch(0, 0, false);
+        release_virtual_stylus_capture();
+    };
+    auto capture_virtual_stylus_mouse = [&]() {
+        if (!virtual_stylus_available || virtual_stylus_capture_owned ||
+            relative_mouse.captured()) {
+            return;
+        }
+        if (!sdl_set_relative_mouse_mode(presentation.windows[0], true)) {
+            std::fprintf(stderr,
+                         "[sdl] Virtual Stylus capture failed: %s\n",
+                         SDL_GetError());
+            return;
+        }
+        SDL_CaptureMouse(SDL_TRUE);
+        SDL_GetRelativeMouseState(nullptr, nullptr);
+        virtual_stylus_capture_owned = true;
+    };
+    auto set_virtual_stylus_pointer_hold = [&](bool down) {
+        if (!virtual_stylus_available) return false;
+        virtual_stylus_pointer_held = down;
+        if (down)
+            capture_virtual_stylus_mouse();
+        else if (!virtual_stylus_pad_held) {
+            virtual_stylus_tap_held = false;
+            release_virtual_stylus_capture();
+            nds_set_touch(0, 0, false);
+        }
+        return true;
+    };
+    auto set_virtual_stylus_pad_hold = [&](bool down) {
+        if (!virtual_stylus_available) return false;
+        virtual_stylus_pad_held = down;
+        if (!down && !virtual_stylus_pointer_held) {
+            virtual_stylus_tap_held = false;
+            nds_set_touch(0, 0, false);
+        }
+        return true;
+    };
+    auto process_virtual_stylus_key = [&](SDL_Scancode key, bool down) {
+        if (binding_matches_key(virtual_stylus_binding, key))
+            return set_virtual_stylus_pointer_hold(down);
+        if (binding_matches_key(virtual_stylus_tap_binding, key)) {
+            if (down) {
+                if (!virtual_stylus_active()) return true;
+                virtual_stylus_tap_held = true;
+            } else {
+                virtual_stylus_tap_held = false;
+            }
+            return true;
+        }
+        return false;
+    };
+    auto process_virtual_stylus_mouse_hold = [&](uint8_t button, bool down) {
+        return binding_matches_mouse(virtual_stylus_binding, button) &&
+               set_virtual_stylus_pointer_hold(down);
+    };
+    auto process_virtual_stylus_mouse_tap = [&](uint8_t button, bool down) {
+        if (!binding_matches_mouse(virtual_stylus_tap_binding, button))
+            return false;
+        if (down) {
+            if (!virtual_stylus_active()) return true;
+            virtual_stylus_tap_held = true;
+        } else {
+            virtual_stylus_tap_held = false;
+        }
+        return true;
+    };
+    auto process_virtual_stylus_pad = [&](MphPadInputKind kind,
+                                          SDL_GameControllerButton button,
+                                          bool down) {
+        if (pad_binding_matches(virtual_stylus_pad_hold, kind, button))
+            return set_virtual_stylus_pad_hold(down);
+        if (virtual_stylus_active() &&
+            pad_binding_matches(virtual_stylus_pad_tap, kind, button)) {
+            virtual_stylus_tap_held = down;
+            return true;
+        }
+        return false;
+    };
     auto release_relative_mouse = [&]() {
         if (relative_mouse.captured()) {
             sdl_set_relative_mouse_mode(presentation.windows[0], false);
@@ -2226,6 +2384,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             publish_keys();
         }
         clear_mph_prime_controls();
+        clear_virtual_stylus();
         publish_keys();
         relative_delta_x = 0;
         relative_delta_y = 0;
@@ -2333,6 +2492,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             mph_prime_controls_available ? 1 : 0;
         g_input_debug.mph_prime_controls_active =
             mph_prime_active() ? 1 : 0;
+        g_input_debug.virtual_stylus_available =
+            virtual_stylus_available ? 1 : 0;
+        g_input_debug.virtual_stylus_active =
+            virtual_stylus_active() ? 1 : 0;
+        g_input_debug.virtual_stylus_tap_held =
+            virtual_stylus_tap_held ? 1 : 0;
         g_input_debug.relative_mouse_captured =
             relative_mouse.captured() ? 1 : 0;
         g_input_debug.keyboard_pressed = keyboard_pressed;
@@ -2699,10 +2864,12 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         }
                     }
                 } else if (scancode == SDL_SCANCODE_ESCAPE) {
-                    if (relative_mouse.captured())
+                    if (relative_mouse.captured() || virtual_stylus_active())
                         release_relative_mouse();
                     else
                         running = false;
+                } else if (process_virtual_stylus_key(scancode, true)) {
+                    // Consumed by the generic lower-screen pointer helper.
                 } else if (process_mph_prime_key(
                                scancode, true, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
@@ -2720,7 +2887,9 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             }
             if (event.type == SDL_KEYUP && !event.key.repeat) {
                 const SDL_Scancode scancode = sdl_event_scancode(event);
-                if (process_mph_prime_key(
+                if (process_virtual_stylus_key(scancode, false)) {
+                    // Consumed by the generic lower-screen pointer helper.
+                } else if (process_mph_prime_key(
                         scancode, false, false)) {
                     // Consumed by the MPH-specific keyboard/mouse layer.
                 } else if (options.tab_turbo &&
@@ -2753,12 +2922,16 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 // Pad-held Prime actions must not survive the device; the
                 // keyboard/mouse can re-press theirs on the next event.
                 clear_mph_prime_controls();
+                clear_virtual_stylus();
                 publish_keys();
             }
             if (event.type == SDL_CONTROLLERBUTTONDOWN) {
                 const auto button = static_cast<SDL_GameControllerButton>(
                     sdl_controller_button(event));
-                if (process_mph_prime_pad(MphPadInputKind::Button, button,
+                if (process_virtual_stylus_pad(MphPadInputKind::Button,
+                                               button, true)) {
+                    // Consumed by the generic lower-screen pointer helper.
+                } else if (process_mph_prime_pad(MphPadInputKind::Button, button,
                                           true)) {
                     // Consumed by Prime Controls.
                 } else if (const uint16_t bit = controller_bit(button)) {
@@ -2769,7 +2942,10 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             if (event.type == SDL_CONTROLLERBUTTONUP) {
                 const auto button = static_cast<SDL_GameControllerButton>(
                     sdl_controller_button(event));
-                if (process_mph_prime_pad(MphPadInputKind::Button, button,
+                if (process_virtual_stylus_pad(MphPadInputKind::Button,
+                                               button, false)) {
+                    // Consumed by the generic lower-screen pointer helper.
+                } else if (process_mph_prime_pad(MphPadInputKind::Button, button,
                                           false)) {
                     // Consumed by Prime Controls.
                 } else if (const uint16_t bit = controller_bit(button)) {
@@ -2796,7 +2972,23 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                         relative_mouse.captured(), stacked_top_screen,
                         stacked_bottom_touch, event.button.x, event.button.y)
                     : NdsStackedRelativeMouseRoute::None;
-            if (relative_left_down && options.relative_mouse_touch &&
+            bool virtual_stylus_mouse_consumed = false;
+            if (event.type == SDL_MOUSEBUTTONDOWN &&
+                is_presentation_window(event.button.windowID)) {
+                if (process_virtual_stylus_mouse_hold(
+                        event.button.button, true)) {
+                    virtual_stylus_mouse_consumed = true;
+                } else if (process_virtual_stylus_mouse_tap(
+                               event.button.button, true)) {
+                    virtual_stylus_mouse_consumed = true;
+                } else if (event.button.button == SDL_BUTTON_LEFT &&
+                           virtual_stylus_active()) {
+                    virtual_stylus_tap_held = true;
+                    virtual_stylus_mouse_consumed = true;
+                }
+            }
+            if (!virtual_stylus_mouse_consumed &&
+                relative_left_down && options.relative_mouse_touch &&
                 (presentation.separate ||
                  stacked_left_route ==
                      NdsStackedRelativeMouseRoute::AcquireRelative ||
@@ -2814,7 +3006,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     publish_keys();
                 }
             }
-            if (event.type == SDL_MOUSEBUTTONDOWN &&
+            if (!virtual_stylus_mouse_consumed &&
+                event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button != SDL_BUTTON_LEFT &&
                 (event.button.windowID == presentation.window_ids[0] ||
                  (mph_prime_unified_window_focus &&
@@ -2823,6 +3016,21 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 // Consumed by Prime Controls.
             }
             if (event.type == SDL_MOUSEBUTTONUP &&
+                is_presentation_window(event.button.windowID)) {
+                if (process_virtual_stylus_mouse_hold(
+                        event.button.button, false)) {
+                    virtual_stylus_mouse_consumed = true;
+                } else if (process_virtual_stylus_mouse_tap(
+                               event.button.button, false)) {
+                    virtual_stylus_mouse_consumed = true;
+                } else if (event.button.button == SDL_BUTTON_LEFT &&
+                           virtual_stylus_tap_held) {
+                    virtual_stylus_tap_held = false;
+                    virtual_stylus_mouse_consumed = true;
+                }
+            }
+            if (!virtual_stylus_mouse_consumed &&
+                event.type == SDL_MOUSEBUTTONUP &&
                 (event.button.windowID == presentation.window_ids[0] ||
                  (mph_prime_unified_window_focus &&
                   is_presentation_window(event.button.windowID))) &&
@@ -2837,7 +3045,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                     publish_keys();
                 }
             }
-            if (event.type == SDL_MOUSEBUTTONDOWN &&
+            if (!virtual_stylus_mouse_consumed &&
+                event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
                 !(mph_prime_unified_window_focus &&
@@ -2857,7 +3066,8 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                                      options.screen_layout,
                                      bottom_logical_width);
             }
-            if (event.type == SDL_MOUSEBUTTONUP &&
+            if (!virtual_stylus_mouse_consumed &&
+                event.type == SDL_MOUSEBUTTONUP &&
                 event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == presentation.window_ids[1] &&
                 mouse_down) {
@@ -2878,6 +3088,20 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                                      options.screen_layout,
                                      bottom_logical_width);
             if (event.type == SDL_MOUSEMOTION &&
+                virtual_stylus_active() &&
+                (event.motion.windowID == presentation.window_ids[0] ||
+                 is_presentation_window(event.motion.windowID) ||
+                 event.motion.windowID == 0)) {
+                mph_virtual_x +=
+                    static_cast<float>(event.motion.xrel) *
+                    options.virtual_stylus.sensitivity * 0.01f;
+                mph_virtual_y +=
+                    static_cast<float>(event.motion.yrel) *
+                    (256.0f / 192.0f) *
+                    options.virtual_stylus.sensitivity * 0.01f;
+                mph_virtual_x = std::clamp(mph_virtual_x, 0.0f, 255.0f);
+                mph_virtual_y = std::clamp(mph_virtual_y, 0.0f, 191.0f);
+            } else if (event.type == SDL_MOUSEMOTION &&
                 relative_mouse.captured() &&
                 (event.motion.windowID == presentation.window_ids[0] ||
                  (mph_prime_unified_window_focus &&
@@ -2946,6 +3170,54 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             stick_dir(lx, 1u << 5, false);   // Left
             stick_dir(ly, 1u << 6, false);   // Up (SDL Y axis points down)
             stick_dir(ly, 1u << 7, true);    // Down
+
+            if (virtual_stylus_available) {
+                const float rx = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+                const float ry = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+                const bool trigger_right = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 9830;
+                const bool trigger_left = SDL_GameControllerGetAxis(
+                    controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 9830;
+                if (trigger_right != virtual_stylus_pad_trigger_right_held) {
+                    virtual_stylus_pad_trigger_right_held = trigger_right;
+                    process_virtual_stylus_pad(MphPadInputKind::TriggerRight,
+                                              SDL_CONTROLLER_BUTTON_INVALID,
+                                              trigger_right);
+                }
+                if (trigger_left != virtual_stylus_pad_trigger_left_held) {
+                    virtual_stylus_pad_trigger_left_held = trigger_left;
+                    process_virtual_stylus_pad(MphPadInputKind::TriggerLeft,
+                                              SDL_CONTROLLER_BUTTON_INVALID,
+                                              trigger_left);
+                }
+                const float mag = std::sqrt(rx * rx + ry * ry);
+                constexpr float kVirtualStylusDeadzone = 0.25f;
+                if (virtual_stylus_active() && mag > kVirtualStylusDeadzone) {
+                    const float curved =
+                        (mag - kVirtualStylusDeadzone) /
+                        (1.0f - kVirtualStylusDeadzone);
+                    const float rate = curved * curved * 5.0f *
+                        (options.virtual_stylus.pad_sensitivity / 100.0f) /
+                        mag;
+                    virtual_stylus_pad_rem_x += rx * rate;
+                    virtual_stylus_pad_rem_y += ry * rate *
+                        (256.0f / 192.0f);
+                    const int32_t pad_x =
+                        static_cast<int32_t>(virtual_stylus_pad_rem_x);
+                    const int32_t pad_y =
+                        static_cast<int32_t>(virtual_stylus_pad_rem_y);
+                    virtual_stylus_pad_rem_x -= static_cast<float>(pad_x);
+                    virtual_stylus_pad_rem_y -= static_cast<float>(pad_y);
+                    mph_virtual_x = std::clamp(
+                        mph_virtual_x + static_cast<float>(pad_x),
+                        0.0f, 255.0f);
+                    mph_virtual_y = std::clamp(
+                        mph_virtual_y + static_cast<float>(pad_y),
+                        0.0f, 191.0f);
+                }
+            }
 
             if (mph_prime_controls_available) {
                 // Right stick -> camera aim; triggers act as bindable
@@ -3019,16 +3291,30 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
                 process_mph_prime_pad(MphPadInputKind::TriggerLeft,
                                       SDL_CONTROLLER_BUTTON_INVALID, false);
             }
+            if (virtual_stylus_pad_trigger_right_held) {
+                virtual_stylus_pad_trigger_right_held = false;
+                process_virtual_stylus_pad(MphPadInputKind::TriggerRight,
+                                          SDL_CONTROLLER_BUTTON_INVALID,
+                                          false);
+            }
+            if (virtual_stylus_pad_trigger_left_held) {
+                virtual_stylus_pad_trigger_left_held = false;
+                process_virtual_stylus_pad(MphPadInputKind::TriggerLeft,
+                                          SDL_CONTROLLER_BUTTON_INVALID,
+                                          false);
+            }
             if (mph_prime_pad_engaged) {
                 mph_prime_pad_engaged = false;
                 if (!relative_mouse.captured()) nds_set_touch(0, 0, false);
             }
+            if (virtual_stylus_pad_held) clear_virtual_stylus();
         }
 
         const bool mph_prime_is_active = mph_prime_active();
         const bool mph_prime_virtual_stylus = mph_prime_is_active &&
             mph_prime_held[static_cast<size_t>(
                 MphPrimeAction::VirtualStylus)];
+        const bool generic_virtual_stylus = virtual_stylus_active();
 
         const bool turbo_want = turbo_pressed || nds_debug_turbo();
         if (turbo_want != turbo_active) {
@@ -3073,7 +3359,11 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             relative_delta_x = 0;
             relative_delta_y = 0;
         }
-        if (mph_prime_is_active) {
+        if (generic_virtual_stylus) {
+            nds_set_touch(static_cast<uint16_t>(std::lround(mph_virtual_x)),
+                          static_cast<uint16_t>(std::lround(mph_virtual_y)),
+                          virtual_stylus_tap_held);
+        } else if (mph_prime_is_active) {
             if (mph_touch_sequence.active()) {
                 mph_touch_sequence.tick();
             } else if (mph_prime_virtual_stylus) {
@@ -3193,7 +3483,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             const PresentationTicks synthetic_ticks = present_screens(
                 presentation, blend_cache.blended[0].data(), top_width,
                 blend_cache.blended[1].data(), bottom_width,
-                mph_prime_virtual_stylus,
+                mph_prime_virtual_stylus || generic_virtual_stylus,
                 mph_virtual_x, mph_virtual_y,
                 savestate_notice.empty() ? nullptr : savestate_notice.c_str());
             if (!synthetic_ticks.ok) {
@@ -3216,7 +3506,7 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
         const PresentationTicks presentation_ticks = present_screens(
             presentation, top_pixels, top_width,
             bottom_pixels, bottom_width,
-            mph_prime_virtual_stylus,
+            mph_prime_virtual_stylus || generic_virtual_stylus,
             mph_virtual_x, mph_virtual_y,
             savestate_notice.empty() ? nullptr : savestate_notice.c_str());
         if (!presentation_ticks.ok) {
