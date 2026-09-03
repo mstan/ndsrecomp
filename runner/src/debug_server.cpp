@@ -257,6 +257,20 @@ std::string counts_json() {
     return buf;
 }
 
+std::string adaptive_fallback_json(const uint64_t* values) {
+    std::string result = "{";
+    for (uint32_t index = 0; index < NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT;
+         ++index) {
+        if (index != 0u) result += ",";
+        result += "\"";
+        result += nds_gpu2d_adaptive_fallback_name(index);
+        result += "\":";
+        result += std::to_string(values[index]);
+    }
+    result += "}";
+    return result;
+}
+
 std::string direct_class_json(const uint64_t* values) {
     std::string result = "{";
     for (uint32_t index = 0; index < NDS_GPU2D_DIRECT_CLASS_COUNT; ++index) {
@@ -1451,6 +1465,8 @@ std::string handle(const std::string& line) {
         scheduler_profile(&sched);
         const std::string direct_class_frames =
             direct_class_json(gpu.direct_class_frames);
+        const std::string adaptive_fallback_frames =
+            adaptive_fallback_json(gpu.adaptive_fallback_frames);
         const std::string direct_class_engine_a_ns =
             direct_class_json(gpu.direct_class_engine_a_ns);
         const std::string direct_extra_bg_mask_frames =
@@ -1499,6 +1515,8 @@ std::string handle(const std::string& line) {
                ",\"direct_frames\":" +
                std::to_string(gpu.direct_frames) +
                ",\"direct_class_frames\":" + direct_class_frames +
+               ",\"adaptive_fallback_frames\":" +
+               adaptive_fallback_frames +
                ",\"direct_class_engine_a_ns\":" +
                direct_class_engine_a_ns +
                ",\"hd_frames\":" + std::to_string(gpu.hd_frames) +

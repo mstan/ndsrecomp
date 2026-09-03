@@ -187,6 +187,27 @@ enum NdsGpu2dDirectClass : uint8_t {
     NDS_GPU2D_DIRECT_CLASS_COUNT,
 };
 const char* nds_gpu2d_direct_class_name(uint32_t index);
+
+// Why nds_gpu2d_adaptive_framebuffer() handed the presenter a native-width
+// composite centred in the adaptive window (a pillarboxed frame) instead of
+// compositing the scene at the adaptive width. WIDE counts the frames that
+// were composited wide.
+enum NdsGpu2dAdaptiveFallback : uint8_t {
+    NDS_GPU2D_ADAPTIVE_WIDE = 0,
+    NDS_GPU2D_ADAPTIVE_ENGINE_B,
+    NDS_GPU2D_ADAPTIVE_CENTER_NATIVE,
+    NDS_GPU2D_ADAPTIVE_LOW_POLYGON,
+    NDS_GPU2D_ADAPTIVE_RENDERER_VIEW,
+    NDS_GPU2D_ADAPTIVE_FORCE_BLANK,
+    NDS_GPU2D_ADAPTIVE_DISPLAY_MODE,
+    NDS_GPU2D_ADAPTIVE_NO_BG0_3D,
+    NDS_GPU2D_ADAPTIVE_HUD_BG,
+    NDS_GPU2D_ADAPTIVE_RENDER_XPOS,
+    NDS_GPU2D_ADAPTIVE_CAPTURE,
+    NDS_GPU2D_ADAPTIVE_TITLE_CENTERED,
+    NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT,
+};
+const char* nds_gpu2d_adaptive_fallback_name(uint32_t index);
 constexpr uint32_t NDS_GPU2D_DIRECT_BG_MASK_COUNT = 8;
 constexpr uint32_t NDS_GPU2D_DIRECT_BG_MODE_COUNT = 8;
 constexpr uint32_t NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT = 4;
@@ -231,6 +252,10 @@ struct NdsGpu2dProfile {
     uint64_t adaptive_band_frames;
     uint64_t adaptive_serial_frames;
     uint64_t adaptive_helper_lines;
+    // Per-frame outcome of the adaptive compositor, indexed by
+    // NdsGpu2dAdaptiveFallback. Only counted while the adaptive width is
+    // above native.
+    uint64_t adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT];
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);
 void nds_gpu2d_profile_reset();

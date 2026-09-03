@@ -176,6 +176,7 @@ uint64_t g_hd_frames = 0;
 uint64_t g_hd_presented = 0;
 uint64_t g_direct_overlay_ns = 0;
 uint64_t g_direct_class_frames[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
+uint64_t g_adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT] = {};
 uint64_t g_direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
 uint64_t g_direct_class_transitions = 0;
 uint64_t g_direct_extra_bg_mask_frames[NDS_GPU2D_DIRECT_BG_MASK_COUNT] = {};
@@ -2632,10 +2633,11 @@ void composite_adaptive_line(const AdaptiveCtx& c, int y,
         }
         // Rectangular windows use the same native coordinate as the HUD
         // source. In the 3D-only widened margins there is no native 2D
-        // source; selection still supplies the correct OBJ-window/outside
-        // mask, and HD eligibility guarantees BG0/effects remain enabled.
-        const uint8_t window_x = static_cast<uint8_t>(
-            hud_x >= 0 ? hud_x : x);
+        // source; the nearest native edge column supplies the rectangular
+        // window status there (see nds_gpu2d_adaptive_window_x), and the
+        // OBJ-window coverage is rasterized at the adaptive width.
+        const uint8_t window_x =
+            nds_gpu2d_adaptive_window_x(x, extra, hud_x);
         const uint8_t window_mask = nds_gpu2d_window_mask(
             window_state, window_x, static_cast<uint8_t>(y),
             obj_window[x] != 0u);
@@ -2868,25 +2870,22 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                 static_cast<size_t>(output_width) * 192u,
                 0xFF000000u);
     const int extra = (output_width - 256) / 2;
-    if (engine != 0) {
+    // Native-width composite centred in the adaptive window. Every reason is
+    // counted so a pillarboxed title can be diagnosed from the live counters
+    // (frontend_stats / profile) instead of by guessing.
+    auto center_native = [&](NdsGpu2dAdaptiveFallback reason) {
+        ++g_adaptive_fallback_frames[reason];
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
                         adaptive.data() + y * output_width + extra);
         return adaptive.data();
-    }
-    if (g_adaptive_center_native) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+    };
+    if (engine != 0) return center_native(NDS_GPU2D_ADAPTIVE_ENGINE_B);
+    if (g_adaptive_center_native)
+        return center_native(NDS_GPU2D_ADAPTIVE_CENTER_NATIVE);
     if (g_adaptive_center_max_polygons != 0u &&
-        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons)
+        return center_native(NDS_GPU2D_ADAPTIVE_LOW_POLYGON);
 
     Unit& u = g_unit[0];
     const uint8_t* const palette = nds_vram_renderer_palette(0);
@@ -2909,18 +2908,36 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
         }
     }
     const NdsGpu2dWindowState window_state{u.dispcnt, u.win};
-    const bool windows_supported = nds_gpu2d_windows_support_hd(window_state);
-    const bool supported_scene =
-        palette && oam && vram && !(u.dispcnt & 0x80u) &&
-        mode == 1u && bg0_3d && supported_hud_bgs && windows_supported &&
-        nds_gpu3d_render_xpos() == 0u && !g_present_capture_active &&
-        !nds_title_patches_mph_adaptive_centered_native();
-    if (!supported_scene) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+    // DS windows do not disqualify a scene from wide composition: the
+    // compositor applies the full per-pixel window mask (rectangular windows
+    // through the native edge-column mapping, the OBJ window from its own
+    // wide-rasterized coverage). Titles such as Mario Kart DS race with
+    // Win0/Win1/OBJ-window enabled on every frame, and treating that as
+    // unsupported pillarboxes them. What windows DO gate is the HD surface
+    // emission below: the accelerated presenter reinserts the 3D layer itself
+    // and cannot honour a mask that removes BG0, so it stands down for those
+    // scenes and the CPU composite is presented instead.
+    const bool windows_support_hd =
+        nds_gpu2d_windows_support_hd(window_state);
+    NdsGpu2dAdaptiveFallback reject = NDS_GPU2D_ADAPTIVE_WIDE;
+    if (!palette || !oam || !vram)
+        reject = NDS_GPU2D_ADAPTIVE_RENDERER_VIEW;
+    else if (u.dispcnt & 0x80u)
+        reject = NDS_GPU2D_ADAPTIVE_FORCE_BLANK;
+    else if (mode != 1u)
+        reject = NDS_GPU2D_ADAPTIVE_DISPLAY_MODE;
+    else if (!bg0_3d)
+        reject = NDS_GPU2D_ADAPTIVE_NO_BG0_3D;
+    else if (!supported_hud_bgs)
+        reject = NDS_GPU2D_ADAPTIVE_HUD_BG;
+    else if (nds_gpu3d_render_xpos() != 0u)
+        reject = NDS_GPU2D_ADAPTIVE_RENDER_XPOS;
+    else if (g_present_capture_active)
+        reject = NDS_GPU2D_ADAPTIVE_CAPTURE;
+    else if (nds_title_patches_mph_adaptive_centered_native())
+        reject = NDS_GPU2D_ADAPTIVE_TITLE_CENTERED;
+    if (reject != NDS_GPU2D_ADAPTIVE_WIDE) return center_native(reject);
+    ++g_adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_WIDE];
 
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{
@@ -2946,7 +2963,8 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     // surfaces would be applied to the wrong window. The direct path rejects
     // that case as SCREEN_ROUTE for the same reason.
     const bool emit_hd =
-        g_hd_emit_enabled && !g_adaptive_skybox_fill && screen == 0;
+        g_hd_emit_enabled && !g_adaptive_skybox_fill && screen == 0 &&
+        windows_support_hd;
     if (emit_hd) {
         const size_t needed =
             static_cast<size_t>(output_width) * 192u * 2u;
@@ -3066,6 +3084,9 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
                     &out->adaptive_helper_lines);
     std::copy_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT,
                 out->fence_drains);
+    std::copy_n(g_adaptive_fallback_frames,
+                NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT,
+                out->adaptive_fallback_frames);
     std::copy_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT,
                 out->fenced_lines);
 }
@@ -3083,6 +3104,8 @@ void nds_gpu2d_profile_reset() {
     g_hd_presented = 0;
     g_direct_overlay_ns = 0;
     std::fill_n(g_direct_class_frames, NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
+    std::fill_n(g_adaptive_fallback_frames,
+                NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT, 0u);
     std::fill_n(g_direct_class_engine_a_ns,
                 NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
     std::fill_n(g_direct_extra_bg_mask_frames,
@@ -3125,4 +3148,23 @@ const char* nds_gpu2d_direct_class_name(uint32_t index) {
         "center_native",
     };
     return index < NDS_GPU2D_DIRECT_CLASS_COUNT ? kNames[index] : "unknown";
+}
+
+const char* nds_gpu2d_adaptive_fallback_name(uint32_t index) {
+    static constexpr const char* kNames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT] = {
+        "wide",
+        "engine_b",
+        "center_native",
+        "low_polygon",
+        "renderer_view",
+        "force_blank",
+        "display_mode",
+        "no_bg0_3d",
+        "hud_bg",
+        "render_xpos",
+        "capture",
+        "title_centered",
+    };
+    return index < NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT ? kNames[index]
+                                                     : "unknown";
 }

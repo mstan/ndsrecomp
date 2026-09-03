@@ -23,6 +23,9 @@ bool g_lcdc_mapped = false;
 uint16_t g_3d_output_width = 256;
 uint16_t g_3d_render_xpos = 0;
 uint32_t g_3d_render_polygon_count = 0;
+// Optional per-test adjustment of the adaptive fixture scene, applied after
+// the base registers are written and before the frame is rendered.
+std::function<void(Unit&)> g_scene_tweak;
 
 bool require(bool value) { return value; }
 
@@ -516,6 +519,7 @@ void run_adaptive_frame(AdaptiveRun& out) {
     u.master_bright = 0;
     u.capture = 0;
     g_unit[1].dispcnt = 0x00010000u;
+    if (g_scene_tweak) g_scene_tweak(u);
 
     nds_gpu2d_start_frame();
     for (int y = 0; y < 192; ++y) nds_gpu2d_render_scanline(y);
@@ -540,6 +544,101 @@ void run_adaptive_frame(AdaptiveRun& out) {
     out.serial_frames = prof.adaptive_serial_frames;
     out.helper_lines = prof.adaptive_helper_lines;
     nds_gpu2d_set_hd_emit(false);
+}
+
+bool test_adaptive_window_x() {
+    // HUD-sourced columns keep their native coordinate; margins clamp to the
+    // nearest native edge column instead of wrapping through uint8_t.
+    constexpr int extra = (448 - 256) / 2;
+    return require(nds_gpu2d_adaptive_window_x(100, extra, 4) == 4) &&
+           require(nds_gpu2d_adaptive_window_x(0, extra, -1) == 0) &&
+           require(nds_gpu2d_adaptive_window_x(95, extra, -1) == 0) &&
+           require(nds_gpu2d_adaptive_window_x(96, extra, -1) == 0) &&
+           require(nds_gpu2d_adaptive_window_x(200, extra, -1) == 104) &&
+           require(nds_gpu2d_adaptive_window_x(351, extra, -1) == 255) &&
+           require(nds_gpu2d_adaptive_window_x(352, extra, -1) == 255) &&
+           require(nds_gpu2d_adaptive_window_x(447, extra, -1) == 255);
+}
+
+// Mario Kart DS races with Win0/Win1/OBJ-window enabled on every frame
+// (DISPCNT 0x0001F108, WININ 0x3F3F, WINOUT 0x322F): the OBJ window is the
+// item-box hole whose mask drops BG0/3D. Such a scene must still be
+// composited at the adaptive width -- with the OBJ window honoured per pixel
+// -- and only the HD surface emission may stand down for it.
+bool test_adaptive_windowed_scene_composites_wide() {
+    static std::array<uint8_t, 0x4000> obj_vram{};
+    obj_vram.fill(0);
+    for (int x = 0; x < 8; ++x)
+        for (int y = 0; y < 8; ++y) set_4bpp_index(obj_vram, x, y, 1);
+    nds_gpu2d_set_adaptive_workers(0);
+
+    AdaptiveRun plain{};
+    g_scene_tweak = [](Unit&) { g_view.obj[0] = obj_vram.data(); };
+    run_adaptive_frame(plain);
+    g_scene_tweak = nullptr;
+
+    auto windowed = [&](uint8_t obj_mask, AdaptiveRun& out,
+                        NdsGpu2dProfile& prof) {
+        g_scene_tweak = [obj_mask](Unit& u) {
+            g_view.obj[0] = obj_vram.data();
+            u.dispcnt |= NDS_GPU2D_DISPCNT_WINDOW_ENABLE_MASK;
+            u.win[8] = 0x3Fu;   // WININ  window 0: everything
+            u.win[9] = 0x3Fu;   //        window 1: everything
+            u.win[10] = 0x2Fu;  // WINOUT outside: BG0-3 + effects
+            u.win[11] = obj_mask;  // OBJ window
+            // Rectangles left empty: only the OBJ window is reachable. An
+            // 8x8 OBJ-window sprite at native (16, 32) -> wide x 112..119.
+            set_obj(2, 0x0020u | (2u << 10u), 0x0010u, 0x0000u);
+        };
+        run_adaptive_frame(out);
+        nds_gpu2d_profile(&prof);
+        g_scene_tweak = nullptr;
+    };
+
+    constexpr int extra = (448 - 256) / 2;
+    AdaptiveRun mkds{};
+    NdsGpu2dProfile mkds_prof{};
+    windowed(0x32u, mkds, mkds_prof);
+    if (!require(plain.width == 448) || !require(mkds.width == 448))
+        return false;
+    // Composited wide, not centred: the frame counter says so and the 3D
+    // margins carry the same content as the unwindowed reference.
+    if (!require(mkds_prof.adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_WIDE] ==
+                 1u))
+        return false;
+    for (int y : {8, 100, 180}) {
+        for (int x : {0, 10, extra - 1, extra + 256, 440, 447}) {
+            const size_t i = static_cast<size_t>(y) * 448u + x;
+            if (!require(mkds.surface[i] == plain.surface[i])) return false;
+            if (!require(mkds.surface[i] != 0xFF000000u)) return false;
+        }
+    }
+    // Inside the OBJ window the mask 0x32 removes BG0/3D, so the pixel
+    // differs from the reference wherever the 3D layer is opaque there.
+    bool masked = false;
+    for (int y = 32; y < 40; ++y) {
+        for (int x = extra + 16; x < extra + 24; ++x) {
+            const size_t i = static_cast<size_t>(y) * 448u + x;
+            if (((g_3d_line[x] >> 24) & 0x1Fu) != 0u &&
+                mkds.surface[i] != plain.surface[i])
+                masked = true;
+        }
+    }
+    if (!require(masked)) return false;
+    // Outside the sprite the same rows match the reference exactly.
+    for (int y = 32; y < 40; ++y) {
+        const size_t i = static_cast<size_t>(y) * 448u + extra + 40;
+        if (!require(mkds.surface[i] == plain.surface[i])) return false;
+    }
+    // HD stands down for the BG0-less OBJ-window mask, but not for one that
+    // keeps BG0 (0x33), and the CPU composite is wide in both cases.
+    if (!require(plain.hd_valid) || !require(!mkds.hd_valid)) return false;
+    AdaptiveRun hd_ok{};
+    NdsGpu2dProfile hd_prof{};
+    windowed(0x33u, hd_ok, hd_prof);
+    return require(hd_ok.width == 448) && require(hd_ok.hd_valid) &&
+           require(hd_prof.adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_WIDE] ==
+                   1u);
 }
 
 bool test_adaptive_helpers_match_serial() {
@@ -648,5 +747,7 @@ int main() {
     if (!test_obj_window_coverage()) return 9;
     if (!test_capture_serializes_and_matches()) return 10;
     if (!test_adaptive_helpers_match_serial()) return 11;
+    if (!test_adaptive_window_x()) return 12;
+    if (!test_adaptive_windowed_scene_composites_wide()) return 13;
     return 0;
 }
