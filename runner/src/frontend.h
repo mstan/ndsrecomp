@@ -174,6 +174,20 @@ struct NdsMphPrimeControlBindings {
 // own dual-stick adaptation of its keyboard/mouse scheme.
 NdsMphPrimeControlBindings nds_default_mph_pad_bindings();
 
+struct NdsVirtualStylusOptions {
+    // Default-on lower-screen pointer helper: hold key/pad_hold to show the
+    // cursor, move it with relative mouse motion or the right stick, and tap
+    // with mouse left / pad_tap. Title-specific control layers may suppress
+    // this when they own the same inputs.
+    bool enabled = true;
+    std::string binding = "Tab";
+    std::string tap_binding = "None";
+    std::string pad_hold_binding = "Pad LT";
+    std::string pad_tap_binding = "Pad A";
+    uint16_t sensitivity = 20;      // 10%..400%
+    uint16_t pad_sensitivity = 100; // 10%..400%
+};
+
 struct NdsFrontendOptions {
     // Optional exact cartridge identity from [game]. When present, every
     // title-owned setting in this config is rejected for any other ROM.
@@ -272,6 +286,7 @@ struct NdsFrontendOptions {
     // Active-high frontend pressed-bit mask (same layout as key_bit()).
     uint16_t relative_mouse_fire_mask = 0;
     bool mph_prime_controls = false;
+    NdsVirtualStylusOptions virtual_stylus{};
     // Default-off compatibility switch for titles that want relative mouse
     // capture to persist across separate top/bottom presentation windows.
     bool mph_prime_unified_window_focus = false;
@@ -410,6 +425,9 @@ struct NdsFrontendInputDebugState {
     int active;
     int mph_prime_controls_available;
     int mph_prime_controls_active;
+    int virtual_stylus_available;
+    int virtual_stylus_active;
+    int virtual_stylus_tap_held;
     int relative_mouse_captured;
     uint16_t keyboard_pressed;
     uint16_t mouse_pressed;

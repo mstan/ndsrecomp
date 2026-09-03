@@ -95,6 +95,13 @@ int main() {
     {
         NdsFrontendOptions defaults{};
         if (!require(defaults.mph_virtual_stylus_sensitivity == 20) ||
+            !require(defaults.virtual_stylus.enabled) ||
+            !require(defaults.virtual_stylus.binding == "Tab") ||
+            !require(defaults.virtual_stylus.tap_binding == "None") ||
+            !require(defaults.virtual_stylus.pad_hold_binding == "Pad LT") ||
+            !require(defaults.virtual_stylus.pad_tap_binding == "Pad A") ||
+            !require(defaults.virtual_stylus.sensitivity == 20) ||
+            !require(defaults.virtual_stylus.pad_sensitivity == 100) ||
             !require(defaults.fullscreen == NdsFullscreenMode::Off))
             return 17;
     }
@@ -136,6 +143,14 @@ int main() {
                 "[local_wireless]\n"
                 "enabled = true\n"
                 "base_port = 27000\n"
+                "[controls.virtual_stylus]\n"
+                "enabled = false\n"
+                "sensitivity = 125\n"
+                "pad_sensitivity = 150\n"
+                "binding = \"Left Shift\"\n"
+                "tap_binding = \"F\"\n"
+                "pad_hold_binding = \"Pad LB\"\n"
+                "pad_tap_binding = \"Pad X\"\n"
                 "[controls.prime]\n"
                 "enabled = true\n"
                 "unified_window_focus = true\n"
@@ -169,6 +184,13 @@ int main() {
         !require(options.cartridge_save.size == 262144) ||
         !require(options.local_wireless.enabled) ||
         !require(options.local_wireless.base_port == 27000) ||
+        !require(!options.virtual_stylus.enabled) ||
+        !require(options.virtual_stylus.sensitivity == 125) ||
+        !require(options.virtual_stylus.pad_sensitivity == 150) ||
+        !require(options.virtual_stylus.binding == "Left Shift") ||
+        !require(options.virtual_stylus.tap_binding == "F") ||
+        !require(options.virtual_stylus.pad_hold_binding == "Pad LB") ||
+        !require(options.virtual_stylus.pad_tap_binding == "Pad X") ||
         !require(options.mph_prime_controls) ||
         !require(options.mph_prime_unified_window_focus) ||
         !require(options.mph_virtual_stylus_sensitivity == 125) ||
@@ -336,6 +358,26 @@ int main() {
     if (!require(
             !nds_load_frontend_config(path.string(), &options, &error)))
         return 13;
+    {
+        std::ofstream file(path);
+        file << "[controls.virtual_stylus]\n"
+                "sensitivity = 401\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 31;
+
+    {
+        std::ofstream file(path);
+        file << "[controls.virtual_stylus]\n"
+                "pad_sensitivity = 9\n";
+    }
+    options = {};
+    if (!require(
+            !nds_load_frontend_config(path.string(), &options, &error)))
+        return 32;
+
     {
         std::ofstream file(path);
         file << "[controls.prime]\n"

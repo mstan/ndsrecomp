@@ -400,6 +400,13 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_sensitivity;
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
+    std::string cli_virtual_stylus;
+    std::string cli_virtual_stylus_sensitivity;
+    std::string cli_virtual_stylus_pad_sensitivity;
+    std::string cli_virtual_stylus_bind;
+    std::string cli_virtual_stylus_tap_bind;
+    std::string cli_virtual_stylus_pad_hold_bind;
+    std::string cli_virtual_stylus_pad_tap_bind;
     std::string cli_mph_prime_controls;
     std::string cli_mph_prime_unified_window_focus;
     std::string cli_mph_virtual_stylus_sensitivity;
@@ -538,6 +545,20 @@ int main(int argc, char** argv) {
             cli_relative_mouse_invert_y = argv[++i];
         } else if (a == "--relative-mouse-fire-key" && i + 1 < argc) {
             cli_relative_mouse_fire_key = argv[++i];
+        } else if (a == "--virtual-stylus" && i + 1 < argc) {
+            cli_virtual_stylus = argv[++i];
+        } else if (a == "--virtual-stylus-sensitivity" && i + 1 < argc) {
+            cli_virtual_stylus_sensitivity = argv[++i];
+        } else if (a == "--virtual-stylus-pad-sensitivity" && i + 1 < argc) {
+            cli_virtual_stylus_pad_sensitivity = argv[++i];
+        } else if (a == "--virtual-stylus-bind" && i + 1 < argc) {
+            cli_virtual_stylus_bind = argv[++i];
+        } else if (a == "--virtual-stylus-tap-bind" && i + 1 < argc) {
+            cli_virtual_stylus_tap_bind = argv[++i];
+        } else if (a == "--virtual-stylus-pad-hold-bind" && i + 1 < argc) {
+            cli_virtual_stylus_pad_hold_bind = argv[++i];
+        } else if (a == "--virtual-stylus-pad-tap-bind" && i + 1 < argc) {
+            cli_virtual_stylus_pad_tap_bind = argv[++i];
         } else if (a == "--mph-prime-controls" && i + 1 < argc) {
             cli_mph_prime_controls = argv[++i];
         } else if (a == "--mph-prime-unified-window-focus" && i + 1 < argc) {
@@ -665,6 +686,13 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-sensitivity 10..400] "
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
+                "[--virtual-stylus on|off] "
+                "[--virtual-stylus-sensitivity 10..400] "
+                "[--virtual-stylus-pad-sensitivity 10..400] "
+                "[--virtual-stylus-bind <key-or-mouse>] "
+                "[--virtual-stylus-tap-bind <key-or-mouse|None>] "
+                "[--virtual-stylus-pad-hold-bind <pad-button|None>] "
+                "[--virtual-stylus-pad-tap-bind <pad-button|None>] "
                 "[--mph-prime-controls on|off] "
                 "[--mph-prime-unified-window-focus on|off] "
                 "[--mph-virtual-stylus-sensitivity 10..400] "
@@ -995,6 +1023,71 @@ int main(int argc, char** argv) {
                      "invalid --relative-mouse-fire-key "
                      "(expected none, a, b, l, r, x, or y)\n");
         return 2;
+    }
+    if (!cli_virtual_stylus.empty() &&
+        !nds_parse_on_off(cli_virtual_stylus,
+                          &frontend_options.virtual_stylus.enabled)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_virtual_stylus_sensitivity,
+            &frontend_options.virtual_stylus.sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_pad_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_virtual_stylus_pad_sensitivity,
+            &frontend_options.virtual_stylus.pad_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus-pad-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_bind.empty()) {
+        if (cli_virtual_stylus_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.binding =
+            cli_virtual_stylus_bind;
+    }
+    if (!cli_virtual_stylus_tap_bind.empty()) {
+        if (cli_virtual_stylus_tap_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-tap-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.tap_binding =
+            cli_virtual_stylus_tap_bind;
+    }
+    if (!cli_virtual_stylus_pad_hold_bind.empty()) {
+        if (cli_virtual_stylus_pad_hold_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-pad-hold-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.pad_hold_binding =
+            cli_virtual_stylus_pad_hold_bind;
+    }
+    if (!cli_virtual_stylus_pad_tap_bind.empty()) {
+        if (cli_virtual_stylus_pad_tap_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-pad-tap-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.pad_tap_binding =
+            cli_virtual_stylus_pad_tap_bind;
     }
     if (!cli_mph_prime_controls.empty() &&
         !nds_parse_on_off(cli_mph_prime_controls,

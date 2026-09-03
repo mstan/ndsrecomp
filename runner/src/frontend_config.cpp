@@ -19,6 +19,13 @@ std::string lower_ascii(std::string value) {
 
 }  // namespace
 
+static bool nds_set_virtual_stylus_binding(std::string* target,
+                                           const std::string& value) {
+    if (!target || value.size() >= 64u) return false;
+    *target = value;
+    return true;
+}
+
 bool nds_parse_screen_layout(const std::string& value,
                              NdsScreenLayout* out) {
     if (!out) return false;
@@ -827,6 +834,85 @@ bool nds_load_frontend_config(const std::string& path,
     }
 
     if (const toml::table* controls = root["controls"].as_table()) {
+        if (const toml::table* virtual_stylus =
+                (*controls)["virtual_stylus"].as_table()) {
+            if (const auto value =
+                    (*virtual_stylus)["enabled"].value<bool>()) {
+                options->virtual_stylus.enabled = *value;
+            }
+            if (const auto value =
+                    (*virtual_stylus)["sensitivity"].value<int64_t>()) {
+                if (!nds_parse_mouse_sensitivity(
+                        std::to_string(*value),
+                        &options->virtual_stylus.sensitivity)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.sensitivity "
+                            "must be 10..400";
+                    }
+                    return false;
+                }
+            }
+            if (const auto value =
+                    (*virtual_stylus)["pad_sensitivity"].value<int64_t>()) {
+                if (!nds_parse_mouse_sensitivity(
+                        std::to_string(*value),
+                        &options->virtual_stylus.pad_sensitivity)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.pad_sensitivity "
+                            "must be 10..400";
+                    }
+                    return false;
+                }
+            }
+            if (const auto value =
+                    (*virtual_stylus)["binding"].value<std::string>()) {
+                if (!nds_set_virtual_stylus_binding(
+                        &options->virtual_stylus.binding, *value)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.binding is too long";
+                    }
+                    return false;
+                }
+            }
+            if (const auto value =
+                    (*virtual_stylus)["tap_binding"].value<std::string>()) {
+                if (!nds_set_virtual_stylus_binding(
+                        &options->virtual_stylus.tap_binding, *value)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.tap_binding is too long";
+                    }
+                    return false;
+                }
+            }
+            if (const auto value =
+                    (*virtual_stylus)["pad_hold_binding"].value<std::string>()) {
+                if (!nds_set_virtual_stylus_binding(
+                        &options->virtual_stylus.pad_hold_binding, *value)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.pad_hold_binding "
+                            "is too long";
+                    }
+                    return false;
+                }
+            }
+            if (const auto value =
+                    (*virtual_stylus)["pad_tap_binding"].value<std::string>()) {
+                if (!nds_set_virtual_stylus_binding(
+                        &options->virtual_stylus.pad_tap_binding, *value)) {
+                    if (error) {
+                        *error =
+                            "controls.virtual_stylus.pad_tap_binding "
+                            "is too long";
+                    }
+                    return false;
+                }
+            }
+        }
         if (const toml::table* prime = (*controls)["prime"].as_table()) {
             if (const auto value = (*prime)["enabled"].value<bool>()) {
                 options->mph_prime_controls = *value;

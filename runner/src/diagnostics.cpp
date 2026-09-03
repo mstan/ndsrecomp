@@ -647,7 +647,8 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         "\"internal_resolution\":%u,"
         "\"texture_upscale\":%u,\"supersampling\":%u,\"antialiasing\":%u,"
         "\"performance_governor\":\"%s\","
-        "\"relative_mouse_touch\":%s,\"mph_prime_controls\":%s,"
+        "\"relative_mouse_touch\":%s,\"virtual_stylus\":%s,"
+        "\"mph_prime_controls\":%s,"
         "\"mph_prime_unified_window_focus\":%s,"
         "\"network_enabled\":%s,\"wfc_enabled\":%s,"
         "\"local_wireless_enabled\":%s}}\n",
@@ -702,6 +703,7 @@ void nds_diagnostics_start_performance_log(const NdsFrontendOptions& options) {
         options.supersampling, options.antialiasing,
         nds_perf_governor_mode_name(options.perf_governor_mode),
         options.relative_mouse_touch ? "true" : "false",
+        options.virtual_stylus.enabled ? "true" : "false",
         options.mph_prime_controls ? "true" : "false",
         options.mph_prime_unified_window_focus ? "true" : "false",
         options.network.enabled ? "true" : "false",
