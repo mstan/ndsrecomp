@@ -13,6 +13,7 @@ void nds_diagnostics_configure(bool enabled, const char* directory,
 void nds_diagnostics_enable_profile_environment();
 bool nds_diagnostics_enabled();
 std::string nds_diagnostics_directory();
+std::string nds_diagnostics_run_stamp();
 std::string nds_diagnostics_make_path(const char* filename);
 std::string nds_diagnostics_run_base(const char* stem);
 std::string nds_diagnostics_dispatch_miss_log_path();

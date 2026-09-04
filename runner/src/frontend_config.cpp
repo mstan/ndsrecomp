@@ -260,8 +260,8 @@ NdsMphPrimeControlBindings nds_default_mph_pad_bindings() {
     pad.morph_ball = "Pad B";
     pad.boost_zoom = "Pad RB";
     pad.scan_visor = "Pad R3";
-    pad.ui_left = "Pad Left";
-    pad.ui_right = "Pad Right";
+    pad.ui_left = "None";
+    pad.ui_right = "None";
     pad.ui_ok = "Pad Y";
     pad.shoot = "Pad RT";
     pad.scan_shoot = "Pad LT";

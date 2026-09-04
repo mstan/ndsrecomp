@@ -227,6 +227,18 @@ def main():
     if debug.count("runtime_clear_fast_limit()") < 2:
         fail("run_to_pc must clear the deadline when it both sets and clears "
              "g_runtime_break_pc; the break-PC predicate is not cycle-based")
+    pump_stop = body(debug, "debug_pump_stop")
+    listener_shutdown = pump_stop.find("shutdown(g_pump_listener")
+    listener_close = pump_stop.find("CLOSESOCK(g_pump_listener)")
+    pump_join = pump_stop.find("g_pump_thread.join()")
+    if listener_shutdown < 0:
+        fail("debug_pump_stop must shutdown() the listener before close; "
+             "Linux accept() may stay blocked across cross-thread close()")
+    if not (listener_shutdown < listener_close < pump_join):
+        fail("debug_pump_stop must shutdown and close the listener before "
+             "joining the pump thread; otherwise accept() can hang shutdown")
+    if "SHUT_RDWR" not in pump_stop or "SD_BOTH" not in pump_stop:
+        fail("debug_pump_stop lost one platform's listener shutdown constant")
 
     # ── 4. The faithful path stays linked and selectable (LLE floor) ─────
     if "NDS_CYCLE_FAST_LIMIT" not in runtime:

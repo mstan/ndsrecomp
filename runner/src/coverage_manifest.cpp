@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "state.h"
+#include "diagnostics.h"
 #include "tier3.h"
 #include "../../recompiler/support/sha1.h"
 
@@ -235,6 +236,10 @@ uint64_t g_rotations = 0u;
 
 std::string run_stamp() {
     if (!g_run_stamp.empty()) return g_run_stamp;
+    if (nds_diagnostics_enabled()) {
+        g_run_stamp = nds_diagnostics_run_stamp();
+        if (!g_run_stamp.empty()) return g_run_stamp;
+    }
     const std::time_t now = std::time(nullptr);
     std::tm tm_buf{};
 #ifdef _WIN32

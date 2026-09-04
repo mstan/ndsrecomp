@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nds_recompile VERSION 0.0.1 LANGUAGES CXX)
+project(nds_recompile VERSION 0.6.10 LANGUAGES CXX)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")

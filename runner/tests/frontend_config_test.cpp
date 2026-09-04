@@ -95,6 +95,8 @@ int main() {
     {
         NdsFrontendOptions defaults{};
         if (!require(defaults.mph_virtual_stylus_sensitivity == 20) ||
+            !require(defaults.mph_pad_bindings.ui_left == "None") ||
+            !require(defaults.mph_pad_bindings.ui_right == "None") ||
             !require(defaults.virtual_stylus.enabled) ||
             !require(defaults.virtual_stylus.binding == "Tab") ||
             !require(defaults.virtual_stylus.tap_binding == "None") ||

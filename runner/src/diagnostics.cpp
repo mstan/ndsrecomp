@@ -544,6 +544,8 @@ bool nds_diagnostics_enabled() { return g_enabled; }
 
 std::string nds_diagnostics_directory() { return g_directory; }
 
+std::string nds_diagnostics_run_stamp() { return run_stamp(); }
+
 std::string nds_diagnostics_make_path(const char* filename) {
     if (!filename || !filename[0]) return {};
     if (g_directory.empty()) return filename;

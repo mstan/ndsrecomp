@@ -2122,7 +2122,7 @@ void debug_pump_stop() {
     g_pump_shutdown.store(true, std::memory_order_relaxed);
 
     // Closing a listening socket from another thread does not reliably wake a
-    // blocking accept() on Windows. Connect a short-lived loopback client
+    // blocking accept() on every host. Connect a short-lived loopback client
     // first so the I/O thread observes the shutdown flag and leaves accept.
     sockaddr_in listener_addr{};
     socklen_t listener_addr_len = sizeof(listener_addr);
