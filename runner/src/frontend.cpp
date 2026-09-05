@@ -17,6 +17,9 @@
 
 #include "debug_server.h"
 #include "diagnostics.h"
+#if defined(__ANDROID__)
+#include "android_second_screen.h"
+#endif
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "melonds_compute/TextureUpscale.h"
@@ -1493,7 +1496,16 @@ bool create_presentation(const NdsFrontendOptions& options,
     const bool direct_top_requested =
         (options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u ||
         options.internal_resolution > 1u;
-    presentation.gl_top = presentation.separate &&
+    // On Android the bottom screen is presented on the Thor's second physical
+    // display, so the single main window shows only the top -- exactly the
+    // gl_top (direct-GL compute) model, even in the stacked layout.
+    bool gl_top_layout_ok = presentation.separate;
+#if defined(__ANDROID__)
+    // The Thor always presents the bottom screen on its second physical
+    // display, so the main window is top-only regardless of attach timing.
+    gl_top_layout_ok = true;
+#endif
+    presentation.gl_top = gl_top_layout_ok &&
         allow_gl_top &&
         direct_top_requested &&
         nds_gpu3d_renderer_prefers_compute() &&
@@ -1591,6 +1603,11 @@ bool create_presentation(const NdsFrontendOptions& options,
                 SDL_GetWindowID(presentation.windows[screen]);
             continue;
         }
+#if defined(__ANDROID__)
+        // gl_top on Android has no bottom SDL window/renderer: the bottom
+        // screen is blitted to the Thor's second display instead.
+        if (screen == 1 && presentation.gl_top) continue;
+#endif
         const int logical_height =
             !presentation.separate && screen == 0
                 ? kScreenHeight * 2 : kScreenHeight;
@@ -1737,6 +1754,12 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         ticks.upload += gl_ticks.upload;
         ticks.draw += gl_ticks.draw;
         ticks.swap += gl_ticks.swap;
+#if defined(__ANDROID__)
+        // Bottom screen -> Thor's second physical display; no SDL renderer.
+        android_second_screen_present(bottom_pixels, bottom_width,
+                                      kScreenHeight);
+        return ticks;
+#endif
         uint64_t start = SDL_GetPerformanceCounter();
         SDL_UpdateTexture(presentation.textures[1], nullptr, bottom_pixels,
                           bottom_width * sizeof(uint32_t));
@@ -1770,6 +1793,25 @@ PresentationTicks present_screens(FrontendPresentation& presentation,
         start = SDL_GetPerformanceCounter();
         SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
         SDL_RenderClear(renderer);
+#if defined(__ANDROID__)
+        if (android_second_screen_active()) {
+            // The bottom screen is on the Thor's second physical display, so
+            // the main window shows the top screen alone, stretched to fill the
+            // entire panel edge-to-edge (no letterbox). Disable the logical-size
+            // letterbox mapping and copy the top texture to the full drawable.
+            SDL_RenderSetIntegerScale(renderer, SDL_FALSE);
+            SDL_RenderSetLogicalSize(renderer, 0, 0);
+            int out_w = 0, out_h = 0;
+            SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+            const SDL_Rect top_only{0, 0, out_w, out_h};
+            render_screen(presentation, 0, top_only);
+            ticks.draw += SDL_GetPerformanceCounter() - start;
+            start = SDL_GetPerformanceCounter();
+            SDL_RenderPresent(renderer);
+            ticks.swap += SDL_GetPerformanceCounter() - start;
+            return ticks;
+        }
+#endif
         const SDL_Rect top_rect{
             (presentation.canvas_width -
              presentation.screen_widths[0]) / 2,
@@ -3171,6 +3213,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             stick_dir(ly, 1u << 6, false);   // Up (SDL Y axis points down)
             stick_dir(ly, 1u << 7, true);    // Down
 
+            // Hold Select/Back = turbo (fast-forward). Lets a gamepad blitz
+            // through the interpreter-heavy opening FMVs. On a pad-equipped
+            // host the pad owns turbo state (Android has no Tab key).
+            if (SDL_GameControllerGetButton(controller,
+                                            SDL_CONTROLLER_BUTTON_BACK))
+                turbo_pressed = true;
+            else
+                turbo_pressed = false;
+
             if (virtual_stylus_available) {
                 const float rx = SDL_GameControllerGetAxis(
                     controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
@@ -3359,6 +3410,19 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             relative_delta_x = 0;
             relative_delta_y = 0;
         }
+#if defined(__ANDROID__)
+        // Route the Thor's second-display touch surface to the DS bottom screen
+        // when the in-game Prime aim logic below is not driving the stylus
+        // (menus, "touch to start", map, etc.).
+        if (android_second_screen_active() && !mph_prime_is_active &&
+            !generic_virtual_stylus) {
+            int tx = 0, ty = 0;
+            bool tdown = false;
+            android_second_screen_touch(&tx, &ty, &tdown);
+            nds_set_touch(static_cast<uint16_t>(tx),
+                          static_cast<uint16_t>(ty), tdown);
+        }
+#endif
         if (generic_virtual_stylus) {
             nds_set_touch(static_cast<uint16_t>(std::lround(mph_virtual_x)),
                           static_cast<uint16_t>(std::lround(mph_virtual_y)),
@@ -3514,6 +3578,14 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             running = false;
             break;
         }
+#if defined(__ANDROID__)
+        // Mirror the DS bottom screen onto the Thor's second physical display.
+        // Skip when gl_top is active -- present_screens already blitted it
+        // there in the compute path (avoids a double present).
+        if (!presentation.gl_top)
+            android_second_screen_present(bottom_pixels, bottom_width,
+                                          kScreenHeight);
+#endif
         phase_upload_ticks += presentation_ticks.upload;
         phase_draw_ticks += presentation_ticks.draw;
         phase_swap_ticks += presentation_ticks.swap;

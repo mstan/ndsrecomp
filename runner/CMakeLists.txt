@@ -184,11 +184,21 @@ if(TITLE_GROUP_COUNT GREATER 0)
     endforeach()
     set(TITLE_BANK_SOURCES ${TITLE_BANK_BODIES} ${TITLE_BANK_DISPATCH})
 endif()
+# Retail BIOS banks exist only when the developer has generated them from
+# their own hash-verified dumps; without them the FreeBIOS path still works,
+# so link empty dispatch tables instead of requiring the dumps at build time.
+if(EXISTS "${GEN}/arm9_bios.c")
+    set(RETAIL_BIOS_BANK_SOURCES
+        ${GEN}/arm9_bios.c
+        ${GEN}/arm9_bios_dispatch.c
+        ${GEN}/arm7_bios.c
+        ${GEN}/arm7_bios_dispatch.c)
+else()
+    set(RETAIL_BIOS_BANK_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/retail_bios_stub.c)
+endif()
 add_library(nds_banks STATIC
-    ${GEN}/arm9_bios.c
-    ${GEN}/arm9_bios_dispatch.c
-    ${GEN}/arm7_bios.c
-    ${GEN}/arm7_bios_dispatch.c
+    ${RETAIL_BIOS_BANK_SOURCES}
     ${GEN}/freebios_arm9.c
     ${GEN}/freebios_arm9_dispatch.c
     ${GEN}/freebios_arm7.c
@@ -372,7 +382,7 @@ add_library(nds_armv4t STATIC ${NDS_ARM_RECOMP_SOURCES})
 target_include_directories(nds_armv4t PUBLIC
     ${NDS_ARM_RECOMP_INCLUDE_DIRS})
 
-add_executable(nds_runner
+set(NDS_RUNNER_SOURCES
     src/runtime_arm.cpp
     # Out-of-line runtime_tick / runtime_should_yield / runtime_unwinding for
     # live shards published before those became header inlines. Must stay a
@@ -441,7 +451,19 @@ add_executable(nds_runner
     vendor/melonds/net/Net.cpp
     vendor/melonds/net/PacketDispatcher.cpp
     vendor/melonds/net/Net_Slirp.cpp)
-set_target_properties(nds_runner PROPERTIES ENABLE_EXPORTS ON)
+# On Android the runner is loaded by SDLActivity as libmain.so; everywhere else
+# it is a standalone executable. The source list and all target_* wiring are
+# identical -- only the target kind differs.
+if(ANDROID)
+    list(APPEND NDS_RUNNER_SOURCES src/android_second_screen.cpp)
+    add_library(nds_runner SHARED ${NDS_RUNNER_SOURCES})
+    set_target_properties(nds_runner PROPERTIES OUTPUT_NAME main)
+    # main.cpp includes <SDL_main.h> under __ANDROID__, which renames main() to
+    # an extern "C", default-visibility SDL_main that SDLActivity dlsym's.
+else()
+    add_executable(nds_runner ${NDS_RUNNER_SOURCES})
+    set_target_properties(nds_runner PROPERTIES ENABLE_EXPORTS ON)
+endif()
 ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
@@ -558,11 +580,20 @@ if(NDS_ENABLE_COMPUTE_RENDERER)
         src/melonds_compute/PlatformCompute.cpp
         src/melonds_compute/ComputeHost.cpp
         vendor/melonds/OpenGLSupport.cpp
-        vendor/melonds/glad/glad.c
         vendor/melonds/xxhash/xxhash.c)
-    target_compile_definitions(nds_runner PRIVATE
-        NDS_HAVE_COMPUTE_RENDERER=1
-        MELONDS_GL_HEADER="glad/glad.h")
+    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_COMPUTE_RENDERER=1)
+    if(ANDROID)
+        # Use platform GLES 3.2 instead of the desktop GL 4.3 glad loader.
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_GLES=1
+            MELONDS_GL_HEADER="melonds_compute/android_gl_compat.h")
+        target_include_directories(nds_runner PRIVATE src)
+        target_link_libraries(nds_runner PRIVATE GLESv3 EGL)
+    else()
+        target_sources(nds_runner PRIVATE vendor/melonds/glad/glad.c)
+        target_compile_definitions(nds_runner PRIVATE
+            MELONDS_GL_HEADER="glad/glad.h")
+    endif()
 else()
     target_sources(nds_runner PRIVATE
         src/melonds_compute/TextureUpscaleStub.cpp)
@@ -699,14 +730,25 @@ if(NDS_SDL_BACKEND STREQUAL "SDL3")
         NDS_SDL_BACKEND_NAME="SDL3")
     target_link_libraries(nds_runner PRIVATE SDL3::SDL3)
 elseif(NDS_SDL_BACKEND STREQUAL "SDL2")
-    find_package(SDL2 CONFIG REQUIRED)
-    if(NOT TARGET SDL2::SDL2)
-        message(FATAL_ERROR "NDS_SDL_BACKEND=SDL2 requires target SDL2::SDL2")
+    # On Android the app's jni CMakeLists adds the SDL2 subproject before this
+    # one, exposing plain `SDL2`/`SDL2main` targets (no SDL2::SDL2 alias);
+    # link those plus the Android JNI entry so libmain.so exports
+    # Java_org_libsdl_app_SDLActivity_nativeRunMain.
+    if(ANDROID AND TARGET SDL2)
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SDL2=1
+            NDS_SDL_BACKEND_NAME="SDL2")
+        target_link_libraries(nds_runner PRIVATE SDL2 SDL2main log android)
+    else()
+        find_package(SDL2 CONFIG REQUIRED)
+        if(NOT TARGET SDL2::SDL2)
+            message(FATAL_ERROR "NDS_SDL_BACKEND=SDL2 requires target SDL2::SDL2")
+        endif()
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SDL2=1
+            NDS_SDL_BACKEND_NAME="SDL2")
+        target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
     endif()
-    target_compile_definitions(nds_runner PRIVATE
-        NDS_HAVE_SDL2=1
-        NDS_SDL_BACKEND_NAME="SDL2")
-    target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
 elseif(NDS_SDL_BACKEND STREQUAL "NONE")
     target_compile_definitions(nds_runner PRIVATE NDS_SDL_BACKEND_NAME="NONE")
 else()

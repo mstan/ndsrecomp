@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #define SDL_MAIN_HANDLED
 #if defined(NDS_HAVE_SDL3)
@@ -13,7 +14,11 @@
 #include <SDL.h>
 #endif
 
+#if defined(NDS_GLES)
+#include "melonds_compute/android_gl_compat.h"
+#else
 #include "glad/glad.h"
+#endif
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "TextureUpscale.h"
@@ -132,6 +137,15 @@ PresentViewport fit_present_viewport(int drawable_width, int drawable_height,
         content_width <= 0 || content_height <= 0) {
         return viewport;
     }
+
+#if defined(NDS_GLES)
+    // Thor: the main panel shows the top screen alone; stretch it to fill the
+    // entire display edge-to-edge (no letterbox), matching the SDL-path
+    // presentation the port ships with.
+    viewport.width = drawable_width;
+    viewport.height = drawable_height;
+    return viewport;
+#endif
 
     viewport.width = drawable_width;
     viewport.height = static_cast<int>(
@@ -443,7 +457,21 @@ void main()
 GLuint compile_shader(GLenum type, const char* source)
 {
     GLuint shader = glCreateShader(type);
+#if defined(NDS_GLES)
+    // Swap the desktop version line for a GLES 3.2 es-profile header with the
+    // precision qualifiers GLES requires (harmless in the vertex stage).
+    std::string src = source;
+    const std::string ver = "#version 430 core";
+    size_t pos = src.find(ver);
+    if (pos != std::string::npos)
+        src.replace(pos, ver.size(),
+            "#version 320 es\nprecision highp float;\nprecision highp int;\n"
+            "precision highp usampler2D;\nprecision highp sampler2D;");
+    const char* patched = src.c_str();
+    glShaderSource(shader, 1, &patched, nullptr);
+#else
     glShaderSource(shader, 1, &source, nullptr);
+#endif
     glCompileShader(shader);
     GLint ok = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
@@ -571,10 +599,20 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
         return fail_or_fallback("SDL video initialization");
     }
 
+#if defined(NDS_GLES)
+    // The Thor (Adreno / GLES) has no desktop GL: request a GLES 3.2 ES-profile
+    // context, which provides compute shaders, image load/store, atomics,
+    // shared memory and barriers.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                        SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                         SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, presentation_window ? 1 : 0);
     g_window = presentation_window;
     g_visible = presentation_window != nullptr;
@@ -597,12 +635,28 @@ bool nds_compute_host_start(SDL_Window* presentation_window)
                      SDL_GetError());
         return fail_or_fallback("OpenGL 4.3 context creation");
     }
+#if defined(NDS_GLES)
+    // GLES entry points are provided directly by libGLESv3 (no glad loader).
+    // Verify the driver actually gave us at least GLES 3.1 (compute shaders).
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        if (major < 3 || (major == 3 && minor < 1)) {
+            std::fprintf(stderr,
+                         "[gpu3d] GLES %d.%d too old for compute\n",
+                         major, minor);
+            return fail_or_fallback("GLES 3.1+ unavailable");
+        }
+    }
+#else
     if (!gladLoadGLLoader(
             reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)) ||
         !GLAD_GL_VERSION_4_3) {
         std::fprintf(stderr, "[gpu3d] OpenGL 4.3 unavailable\n");
         return fail_or_fallback("OpenGL 4.3 unavailable");
     }
+#endif
     capture_gl_identity();
     std::fprintf(stderr, "[gpu3d] OpenGL %s / %s\n",
                  nds_compute_host_gl_version(),
@@ -649,6 +703,16 @@ bool nds_compute_host_present_top(const unsigned int* fallback_pixels,
     if (g_texture_width != width) {
         for (int i = 0; i < 2; ++i) {
             configure_integer_texture(g_fallback_texture[i], width);
+#if defined(NDS_GLES)
+            // The 2D framebuffer is ARGB8888 (BGRA byte order). Desktop uploads
+            // it as GL_BGRA_INTEGER, but GLES has no such format, so it is
+            // uploaded as GL_RGBA_INTEGER with red/blue transposed. Swizzle the
+            // fallback texture to read them back in the correct order (fixes the
+            // blue tint on 2D content).
+            glBindTexture(GL_TEXTURE_2D, g_fallback_texture[i]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+#endif
             configure_integer_texture(g_object_texture[i], width);
             configure_layer_texture(g_hd_top_texture[i], width);
             configure_layer_texture(g_hd_below_texture[i], width);

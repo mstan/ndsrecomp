@@ -47,6 +47,38 @@
 #include "net/net_ring.h"
 #include "net/net_capture.h"
 #include "net/wfc_provider.h"
+
+#if defined(__ANDROID__)
+// Renames main() -> extern "C" SDL_main with default visibility so
+// SDLActivity's nativeRunMain can dlsym it out of libmain.so.
+#include <SDL_main.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <android/log.h>
+// Forward the runner's stdout/stderr into logcat (tag "ThorMPHrun") so its
+// printf/fprintf diagnostics are visible via `adb logcat` on the device.
+static int g_log_pipe[2];
+static void* android_log_pump(void*) {
+    char buf[1024];
+    ssize_t n;
+    while ((n = read(g_log_pipe[0], buf, sizeof(buf) - 1)) > 0) {
+        if (buf[n - 1] == '\n') --n;
+        buf[n] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, "ThorMPHrun", buf);
+    }
+    return nullptr;
+}
+static void android_redirect_stdio_to_logcat() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    if (pipe(g_log_pipe) != 0) return;
+    dup2(g_log_pipe[1], STDOUT_FILENO);
+    dup2(g_log_pipe[1], STDERR_FILENO);
+    pthread_t t;
+    pthread_create(&t, nullptr, android_log_pump, nullptr);
+    pthread_detach(t);
+}
+#endif
 #include "wifi_net.h"
 #include "profile_report.h"
 #include "sha1.h"
@@ -334,6 +366,9 @@ std::filesystem::path exe_dir_from_argv(const char* argv0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(__ANDROID__)
+    android_redirect_stdio_to_logcat();
+#endif
     // stderr is the runner's diagnostic stream and is read from files by
     // harnesses and field-bundle collectors. Under Windows UCRT a redirected
     // stderr becomes BLOCK buffered, so a force-killed process loses its tail
