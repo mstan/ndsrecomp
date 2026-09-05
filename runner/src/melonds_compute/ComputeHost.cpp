@@ -51,6 +51,15 @@ PresentViewport fit_present_viewport(int drawable_width, int drawable_height,
         return viewport;
     }
 
+#if defined(NDS_GLES)
+    // Thor: the main panel shows the top screen alone; stretch it to fill the
+    // entire display edge-to-edge (no letterbox), matching the SDL-path
+    // presentation the port ships with.
+    viewport.width = drawable_width;
+    viewport.height = drawable_height;
+    return viewport;
+#endif
+
     viewport.width = drawable_width;
     viewport.height = static_cast<int>(
         static_cast<long long>(drawable_width) * content_height /

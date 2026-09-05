@@ -2129,6 +2129,15 @@ int nds_run_interactive_frontend(const NdsFrontendOptions& options) {
             stick_dir(ly, 1u << 6, false);   // Up (SDL Y axis points down)
             stick_dir(ly, 1u << 7, true);    // Down
 
+            // Hold Select/Back = turbo (fast-forward). Lets a gamepad blitz
+            // through the interpreter-heavy opening FMVs. On a pad-equipped
+            // host the pad owns turbo state (Android has no Tab key).
+            if (SDL_GameControllerGetButton(controller,
+                                            SDL_CONTROLLER_BUTTON_BACK))
+                turbo_pressed = true;
+            else
+                turbo_pressed = false;
+
             if (mph_prime_controls_available) {
                 // Right stick -> camera aim; triggers act as bindable
                 // pseudo-buttons (defaults: RT shoot, LT scan-fire).
