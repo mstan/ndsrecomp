@@ -6,6 +6,15 @@
 // needs. GLES 3.2 support is verified at runtime in ComputeHost.
 #include <GLES3/gl32.h>
 
+// Desktop GL headers define APIENTRY/APIENTRYP for proc-pointer typedefs;
+// GLES headers spell it GL_APIENTRY. Provide the desktop names.
+#ifndef APIENTRY
+#define APIENTRY GL_APIENTRY
+#endif
+#ifndef APIENTRYP
+#define APIENTRYP APIENTRY *
+#endif
+
 // The renderer guards init on GLAD_GL_VERSION_4_3; on GLES that check is
 // replaced by an explicit GLES 3.2 version test in ComputeHost, so treat the
 // desktop-version flag as satisfied here.
