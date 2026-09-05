@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
+#include "savestate.h"
 #include "state.h"
+#include "emu_profile.h"
 
 namespace {
 
@@ -246,7 +250,7 @@ struct Capture {
     }
     void set_length(uint32_t value) { length = value << 2; if (!length) length = 4; }
     void flush() {
-        for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t i = 0; i < 4 && fifo_level >= 4; ++i) {
             uint32_t value = 0;
             std::memcpy(&value, &fifo[fifo_read], 4);
             bus_device_write32(7, dst + write_offset, value);
@@ -308,6 +312,7 @@ uint32_t g_output_count = 0;
 constexpr uint32_t kDebugOutputFrames = 1048576;
 std::array<int16_t, kDebugOutputFrames * 2> g_debug_output{};
 uint64_t g_debug_output_produced = 0;
+std::atomic<uint64_t> g_presentation_epoch{0};
 
 void output_push(int16_t left, int16_t right) {
     const uint32_t debug_pos = static_cast<uint32_t>(
@@ -505,6 +510,11 @@ void nds_spu_write(uint32_t addr, uint32_t value, uint32_t width) {
 
 void nds_tick_spu(uint64_t system_cycles) {
     const uint64_t due = system_cycles / 1024u;
+    // Placed past the due-count compare so a round with nothing to mix pays
+    // nothing: the SPU deadline is every 1024 system cycles, so at the ~64
+    // cycle rendezvous grid the overwhelming majority of calls are no-ops.
+    if (g_mix_count >= due) return;
+    NdsEmuScope emu_region(NDS_EMU_SPU);
     while (g_mix_count < due) { mix(); ++g_mix_count; }
 }
 
@@ -543,4 +553,161 @@ uint32_t nds_spu_debug_copy_output(uint64_t start, int16_t* stereo,
         stereo[i * 2 + 1] = g_debug_output[pos * 2 + 1];
     }
     return take;
+}
+
+bool spu_savestate_export(NdsSpuSaveState* out) {
+    if (!out) return false;
+    *out = NdsSpuSaveState{};
+    for (size_t i = 0; i < g_channel.size(); ++i) {
+        const Channel& src = g_channel[i];
+        NdsSpuChannelSaveState& dst = out->channel[i];
+        dst.cnt = src.cnt;
+        dst.src = src.src;
+        dst.reload = src.reload;
+        dst.loop = src.loop;
+        dst.length = src.length;
+        dst.key_on = src.key_on ? 1u : 0u;
+        dst.timer = src.timer;
+        dst.pos = src.pos;
+        dst.sample = src.sample;
+        dst.noise = src.noise;
+        dst.adpcm_value = src.adpcm_value;
+        dst.adpcm_index = src.adpcm_index;
+        dst.adpcm_loop_value = src.adpcm_loop_value;
+        dst.adpcm_loop_index = src.adpcm_loop_index;
+        dst.adpcm_byte = src.adpcm_byte;
+        std::memcpy(dst.fifo, src.fifo.data(), src.fifo.size());
+        dst.fifo_read = src.fifo_read;
+        dst.fifo_write = src.fifo_write;
+        dst.source_offset = src.source_offset;
+        dst.fifo_level = src.fifo_level;
+    }
+    for (size_t i = 0; i < g_capture.size(); ++i) {
+        const Capture& src = g_capture[i];
+        NdsSpuCaptureSaveState& dst = out->capture[i];
+        dst.cnt = src.cnt;
+        dst.dst = src.dst;
+        dst.reload = src.reload;
+        dst.length = src.length;
+        dst.timer = src.timer;
+        dst.pos = src.pos;
+        std::memcpy(dst.fifo, src.fifo.data(), src.fifo.size());
+        dst.fifo_read = src.fifo_read;
+        dst.fifo_write = src.fifo_write;
+        dst.write_offset = src.write_offset;
+        dst.fifo_level = src.fifo_level;
+    }
+    out->cnt = g_cnt;
+    out->bias = g_bias;
+    out->mix_count = g_mix_count;
+    return true;
+}
+
+bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if ((in.cnt & ~0xBF7Fu) != 0u || in.bias > 0x3FFu)
+        return fail("savestate SPU global state is invalid");
+    for (const NdsSpuChannelSaveState& channel : in.channel) {
+        const uint32_t format = (channel.cnt >> 29) & 3u;
+        if ((channel.cnt & ~0xFF7F837Fu) != 0u ||
+            (channel.src & ~0x07FFFFFCu) != 0u ||
+            channel.loop > 0x3FFFCu || (channel.loop & 3u) != 0u ||
+            channel.length > 0x7FFFFCu || (channel.length & 3u) != 0u ||
+            channel.key_on > 1u || channel.timer > 0xFFFFu ||
+            channel.pos < -3 || channel.adpcm_index < 0 ||
+            channel.adpcm_index > 88 || channel.adpcm_loop_index < 0 ||
+            channel.adpcm_loop_index > 88 || channel.fifo_read >= 32u ||
+            channel.fifo_write >= 32u || channel.fifo_level > 32u ||
+            ((channel.fifo_write + 32u - channel.fifo_read) & 0x1Fu) !=
+                (channel.fifo_level & 0x1Fu) ||
+            (channel.source_offset & 3u) != 0u ||
+            channel.source_offset > channel.loop + channel.length)
+            return fail("savestate SPU channel state is invalid");
+        if ((channel.fifo_write & 3u) != 0u ||
+            (format == 1u && (channel.fifo_read & 1u) != 0u) ||
+            (format == 2u && channel.pos < 8 && (channel.fifo_read & 3u) != 0u))
+            return fail("savestate SPU channel FIFO cursor is invalid");
+    }
+    for (const NdsSpuCaptureSaveState& capture : in.capture) {
+        if ((capture.cnt & ~0x8Fu) != 0u ||
+            (!(capture.cnt & 0x80u) && (capture.cnt & 1u)) ||
+            (capture.dst & ~0x07FFFFFCu) != 0u ||
+            capture.length > 0x3FFFCu || (capture.length & 3u) != 0u ||
+            capture.timer > 0xFFFFu || capture.pos < 0 ||
+            capture.fifo_read >= 16u || capture.fifo_write >= 16u ||
+            capture.fifo_level > 16u ||
+            ((capture.fifo_write + 16u - capture.fifo_read) & 0xFu) !=
+                (capture.fifo_level & 0xFu) ||
+            (capture.write_offset & 3u) != 0u ||
+            (capture.length == 0u ? capture.write_offset != 0u
+                                  : capture.write_offset >= capture.length))
+            return fail("savestate SPU capture state is invalid");
+        if ((capture.fifo_read & 3u) != 0u ||
+            ((capture.cnt & 0x88u) == 0x80u && (capture.fifo_write & 1u) != 0u))
+            return fail("savestate SPU capture FIFO cursor is invalid");
+    }
+    return true;
+}
+
+bool spu_savestate_import(const NdsSpuSaveState& in, std::string* error) {
+    if (!spu_savestate_validate(in, error)) return false;
+    for (size_t i = 0; i < g_channel.size(); ++i) {
+        const NdsSpuChannelSaveState& src = in.channel[i];
+        Channel dst{};
+        dst.num = static_cast<uint32_t>(i);
+        dst.set_cnt(src.cnt);
+        dst.src = src.src;
+        dst.reload = src.reload;
+        dst.loop = src.loop;
+        dst.length = src.length;
+        dst.key_on = src.key_on != 0u;
+        dst.timer = src.timer;
+        dst.pos = src.pos;
+        dst.sample = src.sample;
+        dst.noise = src.noise;
+        dst.adpcm_value = src.adpcm_value;
+        dst.adpcm_index = src.adpcm_index;
+        dst.adpcm_loop_value = src.adpcm_loop_value;
+        dst.adpcm_loop_index = src.adpcm_loop_index;
+        dst.adpcm_byte = src.adpcm_byte;
+        std::memcpy(dst.fifo.data(), src.fifo, dst.fifo.size());
+        dst.fifo_read = src.fifo_read;
+        dst.fifo_write = src.fifo_write;
+        dst.source_offset = src.source_offset;
+        dst.fifo_level = src.fifo_level;
+        g_channel[i] = dst;
+    }
+    for (size_t i = 0; i < g_capture.size(); ++i) {
+        const NdsSpuCaptureSaveState& src = in.capture[i];
+        Capture dst{};
+        dst.cnt = src.cnt;
+        dst.dst = src.dst;
+        dst.reload = src.reload;
+        dst.length = src.length;
+        dst.timer = src.timer;
+        dst.pos = src.pos;
+        std::memcpy(dst.fifo.data(), src.fifo, dst.fifo.size());
+        dst.fifo_read = src.fifo_read;
+        dst.fifo_write = src.fifo_write;
+        dst.write_offset = src.write_offset;
+        dst.fifo_level = src.fifo_level;
+        g_capture[i] = dst;
+    }
+    set_global(in.cnt);
+    g_bias = in.bias;
+    g_mix_count = in.mix_count;
+
+    // This queue contains already-presented host samples from the abandoned
+    // timeline. It is not guest state and must never survive a restore.
+    g_output.fill(0);
+    g_output_read = g_output_write = g_output_count = 0;
+    g_presentation_epoch.fetch_add(1u, std::memory_order_release);
+    return true;
+}
+
+uint64_t nds_spu_presentation_epoch() {
+    return g_presentation_epoch.load(std::memory_order_acquire);
 }

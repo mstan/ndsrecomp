@@ -1,17 +1,27 @@
 #include "gpu2d.h"
+#include "host_profile.h"
 #include "gpu2d_window.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "gpu3d.h"
 #include "io.h"
+#include "savestate.h"
+#include "title_patches.h"
 #include "vram.h"
+#include "emu_profile.h"
 
 namespace {
 
@@ -38,6 +48,58 @@ struct Unit {
     // (melonDS Unit::CaptureLatch).
     bool capture_latch = false;
 };
+
+NdsGpu2dUnitSaveState export_unit(const Unit& unit) {
+    NdsGpu2dUnitSaveState out{};
+    out.dispcnt = unit.dispcnt;
+    std::copy_n(unit.bgcnt, 4, out.bgcnt);
+    std::copy_n(unit.bgx, 4, out.bgx);
+    std::copy_n(unit.bgy, 4, out.bgy);
+    std::copy_n(unit.pa, 2, out.pa); std::copy_n(unit.pb, 2, out.pb);
+    std::copy_n(unit.pc, 2, out.pc); std::copy_n(unit.pd, 2, out.pd);
+    std::copy_n(unit.refx, 2, out.refx);
+    std::copy_n(unit.refy, 2, out.refy);
+    std::copy_n(unit.win, 12, out.win);
+    out.bg_mosaic_x = unit.bg_mosaic_x;
+    out.bg_mosaic_y = unit.bg_mosaic_y;
+    out.obj_mosaic_x = unit.obj_mosaic_x;
+    out.obj_mosaic_y = unit.obj_mosaic_y;
+    out.bldcnt = unit.bldcnt;
+    out.bldalpha = unit.bldalpha;
+    out.eva = unit.eva; out.evb = unit.evb; out.evy = unit.evy;
+    std::copy_n(unit.refx_internal, 2, out.refx_internal);
+    std::copy_n(unit.refy_internal, 2, out.refy_internal);
+    out.capture = unit.capture;
+    out.master_bright = unit.master_bright;
+    out.capture_latch = unit.capture_latch ? 1u : 0u;
+    return out;
+}
+
+Unit import_unit(const NdsGpu2dUnitSaveState& in) {
+    Unit out{};
+    out.dispcnt = in.dispcnt;
+    std::copy_n(in.bgcnt, 4, out.bgcnt);
+    std::copy_n(in.bgx, 4, out.bgx);
+    std::copy_n(in.bgy, 4, out.bgy);
+    std::copy_n(in.pa, 2, out.pa); std::copy_n(in.pb, 2, out.pb);
+    std::copy_n(in.pc, 2, out.pc); std::copy_n(in.pd, 2, out.pd);
+    std::copy_n(in.refx, 2, out.refx);
+    std::copy_n(in.refy, 2, out.refy);
+    std::copy_n(in.win, 12, out.win);
+    out.bg_mosaic_x = in.bg_mosaic_x;
+    out.bg_mosaic_y = in.bg_mosaic_y;
+    out.obj_mosaic_x = in.obj_mosaic_x;
+    out.obj_mosaic_y = in.obj_mosaic_y;
+    out.bldcnt = in.bldcnt;
+    out.bldalpha = in.bldalpha;
+    out.eva = in.eva; out.evb = in.evb; out.evy = in.evy;
+    std::copy_n(in.refx_internal, 2, out.refx_internal);
+    std::copy_n(in.refy_internal, 2, out.refy_internal);
+    out.capture = in.capture;
+    out.master_bright = in.master_bright;
+    out.capture_latch = in.capture_latch != 0u;
+    return out;
+}
 
 struct Pixel {
     uint32_t color = 0; // 6-bit R/G/B in bytes
@@ -114,6 +176,7 @@ uint64_t g_hd_frames = 0;
 uint64_t g_hd_presented = 0;
 uint64_t g_direct_overlay_ns = 0;
 uint64_t g_direct_class_frames[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
+uint64_t g_adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT] = {};
 uint64_t g_direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
 uint64_t g_direct_class_transitions = 0;
 uint64_t g_direct_extra_bg_mask_frames[NDS_GPU2D_DIRECT_BG_MASK_COUNT] = {};
@@ -317,6 +380,9 @@ uint32_t darken(uint32_t c, uint32_t f, uint32_t bias = 7u) {
 }
 
 struct TextLine {
+    // Latched register state for this line. Never g_unit: a threaded line
+    // render must not observe a register write that landed after its latch.
+    const Unit* u = nullptr;
     int engine = 0;
     int bg = 0;
     const uint8_t* palette = nullptr;
@@ -330,11 +396,11 @@ struct TextLine {
     uint16_t cached_tile = 0;
 };
 
-TextLine prepare_text_line(int engine, int bg, int y,
+TextLine prepare_text_line(const Unit& u, int engine, int bg, int y,
                            const uint8_t* palette,
                            const NdsVramRendererView* vram) {
-    Unit& u = g_unit[engine];
     TextLine line{};
+    line.u = &u;
     line.engine = engine;
     line.bg = bg;
     line.palette = palette;
@@ -356,7 +422,7 @@ TextLine prepare_text_line(int engine, int bg, int y,
 }
 
 Pixel text_pixel(TextLine& line, int x) {
-    Unit& u = g_unit[line.engine];
+    const Unit& u = *line.u;
     const uint16_t cnt = line.cnt;
     const int bg = line.bg;
     uint32_t sx = (u.bgx[bg] + x) & 0x1FFu;
@@ -453,10 +519,10 @@ BgKind bg_kind(const Unit& u, int bg) {
     }
 }
 
-void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
+void decode_text_line(const Unit& u, int engine, int bg, int y,
+                      const uint8_t* palette,
                       const NdsVramRendererView& vram, BgLine& out) {
-    Unit& u = g_unit[engine];
-    TextLine line = prepare_text_line(engine, bg, y, palette, &vram);
+    TextLine line = prepare_text_line(u, engine, bg, y, palette, &vram);
     out.prio = static_cast<uint8_t>(line.cnt & 3u);
     out.target = static_cast<uint8_t>(1u << bg);
     out.order = static_cast<uint8_t>(bg + 1);
@@ -539,7 +605,7 @@ void decode_text_line(int engine, int bg, int y, const uint8_t* palette,
     }
 }
 
-void begin_affine_line(Unit& u, int bg, int y, int32_t* x, int32_t* yy) {
+void begin_affine_line(const Unit& u, int bg, int y, int32_t* x, int32_t* yy) {
     const int affine = bg - 2;
     *x = u.refx_internal[affine];
     *yy = u.refy_internal[affine];
@@ -550,7 +616,12 @@ void begin_affine_line(Unit& u, int bg, int y, int32_t* x, int32_t* yy) {
     }
 }
 
-void end_affine_line(Unit& u, int bg) {
+// BG2/BG3 affine reference accumulators advance once per line, but only on
+// lines where that layer is actually decoded. The line render is a pure
+// function of its latched Unit copy (which carries the pre-advance value), so
+// the advance is applied to the master Unit by the scheduler-thread latch step
+// -- never by a renderer. See docs/device_work_parallelization.md F4.
+void advance_affine_line(Unit& u, int bg) {
     const int affine = bg - 2;
     u.refx_internal[affine] += u.pb[affine];
     u.refy_internal[affine] += u.pd[affine];
@@ -563,9 +634,9 @@ void setup_affine_output(const Unit& u, int bg, BgLine& out) {
     out.color.fill(0u);
 }
 
-void decode_affine_line(int engine, int bg, int y, const uint8_t* palette,
+void decode_affine_line(const Unit& u, int engine, int bg, int y,
+                        const uint8_t* palette,
                         const NdsVramRendererView& vram, BgLine& out) {
-    Unit& u = g_unit[engine];
     const uint16_t cnt = u.bgcnt[bg];
     setup_affine_output(u, bg, out);
 
@@ -616,13 +687,11 @@ void decode_affine_line(int engine, int bg, int y, const uint8_t* palette,
         out.color[x] = static_cast<uint16_t>(
             view16(palette, uint32_t{index} << 1u) | 0x8000u);
     }
-    end_affine_line(u, bg);
 }
 
-void decode_extended_line(int engine, int bg, int y,
+void decode_extended_line(const Unit& u, int engine, int bg, int y,
                           const uint8_t* palette,
                           const NdsVramRendererView& vram, BgLine& out) {
-    Unit& u = g_unit[engine];
     const uint16_t cnt = u.bgcnt[bg];
     setup_affine_output(u, bg, out);
 
@@ -672,7 +741,6 @@ void decode_extended_line(int engine, int bg, int y,
                         view16(palette, uint32_t{index} << 1u) | 0x8000u);
             }
         }
-        end_affine_line(u, bg);
         return;
     }
 
@@ -731,20 +799,20 @@ void decode_extended_line(int engine, int bg, int y,
         }
         out.color[x] = static_cast<uint16_t>(color | 0x8000u);
     }
-    end_affine_line(u, bg);
 }
 
-void decode_bg_line(int engine, int bg, int y, const uint8_t* palette,
+void decode_bg_line(const Unit& u, int engine, int bg, int y,
+                    const uint8_t* palette,
                     const NdsVramRendererView& vram, BgLine& out) {
-    switch (bg_kind(g_unit[engine], bg)) {
+    switch (bg_kind(u, bg)) {
         case BgKind::Text:
-            decode_text_line(engine, bg, y, palette, vram, out);
+            decode_text_line(u, engine, bg, y, palette, vram, out);
             break;
         case BgKind::Affine:
-            decode_affine_line(engine, bg, y, palette, vram, out);
+            decode_affine_line(u, engine, bg, y, palette, vram, out);
             break;
         case BgKind::Extended:
-            decode_extended_line(engine, bg, y, palette, vram, out);
+            decode_extended_line(u, engine, bg, y, palette, vram, out);
             break;
         default:
             out.color.fill(0u);
@@ -760,13 +828,13 @@ void put_obj(Pixel* line, int width, int x, const Pixel& p) {
     if (!line[x].valid || p.priority <= line[x].priority) line[x]=p;
 }
 
-void render_obj_line(int engine, int line_y, Pixel* out, int out_width,
+void render_obj_line(const Unit& u, int engine, int line_y, Pixel* out,
+                     int out_width,
                      const uint8_t* oam, const uint8_t* palette,
                      const NdsVramRendererView& vram,
                      uint8_t* obj_window = nullptr) {
     std::fill_n(out, out_width, Pixel{});
     if (obj_window) std::fill_n(obj_window, out_width, 0u);
-    const Unit& u=g_unit[engine];
     if (!(u.dispcnt&0x1000u)) return;
     static constexpr int widths[16]={8,16,8,8,16,32,8,8,32,32,16,8,64,64,32,8};
     static constexpr int heights[16]={8,8,16,8,16,8,32,8,32,16,32,8,64,32,64,8};
@@ -972,38 +1040,103 @@ uint32_t compose(const Unit& u, const Pixel& top, const Pixel& below,
     return c;
 }
 
+// ---- Per-line latch and per-render scratch --------------------------------
+// A line render is a pure function of a latched register snapshot plus the
+// memory views; it never reads g_unit and never mutates guest state. The
+// scheduler thread owns the latch (and therefore the affine accumulators and
+// the DISPCAPCNT enable latch). See docs/device_work_parallelization.md.
+struct LineScratch {
+    std::array<BgLine, 4> bg_lines{};
+    std::array<uint32_t, 256> comp6{};
+    std::array<Pixel, 256> obj{};
+    std::array<uint8_t, 256> obj_window{};
+    // Profiling accumulators, merged into the module counters at a drain so
+    // concurrent renders cannot tear them.
+    uint64_t obj_ns = 0;
+    uint64_t engine_ns[2] = {};
+    uint64_t text_lines[2][5] = {};
+    uint64_t no_effect_lines[2] = {};
+    uint64_t scanlines = 0;
+    uint64_t render_ns = 0;
+    uint64_t direct_class_engine_a_ns[NDS_GPU2D_DIRECT_CLASS_COUNT] = {};
+    uint64_t direct_extra_bg_mask_engine_a_ns[
+        NDS_GPU2D_DIRECT_BG_MASK_COUNT] = {};
+};
+
+struct LineJob {
+    Unit unit[2]{};
+    const uint8_t* palette[2]{};
+    const uint8_t* oam[2]{};
+    const NdsVramRendererView* vram[2]{};
+    // Owned copy: GPU3D::GetLine returns a pointer into shared scratch that is
+    // valid only until the next call, and SoftRenderer::GetLine consumes
+    // scanline-semaphore tokens, so only the scheduler thread may call it.
+    std::array<uint32_t, 256> line3d_storage{};
+    const uint32_t* line3d = nullptr;
+    uint32_t buffer = 0;
+    uint32_t screen[2]{};
+    int y = 0;
+    bool engine_active[2]{};
+    bool bg0_3d = false;
+    bool cap = false;
+    uint32_t capw = 0;
+    uint8_t direct_class = 0;
+    uint8_t direct_extra_bg_mask = 0;
+    // Staged display capture. The pixels are produced by whichever thread
+    // renders the line; the write into guest VRAM, and the texture-generation
+    // bump that goes with it, are applied by the scheduler thread in line
+    // order at the next drain. capture_count == 0 means nothing was staged
+    // (no capture on this line, or the destination bank is not LCDC-mapped,
+    // in which case the hardware writes nothing either).
+    std::array<uint16_t, 256> capture_pixels{};
+    uint32_t capture_dstaddr = 0;
+    uint32_t capture_dstbank = 0;
+    uint32_t capture_count = 0;
+};
+
+// The set of BG layers this engine decodes on this line. Single source of
+// truth for the decoders and for the affine-accumulator advance (F4).
+uint8_t bg_active_mask(const Unit& u, bool bg0_3d) {
+    uint8_t mask = 0;
+    for (int bg = 0; bg < 4; ++bg) {
+        if (!(u.dispcnt & (0x100u << bg))) continue;
+        if (bg == 0 && bg0_3d) continue;   // BG0's slot is the 3D layer
+        if (bg_kind(u, bg) != BgKind::None) mask |= static_cast<uint8_t>(1u << bg);
+    }
+    return mask;
+}
+
 // Composite one scanline into the internal 6-bit format (channels at bits
 // 0-5/8-13/16-21) including the 3D layer when BG0 is redirected to it.
 // This is the general-path twin of the dst-direct fast paths in
 // render_engine_line, which carry the same layer/priority/blend rules but
 // skip the 3D layer and the 6-bit intermediate.
-void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
+void compose_line6(int engine, int y, const Unit& u, const uint8_t* palette,
                    const uint8_t* oam, const NdsVramRendererView& vram,
-                   const uint32_t* line3d, bool bg0_3d, uint32_t* out) {
-    std::array<Pixel,256> obj{};
-    std::array<uint8_t,256> obj_window{};
+                   const uint32_t* line3d, bool bg0_3d, uint32_t* out,
+                   LineScratch& sc) {
+    std::array<Pixel,256>& obj = sc.obj;
+    std::array<uint8_t,256>& obj_window = sc.obj_window;
     const auto obj_start = profiling() ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
-    render_obj_line(engine, y, obj.data(), 256, oam, palette, vram,
+    render_obj_line(u, engine, y, obj.data(), 256, oam, palette, vram,
                     obj_window.data());
     if (profiling()) {
-        g_obj_ns += static_cast<uint64_t>(
+        sc.obj_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - obj_start).count());
     }
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
-    static std::array<BgLine, 4> bg_lines;
+    std::array<BgLine, 4>& bg_lines = sc.bg_lines;
     size_t bg_count = 0;
     int active_bgs[4];
-    for (int bg = 0; bg < 4; ++bg) {
-        if (!(u.dispcnt & (0x100u << bg))) continue;
-        if (bg == 0 && bg0_3d) continue;   // BG0's slot is the 3D layer
-        if (bg_kind(u, bg) != BgKind::None)
-            active_bgs[bg_count++] = bg;
-    }
+    const uint8_t active_mask = bg_active_mask(u, bg0_3d);
+    for (int bg = 0; bg < 4; ++bg)
+        if (active_mask & (1u << bg)) active_bgs[bg_count++] = bg;
     for (size_t i = 0; i < bg_count; ++i)
-        decode_bg_line(engine, active_bgs[i], y, palette, vram, bg_lines[i]);
+        decode_bg_line(u, engine, active_bgs[i], y, palette, vram,
+                       bg_lines[i]);
     const uint8_t prio3d = static_cast<uint8_t>(u.bgcnt[0] & 3u);
     auto ahead = [](const Pixel& a, const Pixel& b) {
         return a.priority < b.priority ||
@@ -1044,13 +1177,17 @@ void compose_line6(int engine, int y, Unit& u, const uint8_t* palette,
 // writes 15-bit+alpha pixels into the physical destination bank (gated on
 // its LCDC mapping), blending source A (composite or 3D-only line, in the
 // internal 6-bit format) with source B (LCDC VRAM or the display FIFO).
-void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
-                const uint32_t* line3d) {
+// Produce the capture line's pixels. Pure with respect to guest state: it
+// reads source A (already in hand) and source B (an LCDC bank), and writes
+// only into the job. apply_staged_capture performs the guest-visible half.
+void stage_capture(const Unit& u, int line, uint32_t width,
+                   const uint32_t* comp6, const uint32_t* line3d,
+                   LineJob& job) {
     const uint32_t cap = u.capture;
     const uint32_t dstbank = (cap >> 16) & 3u;
+    job.capture_count = 0;
     if (!nds_vram_lcdc_mapped(dstbank)) return;
-    uint16_t* const dstp =
-        reinterpret_cast<uint16_t*>(nds_vram_bank_data(dstbank));
+    uint16_t* const dstp = job.capture_pixels.data();
     uint32_t dstaddr = (((cap >> 18) & 3u) << 14) + line * width;
 
     // Source A: the 3D-only line or the pre-master-brightness composite.
@@ -1078,6 +1215,9 @@ void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
     }
     dstaddr &= 0xFFFFu;
     srcBaddr &= 0xFFFFu;
+    job.capture_dstbank = dstbank;
+    job.capture_dstaddr = dstaddr;
+    job.capture_count = width;
 
     switch ((cap >> 29) & 3u) {
         case 0:  // source A only
@@ -1087,14 +1227,14 @@ void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
                 const uint32_t g = (val >> 9) & 0x1Fu;
                 const uint32_t b = (val >> 17) & 0x1Fu;
                 const uint32_t a = (!srcA_3d || (val >> 24)) ? 0x8000u : 0u;
-                dstp[dstaddr] = static_cast<uint16_t>(r | (g << 5) |
-                                                      (b << 10) | a);
+                dstp[i] = static_cast<uint16_t>(r | (g << 5) |
+                                               (b << 10) | a);
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
             break;
         case 1:  // source B only
             for (uint32_t i = 0; i < width; ++i) {
-                dstp[dstaddr] = srcB ? srcB[srcBaddr & 0xFFFFu] : 0;
+                dstp[i] = srcB ? srcB[srcBaddr & 0xFFFFu] : 0;
                 srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
@@ -1132,85 +1272,61 @@ void do_capture(Unit& u, int line, uint32_t width, const uint32_t* comp6,
                 if (rD > 0x1Fu) rD = 0x1Fu;
                 if (gD > 0x1Fu) gD = 0x1Fu;
                 if (bD > 0x1Fu) bD = 0x1Fu;
-                dstp[dstaddr] = static_cast<uint16_t>(rD | (gD << 5) |
-                                                      (bD << 10) |
-                                                      (aD << 15));
+                dstp[i] = static_cast<uint16_t>(rD | (gD << 5) |
+                                               (bD << 10) |
+                                               (aD << 15));
                 srcBaddr = (srcBaddr + 1u) & 0xFFFFu;
                 dstaddr = (dstaddr + 1u) & 0xFFFFu;
             }
             break;
         }
     }
-    nds_vram_note_capture_write();
 }
 
-void render_engine_line(int engine, int y) {
-    Unit& u=g_unit[engine];
-    const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
-    const int screen = engine_a_on_top ? engine : (engine ^ 1);
-    Frame& fb = g_fb[g_front ^ 1][screen];
+// True when this engine's line render takes the general (melonDS
+// DrawScanline) path rather than one of the dst-direct fast paths. Shared by
+// the render and by the latch, which must decide whether to fetch the 3D line
+// under exactly the same condition (F5).
+bool line_general_path(const Unit& u, int engine, bool bg0_3d, bool cap) {
+    const uint32_t mode = (u.dispcnt >> 16) & (engine ? 1u : 3u);
+    return bg0_3d || cap || mode != 1u ||
+           (u.dispcnt & NDS_GPU2D_DISPCNT_WINDOW_ENABLE_MASK);
+}
+
+bool line_forceblank(const LineJob& job, int engine) {
+    return !job.palette[engine] || !job.oam[engine] ||
+           (job.unit[engine].dispcnt & 0x80u);
+}
+
+void render_engine_line(LineJob& job, int engine, LineScratch& sc) {
+    const Unit& u = job.unit[engine];
+    const int y = job.y;
+    Frame& fb = g_fb[job.buffer][job.screen[engine]];
     uint32_t* const dst = fb.data() + y * 256;
-    const uint8_t* const palette = nds_vram_renderer_palette(engine);
-    const uint8_t* const oam = nds_vram_renderer_oam(engine);
-    const NdsVramRendererView& vram = *nds_vram_renderer_view(engine);
-    const bool forceblank = !palette || !oam || (u.dispcnt & 0x80u);
-    // DISPCAPCNT latches at the top of the frame; setting the enable bit
-    // mid-frame does not capture until the next frame. melonDS's arm skips
-    // only its own force-blank cases (VCount>192, engine-B power-off),
-    // neither of which applies to engine A here.
-    if (engine == 0 && y == 0 && (u.capture & 0x80000000u))
-        u.capture_latch = true;
-    if (forceblank) {
+    const uint8_t* const palette = job.palette[engine];
+    const uint8_t* const oam = job.oam[engine];
+    if (line_forceblank(job, engine)) {
         std::fill_n(dst, 256, 0xFFFFFFFFu);
         return;
     }
+    const NdsVramRendererView& vram = *job.vram[engine];
     const uint32_t mode=(u.dispcnt>>16)&(engine?1u:3u);
 
-    uint32_t capw = 0;
-    bool cap = false;
-    if (engine == 0 && u.capture_latch) {
-        static constexpr uint16_t kCapW[4] = {128, 256, 256, 256};
-        static constexpr uint8_t kCapH[4] = {128, 64, 128, 192};
-        const uint32_t size = (u.capture >> 20) & 3u;
-        capw = kCapW[size];
-        cap = y < kCapH[size];
-    }
-    const bool bg0_3d = engine == 0 && (u.dispcnt & 0x8u) != 0 &&
-                        (u.dispcnt & 0x100u) != 0;
+    const uint32_t capw = engine == 0 ? job.capw : 0u;
+    const bool cap = engine == 0 && job.cap;
+    const bool bg0_3d = engine == 0 && job.bg0_3d;
 
-    if (bg0_3d || cap || mode != 1u ||
-        (u.dispcnt & NDS_GPU2D_DISPCNT_WINDOW_ENABLE_MASK)) {
+    if (line_general_path(u, engine, bg0_3d, cap)) {
         // General path: mirror melonDS DrawScanline ordering — composite
         // (when the display or capture consumes it), display-mode mux,
         // capture, master brightness on every mode except screen-off.
-        const uint32_t* line3d =
-            (engine == 0) ? nds_gpu3d_line(y) : nullptr;
-        if (engine == 0 && bg0_3d) {
-            const uint16_t wide_width = nds_gpu3d_output_width();
-            if (wide_width > 256u &&
-                wide_width <= static_cast<uint16_t>(kMaxAdaptiveWidth)) {
-                const size_t offset =
-                    static_cast<size_t>(y) * wide_width;
-                std::copy_n(nds_gpu3d_wide_line(y), wide_width,
-                            g_wide_3d_frame[g_front ^ 1].data() + offset);
-                if (g_adaptive_skybox_fill) {
-                    const uint32_t* const attr =
-                        nds_gpu3d_wide_attr_line(y);
-                    if (attr)
-                        std::copy_n(
-                            attr, wide_width,
-                            g_wide_3d_attr_frame[g_front ^ 1].data() +
-                                offset);
-                }
-                g_wide_3d_width[g_front ^ 1] = wide_width;
-            }
-        }
-        static std::array<uint32_t, 256> comp6;
+        const uint32_t* const line3d = (engine == 0) ? job.line3d : nullptr;
+        std::array<uint32_t, 256>& comp6 = sc.comp6;
         const bool need_comp =
             mode == 1u || (cap && !(u.capture & 0x01000000u));
         if (need_comp)
             compose_line6(engine, y, u, palette, oam, vram, line3d,
-                          bg0_3d, comp6.data());
+                          bg0_3d, comp6.data(), sc);
         const uint32_t mbmode = u.master_bright >> 14;
         const uint32_t mb = std::min<uint32_t>(16, u.master_bright & 0x1Fu);
         auto bright = [&](uint32_t c6) {
@@ -1236,30 +1352,32 @@ void render_engine_line(int engine, int y) {
             // is not implemented; an unfed FIFO displays black.
             std::fill_n(dst, 256, to_rgb32(bright(0u)));
         }
-        if (cap) do_capture(u, y, capw, need_comp ? comp6.data() : nullptr,
-                            line3d);
+        if (cap)
+            stage_capture(u, y, capw, need_comp ? comp6.data() : nullptr,
+                          line3d, job);
         return;
     }
 
-    std::array<Pixel,256> obj{};
+    std::array<Pixel,256>& obj = sc.obj;
     const auto obj_start = profiling() ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
-    render_obj_line(engine,y,obj.data(),256,oam,palette,vram);
+    render_obj_line(u,engine,y,obj.data(),256,oam,palette,vram);
     if (profiling()) {
-        g_obj_ns += static_cast<uint64_t>(
+        sc.obj_ns += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - obj_start).count());
     }
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{rgb6(backdrop15), 0x20u, 0, 4, 5, true};
     const uint32_t* const lut = rgb32_lut();
-    static std::array<BgLine, 4> bg_lines;  // decoded, sorted front-first
+    // decoded, sorted front-first
+    std::array<BgLine, 4>& bg_lines = sc.bg_lines;
     size_t bg_count = 0;
     int active_bgs[4];
-    for (int bg = 0; bg < 4; ++bg) {
-        if (!(u.dispcnt & (0x100u << bg))) continue;
-        if (bg_kind(u, bg) != BgKind::None)
-            active_bgs[bg_count++] = bg;
+    {
+        const uint8_t active = bg_active_mask(u, false);
+        for (int bg = 0; bg < 4; ++bg)
+            if (active & (1u << bg)) active_bgs[bg_count++] = bg;
     }
     // Front-first order: lower BGCNT priority wins, ties break to the lower
     // BG index. Four elements maximum: insertion sort on the index list.
@@ -1284,14 +1402,15 @@ void render_engine_line(int engine, int y) {
             prio[j] = p;
         }
         for (size_t i = 0; i < bg_count; ++i)
-            decode_bg_line(engine, order[i], y, palette, vram, bg_lines[i]);
+            decode_bg_line(u, engine, order[i], y, palette, vram,
+                           bg_lines[i]);
     }
     const uint32_t mbmode=u.master_bright>>14;
     const uint32_t mb=std::min<uint32_t>(16,u.master_bright&0x1Fu);
     // Common firmware top-screen mode: OBJ over a backdrop, with no BG or
     // color effect enabled. There is no second layer to sort or blend.
     if (bg_count == 0 && u.bldcnt == 0 && mbmode == 0) {
-        if (profiling()) ++g_text_lines[engine][0];
+        if (profiling()) ++sc.text_lines[engine][0];
         for (int x = 0; x < 256; ++x)
             dst[x] = obj[x].valid ? to_rgb32(obj[x].color)
                                   : lut[backdrop15];
@@ -1307,8 +1426,8 @@ void render_engine_line(int engine, int y) {
     // the general blender for every pixel.
     if ((u.bldcnt & 0x3FC0u) == 0 && mbmode == 0) {
         if (profiling()) {
-            ++g_text_lines[engine][bg_count];
-            ++g_no_effect_lines[engine];
+            ++sc.text_lines[engine][bg_count];
+            ++sc.no_effect_lines[engine];
         }
         for (int x = 0; x < 256; ++x) {
             // BG layers are front-first: the first opaque pixel is the top
@@ -1331,7 +1450,7 @@ void render_engine_line(int engine, int y) {
         }
         return;
     }
-    if (profiling()) ++g_text_lines[engine][bg_count];
+    if (profiling()) ++sc.text_lines[engine][bg_count];
     for(int x=0;x<256;++x){
         Pixel top=backdrop, below=backdrop;
         bool have_top = false;
@@ -1496,9 +1615,435 @@ void reg_write8(Unit& u, int engine, uint32_t off, uint8_t v) {
     if (off == 0x54) u.evy = std::min<uint8_t>(16, v & 0x1Fu);
 }
 
+
+// ---- Latch / execute -----------------------------------------------------
+
+uint64_t ns_since(std::chrono::steady_clock::time_point a,
+                  std::chrono::steady_clock::time_point b) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+}
+
+// Scheduler-thread latch. Everything a line render reads that a later guest
+// write could change is captured here, and the two pieces of renderer-owned
+// mutable state -- the BG2/BG3 affine accumulators and the DISPCAPCNT enable
+// latch -- are advanced here and nowhere else.
+void latch_line(int y, LineJob& job) {
+    const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
+    job.y = y;
+    job.buffer = static_cast<uint32_t>(g_front ^ 1);
+    job.line3d = nullptr;
+    job.direct_class = static_cast<uint8_t>(g_direct_frame_class);
+    job.direct_extra_bg_mask = g_direct_extra_bg_mask;
+    for (int e = 0; e < 2; ++e) {
+        job.unit[e] = g_unit[e];
+        job.screen[e] = static_cast<uint32_t>(engine_a_on_top ? e : (e ^ 1));
+        job.palette[e] = nds_vram_renderer_palette(e);
+        job.oam[e] = nds_vram_renderer_oam(e);
+        job.vram[e] = nds_vram_renderer_view(e);
+    }
+    job.engine_active[0] = !g_direct_frame_active;
+    job.engine_active[1] = true;
+
+    // DISPCAPCNT latches at the top of the frame; setting the enable bit
+    // mid-frame does not capture until the next frame. melonDS's arm skips
+    // only its own force-blank cases (VCount>192, engine-B power-off),
+    // neither of which applies to engine A here. This ran inside the engine-A
+    // render before the force-blank early-out, and it is guest-readable
+    // through DISPCAPCNT, so it belongs on this thread.
+    if (y == 0 && (g_unit[0].capture & 0x80000000u))
+        g_unit[0].capture_latch = true;
+    job.unit[0].capture_latch = g_unit[0].capture_latch;
+
+    job.cap = false;
+    job.capw = 0;
+    if (job.unit[0].capture_latch) {
+        static constexpr uint16_t kCapW[4] = {128, 256, 256, 256};
+        static constexpr uint8_t kCapH[4] = {128, 64, 128, 192};
+        const uint32_t size = (job.unit[0].capture >> 20) & 3u;
+        job.capw = kCapW[size];
+        job.cap = y < kCapH[size];
+    }
+    job.bg0_3d = (job.unit[0].dispcnt & 0x8u) != 0 &&
+                 (job.unit[0].dispcnt & 0x100u) != 0;
+
+    // The 3D line and the wide-3D snapshot are pulled here, in scanline order,
+    // under exactly the condition the inline render used: GPU3D::GetLine writes
+    // a single shared scratch buffer and SoftRenderer::GetLine consumes
+    // scanline-semaphore tokens, so no other thread may call it.
+    const bool engine_a_renders =
+        job.engine_active[0] && !line_forceblank(job, 0);
+    if (engine_a_renders &&
+        line_general_path(job.unit[0], 0, job.bg0_3d, job.cap)) {
+        const uint32_t* const line3d = nds_gpu3d_line(y);
+        if (line3d) {
+            std::copy_n(line3d, 256, job.line3d_storage.data());
+            job.line3d = job.line3d_storage.data();
+        }
+        if (job.bg0_3d) {
+            const uint16_t wide_width = nds_gpu3d_output_width();
+            if (wide_width > 256u &&
+                wide_width <= static_cast<uint16_t>(kMaxAdaptiveWidth)) {
+                const size_t offset = static_cast<size_t>(y) * wide_width;
+                std::copy_n(nds_gpu3d_wide_line(y), wide_width,
+                            g_wide_3d_frame[job.buffer].data() + offset);
+                if (g_adaptive_skybox_fill) {
+                    const uint32_t* const attr = nds_gpu3d_wide_attr_line(y);
+                    if (attr)
+                        std::copy_n(attr, wide_width,
+                                    g_wide_3d_attr_frame[job.buffer].data() +
+                                        offset);
+                }
+                g_wide_3d_width[job.buffer] = wide_width;
+            }
+        }
+    }
+
+    // Affine reference accumulators advance once per decoded line, per layer.
+    for (int e = 0; e < 2; ++e) {
+        if (!job.engine_active[e] || line_forceblank(job, e)) continue;
+        const Unit& snapshot = job.unit[e];
+        const bool bg0_3d_e = (e == 0) && job.bg0_3d;
+        const bool cap_e = (e == 0) && job.cap;
+        if (line_general_path(snapshot, e, bg0_3d_e, cap_e)) {
+            const uint32_t mode = (snapshot.dispcnt >> 16) & (e ? 1u : 3u);
+            const bool need_comp =
+                mode == 1u || (cap_e && !(snapshot.capture & 0x01000000u));
+            if (!need_comp) continue;   // nothing decoded, nothing advances
+        }
+        const uint8_t active = bg_active_mask(snapshot, bg0_3d_e);
+        for (int bg = 2; bg < 4; ++bg)
+            if (active & (1u << bg)) advance_affine_line(g_unit[e], bg);
+    }
+}
+
+void render_line_job(LineJob& job, LineScratch& sc) {
+    if (!profiling()) {
+        if (job.engine_active[0]) render_engine_line(job, 0, sc);
+        if (job.engine_active[1]) render_engine_line(job, 1, sc);
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    if (job.engine_active[0]) render_engine_line(job, 0, sc);
+    const auto middle = std::chrono::steady_clock::now();
+    if (job.engine_active[1]) render_engine_line(job, 1, sc);
+    const auto finish = std::chrono::steady_clock::now();
+    sc.render_ns += ns_since(start, finish);
+    const uint64_t engine_a_ns = ns_since(start, middle);
+    sc.engine_ns[0] += engine_a_ns;
+    sc.direct_class_engine_a_ns[job.direct_class] += engine_a_ns;
+    if (job.direct_class == NDS_GPU2D_DIRECT_EXTRA_BG)
+        sc.direct_extra_bg_mask_engine_a_ns[job.direct_extra_bg_mask] +=
+            engine_a_ns;
+    sc.engine_ns[1] += ns_since(middle, finish);
+    ++sc.scanlines;
+}
+
+// Fold a scratch's profiling accumulators into the module counters. Called on
+// the scheduler thread at a drain, so the counters never tear.
+void merge_scratch(LineScratch& sc) {
+    if (!sc.scanlines && !sc.render_ns && !sc.obj_ns) return;
+    g_render_ns += sc.render_ns;
+    g_obj_ns += sc.obj_ns;
+    g_render_scanlines += sc.scanlines;
+    for (int e = 0; e < 2; ++e) {
+        g_engine_ns[e] += sc.engine_ns[e];
+        g_no_effect_lines[e] += sc.no_effect_lines[e];
+        for (int i = 0; i < 5; ++i)
+            g_text_lines[e][i] += sc.text_lines[e][i];
+    }
+    for (uint32_t i = 0; i < NDS_GPU2D_DIRECT_CLASS_COUNT; ++i)
+        g_direct_class_engine_a_ns[i] += sc.direct_class_engine_a_ns[i];
+    for (uint32_t i = 0; i < NDS_GPU2D_DIRECT_BG_MASK_COUNT; ++i)
+        g_direct_extra_bg_mask_engine_a_ns[i] +=
+            sc.direct_extra_bg_mask_engine_a_ns[i];
+    sc.render_ns = 0;
+    sc.obj_ns = 0;
+    sc.scanlines = 0;
+    std::memset(sc.engine_ns, 0, sizeof(sc.engine_ns));
+    std::memset(sc.text_lines, 0, sizeof(sc.text_lines));
+    std::memset(sc.no_effect_lines, 0, sizeof(sc.no_effect_lines));
+    std::memset(sc.direct_class_engine_a_ns, 0,
+                sizeof(sc.direct_class_engine_a_ns));
+    std::memset(sc.direct_extra_bg_mask_engine_a_ns, 0,
+                sizeof(sc.direct_extra_bg_mask_engine_a_ns));
+}
+
+LineJob g_latch_job{};
+LineScratch g_inline_scratch{};
+
+
+// ---- Worker pool ---------------------------------------------------------
+// Topology mirrors the in-tree GPU3D soft-renderer contract: an atomic
+// progress counter plus a condition-variable wait, with the scheduler thread
+// helping rather than idling at a drain.
+
+constexpr uint32_t kJobSlots = 256;   // > 192 lines per frame, power of two
+
+struct Pool {
+    std::array<LineJob, kJobSlots> jobs{};
+    // head: slots published by the scheduler thread.
+    // claim: slots handed out to a renderer (worker or a helping drain).
+    // done: slots whose render has returned.
+    std::atomic<uint64_t> head{0};
+    std::atomic<uint64_t> claim{0};
+    std::atomic<uint64_t> done{0};
+    std::atomic<bool> stop{false};
+    std::mutex m;
+    std::condition_variable work_cv;
+    std::condition_variable done_cv;
+    std::vector<std::thread> threads;
+    std::vector<std::unique_ptr<LineScratch>> scratch;
+};
+
+std::unique_ptr<Pool> g_pool;
+bool g_threaded_requested = false;
+unsigned g_worker_count = 1;
+
+uint64_t g_threaded_lines = 0;
+uint64_t g_inline_lines = 0;
+uint64_t g_fence_drains[NDS_GPU2D_FENCE_CAUSE_COUNT] = {};
+uint64_t g_fenced_lines[NDS_GPU2D_FENCE_CAUSE_COUNT] = {};
+uint64_t g_fence_wait_ns = 0;
+uint64_t g_fence_helped_lines = 0;
+uint64_t g_staged_captures = 0;
+// Banks holding a staged, not-yet-applied capture write.
+uint32_t g_staged_bank_mask = 0;
+// Next ring index whose staged capture has still to be applied.
+uint64_t g_capture_apply_index = 0;
+
+void worker_main(Pool* pool, LineScratch* sc) {
+    // Registered with the always-on host sampler so that emu-thread time spent
+    // WAITING on this pool is attributable to the pool's own host symbols
+    // rather than showing up as an unexplained gap in the emu profile
+    // (host_profile.h). Scoped: the pool is torn down and rebuilt when the
+    // worker count changes, and a leaked slot would cost a failing suspend
+    // every tick thereafter.
+    NdsHostProfThreadScope hostprof_scope(NDS_HOSTPROF_ROLE_RENDER);
+    for (;;) {
+        uint64_t index = 0;
+        bool have = false;
+        for (;;) {
+            if (pool->stop.load(std::memory_order_acquire)) return;
+            uint64_t c = pool->claim.load(std::memory_order_acquire);
+            const uint64_t h = pool->head.load(std::memory_order_acquire);
+            if (c < h) {
+                if (pool->claim.compare_exchange_weak(
+                        c, c + 1, std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    index = c;
+                    have = true;
+                    break;
+                }
+                continue;
+            }
+            std::unique_lock<std::mutex> lock(pool->m);
+            if (pool->stop.load(std::memory_order_acquire)) return;
+            if (pool->claim.load(std::memory_order_acquire) >=
+                pool->head.load(std::memory_order_acquire))
+                // Bounded so that no future publish/notify ordering mistake
+                // can wedge a worker asleep with work queued; the predicate is
+                // re-checked on every wakeup.
+                pool->work_cv.wait_for(lock, std::chrono::milliseconds(2));
+        }
+        if (!have) continue;
+        render_line_job(pool->jobs[index % kJobSlots], *sc);
+        pool->done.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard<std::mutex> lock(pool->m);
+        }
+        pool->done_cv.notify_all();
+    }
+}
+
+// The guest-visible half of display capture: the VRAM write and the texture
+// generation bump the 3D engine reads. Runs on the scheduler thread only, in
+// ring order, so the sequence of writes is exactly the single-threaded one.
+void drain_pool(uint32_t cause);
+
+void apply_staged_capture(LineJob& job) {
+    if (!job.capture_count) return;
+    uint16_t* const dstp = reinterpret_cast<uint16_t*>(
+        nds_vram_bank_data(job.capture_dstbank));
+    uint32_t dstaddr = job.capture_dstaddr;
+    for (uint32_t i = 0; i < job.capture_count; ++i) {
+        dstp[dstaddr] = job.capture_pixels[i];
+        dstaddr = (dstaddr + 1u) & 0xFFFFu;
+    }
+    job.capture_count = 0;
+    ++g_staged_captures;
+    nds_vram_note_capture_write();
+}
+
+void stop_pool() {
+    if (!g_pool) return;
+    // Any staged capture write must land in guest VRAM before the ring that
+    // holds it goes away.
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    Pool* const pool = g_pool.get();
+    {
+        std::lock_guard<std::mutex> lock(pool->m);
+        pool->stop.store(true, std::memory_order_release);
+    }
+    pool->work_cv.notify_all();
+    for (auto& t : pool->threads)
+        if (t.joinable()) t.join();
+    for (auto& sc : pool->scratch) merge_scratch(*sc);
+    g_pool.reset();
+}
+
+void start_pool() {
+    if (g_pool || !g_threaded_requested) return;
+    g_pool = std::make_unique<Pool>();
+    Pool* const pool = g_pool.get();
+    const unsigned n = g_worker_count ? g_worker_count : 1u;
+    pool->scratch.reserve(n);
+    pool->threads.reserve(n);
+    for (unsigned i = 0; i < n; ++i)
+        pool->scratch.push_back(std::make_unique<LineScratch>());
+    for (unsigned i = 0; i < n; ++i)
+        pool->threads.emplace_back(worker_main, pool, pool->scratch[i].get());
+}
+
+// Apply every staged capture up to (not including) `target`, in ring order.
+// Every one of those jobs has completed by the time this is called.
+void apply_staged_range(uint64_t target) {
+    Pool* const pool = g_pool.get();
+    if (!pool) return;
+    for (; g_capture_apply_index < target; ++g_capture_apply_index)
+        apply_staged_capture(pool->jobs[g_capture_apply_index % kJobSlots]);
+    g_staged_bank_mask = 0;
+    nds_gpu2d_staged_captures.store(0u, std::memory_order_relaxed);
+}
+
+// Render every published-but-unrendered job, helping rather than idling, then
+// wait for any job a worker is still inside.
+void drain_pool(uint32_t cause) {
+    Pool* const pool = g_pool.get();
+    if (!pool) return;
+    const uint64_t target = pool->head.load(std::memory_order_acquire);
+    const uint64_t already = pool->done.load(std::memory_order_acquire);
+    if (already >= target) {
+        nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+        apply_staged_range(target);
+        return;
+    }
+    if (cause < NDS_GPU2D_FENCE_CAUSE_COUNT) {
+        ++g_fence_drains[cause];
+        g_fenced_lines[cause] += target - already;
+    }
+    const auto wait_start = std::chrono::steady_clock::now();
+    for (;;) {
+        uint64_t c = pool->claim.load(std::memory_order_acquire);
+        if (c >= target) break;
+        if (!pool->claim.compare_exchange_weak(c, c + 1,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire))
+            continue;
+        render_line_job(pool->jobs[c % kJobSlots], g_inline_scratch);
+        ++g_fence_helped_lines;
+        pool->done.fetch_add(1, std::memory_order_acq_rel);
+    }
+    while (pool->done.load(std::memory_order_acquire) < target) {
+        std::unique_lock<std::mutex> lock(pool->m);
+        if (pool->done.load(std::memory_order_acquire) >= target) break;
+        pool->done_cv.wait_for(lock, std::chrono::microseconds(200));
+    }
+    g_fence_wait_ns += ns_since(wait_start, std::chrono::steady_clock::now());
+    nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+    apply_staged_range(target);
+    for (auto& sc : pool->scratch) merge_scratch(*sc);
+    merge_scratch(g_inline_scratch);
+}
+
+// Capture lines render on a worker; only the VRAM write is deferred to the
+// scheduler thread. What a deferred write must not do is let a later line read
+// the destination bank and see stale data.
+//
+// BG/OBJ decode can never be that reader: DoCapture writes only when the
+// destination bank is LCDC-mapped, and a bank has one VRAMCNT setting, so an
+// LCDC bank is by construction absent from the BG/OBJ renderer views. A
+// VRAMCNT remap that would change that already fences (F14).
+//
+// That leaves exactly two readers, both engine A: display mode 2, which reads
+// the DISPCNT-selected LCDC bank, and the capture unit's own source B, which
+// reads the same bank field. Either one hitting a bank with a staged write
+// takes a drain first -- after which the line still goes to a worker.
+bool line_reads_staged_bank(const LineJob& job) {
+    if (!g_staged_bank_mask) return false;
+    const Unit& u = job.unit[0];
+    const uint32_t bank_bit = 1u << ((u.dispcnt >> 18) & 3u);
+    if (!(g_staged_bank_mask & bank_bit)) return false;
+    if (((u.dispcnt >> 16) & 3u) == 2u) return true;   // VRAM display
+    // Source B is read unless the capture takes source A only, or is fed from
+    // the (unimplemented, all-zero) main-memory FIFO.
+    return job.cap && ((u.capture >> 29) & 3u) != 0u &&
+           !(u.capture & 0x02000000u);
+}
+
+// g_pool holds joinable std::threads; destroying it with the workers still
+// running would call std::terminate. This guard is declared after g_pool so it
+// is destroyed first, joining them at process exit.
+struct PoolShutdownGuard {
+    ~PoolShutdownGuard() { stop_pool(); }
+};
+PoolShutdownGuard g_pool_shutdown_guard{};
+
+void submit_line(int y) {
+    if (!g_pool) {
+        latch_line(y, g_latch_job);
+        render_line_job(g_latch_job, g_inline_scratch);
+        // Single-threaded: the capture write lands immediately, exactly where
+        // DoCapture used to run.
+        apply_staged_capture(g_latch_job);
+        merge_scratch(g_inline_scratch);
+        ++g_inline_lines;
+        return;
+    }
+    Pool* const pool = g_pool.get();
+    // Reserve the slot before latching into it.
+    uint64_t head = pool->head.load(std::memory_order_relaxed);
+    if (head - pool->done.load(std::memory_order_acquire) >= kJobSlots) {
+        drain_pool(NDS_GPU2D_FENCE_SLOTS);
+        head = pool->head.load(std::memory_order_relaxed);
+    }
+    LineJob& job = pool->jobs[head % kJobSlots];
+    latch_line(y, job);
+    if (line_reads_staged_bank(job)) {
+        drain_pool(NDS_GPU2D_FENCE_CAPTURE);
+        // The drain does not move head, so the reserved slot is still ours.
+    }
+    if (job.cap)
+        g_staged_bank_mask |=
+            1u << ((job.unit[0].capture >> 16) & 3u);
+    // Publish under the mutex: a worker that has already evaluated its
+    // predicate and is between that check and its wait would otherwise miss
+    // the notification and sleep with work queued.
+    {
+        std::lock_guard<std::mutex> lock(pool->m);
+        pool->head.store(head + 1, std::memory_order_release);
+    }
+    nds_gpu2d_jobs_outstanding.store(1u, std::memory_order_relaxed);
+    if (job.cap)
+        nds_gpu2d_staged_captures.store(1u, std::memory_order_relaxed);
+    ++g_threaded_lines;
+    pool->work_cv.notify_one();
+}
+
+// Defined with the adaptive-compositor band pool further down (it needs
+// AdaptiveCtx). Declared here so the reset/profile/shutdown entry points above
+// the compositor can reach it.
+unsigned g_band_helper_count = 0;
+void stop_band_pool();
+void start_band_pool();
+void band_pool_stats(uint64_t* frames, uint64_t* serial_frames,
+                     uint64_t* helper_lines);
+void band_pool_reset_stats();
+
 } // namespace
 
 void nds_gpu2d_reset(){
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
     g_unit={};
     g_front = 0;
     g_direct_frame_active = false;
@@ -1532,6 +2077,16 @@ void nds_gpu2d_reset(){
     std::fill_n(g_direct_extra_master_bright_frames,
                 NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT, 0u);
     g_direct_class_transitions = 0;
+    g_threaded_lines = 0;
+    g_inline_lines = 0;
+    g_fence_wait_ns = 0;
+    g_fence_helped_lines = 0;
+    g_staged_captures = 0;
+    g_staged_bank_mask = 0;
+    g_capture_apply_index = 0;
+    band_pool_reset_stats();
+    std::fill_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
+    std::fill_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
     g_direct_frame_class = NDS_GPU2D_DIRECT_DISABLED;
     g_direct_previous_class = NDS_GPU2D_DIRECT_CLASS_COUNT;
     g_direct_extra_bg_mask = 0;
@@ -1544,6 +2099,7 @@ void nds_gpu2d_reset(){
     for (auto& frame : g_direct_object_frame) frame.fill(0u);
 }
 void nds_gpu2d_stop(){
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
     for (auto& buffers : g_fb)
         for (auto& frame : buffers)
             frame.fill(0u);
@@ -1555,32 +2111,142 @@ void nds_gpu2d_write(uint32_t addr,uint32_t value,uint32_t width){
     if(width==2){reg_write16(u,e,off,value);return;}
     reg_write8(u, e, off, static_cast<uint8_t>(value));
 }
+std::atomic<uint32_t> nds_gpu2d_jobs_outstanding{0};
+std::atomic<uint32_t> nds_gpu2d_staged_captures{0};
+
+const char* nds_gpu2d_fence_cause_name(uint32_t index) {
+    static const char* const kNames[NDS_GPU2D_FENCE_CAUSE_COUNT] = {
+        "vram", "vramcnt", "palette", "oam", "frame", "present", "slots",
+        "capture"};
+    return index < NDS_GPU2D_FENCE_CAUSE_COUNT ? kNames[index] : "?";
+}
+
+void nds_gpu2d_drain(uint32_t cause) { drain_pool(cause); }
+
+void nds_gpu2d_set_threaded(bool enabled, unsigned workers) {
+    if (g_threaded_requested == enabled &&
+        g_worker_count == (workers ? workers : 1u))
+        return;
+    stop_pool();
+    g_threaded_requested = enabled;
+    g_worker_count = workers ? workers : 1u;
+    start_pool();
+}
+
+bool nds_gpu2d_threaded() { return g_pool != nullptr; }
+
+void nds_gpu2d_shutdown_workers() {
+    stop_pool();
+    stop_band_pool();
+}
+
+void nds_gpu2d_set_adaptive_workers(unsigned helpers) {
+    if (g_band_helper_count == helpers) return;
+    stop_band_pool();
+    g_band_helper_count = helpers;
+    start_band_pool();
+}
+
+unsigned nds_gpu2d_adaptive_workers() { return g_band_helper_count; }
+
+bool gpu2d_savestate_export(NdsGpu2dSaveState* out) {
+    if (!out) return false;
+    // This is called only at the scheduler's between-round transaction point.
+    // Finish every line and apply every capture write so no worker-owned job
+    // or pointer has to cross the state boundary.
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    out->unit[0] = export_unit(g_unit[0]);
+    out->unit[1] = export_unit(g_unit[1]);
+    out->framebuffers.clear();
+    out->framebuffers.reserve(4u * 256u * 192u);
+    for (const auto& buffers : g_fb)
+        for (const auto& frame : buffers)
+            out->framebuffers.insert(out->framebuffers.end(),
+                                     frame.begin(), frame.end());
+    out->front = static_cast<uint8_t>(g_front);
+    out->frame_capture_active = g_frame_capture_active ? 1u : 0u;
+    out->present_capture_active = g_present_capture_active ? 1u : 0u;
+    return true;
+}
+
+bool gpu2d_savestate_validate(const NdsGpu2dSaveState& in,
+                              std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (in.framebuffers.size() != 4u * 256u * 192u)
+        return fail("savestate GPU2D framebuffer size mismatch");
+    if (in.front > 1u || in.frame_capture_active > 1u ||
+        in.present_capture_active > 1u)
+        return fail("savestate GPU2D frame state is invalid");
+    for (const NdsGpu2dUnitSaveState& unit : in.unit) {
+        if (unit.capture_latch > 1u || unit.bg_mosaic_x > 15u ||
+            unit.bg_mosaic_y > 15u || unit.obj_mosaic_x > 15u ||
+            unit.obj_mosaic_y > 15u || unit.eva > 16u ||
+            unit.evb > 16u || unit.evy > 16u)
+            return fail("savestate GPU2D register state is invalid");
+    }
+    return true;
+}
+
+bool gpu2d_savestate_import(const NdsGpu2dSaveState& in,
+                            std::string* error) {
+    if (!gpu2d_savestate_validate(in, error)) return false;
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    g_unit[0] = import_unit(in.unit[0]);
+    g_unit[1] = import_unit(in.unit[1]);
+    size_t pos = 0;
+    for (auto& buffers : g_fb) {
+        for (auto& frame : buffers) {
+            std::copy_n(in.framebuffers.begin() +
+                            static_cast<std::ptrdiff_t>(pos),
+                        frame.size(), frame.begin());
+            pos += frame.size();
+        }
+    }
+    g_front = in.front;
+    g_frame_capture_active = in.frame_capture_active != 0u;
+    g_present_capture_active = in.present_capture_active != 0u;
+
+    // These are presentation/worker products, not DS state. Recreate them
+    // from the restored registers, VRAM, and 3D frame on subsequent hooks.
+    g_latch_job = {};
+    g_staged_bank_mask = 0;
+    g_capture_apply_index = g_pool
+        ? g_pool->head.load(std::memory_order_acquire) : 0u;
+    nds_gpu2d_jobs_outstanding.store(0u, std::memory_order_relaxed);
+    nds_gpu2d_staged_captures.store(0u, std::memory_order_relaxed);
+    g_direct_frame_active = false;
+    g_direct_present_frame_active = false;
+    g_direct_current_frame = {};
+    g_direct_present_frame = {};
+    g_direct_object_write = 0;
+    g_direct_force_cpu_frames = std::max(g_direct_force_cpu_frames, 1u);
+    g_hd_frame_valid = false;
+    g_hd_frame = {};
+    for (auto& frame : g_adaptive_frame) frame.fill(0u);
+    for (auto& frame : g_wide_3d_frame) frame.fill(0u);
+    for (auto& frame : g_wide_3d_attr_frame) frame.fill(0u);
+    g_wide_3d_width.fill(0u);
+    for (auto& frame : g_direct_object_frame) frame.fill(0u);
+    return true;
+}
+
 void nds_gpu2d_render_scanline(int line) {
     if (line < 0 || line >= 192) return;
-    if (!profiling()) {
-        if (!g_direct_frame_active) render_engine_line(0, line);
-        render_engine_line(1, line);
-        return;
-    }
-    const auto start = std::chrono::steady_clock::now();
-    if (!g_direct_frame_active) render_engine_line(0, line);
-    const auto middle = std::chrono::steady_clock::now();
-    render_engine_line(1, line);
-    const auto finish = std::chrono::steady_clock::now();
-    const auto elapsed = finish - start;
-    g_render_ns += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
-    const uint64_t engine_a_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            middle - start).count());
-    g_engine_ns[0] += engine_a_ns;
-    g_direct_class_engine_a_ns[g_direct_frame_class] += engine_a_ns;
-    if (g_direct_frame_class == NDS_GPU2D_DIRECT_EXTRA_BG)
-        g_direct_extra_bg_mask_engine_a_ns[
-            g_direct_extra_bg_mask] += engine_a_ns;
-    g_engine_ns[1] += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(finish - middle).count());
-    ++g_render_scanlines;
+    // MAIN-THREAD cost of one 2D scanline: the raster itself in inline mode,
+    // or the job submit plus any pool fence wait in threaded mode. EXACT: 192
+    // calls a frame, and in threaded mode a fence drain is a heavy tail.
+    //
+    // This is deliberately NOT the same number as gpu2d_render_ns, which is
+    // measured inside render_line_job and in threaded mode accumulates on
+    // WORKER threads -- so it is not emu wall time at all. That mismatch is
+    // why gpu2d could read as ~1 ms/frame while contributing far less to the
+    // emu budget. Placed past the range guard so the out-of-range call, which
+    // nds_gpu2d_render_frame makes for non-visible lines, pays nothing.
+    NdsEmuScope emu_region(NDS_EMU_RASTER2D);
+    submit_line(line);
 }
 void nds_gpu2d_render_frame(){
     for (int line = 0; line < 192; ++line)
@@ -1607,7 +2273,7 @@ void prepare_direct_frame() {
         g_direct_object_frame[g_direct_object_write];
     std::array<Pixel, kMaxAdaptiveWidth> obj{};
     for (int y = 0; y < 192; ++y) {
-        render_obj_line(0, y, obj.data(), output_width,
+        render_obj_line(u, 0, y, obj.data(), output_width,
                         oam, palette, *vram);
         uint32_t* const dst = object_frame.data() +
             static_cast<size_t>(y) * output_width;
@@ -1649,6 +2315,7 @@ void prepare_direct_frame() {
 }
 
 void nds_gpu2d_start_frame(){
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
     // The frontend presents g_front after this boundary, while rasterization
     // has already advanced to the next back buffer. Preserve the completed
     // frame's host-only presentation decision and descriptor before updating
@@ -1693,8 +2360,12 @@ void nds_gpu2d_start_frame(){
         }
     }
 }
-void nds_gpu2d_finish_frame(){g_front ^= 1;}
+void nds_gpu2d_finish_frame(){
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
+    g_front ^= 1;
+}
 void nds_gpu2d_vblank(){
+    drain_pool(NDS_GPU2D_FENCE_FRAME);
     // melonDS Unit::VBlank: the capture enable bit auto-clears at line 192
     // only if it latched at line 0 this frame.
     for (auto& u : g_unit) {
@@ -1705,6 +2376,7 @@ void nds_gpu2d_vblank(){
     }
 }
 const uint32_t* nds_gpu2d_framebuffer(int screen){
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
     return g_fb[g_front][screen & 1].data();
 }
 void nds_gpu2d_set_adaptive_skybox_fill(bool enabled) {
@@ -1730,7 +2402,21 @@ bool nds_gpu2d_direct_present_frame_active() {
 }
 
 bool nds_gpu2d_requires_3d_readback() {
-    return !g_direct_frame_active;
+    // Capture is tested LIVE, the same way direct_scene_class() does, not via
+    // the frame latch: g_frame_capture_active is sampled at line 0 cycle 0,
+    // but Unit::capture_latch is only set by latch_line() at y == 0 from the
+    // HBlank sweep (~cycle 1584). A guest write to DISPCAPCNT bit31 inside
+    // that window leaves the latch set with the frame flag clear, and skipping
+    // the readback there would let apply_staged_capture write the PREVIOUS
+    // frame's 3D pixels into guest VRAM - a guest-visible divergence. The
+    // latched flag is OR'd in as well so a capture that has already been
+    // consumed for this frame still forces the synchronous path.
+    const Unit& unit = g_unit[0];
+    if ((unit.capture & 0x80000000u) != 0u || unit.capture_latch ||
+        g_frame_capture_active)
+        return true;
+    return !g_direct_frame_active &&
+           !nds_gpu3d_display_readback_latency();
 }
 
 void nds_gpu2d_force_cpu_frames(uint32_t frames) {
@@ -1739,6 +2425,7 @@ void nds_gpu2d_force_cpu_frames(uint32_t frames) {
 }
 
 bool nds_gpu2d_direct_frame(NdsGpu2dDirectFrame* out) {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
     if (!out || !g_direct_present_frame_active ||
         !g_direct_present_frame.object_pixels) return false;
     *out = g_direct_present_frame;
@@ -1760,7 +2447,408 @@ void nds_gpu2d_set_adaptive_center_max_polygons(uint32_t max_polygons) {
     g_adaptive_center_max_polygons = max_polygons;
 }
 
+namespace {
+// ---- Adaptive compositor: per-line work ---------------------------------
+// The widened presentation composite is a pure per-line function of a latched
+// register snapshot plus the memory views, exactly like the scanline
+// renderer -- every write it makes (the destination row, and the HD layer
+// surfaces at (y * width + x) * 2) is indexed by y, so the lines are disjoint
+// and any execution order produces the identical frame. That is what lets the
+// band pool below run them on worker threads bit-exactly.
+struct AdaptiveScratch {
+    std::array<Pixel, kMaxAdaptiveWidth> obj{};
+    std::array<uint8_t, kMaxAdaptiveWidth> obj_window{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_left{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_indices{};
+    std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
+    std::array<int16_t, kMaxAdaptiveWidth> black_run{};
+    std::array<uint32_t, kMaxAdaptiveWidth> repaired_3d{};
+    std::array<BgLine, 3> hud_bg_lines{};
+};
+
+// Loop-invariant state for one adaptive frame. Snapshotted on the calling
+// thread before any worker starts, and read-only for the duration.
+struct AdaptiveCtx {
+    const Unit* u = nullptr;
+    const uint8_t* palette = nullptr;
+    const uint8_t* oam = nullptr;
+    const NdsVramRendererView* vram = nullptr;
+    uint32_t* dst = nullptr;
+    int output_width = 0;
+    int extra = 0;
+    Pixel backdrop{};
+    uint8_t prio3d = 0;
+    uint32_t mbmode = 0;
+    uint32_t mb = 0;
+    NdsGpu2dWindowState window_state{};
+    int hud_bgs[3]{};
+    size_t hud_bg_count = 0;
+    bool snapshot_matches = false;
+    bool emit_hd = false;
+    uint32_t front = 0;
+};
+
+void composite_adaptive_line(const AdaptiveCtx& c, int y,
+                             AdaptiveScratch& sc) {
+    const Unit& u = *c.u;
+    const uint8_t* const palette = c.palette;
+    const uint8_t* const oam = c.oam;
+    const NdsVramRendererView* const vram = c.vram;
+    const int output_width = c.output_width;
+    const int extra = c.extra;
+    const Pixel& backdrop = c.backdrop;
+    const uint8_t prio3d = c.prio3d;
+    const uint32_t mbmode = c.mbmode;
+    const uint32_t mb = c.mb;
+    const NdsGpu2dWindowState& window_state = c.window_state;
+    const int* const hud_bgs = c.hud_bgs;
+    const size_t hud_bg_count = c.hud_bg_count;
+    const bool snapshot_matches = c.snapshot_matches;
+    const bool emit_hd = c.emit_hd;
+    // Named to match the single-threaded body they replace: the scratch is
+    // per-renderer, everything else is shared and read-only.
+    auto& obj = sc.obj;
+    auto& obj_window = sc.obj_window;
+    auto& sky_left = sc.sky_left;
+    auto& sky_indices = sc.sky_indices;
+    auto& sky_rank = sc.sky_rank;
+    auto& black_run = sc.black_run;
+    auto& repaired_3d = sc.repaired_3d;
+    auto& hud_bg_lines = sc.hud_bg_lines;
+    (void)extra;
+    render_obj_line(u, 0, y, obj.data(), output_width,
+                    oam, palette, *vram, obj_window.data());
+    for (size_t i = 0; i < hud_bg_count; ++i)
+        decode_bg_line(u, 0, hud_bgs[i], y, palette, *vram,
+                       hud_bg_lines[i]);
+    const uint32_t* const line3d = snapshot_matches
+        ? g_wide_3d_frame[c.front].data() +
+              static_cast<size_t>(y) * output_width
+        : nds_gpu3d_wide_line(y);
+    const uint32_t* const attr3d =
+        !g_adaptive_skybox_fill ? nullptr
+        : snapshot_matches
+            ? g_wide_3d_attr_frame[c.front].data() +
+                  static_cast<size_t>(y) * output_width
+            : nds_gpu3d_wide_attr_line(y);
+    const uint32_t* composited_3d = line3d;
+    if (attr3d) {
+        int last_sky = -1;
+        int sky_count = 0;
+        int previous = -1;
+        std::fill_n(sky_rank.data(), output_width,
+                    static_cast<int16_t>(-1));
+        for (int x = 0; x < output_width; ++x) {
+            const uint32_t rgb = line3d[x] & 0x003F3F3Fu;
+            const bool sky =
+                ((line3d[x] >> 24) & 0x1Fu) != 0u &&
+                rgb != 0u &&
+                (attr3d[x] & 0x3F000000u) == 0x02000000u;
+            if (sky) {
+                last_sky = x;
+                previous = x;
+                sky_indices[sky_count] = static_cast<int16_t>(x);
+                sky_rank[x] = static_cast<int16_t>(sky_count);
+                ++sky_count;
+            }
+            sky_left[x] = static_cast<int16_t>(previous);
+        }
+        if (sky_count > 1) {
+            std::copy_n(line3d, output_width, repaired_3d.data());
+            for (int start = 0; start < output_width;) {
+                if ((line3d[start] & 0x003F3F3Fu) != 0u) {
+                    black_run[start++] = 0;
+                    continue;
+                }
+                int end = start + 1;
+                while (end < output_width &&
+                       (line3d[end] & 0x003F3F3Fu) == 0u)
+                    ++end;
+                const int16_t length =
+                    static_cast<int16_t>(end - start);
+                std::fill(black_run.begin() + start,
+                          black_run.begin() + end, length);
+                start = end;
+            }
+            for (int x = 0; x < output_width; ++x) {
+                const uint32_t alpha =
+                    (line3d[x] >> 24) & 0x1Fu;
+                const uint32_t rgb =
+                    line3d[x] & 0x003F3F3Fu;
+                const bool skybox_black =
+                    alpha != 0u && rgb == 0u &&
+                    black_run[x] >= 8;
+                if (alpha != 0u && !skybox_black) continue;
+                int left = sky_left[x];
+                if (left < 0) left = last_sky - output_width;
+                const int left_index =
+                    (left + output_width) % output_width;
+                int rank = sky_rank[left_index];
+                if (rank < 0) rank = sky_count - 1;
+                rank = (rank + (x - left)) % sky_count;
+                repaired_3d[x] =
+                    line3d[sky_indices[rank]];
+            }
+            composited_3d = repaired_3d.data();
+        }
+    }
+    uint32_t* const dst =
+        c.dst + y * output_width;
+    auto ahead = [](const Pixel& a, const Pixel& b) {
+        return a.priority < b.priority ||
+               (a.priority == b.priority && a.order < b.order);
+    };
+    const int hud_center_left =
+        (256 - g_adaptive_hud_center_width) / 2;
+    const int hud_center_right =
+        hud_center_left + g_adaptive_hud_center_width;
+    for (int x = 0; x < output_width; ++x) {
+        Pixel top = backdrop;
+        Pixel below = backdrop;
+        auto push = [&](const Pixel& pixel) {
+            if (ahead(pixel, top)) {
+                below = top;
+                top = pixel;
+            } else if (ahead(pixel, below)) {
+                below = pixel;
+            }
+        };
+        // Resolve the stack WITHOUT the 3D layer first. Because
+        // (priority, order) is a total order, pushing 3D afterwards
+        // reproduces exactly the pair a single interleaved pass would,
+        // so the CPU result below is unchanged by this reordering.
+        int hud_x = -1;
+        if (g_adaptive_hud_anchor) {
+            if (x < hud_center_left) {
+                hud_x = x;
+            } else if (x >= extra + hud_center_left &&
+                       x < extra + hud_center_right) {
+                hud_x = x - extra;
+            } else if (x >= output_width -
+                                (256 - hud_center_right)) {
+                hud_x = x - (output_width - 256);
+            }
+        } else if (x >= extra && x < extra + 256) {
+            hud_x = x - extra;
+        }
+        // Rectangular windows use the same native coordinate as the HUD
+        // source. In the 3D-only widened margins there is no native 2D
+        // source; the nearest native edge column supplies the rectangular
+        // window status there (see nds_gpu2d_adaptive_window_x), and the
+        // OBJ-window coverage is rasterized at the adaptive width.
+        const uint8_t window_x =
+            nds_gpu2d_adaptive_window_x(x, extra, hud_x);
+        const uint8_t window_mask = nds_gpu2d_window_mask(
+            window_state, window_x, static_cast<uint8_t>(y),
+            obj_window[x] != 0u);
+        if (hud_x >= 0) {
+            for (size_t i = 0; i < hud_bg_count; ++i) {
+                const uint16_t c = hud_bg_lines[i].color[hud_x];
+                if (!(c & 0x8000u) ||
+                    !(window_mask & (1u << hud_bgs[i])))
+                    continue;
+                const BgLine& line = hud_bg_lines[i];
+                push(Pixel{
+                    rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
+                    line.target, 0, line.prio, line.order, true});
+            }
+        }
+        if (obj[x].valid && (window_mask & 0x10u)) push(obj[x]);
+        if (emit_hd) {
+            const size_t o = (static_cast<size_t>(y) * output_width + x)
+                             * 2u;
+            const bool effects_enabled = (window_mask & 0x20u) != 0u;
+            g_hd_top_pixels[o] = top.color;
+            g_hd_top_pixels[o + 1] = hd_meta(top, effects_enabled);
+            g_hd_below_pixels[o] = below.color;
+            g_hd_below_pixels[o + 1] = hd_meta(below, effects_enabled);
+        }
+        const uint32_t c3 = composited_3d[x];
+        const uint8_t a3 =
+            static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
+        if (a3 && (window_mask & 0x01u)) {
+            push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
+                       prio3d, 1, true, a3});
+        }
+        uint32_t color = compose(u, top, below,
+                                 (window_mask & 0x20u) != 0u);
+        if (mbmode == 1u)
+            color = brighten(color, mb, 0u);
+        else if (mbmode == 2u)
+            color = darken(color, mb, 15u);
+        dst[x] = to_rgb32(color);
+    }
+}
+
+
+// ---- Adaptive compositor band pool --------------------------------------
+// A second, smaller pool than the scanline one, and deliberately so: the two
+// never run at the same time (the compositor runs at present, after the frame
+// drain has emptied the scanline ring), and merging them would mean teaching
+// the LineJob ring a second job type whose capture-ordering rules do not
+// apply. Idle threads sleep on a condition variable, so the cost of keeping
+// them separate is threads, not cycles, and the host has 8+ of them.
+//
+// Bit-exactness: the workers only ever call composite_adaptive_line(), whose
+// writes are indexed by y. The calling thread participates and does not
+// return until every line is done, so the presented frame is the same frame,
+// with no added latency and no extra buffering.
+struct BandPool {
+    std::vector<std::thread> threads;
+    std::vector<std::unique_ptr<AdaptiveScratch>> scratch;
+    std::mutex m;
+    std::condition_variable work_cv;
+    std::condition_variable done_cv;
+    std::atomic<bool> stop{false};
+    // Bumped under `m` once per frame; workers wake on the change.
+    std::atomic<uint64_t> generation{0};
+    std::atomic<const AdaptiveCtx*> ctx{nullptr};
+    std::atomic<int> y_end{0};
+    std::atomic<int> next_y{0};
+    std::atomic<int> completed{0};
+};
+
+std::unique_ptr<BandPool> g_band_pool;
+uint64_t g_band_frames = 0;
+uint64_t g_band_serial_frames = 0;
+std::atomic<uint64_t> g_band_helper_lines{0};
+AdaptiveScratch g_adaptive_scratch{};
+
+void band_worker_main(BandPool* pool, AdaptiveScratch* sc) {
+    // Same registration as the scanline workers: compositor time that moves
+    // here has to be visible under the "render" role, or the emu-thread share
+    // falling would look like the work vanishing.
+    NdsHostProfThreadScope hostprof_scope(NDS_HOSTPROF_ROLE_RENDER);
+    uint64_t seen = pool->generation.load(std::memory_order_acquire);
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(pool->m);
+            // Bounded wait: a missed notification can then only cost latency
+            // on one frame, never a wedge.
+            pool->work_cv.wait_for(
+                lock, std::chrono::milliseconds(2), [&] {
+                    return pool->stop.load(std::memory_order_acquire) ||
+                           pool->generation.load(
+                               std::memory_order_acquire) != seen;
+                });
+            if (pool->stop.load(std::memory_order_acquire)) return;
+            const uint64_t generation =
+                pool->generation.load(std::memory_order_acquire);
+            if (generation == seen) continue;
+            seen = generation;
+        }
+        const AdaptiveCtx* const ctx =
+            pool->ctx.load(std::memory_order_acquire);
+        const int y_end = pool->y_end.load(std::memory_order_acquire);
+        if (!ctx) continue;
+        bool did_any = false;
+        for (;;) {
+            const int y = pool->next_y.fetch_add(1, std::memory_order_acq_rel);
+            if (y >= y_end) break;
+            composite_adaptive_line(*ctx, y, *sc);
+            pool->completed.fetch_add(1, std::memory_order_acq_rel);
+            did_any = true;
+            g_band_helper_lines.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (did_any) {
+            { std::lock_guard<std::mutex> lock(pool->m); }
+            pool->done_cv.notify_all();
+        }
+    }
+}
+
+void stop_band_pool() {
+    if (!g_band_pool) return;
+    BandPool* const pool = g_band_pool.get();
+    {
+        std::lock_guard<std::mutex> lock(pool->m);
+        pool->stop.store(true, std::memory_order_release);
+    }
+    pool->work_cv.notify_all();
+    for (auto& t : pool->threads)
+        if (t.joinable()) t.join();
+    g_band_pool.reset();
+}
+
+void start_band_pool() {
+    if (g_band_pool || !g_band_helper_count) return;
+    g_band_pool = std::make_unique<BandPool>();
+    BandPool* const pool = g_band_pool.get();
+    pool->scratch.reserve(g_band_helper_count);
+    pool->threads.reserve(g_band_helper_count);
+    for (unsigned i = 0; i < g_band_helper_count; ++i)
+        pool->scratch.push_back(std::make_unique<AdaptiveScratch>());
+    for (unsigned i = 0; i < g_band_helper_count; ++i)
+        pool->threads.emplace_back(band_worker_main, pool,
+                                   pool->scratch[i].get());
+}
+
+void band_pool_stats(uint64_t* frames, uint64_t* serial_frames,
+                     uint64_t* helper_lines) {
+    if (frames) *frames = g_band_frames;
+    if (serial_frames) *serial_frames = g_band_serial_frames;
+    if (helper_lines)
+        *helper_lines = g_band_helper_lines.load(std::memory_order_relaxed);
+}
+
+void band_pool_reset_stats() {
+    g_band_frames = 0;
+    g_band_serial_frames = 0;
+    g_band_helper_lines.store(0, std::memory_order_relaxed);
+}
+
+// Joins the band threads at process exit, before the pool they point into is
+// destroyed.
+struct BandPoolShutdownGuard {
+    ~BandPoolShutdownGuard() { stop_band_pool(); }
+};
+BandPoolShutdownGuard g_band_pool_shutdown_guard{};
+
+void composite_adaptive_frame(const AdaptiveCtx& ctx) {
+    BandPool* const pool = g_band_pool.get();
+    // Without a wide-3D snapshot for this width the line source is
+    // nds_gpu3d_wide_line(), which reads GPU3D scratch that only the
+    // scheduler thread may touch. Serial is then the only correct answer.
+    if (!pool || !ctx.snapshot_matches) {
+        ++g_band_serial_frames;
+        for (int y = 0; y < 192; ++y)
+            composite_adaptive_line(ctx, y, g_adaptive_scratch);
+        return;
+    }
+    ++g_band_frames;
+    pool->ctx.store(&ctx, std::memory_order_release);
+    pool->y_end.store(192, std::memory_order_release);
+    pool->next_y.store(0, std::memory_order_release);
+    pool->completed.store(0, std::memory_order_release);
+    {
+        // Publish ctx/y_end and the generation bump together: a worker reads
+        // both under this mutex, so it can never see a new generation with a
+        // stale context.
+        std::lock_guard<std::mutex> lock(pool->m);
+        pool->generation.fetch_add(1, std::memory_order_acq_rel);
+    }
+    pool->work_cv.notify_all();
+    for (;;) {
+        const int y = pool->next_y.fetch_add(1, std::memory_order_acq_rel);
+        if (y >= 192) break;
+        composite_adaptive_line(ctx, y, g_adaptive_scratch);
+        pool->completed.fetch_add(1, std::memory_order_acq_rel);
+    }
+    while (pool->completed.load(std::memory_order_acquire) < 192) {
+        std::unique_lock<std::mutex> lock(pool->m);
+        if (pool->completed.load(std::memory_order_acquire) >= 192) break;
+        pool->done_cv.wait_for(lock, std::chrono::microseconds(200));
+    }
+    // Every line is done, so a worker that wakes late finds next_y
+    // exhausted and never dereferences this; clearing it keeps a stale
+    // pointer to a dead stack frame from being readable at all.
+    pool->ctx.store(nullptr, std::memory_order_release);
+}
+
+}  // namespace
+
 const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
     const uint32_t* native = nds_gpu2d_framebuffer(screen);
     const bool engine_a_on_top = (nds_powercontrol9() & 0x8000u) != 0;
     const int engine = engine_a_on_top ? screen : (screen ^ 1);
@@ -1782,25 +2870,22 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
                 static_cast<size_t>(output_width) * 192u,
                 0xFF000000u);
     const int extra = (output_width - 256) / 2;
-    if (engine != 0) {
+    // Native-width composite centred in the adaptive window. Every reason is
+    // counted so a pillarboxed title can be diagnosed from the live counters
+    // (frontend_stats / profile) instead of by guessing.
+    auto center_native = [&](NdsGpu2dAdaptiveFallback reason) {
+        ++g_adaptive_fallback_frames[reason];
         for (int y = 0; y < 192; ++y)
             std::copy_n(native + y * 256, 256,
                         adaptive.data() + y * output_width + extra);
         return adaptive.data();
-    }
-    if (g_adaptive_center_native) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+    };
+    if (engine != 0) return center_native(NDS_GPU2D_ADAPTIVE_ENGINE_B);
+    if (g_adaptive_center_native)
+        return center_native(NDS_GPU2D_ADAPTIVE_CENTER_NATIVE);
     if (g_adaptive_center_max_polygons != 0u &&
-        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+        nds_gpu3d_render_polygon_count() <= g_adaptive_center_max_polygons)
+        return center_native(NDS_GPU2D_ADAPTIVE_LOW_POLYGON);
 
     Unit& u = g_unit[0];
     const uint8_t* const palette = nds_vram_renderer_palette(0);
@@ -1823,17 +2908,36 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
         }
     }
     const NdsGpu2dWindowState window_state{u.dispcnt, u.win};
-    const bool windows_supported = nds_gpu2d_windows_support_hd(window_state);
-    const bool supported_scene =
-        palette && oam && vram && !(u.dispcnt & 0x80u) &&
-        mode == 1u && bg0_3d && supported_hud_bgs && windows_supported &&
-        nds_gpu3d_render_xpos() == 0u && !g_present_capture_active;
-    if (!supported_scene) {
-        for (int y = 0; y < 192; ++y)
-            std::copy_n(native + y * 256, 256,
-                        adaptive.data() + y * output_width + extra);
-        return adaptive.data();
-    }
+    // DS windows do not disqualify a scene from wide composition: the
+    // compositor applies the full per-pixel window mask (rectangular windows
+    // through the native edge-column mapping, the OBJ window from its own
+    // wide-rasterized coverage). Titles such as Mario Kart DS race with
+    // Win0/Win1/OBJ-window enabled on every frame, and treating that as
+    // unsupported pillarboxes them. What windows DO gate is the HD surface
+    // emission below: the accelerated presenter reinserts the 3D layer itself
+    // and cannot honour a mask that removes BG0, so it stands down for those
+    // scenes and the CPU composite is presented instead.
+    const bool windows_support_hd =
+        nds_gpu2d_windows_support_hd(window_state);
+    NdsGpu2dAdaptiveFallback reject = NDS_GPU2D_ADAPTIVE_WIDE;
+    if (!palette || !oam || !vram)
+        reject = NDS_GPU2D_ADAPTIVE_RENDERER_VIEW;
+    else if (u.dispcnt & 0x80u)
+        reject = NDS_GPU2D_ADAPTIVE_FORCE_BLANK;
+    else if (mode != 1u)
+        reject = NDS_GPU2D_ADAPTIVE_DISPLAY_MODE;
+    else if (!bg0_3d)
+        reject = NDS_GPU2D_ADAPTIVE_NO_BG0_3D;
+    else if (!supported_hud_bgs)
+        reject = NDS_GPU2D_ADAPTIVE_HUD_BG;
+    else if (nds_gpu3d_render_xpos() != 0u)
+        reject = NDS_GPU2D_ADAPTIVE_RENDER_XPOS;
+    else if (g_present_capture_active)
+        reject = NDS_GPU2D_ADAPTIVE_CAPTURE;
+    else if (nds_title_patches_mph_adaptive_centered_native())
+        reject = NDS_GPU2D_ADAPTIVE_TITLE_CENTERED;
+    if (reject != NDS_GPU2D_ADAPTIVE_WIDE) return center_native(reject);
+    ++g_adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_WIDE];
 
     const uint16_t backdrop15 = view16(palette, 0);
     const Pixel backdrop{
@@ -1842,14 +2946,6 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     const uint32_t mbmode = u.master_bright >> 14;
     const uint32_t mb =
         std::min<uint32_t>(16, u.master_bright & 0x1Fu);
-    std::array<Pixel, kMaxAdaptiveWidth> obj{};
-    std::array<uint8_t, kMaxAdaptiveWidth> obj_window{};
-    std::array<int16_t, kMaxAdaptiveWidth> sky_left{};
-    std::array<int16_t, kMaxAdaptiveWidth> sky_indices{};
-    std::array<int16_t, kMaxAdaptiveWidth> sky_rank{};
-    std::array<int16_t, kMaxAdaptiveWidth> black_run{};
-    std::array<uint32_t, kMaxAdaptiveWidth> repaired_3d{};
-    std::array<BgLine, 3> hud_bg_lines{};
     int hud_bgs[3]{};
     size_t hud_bg_count = 0;
     for (int bg = 1; bg < 4; ++bg) {
@@ -1867,7 +2963,8 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
     // surfaces would be applied to the wrong window. The direct path rejects
     // that case as SCREEN_ROUTE for the same reason.
     const bool emit_hd =
-        g_hd_emit_enabled && !g_adaptive_skybox_fill && screen == 0;
+        g_hd_emit_enabled && !g_adaptive_skybox_fill && screen == 0 &&
+        windows_support_hd;
     if (emit_hd) {
         const size_t needed =
             static_cast<size_t>(output_width) * 192u * 2u;
@@ -1876,169 +2973,27 @@ const uint32_t* nds_gpu2d_adaptive_framebuffer(int screen, uint16_t* width) {
             g_hd_below_pixels.resize(needed);
         }
     }
-    for (int y = 0; y < 192; ++y) {
-        render_obj_line(0, y, obj.data(), output_width,
-                        oam, palette, *vram, obj_window.data());
-        for (size_t i = 0; i < hud_bg_count; ++i)
-            decode_bg_line(0, hud_bgs[i], y, palette, *vram,
-                           hud_bg_lines[i]);
-        const uint32_t* const line3d = snapshot_matches
-            ? g_wide_3d_frame[g_front].data() +
-                  static_cast<size_t>(y) * output_width
-            : nds_gpu3d_wide_line(y);
-        const uint32_t* const attr3d =
-            !g_adaptive_skybox_fill ? nullptr
-            : snapshot_matches
-                ? g_wide_3d_attr_frame[g_front].data() +
-                      static_cast<size_t>(y) * output_width
-                : nds_gpu3d_wide_attr_line(y);
-        const uint32_t* composited_3d = line3d;
-        if (attr3d) {
-            int last_sky = -1;
-            int sky_count = 0;
-            int previous = -1;
-            std::fill_n(sky_rank.data(), output_width,
-                        static_cast<int16_t>(-1));
-            for (int x = 0; x < output_width; ++x) {
-                const uint32_t rgb = line3d[x] & 0x003F3F3Fu;
-                const bool sky =
-                    ((line3d[x] >> 24) & 0x1Fu) != 0u &&
-                    rgb != 0u &&
-                    (attr3d[x] & 0x3F000000u) == 0x02000000u;
-                if (sky) {
-                    last_sky = x;
-                    previous = x;
-                    sky_indices[sky_count] = static_cast<int16_t>(x);
-                    sky_rank[x] = static_cast<int16_t>(sky_count);
-                    ++sky_count;
-                }
-                sky_left[x] = static_cast<int16_t>(previous);
-            }
-            if (sky_count > 1) {
-                std::copy_n(line3d, output_width, repaired_3d.data());
-                for (int start = 0; start < output_width;) {
-                    if ((line3d[start] & 0x003F3F3Fu) != 0u) {
-                        black_run[start++] = 0;
-                        continue;
-                    }
-                    int end = start + 1;
-                    while (end < output_width &&
-                           (line3d[end] & 0x003F3F3Fu) == 0u)
-                        ++end;
-                    const int16_t length =
-                        static_cast<int16_t>(end - start);
-                    std::fill(black_run.begin() + start,
-                              black_run.begin() + end, length);
-                    start = end;
-                }
-                for (int x = 0; x < output_width; ++x) {
-                    const uint32_t alpha =
-                        (line3d[x] >> 24) & 0x1Fu;
-                    const uint32_t rgb =
-                        line3d[x] & 0x003F3F3Fu;
-                    const bool skybox_black =
-                        alpha != 0u && rgb == 0u &&
-                        black_run[x] >= 8;
-                    if (alpha != 0u && !skybox_black) continue;
-                    int left = sky_left[x];
-                    if (left < 0) left = last_sky - output_width;
-                    const int left_index =
-                        (left + output_width) % output_width;
-                    int rank = sky_rank[left_index];
-                    if (rank < 0) rank = sky_count - 1;
-                    rank = (rank + (x - left)) % sky_count;
-                    repaired_3d[x] =
-                        line3d[sky_indices[rank]];
-                }
-                composited_3d = repaired_3d.data();
-            }
-        }
-        uint32_t* const dst =
-            adaptive.data() + y * output_width;
-        auto ahead = [](const Pixel& a, const Pixel& b) {
-            return a.priority < b.priority ||
-                   (a.priority == b.priority && a.order < b.order);
-        };
-        const int hud_center_left =
-            (256 - g_adaptive_hud_center_width) / 2;
-        const int hud_center_right =
-            hud_center_left + g_adaptive_hud_center_width;
-        for (int x = 0; x < output_width; ++x) {
-            Pixel top = backdrop;
-            Pixel below = backdrop;
-            auto push = [&](const Pixel& pixel) {
-                if (ahead(pixel, top)) {
-                    below = top;
-                    top = pixel;
-                } else if (ahead(pixel, below)) {
-                    below = pixel;
-                }
-            };
-            // Resolve the stack WITHOUT the 3D layer first. Because
-            // (priority, order) is a total order, pushing 3D afterwards
-            // reproduces exactly the pair a single interleaved pass would,
-            // so the CPU result below is unchanged by this reordering.
-            int hud_x = -1;
-            if (g_adaptive_hud_anchor) {
-                if (x < hud_center_left) {
-                    hud_x = x;
-                } else if (x >= extra + hud_center_left &&
-                           x < extra + hud_center_right) {
-                    hud_x = x - extra;
-                } else if (x >= output_width -
-                                    (256 - hud_center_right)) {
-                    hud_x = x - (output_width - 256);
-                }
-            } else if (x >= extra && x < extra + 256) {
-                hud_x = x - extra;
-            }
-            // Rectangular windows use the same native coordinate as the HUD
-            // source. In the 3D-only widened margins there is no native 2D
-            // source; selection still supplies the correct OBJ-window/outside
-            // mask, and HD eligibility guarantees BG0/effects remain enabled.
-            const uint8_t window_x = static_cast<uint8_t>(
-                hud_x >= 0 ? hud_x : x);
-            const uint8_t window_mask = nds_gpu2d_window_mask(
-                window_state, window_x, static_cast<uint8_t>(y),
-                obj_window[x] != 0u);
-            if (hud_x >= 0) {
-                for (size_t i = 0; i < hud_bg_count; ++i) {
-                    const uint16_t c = hud_bg_lines[i].color[hud_x];
-                    if (!(c & 0x8000u) ||
-                        !(window_mask & (1u << hud_bgs[i])))
-                        continue;
-                    const BgLine& line = hud_bg_lines[i];
-                    push(Pixel{
-                        rgb6(static_cast<uint16_t>(c & 0x7FFFu)),
-                        line.target, 0, line.prio, line.order, true});
-                }
-            }
-            if (obj[x].valid && (window_mask & 0x10u)) push(obj[x]);
-            if (emit_hd) {
-                const size_t o = (static_cast<size_t>(y) * output_width + x)
-                                 * 2u;
-                const bool effects_enabled = (window_mask & 0x20u) != 0u;
-                g_hd_top_pixels[o] = top.color;
-                g_hd_top_pixels[o + 1] = hd_meta(top, effects_enabled);
-                g_hd_below_pixels[o] = below.color;
-                g_hd_below_pixels[o + 1] = hd_meta(below, effects_enabled);
-            }
-            const uint32_t c3 = composited_3d[x];
-            const uint8_t a3 =
-                static_cast<uint8_t>((c3 >> 24) & 0x1Fu);
-            if (a3 && (window_mask & 0x01u)) {
-                push(Pixel{c3 & 0x003F3F3Fu, 0x01u, 0,
-                           prio3d, 1, true, a3});
-            }
-            uint32_t color = compose(u, top, below,
-                                     (window_mask & 0x20u) != 0u);
-            if (mbmode == 1u)
-                color = brighten(color, mb, 0u);
-            else if (mbmode == 2u)
-                color = darken(color, mb, 15u);
-            dst[x] = to_rgb32(color);
-        }
-    }
+    AdaptiveCtx ctx{};
+    ctx.u = &u;
+    ctx.palette = palette;
+    ctx.oam = oam;
+    ctx.vram = vram;
+    ctx.dst = adaptive.data();
+    ctx.output_width = output_width;
+    ctx.extra = extra;
+    ctx.backdrop = backdrop;
+    ctx.prio3d = prio3d;
+    ctx.mbmode = mbmode;
+    ctx.mb = mb;
+    ctx.window_state = window_state;
+    ctx.hud_bgs[0] = hud_bgs[0];
+    ctx.hud_bgs[1] = hud_bgs[1];
+    ctx.hud_bgs[2] = hud_bgs[2];
+    ctx.hud_bg_count = hud_bg_count;
+    ctx.snapshot_matches = snapshot_matches;
+    ctx.emit_hd = emit_hd;
+    ctx.front = g_front;
+    composite_adaptive_frame(ctx);
     if (emit_hd) {
         g_hd_frame.top_pixels = g_hd_top_pixels.data();
         g_hd_frame.below_pixels = g_hd_below_pixels.data();
@@ -2066,7 +3021,15 @@ void nds_gpu2d_set_hd_emit(bool enabled) {
     if (!enabled) g_hd_frame_valid = false;
 }
 
+bool nds_gpu2d_hd_frame_peek(NdsGpu2dHdFrame* out) {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
+    if (!out || !g_hd_frame_valid || !g_hd_frame.top_pixels) return false;
+    *out = g_hd_frame;
+    return true;
+}
+
 bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out) {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
     if (!out || !g_hd_frame_valid || !g_hd_frame.top_pixels) return false;
     *out = g_hd_frame;
     // Counted on consumption, not emission: emitting surfaces nobody reads
@@ -2075,6 +3038,7 @@ bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out) {
     return true;
 }
 void nds_gpu2d_profile(NdsGpu2dProfile* out) {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
     if (!out) return;
     out->render_ns = g_render_ns;
     out->obj_ns = g_obj_ns;
@@ -2110,6 +3074,59 @@ void nds_gpu2d_profile(NdsGpu2dProfile* out) {
     std::copy_n(g_direct_extra_master_bright_frames,
                 NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT,
                 out->direct_extra_master_bright_frames);
+    out->threaded_lines = g_threaded_lines;
+    out->inline_lines = g_inline_lines;
+    out->fence_wait_ns = g_fence_wait_ns;
+    out->fence_helped_lines = g_fence_helped_lines;
+    out->staged_captures = g_staged_captures;
+    band_pool_stats(&out->adaptive_band_frames,
+                    &out->adaptive_serial_frames,
+                    &out->adaptive_helper_lines);
+    std::copy_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT,
+                out->fence_drains);
+    std::copy_n(g_adaptive_fallback_frames,
+                NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT,
+                out->adaptive_fallback_frames);
+    std::copy_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT,
+                out->fenced_lines);
+}
+
+void nds_gpu2d_profile_reset() {
+    drain_pool(NDS_GPU2D_FENCE_PRESENT);
+    g_render_ns = 0;
+    g_obj_ns = 0;
+    g_engine_ns[0] = g_engine_ns[1] = 0;
+    std::memset(g_text_lines, 0, sizeof(g_text_lines));
+    g_no_effect_lines[0] = g_no_effect_lines[1] = 0;
+    g_render_scanlines = 0;
+    g_direct_frames = 0;
+    g_hd_frames = 0;
+    g_hd_presented = 0;
+    g_direct_overlay_ns = 0;
+    std::fill_n(g_direct_class_frames, NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
+    std::fill_n(g_adaptive_fallback_frames,
+                NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT, 0u);
+    std::fill_n(g_direct_class_engine_a_ns,
+                NDS_GPU2D_DIRECT_CLASS_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mask_frames,
+                NDS_GPU2D_DIRECT_BG_MASK_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mask_engine_a_ns,
+                NDS_GPU2D_DIRECT_BG_MASK_COUNT, 0u);
+    std::fill_n(g_direct_extra_bg_mode_frames,
+                NDS_GPU2D_DIRECT_BG_MODE_COUNT, 0u);
+    std::fill_n(g_direct_extra_effect_frames,
+                NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT, 0u);
+    std::fill_n(g_direct_extra_master_bright_frames,
+                NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT, 0u);
+    g_direct_class_transitions = 0;
+    g_threaded_lines = 0;
+    g_inline_lines = 0;
+    g_fence_wait_ns = 0;
+    g_fence_helped_lines = 0;
+    g_staged_captures = 0;
+    band_pool_reset_stats();
+    std::fill_n(g_fence_drains, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
+    std::fill_n(g_fenced_lines, NDS_GPU2D_FENCE_CAUSE_COUNT, 0u);
 }
 
 const char* nds_gpu2d_direct_class_name(uint32_t index) {
@@ -2131,4 +3148,23 @@ const char* nds_gpu2d_direct_class_name(uint32_t index) {
         "center_native",
     };
     return index < NDS_GPU2D_DIRECT_CLASS_COUNT ? kNames[index] : "unknown";
+}
+
+const char* nds_gpu2d_adaptive_fallback_name(uint32_t index) {
+    static constexpr const char* kNames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT] = {
+        "wide",
+        "engine_b",
+        "center_native",
+        "low_polygon",
+        "renderer_view",
+        "force_blank",
+        "display_mode",
+        "no_bg0_3d",
+        "hud_bg",
+        "render_xpos",
+        "capture",
+        "title_centered",
+    };
+    return index < NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT ? kNames[index]
+                                                     : "unknown";
 }

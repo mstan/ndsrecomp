@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+
+struct NdsSpuSaveState;
 
 // Nintendo DS ARM7 sound unit. Register widths are bytes (1/2/4), matching
 // nds_io_read/write. The mixer advances once per 1024 system cycles.
@@ -22,3 +25,11 @@ uint64_t nds_spu_debug_output_produced();
 uint64_t nds_spu_debug_output_oldest();
 uint32_t nds_spu_debug_copy_output(uint64_t start, int16_t* stereo,
                                    uint32_t frames);
+
+bool spu_savestate_export(NdsSpuSaveState* out);
+bool spu_savestate_validate(const NdsSpuSaveState& in, std::string* error);
+bool spu_savestate_import(const NdsSpuSaveState& in, std::string* error);
+
+// Increments whenever restored guest state invalidates already-buffered host
+// presentation audio. Frontends clear their backend queue on an epoch change.
+uint64_t nds_spu_presentation_epoch();

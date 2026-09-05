@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "net/net_capture.h"
+#include "network_savestate_guard.h"
 
 namespace melonDS { class Wifi; }
 
@@ -243,6 +244,25 @@ void nds_net_platform_shutdown();
 // a no-op when the knob is 0. Safe on the emulation thread only -- it
 // writes guest RAM through the bus.
 void nds_wifi_on_client_associated();
+
+// Called by WifiAP at every accepted station lifecycle transition. This is
+// the authoritative guest association state, not a backend/configuration
+// inference. Values match WifiAP::ClientStatus (0/1/2); unexpected values
+// become an unknown state that conservatively rejects save/load.
+void nds_wifi_on_client_state_changed(uint32_t status);
+
+// Called when the vendored local-wireless state machine leaves MP mode. A
+// validated received datagram marks a peer present; this owner transition is
+// what proves that the peer session has ended without requiring radio power
+// to be cycled.
+void nds_wifi_on_local_mp_disconnected();
+
+// Transaction-boundary query installed into the core savestate layer when
+// the bridge attaches. A configured/idle backend does not block. Association,
+// local peers, lifecycle transitions, and currently-unserialized powered
+// Wi-Fi device state return a stable, UI-ready reason.
+bool nds_wifi_savestate_allowed(std::string* error);
+NdsSavestateNetworkEligibility nds_wifi_savestate_eligibility();
 
 // Stores the resolved network configuration for the next nds_wifi3d_attach()
 // call to consume. Safe to call at any time before that first attach;

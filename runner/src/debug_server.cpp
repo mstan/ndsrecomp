@@ -1,6 +1,7 @@
 #include "debug_server.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -22,10 +23,14 @@
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "hle_profile.h"
+#include "host_profile.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
+#include "emu_profile.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
 #include "mem_timing_profile.h"
+#include "pc_profile.h"
 #include "net/net_ring.h"
 #include "wifi_net.h"
 #include "runtime_arm.h"
@@ -250,6 +255,20 @@ std::string counts_json() {
         (unsigned long long)scheduler_cpu_cycles(0),
         (unsigned long long)scheduler_cpu_cycles(1));
     return buf;
+}
+
+std::string adaptive_fallback_json(const uint64_t* values) {
+    std::string result = "{";
+    for (uint32_t index = 0; index < NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT;
+         ++index) {
+        if (index != 0u) result += ",";
+        result += "\"";
+        result += nds_gpu2d_adaptive_fallback_name(index);
+        result += "\":";
+        result += std::to_string(values[index]);
+    }
+    result += "}";
+    return result;
 }
 
 std::string direct_class_json(const uint64_t* values) {
@@ -516,6 +535,23 @@ std::string handle(const std::string& line) {
             (unsigned long long)s.clean_ram_rejects[1]);
         return buf;
     }
+    if (cmd == "force_tier3") {
+        // Phase-scoped forcing (beads-yjp.42). Booting an entire route through
+        // the interpreter costs far more wall time than the phase under study,
+        // so the harness boots faithfully, drives to the phase it wants, then
+        // flips the selector here and measures. Toggling is a single bool
+        // store: the selector applies AFTER the dispatch-cache lookup, so no
+        // cache or epoch invalidation is required and this is safe from the
+        // debug-server thread. Omit "on" to read the state without changing it.
+        if (line.find("\"on\"") != std::string::npos)
+            g_nds_force_tier3 = json_u64(line, "on", 0) != 0;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+            "{\"forced_tier3\":%s,\"forced_tier3_misses\":%llu}",
+            g_nds_force_tier3 ? "true" : "false",
+            (unsigned long long)g_nds_force_tier3_misses);
+        return buf;
+    }
     if (cmd == "exec_provenance") {
         const int cpu = json_u64(line, "cpu", 9) == 7 ? 7 : 9;
         const uint32_t addr = static_cast<uint32_t>(json_u64(line, "addr", 0));
@@ -578,7 +614,10 @@ std::string handle(const std::string& line) {
         return out + "}";
     }
     if (cmd == "live_overlay_status") {
-        live_overlay_poll();
+        // The unconditional body, not the scheduler's countdown gate: a probe
+        // asking for status wants the state as of now, including whatever a
+        // finished compiler child has left to be drained.
+        live_overlay_poll_now();
         return live_overlay_status_json();
     }
     if (cmd == "live_overlay_diagnostics") {
@@ -1069,7 +1108,48 @@ std::string handle(const std::string& line) {
                ",\"underruns\":" + std::to_string(s.underruns) +
                ",\"real_presents\":" + std::to_string(s.real_presents) +
                ",\"synthetic_presents\":" +
-               std::to_string(s.synthetic_presents) + "}";
+               std::to_string(s.synthetic_presents) +
+               ",\"perf_governor_stage\":" +
+               std::to_string(s.perf_governor_stage) +
+               ",\"perf_governor_over_frames\":" +
+               std::to_string(s.perf_governor_over_frames) +
+               ",\"perf_governor_under_frames\":" +
+               std::to_string(s.perf_governor_under_frames) +
+               ",\"perf_governor_held\":" +
+               std::to_string(s.perf_governor_held) +
+               ",\"perf_governor_apply_failed\":" +
+               std::to_string(s.perf_governor_apply_failed) +
+               ",\"perf_governor_transitions\":" +
+               std::to_string(s.perf_governor_transitions) + "}";
+    }
+    if (cmd == "governor_history") {
+        // Retroactive query over the always-on transition ring: every stage
+        // change since the run started (up to the ring capacity) with no
+        // arming step and no dependency on the performance log.
+        std::array<NdsPerfGovernorTransition,
+                   kNdsPerfGovernorHistoryCapacity> entries{};
+        const uint32_t count = nds_perf_governor_history(
+            entries.data(), kNdsPerfGovernorHistoryCapacity);
+        std::string out = "{\"total\":" +
+            std::to_string(nds_perf_governor_history_total()) +
+            ",\"capacity\":" +
+            std::to_string(kNdsPerfGovernorHistoryCapacity) +
+            ",\"transitions\":[";
+        for (uint32_t i = 0; i < count; ++i) {
+            const NdsPerfGovernorTransition& e = entries[i];
+            if (i) out += ",";
+            out += "{\"frame\":" + std::to_string(e.frame_index) +
+                   ",\"ts_ms\":" + std::to_string(e.ts_ms) +
+                   ",\"from_stage\":" + std::to_string(e.from_stage) +
+                   ",\"to_stage\":" + std::to_string(e.to_stage) +
+                   ",\"reason\":\"" +
+                   nds_perf_governor_reason_name(e.reason) + "\"" +
+                   ",\"held\":" + std::to_string(e.stage2_held ? 1 : 0) +
+                   ",\"apply_failed\":" +
+                   std::to_string(e.apply_failed ? 1 : 0) + "}";
+        }
+        out += "]}";
+        return out;
     }
     if (cmd == "title_patches") {
         const NdsTitlePatchDebugState s = nds_title_patches_debug_state();
@@ -1096,6 +1176,12 @@ std::string handle(const std::string& line) {
                std::to_string(s.mph_prime_controls_available) +
                ",\"mph_prime_controls_active\":" +
                std::to_string(s.mph_prime_controls_active) +
+               ",\"virtual_stylus_available\":" +
+               std::to_string(s.virtual_stylus_available) +
+               ",\"virtual_stylus_active\":" +
+               std::to_string(s.virtual_stylus_active) +
+               ",\"virtual_stylus_tap_held\":" +
+               std::to_string(s.virtual_stylus_tap_held) +
                ",\"relative_mouse_captured\":" +
                std::to_string(s.relative_mouse_captured) +
                ",\"keyboard_pressed\":" +
@@ -1151,7 +1237,8 @@ std::string handle(const std::string& line) {
         } else if (action == "key") {
             ok = nds_frontend_debug_key(
                 json_str(line, "key").c_str(),
-                json_bool(line, "down", true));
+                json_bool(line, "down", true),
+                json_bool(line, "shift", false));
         } else if (action == "mouse") {
             const std::string named = json_str(line, "button");
             uint8_t button = mouse_button_from_string(named);
@@ -1214,6 +1301,41 @@ std::string handle(const std::string& line) {
                std::to_string(capture.worst_row_count) +
                ",\"w\":256,\"h\":192,\"rgb\":\"" + rgb + "\"}";
     }
+    // Query into the always-on presented-frame digest ring (frontend.h). The
+    // ring records from process start when NDS_FRAME_HASH=1; this only reads a
+    // window out of it, so nothing is armed here and no frame before the probe
+    // connected is missing.
+    if (cmd == "frame_digests") {
+        const uint64_t count = nds_frontend_frame_digest_count();
+        const uint64_t from = json_u64(line, "from", 0);
+        uint32_t max = static_cast<uint32_t>(json_u64(line, "count", 256));
+        if (max > 4096u) max = 4096u;
+        std::vector<NdsFrontendFrameDigest> entries(max);
+        const uint32_t got =
+            nds_frontend_frame_digests(from, max, entries.data());
+        std::string out = "{\"enabled\":" +
+            std::to_string(nds_frontend_frame_digest_enabled() ? 1 : 0) +
+            ",\"count\":" + std::to_string(count) +
+            ",\"from\":" + std::to_string(from) +
+            ",\"digests\":[";
+        for (uint32_t i = 0; i < got; ++i) {
+            const NdsFrontendFrameDigest& d = entries[i];
+            char b[256];
+            std::snprintf(b, sizeof(b),
+                "%s{\"frame\":%llu,\"top\":\"%016llx\","
+                "\"bottom\":\"%016llx\",\"hd\":\"%016llx\","
+                "\"tw\":%u,\"bw\":%u,\"flags\":%u,\"epoch\":%u}",
+                i ? "," : "",
+                (unsigned long long)d.frame,
+                (unsigned long long)d.top_hash,
+                (unsigned long long)d.bottom_hash,
+                (unsigned long long)d.hd_hash,
+                d.top_width, d.bottom_width, d.flags, d.epoch);
+            out += b;
+        }
+        out += "]}";
+        return out;
+    }
     if (cmd == "framebuffer_sync") {
         NdsFrontendLiveStats stats{};
         nds_frontend_live_stats(&stats);
@@ -1224,6 +1346,89 @@ std::string handle(const std::string& line) {
     if (cmd == "hle_heat") return nds_hle_profile_json();
     if (cmd == "mem_timing_profile") return nds_mem_timing_profile_json();
     if (cmd == "dispatch_stats") return nds_dispatch_stats_json();
+    // Cost companion to dispatch_stats: same snapshot-twice-and-subtract
+    // model, answering how expensive each class is rather than how often it
+    // ran. Cache-path `events` here is the dispatcher-only population; the
+    // all-consumers lookup totals are in dispatch_stats.
+    if (cmd == "dispatch_timing") return nds_dispatch_timing_json();
+    // The emu-time partition (emu_profile.h): where the host time inside
+    // NdsFrontendLiveStats::emu_ticks actually goes -- guest execution per
+    // CPU, the CPU-side geometry engine, Tier 3, DMA, the 2D raster, the 3D
+    // frame boundaries, each device tick, and the round machinery. Exclusive
+    // buckets, so they sum; `exact` says whether a bucket needs scaling by
+    // rounds/sampled_rounds. Snapshot twice and subtract, like its
+    // neighbours -- there is no arm/reset.
+    if (cmd == "emu_attrib") return nds_emu_profile_json();
+    // WHERE the guest is, the companion question to emu_attrib's "which
+    // subsystem is expensive" (pc_profile.h). Always-on per-CPU histograms;
+    // read-only, so no execution guard applies and both are answerable in play
+    // mode while the frontend owns execution. Whole-run totals -- snapshot
+    // twice and subtract for an interval, exactly like its neighbours; there
+    // is nothing to arm and nothing to reset.
+    //
+    // "kind":"park" (the default, and what this command meant before exec
+    // existed) is the round-boundary PC, which answers HALT SHARE and is
+    // dominated by idle loops. "kind":"exec" is the dispatch-entry PC, which
+    // is the one that ranks hot entry points. Defaulting to park keeps every
+    // existing probe's meaning byte-for-byte.
+    if (cmd == "pc_hot") {
+        const int cpu = json_u64(line, "cpu", 9) == 7 ? 1 : 0;
+        const NdsPcHotKind kind =
+            nds_pc_profile_kind_from_name(json_str(line, "kind").c_str());
+        return nds_pc_profile_json(
+            kind, cpu, static_cast<unsigned>(json_u64(line, "top", 32)));
+    }
+    // The HOST side of the same question, and the only surface here that
+    // names host symbols at all (host_profile.h). pc_hot says which GUEST
+    // code is hot; emu_attrib says which guest-side subsystem is expensive;
+    // neither can say whether the ~36 host cycles per guest cycle are going
+    // into dispatch lookup, bus decode, an MMIO handler, the scheduler, gpu3d,
+    // gpu2d, audio or a generated body. This one can, in every build, for
+    // every title, after the fact.
+    //
+    // Always-on: there is nothing to arm. `window_sec` <= 0 means the whole
+    // run (answered from the running leaf histogram); a positive window is
+    // answered from the sample ring, scanning back only as far as it reaches.
+    // RIPs come back with module + RVA; names need
+    // tools/hostprof_symbolize.py against a dump, because the runner does not
+    // carry a symbol table.
+    if (cmd == "hostprof_top") {
+        return nds_hostprof_top_json(
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0,
+            static_cast<unsigned>(json_u64(line, "top", 40)));
+    }
+    // Is the sampler on, at what rate, how much history does it hold, and what
+    // is it costing? Asked before trusting a table, and the answer carries the
+    // observer's own measured overhead.
+    if (cmd == "hostprof_status") return nds_hostprof_status_json();
+    // Write the ring for a window plus the module map (base/size/path of the
+    // exe and every loaded module, shard DLLs included) so the RVAs can be
+    // symbolized offline. Forward slashes in the path: the request parser is a
+    // flat scanner that does not unescape, exactly as for coverage_manifest.
+    //
+    // window_ms <= 0 dumps the whole resident ring; end_ms_ago shifts the
+    // window's end backwards, so an arbitrary [t0,t1] is
+    // window_ms = t1-t0, end_ms_ago = now-t1.
+    if (cmd == "hostprof_dump") {
+        const std::string path = json_str(line, "path");
+        if (path.empty()) return "{\"error\":\"hostprof_dump needs a path\"}";
+        char error[256] = {};
+        std::string extra;
+        const double window_sec =
+            static_cast<double>(json_i64(line, "window_ms", 0)) / 1000.0;
+        const double end_sec_ago =
+            static_cast<double>(json_i64(line, "end_ms_ago", 0)) / 1000.0;
+        if (!nds_hostprof_dump(path.c_str(), window_sec, end_sec_ago, error,
+                               sizeof(error), &extra))
+            return "{\"ok\":false,\"error\":\"" + json_escape(error) + "\"}";
+        return "{\"ok\":true,\"path\":\"" + json_escape(path) + "\"" + extra +
+               "}";
+    }
+    // B2 direct linking: whether the per-callsite link slots are live
+    // right now (they are gated off under deep trace) and how the
+    // literal transfers actually resolved. Snapshot-twice-and-subtract
+    // like its two neighbours.
+    if (cmd == "direct_link") return nds_direct_link_json();
     if (cmd == "cart_save_info") {
         const uint8_t* data = nullptr;
         uint32_t size = 0;
@@ -1260,6 +1465,8 @@ std::string handle(const std::string& line) {
         scheduler_profile(&sched);
         const std::string direct_class_frames =
             direct_class_json(gpu.direct_class_frames);
+        const std::string adaptive_fallback_frames =
+            adaptive_fallback_json(gpu.adaptive_fallback_frames);
         const std::string direct_class_engine_a_ns =
             direct_class_json(gpu.direct_class_engine_a_ns);
         const std::string direct_extra_bg_mask_frames =
@@ -1277,7 +1484,29 @@ std::string handle(const std::string& line) {
         const std::string direct_extra_master_bright_frames =
             indexed_profile_json(gpu.direct_extra_master_bright_frames,
                                  NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT);
-        return "{\"gpu2d\":{\"render_ns\":" + std::to_string(gpu.render_ns) +
+        const std::string fence_drains =
+            indexed_profile_json(gpu.fence_drains,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        const std::string fenced_lines =
+            indexed_profile_json(gpu.fenced_lines,
+                                 NDS_GPU2D_FENCE_CAUSE_COUNT);
+        return "{\"gpu2d\":{\"threaded_lines\":" +
+               std::to_string(gpu.threaded_lines) +
+               ",\"inline_lines\":" + std::to_string(gpu.inline_lines) +
+               ",\"fence_wait_ns\":" + std::to_string(gpu.fence_wait_ns) +
+               ",\"fence_helped_lines\":" +
+               std::to_string(gpu.fence_helped_lines) +
+               ",\"staged_captures\":" +
+               std::to_string(gpu.staged_captures) +
+               ",\"adaptive_band_frames\":" +
+               std::to_string(gpu.adaptive_band_frames) +
+               ",\"adaptive_serial_frames\":" +
+               std::to_string(gpu.adaptive_serial_frames) +
+               ",\"adaptive_helper_lines\":" +
+               std::to_string(gpu.adaptive_helper_lines) +
+               ",\"fence_drains\":" + fence_drains +
+               ",\"fenced_lines\":" + fenced_lines +
+               ",\"render_ns\":" + std::to_string(gpu.render_ns) +
                ",\"engine_a_ns\":" + std::to_string(gpu.engine_ns[0]) +
                ",\"engine_b_ns\":" + std::to_string(gpu.engine_ns[1]) +
                ",\"obj_ns\":" + std::to_string(gpu.obj_ns) +
@@ -1286,6 +1515,8 @@ std::string handle(const std::string& line) {
                ",\"direct_frames\":" +
                std::to_string(gpu.direct_frames) +
                ",\"direct_class_frames\":" + direct_class_frames +
+               ",\"adaptive_fallback_frames\":" +
+               adaptive_fallback_frames +
                ",\"direct_class_engine_a_ns\":" +
                direct_class_engine_a_ns +
                ",\"hd_frames\":" + std::to_string(gpu.hd_frames) +
@@ -1383,6 +1614,11 @@ std::string handle(const std::string& line) {
         if (!pc) return "{\"error\":\"pc must be nonzero\"}";
         if (max_rounds > 100000000u) max_rounds = 100000000u;
         g_runtime_break_pc = pc;
+        // Re-arm site: the break-PC predicate is per-PC, not cycle-based, so
+        // a deadline published while it was clear would let the guest run to
+        // the slice boundary before noticing it. Debug intervention from
+        // another thread must drop the deadline.
+        runtime_clear_fast_limit();
         uint64_t rounds = 0;
         while (!scheduler_cpu_terminal_halted(0) &&
                !scheduler_cpu_terminal_halted(1) && rounds < max_rounds) {
@@ -1390,6 +1626,7 @@ std::string handle(const std::string& line) {
             ++rounds;
         }
         g_runtime_break_pc = 0;
+        runtime_clear_fast_limit();
         const bool reached = ((g_cpu.R[15] & ~1u) == (pc & ~1u)) &&
             (scheduler_cpu_terminal_halted(0) || scheduler_cpu_terminal_halted(1));
         return std::string("{\"reached\":") + (reached ? "true" : "false") +
@@ -1885,7 +2122,7 @@ void debug_pump_stop() {
     g_pump_shutdown.store(true, std::memory_order_relaxed);
 
     // Closing a listening socket from another thread does not reliably wake a
-    // blocking accept() on Windows. Connect a short-lived loopback client
+    // blocking accept() on every host. Connect a short-lived loopback client
     // first so the I/O thread observes the shutdown flag and leaves accept.
     sockaddr_in listener_addr{};
     socklen_t listener_addr_len = sizeof(listener_addr);

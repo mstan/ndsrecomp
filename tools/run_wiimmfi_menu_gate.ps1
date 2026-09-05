@@ -1,6 +1,6 @@
 # run_wiimmfi_menu_gate.ps1 -- non-public-matchmaking Wiimmfi menu proof.
 #
-# Run from the Mario Kart DS game worktree after building the pcap runner:
+# Run from the Mario Kart DS game worktree after building the network runner:
 #
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File ndsrecomp\tools\run_wiimmfi_menu_gate.ps1
 #
@@ -15,7 +15,7 @@ param(
     [string] $Rom = 'Mario Kart DS.nds',
     [int] $Port = 19890,
     [ValidateSet('slirp', 'pcap')]
-    [string] $NetworkBackend = 'pcap',
+    [string] $NetworkBackend = 'slirp',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
     [int] $InstanceIndex = 0,

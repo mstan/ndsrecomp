@@ -99,6 +99,38 @@ Deadlock probe — inspect ARM7 halted? / IE7.18 / IF7.18 / FIFO-recv nonempty:
 "Spinning HALT" is only harmless if it advances timestamp WITHOUT retiring guest
 instructions.
 
+### Invariant: a halted core snaps to the RENDEZVOUS, never to a nearer deadline
+
+"Fast-forwards the halted CPU's timestamp to target" above means *the target*,
+i.e. this round's rendezvous — not the next instant at which some device of the
+halted core's own would like to fire. melonDS `ARMv4::Execute` does
+`NDS.ARM7Timestamp = NDS.ARM7Target; return;` for `Halted==1`, and
+`NDS::RunFrame` calls `RunTimers(1)` only once, at that target. A timer that
+overflows in the middle of the round therefore raises its IF bit at the
+rendezvous, and the halted core resumes on the *next* round, at the rendezvous
+cycle.
+
+`scheduler_run_round()`'s per-CPU ARM7 catch-up loop therefore hands every
+state to `run_slice()`, whose guest-halt branch consumes the whole quantum in a
+single step. It must not compute a nearer target of its own.
+
+**beads-yjp.48 (regression, 62dbbc7 → fixed here).** That loop was given a
+shortcut: for a guest-halted ARM7 it clamped the target to
+`nds_next_timer_overflow_time_for_cpu(1)` and ticked the timers there, so the
+overflow IRQ landed at the exact overflow cycle *inside* the round and the ARM7
+left HALT up to one rendezvous early. Everything still built, booted and
+rendered; all eight G1 firmware scenarios went red on an SPU output mismatch
+~0.15 s of guest time downstream. First divergence, from the always-on ARM7
+retired-instruction ring: ordinal 2849672 (the ARM7 IRQ vector at `0x18`)
+retired at `cyc7=5087805` natively against the oracle's `5087820`, with ARM7
+Timer3 (`IE7=0x40`) the only enabled wake source. `runner/tests/
+test_scheduler_halt_fidelity.py` pins the shape so it cannot come back.
+
+The **whole-console idle fast-forward** (both cores halted, no wake pending, no
+DMA stall) is the one place a timer overflow may influence a deadline, and only
+because it snaps that overflow forward onto the `kIterCap` rendezvous grid —
+delivering the IRQ at exactly the instant the non-jumping scheduler would.
+
 ## Cycle accuracy — match melonDS's EFFECTIVE model, not silicon
 
 Event-bounding limits but doesn't eliminate cycle-error damage: a small error is

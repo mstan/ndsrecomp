@@ -9,18 +9,98 @@
 #include <ctime>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "state.h"
+#include "diagnostics.h"
 #include "tier3.h"
 #include "../../recompiler/support/sha1.h"
 
 uint64_t g_coverage_write_epoch = 0u;
 CoverageExecCache g_coverage_exec_cache[2];
 
-namespace {
-
 constexpr uint32_t kPageSize = 4096u;
+
+// Roots -- the PCs where native code fell into the interpreter -- are dense,
+// not sparse. The interpreter re-enters at whatever instruction an IRQ or a DMA
+// stall interrupted, so over a session they converge on the set of ALL
+// interpreted instructions: on the first real MPH submission 92% of root
+// addresses had another root exactly one instruction away and the longest
+// unbroken run was 415. Storing one ~96-byte JSON record per address made 94%
+// of the manifest's entries roots. A bitmap over the page stores the same
+// address set for a fixed 384 bytes.
+//
+// Two bitmaps, because mode is load-bearing: tools/seed_overlay_from_coverage.py
+// feeds roots to the recompiler's interior-entry switch and must know whether a
+// landing pad is ARM or Thumb. ARM roots are word aligned (1024 bits), Thumb
+// roots halfword aligned (2048 bits).
+constexpr uint32_t kRootArmBytes = 128u;    // 4096 / 4 / 8
+constexpr uint32_t kRootThumbBytes = 256u;  // 4096 / 2 / 8
+// Hit counts per 256-byte block. A single per-page total would have collapsed
+// the interpreted-span ranking, which is the whole point of keeping roots; 16
+// counters keep cost attribution at 256-byte resolution for 128 bytes.
+constexpr uint32_t kRootBlocks = 16u;
+
+// RootBits, StoredEntry and the snapshot types below sit at file scope rather
+// than in the anonymous namespace: CoverageLiveSnapshot is named in the header
+// and must not have fields whose types have internal linkage.
+struct RootBits {
+    std::array<uint8_t, kRootArmBytes> arm{};
+    std::array<uint8_t, kRootThumbBytes> thumb{};
+    std::array<uint64_t, kRootBlocks> hits{};
+
+    void note(uint32_t offset, bool thumb_mode) {
+        if (thumb_mode) {
+            const uint32_t bit = offset >> 1u;
+            thumb[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
+        } else {
+            const uint32_t bit = offset >> 2u;
+            arm[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
+        }
+        ++hits[(offset * kRootBlocks) / kPageSize];
+    }
+    void clear() { arm = {}; thumb = {}; hits = {}; }
+};
+
+struct StoredEntry {
+    uint64_t hits;
+    uint32_t pc;
+    uint32_t caller;
+    uint8_t thumb;
+    uint8_t kind;
+};
+
+// One captured code page, detached from the resident store.
+struct SnapshotPage {
+    uint32_t addr = 0u;
+    uint8_t cpu = 0u;
+    std::string sha1;
+    uint64_t executions = 0u;
+    std::vector<StoredEntry> entries;
+    RootBits roots;
+    std::vector<uint8_t> bytes;
+};
+
+// beads-yjp.59: everything a manifest is rendered from, copied out of the
+// resident store in one bounded pass. Capture reads emulation-owned state and
+// therefore runs on the emulation thread; rendering (base64, the root-map sort,
+// the JSON build) and the file write are pure functions of this struct and run
+// wherever the caller puts them.
+struct CoverageLiveSnapshot {
+    std::string rom_sha1;
+    std::string rom_name;
+    std::string build_id;
+    Tier3Stats stats{};
+    std::vector<Tier3CoverageEntry> entries;
+    std::vector<SnapshotPage> pages;
+    std::vector<std::pair<uint64_t, RootBits>> root_map;
+    uint64_t dropped = 0u;
+    uint64_t replaced = 0u;
+    uint64_t revisits = 0u;
+};
+
+namespace {
 
 // Ceiling on the page store. 8192 pages is 32 MB of guest code, far above any
 // observed session (an MPH adventure capture touches a few hundred), and the
@@ -53,44 +133,6 @@ constexpr uint32_t kMaxCallersPerEntry = 4u;
 // aligned, so it is never a real ARM or Thumb branch source, and an ingest can
 // tell "many further sites, not recorded individually" from a real address.
 constexpr uint32_t kCallerMany = 0xFFFFFFFFu;
-
-// Roots -- the PCs where native code fell into the interpreter -- are dense,
-// not sparse. The interpreter re-enters at whatever instruction an IRQ or a DMA
-// stall interrupted, so over a session they converge on the set of ALL
-// interpreted instructions: on the first real MPH submission 92% of root
-// addresses had another root exactly one instruction away and the longest
-// unbroken run was 415. Storing one ~96-byte JSON record per address made 94%
-// of the manifest's entries roots. A bitmap over the page stores the same
-// address set for a fixed 384 bytes.
-//
-// Two bitmaps, because mode is load-bearing: tools/seed_overlay_from_coverage.py
-// feeds roots to the recompiler's interior-entry switch and must know whether a
-// landing pad is ARM or Thumb. ARM roots are word aligned (1024 bits), Thumb
-// roots halfword aligned (2048 bits).
-constexpr uint32_t kRootArmBytes = 128u;    // 4096 / 4 / 8
-constexpr uint32_t kRootThumbBytes = 256u;  // 4096 / 2 / 8
-// Hit counts per 256-byte block. A single per-page total would have collapsed
-// the interpreted-span ranking, which is the whole point of keeping roots; 16
-// counters keep cost attribution at 256-byte resolution for 128 bytes.
-constexpr uint32_t kRootBlocks = 16u;
-
-struct RootBits {
-    std::array<uint8_t, kRootArmBytes> arm{};
-    std::array<uint8_t, kRootThumbBytes> thumb{};
-    std::array<uint64_t, kRootBlocks> hits{};
-
-    void note(uint32_t offset, bool thumb_mode) {
-        if (thumb_mode) {
-            const uint32_t bit = offset >> 1u;
-            thumb[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
-        } else {
-            const uint32_t bit = offset >> 2u;
-            arm[bit >> 3u] |= static_cast<uint8_t>(1u << (bit & 7u));
-        }
-        ++hits[(offset * kRootBlocks) / kPageSize];
-    }
-    void clear() { arm = {}; thumb = {}; hits = {}; }
-};
 
 struct StoredPage {
     uint32_t addr;
@@ -125,14 +167,6 @@ struct PageKeyHash {
             folded = (folded << 8) ^ key.digest[static_cast<size_t>(i)];
         return static_cast<size_t>(folded);
     }
-};
-
-struct StoredEntry {
-    uint64_t hits;
-    uint32_t pc;
-    uint32_t caller;
-    uint8_t thumb;
-    uint8_t kind;
 };
 
 struct PageEntryKey {
@@ -202,6 +236,10 @@ uint64_t g_rotations = 0u;
 
 std::string run_stamp() {
     if (!g_run_stamp.empty()) return g_run_stamp;
+    if (nds_diagnostics_enabled()) {
+        g_run_stamp = nds_diagnostics_run_stamp();
+        if (!g_run_stamp.empty()) return g_run_stamp;
+    }
     const std::time_t now = std::time(nullptr);
     std::tm tm_buf{};
 #ifdef _WIN32
@@ -274,6 +312,14 @@ bool any_bits(const std::array<uint8_t, N>& data) {
     for (uint8_t byte : data)
         if (byte != 0u) return true;
     return false;
+}
+
+// Does this page carry ANY interpreted-span root? The hits array is
+// deliberately not consulted: it is a per-block counter that says how often,
+// while the two bitmaps are what say whether an address was ever a root at
+// all, and a promotable observation is an address, not a count.
+bool any_roots(const RootBits& roots) {
+    return any_bits(roots.arm) || any_bits(roots.thumb);
 }
 
 void append_root_bits(std::string& out, const RootBits& roots) {
@@ -619,33 +665,50 @@ void coverage_pages_reset() {
     for (CoverageExecCache& cache : g_coverage_exec_cache) cache = {};
 }
 
-bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
-                                  char* error, unsigned error_cap) {
-    auto fail = [&](const char* message) {
-        if (error && error_cap) {
-            std::snprintf(error, error_cap, "%s", message);
-        }
-        return false;
-    };
-    if (!path || !path[0]) return fail("no manifest path");
+// Emulation-thread half: a bounded copy of the resident store. Nothing here
+// formats, sorts by key or touches the filesystem -- the whole point of the
+// split is that everything expensive is a pure function of what this returns.
+static void capture_manifest_snapshot(uint32_t live_max_pages,
+                               CoverageLiveSnapshot& snap) {
+    snap.rom_sha1 = g_rom_sha1;
+    snap.rom_name = g_rom_name;
+    snap.build_id = g_build_id;
 
     // Pull the Tier-3 address map. The cap matches the debug server's
     // tier3_coverage ceiling so a manifest is never a smaller view than a live
     // probe would have given.
-    std::vector<Tier3CoverageEntry> entries;
     if (live_max_pages == 0u) {
-        entries.resize(262144);
+        snap.entries.resize(262144);
         const uint32_t entry_count = tier3_coverage_copy(
-            entries.data(), static_cast<uint32_t>(entries.size()));
-        entries.resize(entry_count);
+            snap.entries.data(), static_cast<uint32_t>(snap.entries.size()));
+        snap.entries.resize(entry_count);
     }
-    const Tier3Stats stats = tier3_stats();
+    snap.stats = tier3_stats();
+    snap.dropped = g_page_stats.dropped;
+    snap.replaced = g_page_stats.replaced;
+    snap.revisits = g_page_stats.revisits;
 
     std::vector<uint32_t> page_indices;
     page_indices.reserve(g_pages.size());
+    // beads-yjp.62: a page qualifies for the LIVE snapshot on entry points OR
+    // on roots. Entry points alone was the whole starvation: since
+    // beads-yjp.53/.55 a fresh install's coverage is ROOT-ONLY -- the deferred
+    // filing rule records a call/indirect entry point only when the
+    // interpreter resolves a transfer whose target has no live bank, and a
+    // cold session spends its time in straight-line interpreted spans that
+    // produce root-map bits and nothing else. A tester's own manifest shows
+    // it: 27 captured pages, 2 with a non-empty entry_points array. Filtering
+    // the other 25 out here starves the provider no matter what the compiler
+    // is told, which is why passing --include-roots to it (main.cpp,
+    // bundled_tcc_command) is necessary but not sufficient -- the flag can
+    // only widen the selection over pages the snapshot actually carries.
+    // Recency sort and the max_pages cap below are unchanged; this only
+    // decides which pages are eligible to be sorted.
     for (uint32_t i = 0; i < g_pages.size(); ++i) {
-        if (live_max_pages == 0u || !g_pages[i].entry_indices.empty())
+        if (live_max_pages == 0u || !g_pages[i].entry_indices.empty() ||
+            any_roots(g_pages[i].roots)) {
             page_indices.push_back(i);
+        }
     }
     if (live_max_pages != 0u) {
         std::sort(page_indices.begin(), page_indices.end(),
@@ -662,26 +725,51 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
             page_indices.resize(live_max_pages);
     }
 
+    snap.pages.reserve(page_indices.size());
+    for (const uint32_t page_index : page_indices) {
+        const StoredPage& page = g_pages[page_index];
+        SnapshotPage out;
+        out.addr = page.addr;
+        out.cpu = page.cpu;
+        out.sha1 = page.sha1;
+        out.executions = page.executions;
+        out.roots = page.roots;
+        out.bytes = page.bytes;
+        out.entries.reserve(page.entry_indices.size());
+        for (const uint32_t entry_index : page.entry_indices) {
+            if (entry_index >= g_generation_entries.size()) continue;
+            out.entries.push_back(g_generation_entries[entry_index]);
+        }
+        snap.pages.push_back(std::move(out));
+    }
+
+    snap.root_map.reserve(g_root_map.size());
+    for (const auto& item : g_root_map) snap.root_map.push_back(item);
+}
+
+// Worker half: format. Byte-for-byte the document the single-pass writer
+// produced, which is what keeps every existing ingest working.
+static std::string render_manifest(const CoverageLiveSnapshot& snap) {
     std::string out;
-    out.reserve(page_indices.size() * 6000u + entries.size() * 96u + 4096u);
+    out.reserve(snap.pages.size() * 6000u + snap.entries.size() * 96u + 4096u);
     out += "{\n  \"schema\": 4,\n";
     out += "  \"kind\": \"ndsrecomp-tier3-coverage\",\n";
     out += "  \"rom_sha1\": ";
-    append_json_escaped(out, g_rom_sha1);
+    append_json_escaped(out, snap.rom_sha1);
     out += ",\n  \"rom_name\": ";
-    append_json_escaped(out, g_rom_name);
+    append_json_escaped(out, snap.rom_name);
     out += ",\n  \"build_id\": ";
-    append_json_escaped(out, g_build_id);
+    append_json_escaped(out, snap.build_id);
 
     out += ",\n  \"static_coverage\": {";
-    out += "\"tier3_entries9\": " + std::to_string(stats.entries[0]);
-    out += ", \"tier3_entries7\": " + std::to_string(stats.entries[1]);
-    out += ", \"tier3_insns9\": " + std::to_string(stats.instructions[0]);
-    out += ", \"tier3_insns7\": " + std::to_string(stats.instructions[1]);
+    out += "\"tier3_entries9\": " + std::to_string(snap.stats.entries[0]);
+    out += ", \"tier3_entries7\": " + std::to_string(snap.stats.entries[1]);
+    out += ", \"tier3_insns9\": " + std::to_string(snap.stats.instructions[0]);
+    out += ", \"tier3_insns7\": " + std::to_string(snap.stats.instructions[1]);
     out += ", \"clean_ram_rejects9\": " +
-           std::to_string(stats.clean_ram_rejects[0]);
+           std::to_string(snap.stats.clean_ram_rejects[0]);
     out += ", \"clean_ram_rejects7\": " +
-           std::to_string(stats.clean_ram_rejects[1]);
+           std::to_string(snap.stats.clean_ram_rejects[1]);
     out += "}";
 
     // Entry points, split per CPU to match the committed coverage JSON shape
@@ -691,7 +779,7 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
         out += (cpu == 0) ? "arm9" : "arm7";
         out += "\": [";
         bool first = true;
-        for (const Tier3CoverageEntry& entry : entries) {
+        for (const Tier3CoverageEntry& entry : snap.entries) {
             if (entry.cpu != cpu) continue;
             // Roots are carried by root_map / the per-page bitmaps now. They
             // were 94% of this array and every address in it is still present,
@@ -717,31 +805,33 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
     // it survives version eviction and part rotation.
     out += ",\n  \"root_map\": [";
     {
-        std::vector<uint64_t> keys;
-        keys.reserve(g_root_map.size());
-        for (const auto& item : g_root_map) keys.push_back(item.first);
-        std::sort(keys.begin(), keys.end());
+        std::vector<uint32_t> order;
+        order.reserve(snap.root_map.size());
+        for (uint32_t i = 0; i < snap.root_map.size(); ++i) order.push_back(i);
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            return snap.root_map[a].first < snap.root_map[b].first;
+        });
         bool first_root = true;
-        for (const uint64_t key : keys) {
+        for (const uint32_t index : order) {
+            const uint64_t key = snap.root_map[index].first;
             if (!first_root) out += ",";
             first_root = false;
             out += "\n    {\"addr\": \"" +
                    hex32(static_cast<uint32_t>(key)) + "\"";
             out += ", \"cpu\": ";
             out += ((key >> 32u) == 1u) ? "7" : "9";
-            append_root_bits(out, g_root_map.at(key));
+            append_root_bits(out, snap.root_map[index].second);
             out += "}";
         }
         out += first_root ? "]" : "\n  ]";
     }
 
     out += ",\n  \"pages\": {";
-    out += "\"captured\": " + std::to_string(page_indices.size());
-    out += ", \"dropped\": " + std::to_string(g_page_stats.dropped);
-    out += ", \"replaced\": " + std::to_string(g_page_stats.replaced);
-    out += ", \"bytes\": " +
-           std::to_string(page_indices.size() * kPageSize);
-    out += ", \"revisits\": " + std::to_string(g_page_stats.revisits);
+    out += "\"captured\": " + std::to_string(snap.pages.size());
+    out += ", \"dropped\": " + std::to_string(snap.dropped);
+    out += ", \"replaced\": " + std::to_string(snap.replaced);
+    out += ", \"bytes\": " + std::to_string(snap.pages.size() * kPageSize);
+    out += ", \"revisits\": " + std::to_string(snap.revisits);
     out += ", \"page_size\": " + std::to_string(kPageSize);
     // Declared so an ingest can read a per-page entry whose caller is
     // 0xFFFFFFFF as "this many further sites, folded" rather than as an
@@ -749,8 +839,7 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
     out += ", \"caller_cap\": " + std::to_string(kMaxCallersPerEntry);
     out += ", \"entries\": [";
     bool first_page = true;
-    for (const uint32_t page_index : page_indices) {
-        const StoredPage& page = g_pages[page_index];
+    for (const SnapshotPage& page : snap.pages) {
         if (!first_page) out += ",";
         first_page = false;
         out += "\n    {\"addr\": \"" + hex32(page.addr) + "\"";
@@ -760,9 +849,7 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
         out += ", \"executions\": " + std::to_string(page.executions);
         out += ", \"entry_points\": [";
         bool first_entry = true;
-        for (const uint32_t entry_index : page.entry_indices) {
-            if (entry_index >= g_generation_entries.size()) continue;
-            const StoredEntry& entry = g_generation_entries[entry_index];
+        for (const StoredEntry& entry : page.entries) {
             if (!first_entry) out += ",";
             first_entry = false;
             out += "{\"addr\": \"" + hex32(entry.pc) + "\"";
@@ -781,7 +868,17 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
     }
     out += first_page ? "]}" : "\n  ]}";
     out += "\n}\n";
+    return out;
+}
 
+static bool write_manifest_text(const char* path, const std::string& out,
+                         char* error, unsigned error_cap) {
+    auto fail = [&](const char* message) {
+        if (error && error_cap) {
+            std::snprintf(error, error_cap, "%s", message);
+        }
+        return false;
+    };
     // Write through a temporary so an interrupted dump never leaves a
     // half-written manifest that looks handable.
     const std::string temporary = std::string(path) + ".tmp";
@@ -804,13 +901,36 @@ bool coverage_manifest_write_impl(const char* path, uint32_t live_max_pages,
 
 bool coverage_manifest_write(const char* path, char* error,
                              unsigned error_cap) {
-    return coverage_manifest_write_impl(path, 0u, error, error_cap);
+    if (!path || !path[0]) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "no manifest path");
+        return false;
+    }
+    CoverageLiveSnapshot snap;
+    capture_manifest_snapshot(0u, snap);
+    return write_manifest_text(path, render_manifest(snap), error, error_cap);
 }
 
-bool coverage_manifest_write_live_snapshot(const char* path,
-                                           uint32_t max_pages,
-                                           char* error,
-                                           unsigned error_cap) {
+CoverageLiveSnapshot* coverage_manifest_capture_live_snapshot(
+    uint32_t max_pages) {
     if (max_pages == 0u) max_pages = 64u;
-    return coverage_manifest_write_impl(path, max_pages, error, error_cap);
+    auto* snap = new CoverageLiveSnapshot();
+    capture_manifest_snapshot(max_pages, *snap);
+    return snap;
+}
+
+bool coverage_manifest_write_captured_snapshot(
+    const CoverageLiveSnapshot* snapshot, const char* path, char* error,
+    unsigned error_cap) {
+    if (!snapshot || !path || !path[0]) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "no manifest snapshot");
+        return false;
+    }
+    return write_manifest_text(path, render_manifest(*snapshot), error,
+                               error_cap);
+}
+
+void coverage_manifest_release_snapshot(CoverageLiveSnapshot* snapshot) {
+    delete snapshot;
 }

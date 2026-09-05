@@ -51,6 +51,19 @@ constexpr uint8_t nds_gpu2d_window_mask(const NdsGpu2dWindowState& state,
     return win[10];
 }
 
+// Native window coordinate for one column of an adaptive (widened) frame.
+// Columns that carry a 2D HUD source use that source's native x. The widened
+// 3D margins have no native 2D source, so they take the window status of the
+// nearest native edge column: a window that reaches the native edge extends
+// across the margin, and a full-screen window covers the whole adaptive
+// frame. (Casting the wide x to uint8_t would wrap columns >= 256 back onto
+// the left of the native screen and sample an unrelated window region.)
+constexpr uint8_t nds_gpu2d_adaptive_window_x(int x, int extra, int hud_x) {
+    if (hud_x >= 0) return static_cast<uint8_t>(hud_x);
+    const int native = x - extra;
+    return static_cast<uint8_t>(native < 0 ? 0 : native > 255 ? 255 : native);
+}
+
 constexpr bool nds_gpu2d_window_mask_supports_hd(uint8_t mask) {
     // The HD descriptor removes BG0/3D and the shader reinserts it. It can
     // represent a region only when BG0 remains enabled there. The per-pixel

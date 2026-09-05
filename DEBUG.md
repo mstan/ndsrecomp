@@ -33,6 +33,30 @@ synchronize the ARM9 and ARM7 observers.
   DISPCNT A/B, VRAMCNT, IF/IE/IME per CPU.
 - `irq_ring9` / `irq_ring7` — IRQ raise / acknowledge / BIOS return.
 - `dispatch_misses.log` — append-only; a miss is a P0 silent bug.
+- `hostprof` — the only ring that records HOST addresses rather than
+  guest ones (`runner/src/host_profile.h`). A sampler thread started at
+  runner init suspends each registered thread (emu at 250 Hz; 2D/3D
+  workers, audio and the live compiler at a quarter of that, because the
+  cost is entirely per-suspend), copies its registers and 64 KB of stack, and
+  unwinds the copy against the PE `.pdata`/`.xdata` tables — so it needs
+  no PDB and works on stripped Release builds and on shard DLLs. 1<<18
+  samples x 16 frames = 36 MB, ~17 minutes of history. Query with
+  The 250 Hz is a measurement, not a preference: one
+  suspend/context/resume cycle costs ~33 us median regardless of how much
+  stack is copied, so the sampled thread loses `hz * 33 us` per second and
+  only 250 Hz fits inside 1 percent. `NDS_HOSTPROF_HZ=1000` is an opt-in
+  for a narrow high-resolution session, at 3.3 percent. Query with
+  `hostprof_top` (top-K by self time, module+RVA), `hostprof_dump`
+  (samples + module map to a file) and `hostprof_status`; the whole ring
+  also lands in the diagnostics bundle at shutdown. Names come from
+  `tools/hostprof_symbolize.py` offline, which also prints the
+  self/inclusive/category tables. `NDS_HOSTPROF=off` opts out;
+  `NDS_HOSTPROF_HZ`, `NDS_HOSTPROF_RING` tune it.
+
+  This is the answer to "emu_ms is 17 ms/frame and every diagnostic we
+  have points at a guest address". It does NOT replace the guest-side
+  surfaces: read `pc_hot`/`emu_attrib` for what the GUEST is doing and
+  `hostprof` for what the HOST is spending, and cross them.
 
 All on in Release. Eviction keeps memory bounded; targeted dumps pull
 the requested slice.

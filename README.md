@@ -1,6 +1,6 @@
 # ndsrecomp
 
-> ## Status: very early pre-alpha (v0.0.1)
+> ## Status: very early pre-alpha (v0.6.10)
 >
 > This is an experimental developer snapshot, not a ready-to-use emulator or
 > a stable framework. It has demonstrated one specific, hash-verified Nintendo
@@ -30,7 +30,7 @@ matching and experimental same-machine local wireless multiplayer. Metroid
 Prime Hunters has early gameplay footage and title-specific 21:9 display
 bring-up. These are narrow bring-up results, not broad compatibility claims.
 
-Current source release: **[v0.0.1](https://github.com/mstan/ndsrecomp/releases/tag/v0.0.1)**.
+Current source release: **[v0.6.10](https://github.com/mstan/ndsrecomp/releases/tag/v0.6.10)**.
 
 ## Showcase
 
@@ -181,8 +181,10 @@ cmake -G Ninja -B runner/build runner
 cmake --build runner/build
 ```
 
-SDL2 is optional at configure time; without it, the runner is headless and
-interactive presentation is unavailable.
+SDL3 is the default host presentation backend. Configure with
+`-DNDS_SDL_BACKEND=SDL2` for the compatibility backend, or
+`-DNDS_SDL_BACKEND=NONE` for a headless runner with no interactive
+presentation.
 
 ### Game-owned static banks
 

@@ -5,6 +5,7 @@
 // slots). The vendored translation units are unmodified melonDS 1.0rc.
 
 #include "gpu3d.h"
+#include "host_profile.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -19,14 +20,17 @@
 #include "io.h"
 #include "gpu2d.h"
 #include "scheduler.h"
+#include "savestate.h"
 #include "state.h"
 #include "vram.h"
 #include "net/net_ring.h"
+#include "emu_profile.h"
 
 #include "NDS.h"
 #include "GPU3D_Soft.h"
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
 #include "GPU3D_Compute.h"
+#include "ComputeHost.h"
 #endif
 
 namespace {
@@ -55,6 +59,64 @@ using ProfileClock = std::chrono::steady_clock;
 bool profiling();
 void profile_add(uint64_t& dst, ProfileClock::time_point start);
 
+bool pointer_in_array(const void* pointer, const void* begin,
+                      size_t count, size_t element_size) {
+    if (!pointer) return false;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(pointer);
+    const uintptr_t first = reinterpret_cast<uintptr_t>(begin);
+    const uintptr_t bytes = count * element_size;
+    return value >= first && value < first + bytes &&
+        ((value - first) % element_size) == 0u;
+}
+
+bool validate_gpu3d_device(const melonDS::GPU3D& gpu,
+                           std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (gpu.CurRAMBank > 1u || gpu.NumVertices > 6144u ||
+        gpu.NumPolygons > 2048u || gpu.NumOpaquePolygons > gpu.NumPolygons ||
+        gpu.RenderNumPolygons > 2048u)
+        return fail("savestate GPU3D RAM state is invalid");
+    if (gpu.ProjMatrixStackPointer < 0 ||
+        gpu.ProjMatrixStackPointer > 1 ||
+        gpu.PosMatrixStackPointer < 0 ||
+        gpu.PosMatrixStackPointer > 63 ||
+        gpu.TexMatrixStackPointer < 0 ||
+        gpu.TexMatrixStackPointer > 1 ||
+        gpu.MatrixMode > 3u || gpu.VertexNum > 4u ||
+        gpu.VertexNumInPoly > 10u || gpu.ExecParamCount > 32u ||
+        gpu.ParamCount > 32u || gpu.TotalParams > 32u)
+        return fail("savestate GPU3D command state is invalid");
+    const melonDS::Vertex* expected_vertex =
+        &gpu.VertexRAM[gpu.CurRAMBank ? 6144u : 0u];
+    const melonDS::Polygon* expected_polygon =
+        &gpu.PolygonRAM[gpu.CurRAMBank ? 2048u : 0u];
+    if (gpu.CurVertexRAM != expected_vertex ||
+        gpu.CurPolygonRAM != expected_polygon)
+        return fail("savestate GPU3D active RAM pointer is invalid");
+    if (gpu.LastStripPolygon &&
+        !pointer_in_array(gpu.LastStripPolygon, gpu.PolygonRAM, 4096u,
+                          sizeof(gpu.PolygonRAM[0])))
+        return fail("savestate GPU3D strip pointer is invalid");
+    for (const melonDS::Polygon& polygon : gpu.PolygonRAM) {
+        if (polygon.NumVertices > 10u)
+            return fail("savestate GPU3D polygon vertex count is invalid");
+        for (uint32_t i = 0; i < polygon.NumVertices; ++i) {
+            if (!pointer_in_array(polygon.Vertices[i], gpu.VertexRAM, 12288u,
+                                  sizeof(gpu.VertexRAM[0])))
+                return fail("savestate GPU3D vertex pointer is invalid");
+        }
+    }
+    for (uint32_t i = 0; i < gpu.RenderNumPolygons; ++i) {
+        if (!pointer_in_array(gpu.RenderPolygonRAM[i], gpu.PolygonRAM, 4096u,
+                              sizeof(gpu.PolygonRAM[0])))
+            return fail("savestate GPU3D render pointer is invalid");
+    }
+    return true;
+}
+
 // Internal-resolution (HD) multiplier for the accelerated renderer. 4x of a
 // 448-wide adaptive raster is 1792x768; the compute renderer's tile and span
 // buffers grow with it, so this is deliberately capped well below what the
@@ -62,6 +124,7 @@ void profile_add(uint64_t& dst, ProfileClock::time_point start);
 constexpr uint8_t kMaxInternalScale = 4u;
 uint8_t g_internal_scale = 1u;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
+bool g_display_readback_latency = false;
 bool g_compute_rendered_frame = false;
 bool g_compute_readback_pending = false;
 bool g_compute_frame_ready = false;
@@ -73,6 +136,32 @@ uint32_t g_compute_frame[kComputeMaxWidth * 192u] = {};
 uint32_t g_compute_attr_frame[kComputeMaxWidth * 192u] = {};
 uint32_t g_compute_scrolled_line[kComputeMaxWidth] = {};
 uint32_t g_compute_scrolled_attr_line[kComputeMaxWidth] = {};
+
+// ── Native 3D readback (see compute_submit_readback) ────────────────────
+// ARB_buffer_storage is core in GL 4.4; the host context floor is 4.3 and
+// the vendored glad loader is generated with no extensions, so both the
+// entry point and the flag values are declared here and resolved through
+// the host context at renderer start.
+#ifndef GL_MAP_PERSISTENT_BIT
+#define GL_MAP_PERSISTENT_BIT 0x0040
+#endif
+#ifndef GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT
+#define GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT 0x00004000
+#endif
+typedef void (APIENTRYP NdsGlBufferStorageProc)(GLenum, GLsizeiptr,
+                                                const void*, GLbitfield);
+
+// Readback destination. Non-zero only when persistent mapping is available;
+// otherwise the renderer's own PBO plus glMapBuffer is used and these stay
+// empty. g_compute_pbo_map is a permanent CPU view of g_compute_pbo.
+GLuint g_compute_pbo = 0;
+const uint32_t* g_compute_pbo_map = nullptr;
+size_t g_compute_pbo_bytes = 0;
+// Completion of the queued pack, in both readback modes.
+GLsync g_compute_fence = nullptr;
+// Emitted once at renderer start so a field diagnostics bundle says which
+// readback path produced its numbers.
+const char* g_compute_readback_mode = "glMapBuffer";
 
 void clear_compute_gl_errors() {
     while (glGetError() != GL_NO_ERROR) {}
@@ -102,6 +191,79 @@ bool compute_readback_overlap() {
     return enabled;
 }
 
+// Both readback modes carry a fence; dropping it is always safe because a
+// dropped fence only means the next consume has nothing to wait on, and a
+// consume only runs while a readback is pending.
+void compute_drop_fence() {
+    if (!g_compute_fence) return;
+    glDeleteSync(g_compute_fence);
+    g_compute_fence = nullptr;
+}
+
+bool compute_gl_has_extension(const char* name) {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; ++i) {
+        const char* extension = reinterpret_cast<const char*>(
+            glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        if (extension && std::strcmp(extension, name) == 0) return true;
+    }
+    return false;
+}
+
+// Requires a current context; every caller either owns one or has never
+// created the objects being released.
+void compute_readback_shutdown() {
+    compute_drop_fence();
+    if (g_compute_pbo) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+        if (g_compute_pbo_map) glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glDeleteBuffers(1, &g_compute_pbo);
+    }
+    g_compute_pbo = 0;
+    g_compute_pbo_map = nullptr;
+    g_compute_pbo_bytes = 0;
+    g_compute_readback_mode = "glMapBuffer";
+}
+
+// A persistently mapped pixel-pack buffer removes the per-frame
+// glMapBuffer/glUnmapBuffer round trip from the emu thread entirely: the CPU
+// view is established once here, and the only per-frame synchronisation left
+// is an explicit fence wait on the pack itself. Auto-detected, never a user
+// knob -- implementations without ARB_buffer_storage keep the renderer's own
+// PBO and the original map path, which produces byte-identical pixels.
+void compute_readback_init(uint32_t render_width) {
+    compute_readback_shutdown();
+    const size_t bytes =
+        static_cast<size_t>(render_width) * 192u * sizeof(uint32_t);
+    auto buffer_storage = reinterpret_cast<NdsGlBufferStorageProc>(
+        compute_gl_has_extension("GL_ARB_buffer_storage")
+            ? nds_compute_host_gl_proc("glBufferStorage")
+            : nullptr);
+    if (!buffer_storage) return;
+    clear_compute_gl_errors();
+    // No GL_MAP_COHERENT_BIT: coherent storage is the write-combined path
+    // meant for CPU->GPU streaming, and this buffer is read by the CPU. The
+    // explicit GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT at submit is what makes
+    // the pack visible through the mapping.
+    const GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT;
+    glGenBuffers(1, &g_compute_pbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+    buffer_storage(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(bytes),
+                   nullptr, flags);
+    void* mapped = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+                                    static_cast<GLsizeiptr>(bytes), flags);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    g_compute_pbo_map = static_cast<const uint32_t*>(mapped);
+    g_compute_pbo_bytes = bytes;
+    if (!mapped || compute_gl_stage_failed("persistent readback buffer")) {
+        compute_readback_shutdown();
+        return;
+    }
+    g_compute_readback_mode = "persistent map";
+}
+
 void compute_readback_failed(const char* stage) {
     g_compute_rendered_frame = false;
     g_compute_readback_pending = false;
@@ -121,7 +283,32 @@ void compute_submit_readback() {
     // Order the compute shader's image stores before queuing the low-resolution
     // texture copy into its pixel-pack buffer.
     glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
-    renderer.PrepareCaptureFrame();
+    if (g_compute_pbo_map) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_compute_pbo);
+        glBindTexture(GL_TEXTURE_2D, nds_gpu3d_compute_output_texture());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE,
+                      nullptr);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        // Persistent, non-coherent mapping: the pack's writes only become
+        // visible through the CPU view once this barrier has retired, and
+        // the fence below is what tells us it has.
+        glMemoryBarrier(GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT);
+    } else {
+        renderer.PrepareCaptureFrame();
+    }
+    // KICK THE GPU. Everything above -- the whole compute dispatch chain
+    // RenderFrame just queued as well as this pack -- is still sitting in the
+    // driver's client-side command buffer, and nothing in the rest of the
+    // frame forces a flush before the readback is consumed at the next frame
+    // boundary. Without this the GPU did not start the frame until the
+    // consumer's glMapBuffer flushed it, so the emu thread paid the entire
+    // render latency synchronously and the "overlap" window overlapped
+    // nothing. The fence is created before the flush so the flush submits it
+    // too, and it gives the consumer something to wait on that is not the
+    // buffer object itself.
+    compute_drop_fence();
+    g_compute_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
     g_compute_rendered_frame = false;
     const bool failed =
         compute_gl_stage_failed("frame render/readback submit");
@@ -140,20 +327,52 @@ void compute_submit_readback() {
 
 void compute_finish_readback() {
     if (!g_compute_readback_pending) return;
-    const auto start = profiling() ? ProfileClock::now()
+    // ALWAYS-ON: this stall is precisely the quantity governor stage 1 moves
+    // off the frame's critical path, so it cannot live behind NDS_PROFILE_GPU.
+    // One clock pair per frame is free next to the fence wait it brackets.
+    const auto readback_start = ProfileClock::now();
+    const auto start = profiling() ? readback_start
                                    : ProfileClock::time_point{};
-    // PrepareCaptureFrame left the renderer's PBO bound. Mapping waits only
-    // for copy work that did not finish during the scanline overlap.
-    void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-    bool valid = mapped != nullptr;
+    const size_t frame_bytes =
+        static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
+        192u * sizeof(uint32_t);
+    // The pack was flushed at submit, so whatever is left here is only the
+    // portion of the GPU's frame that did not fit in the ~48 scanlines of
+    // guest emulation plus the present that separate the two points.
+    bool valid = true;
+    const void* mapped = nullptr;
+    if (g_compute_pbo_map) {
+        if (g_compute_fence) {
+            // GL_SYNC_FLUSH_COMMANDS_BIT is redundant after the submit-side
+            // glFlush and costs nothing; it keeps this correct if a future
+            // caller ever submits without flushing.
+            constexpr GLuint64 kReadbackTimeoutNs = 5ull * 1000000000ull;
+            const GLenum status = glClientWaitSync(
+                g_compute_fence, GL_SYNC_FLUSH_COMMANDS_BIT,
+                kReadbackTimeoutNs);
+            if (status == GL_WAIT_FAILED || status == GL_TIMEOUT_EXPIRED)
+                valid = false;
+        }
+        if (valid && frame_bytes <= g_compute_pbo_bytes)
+            mapped = g_compute_pbo_map;
+        else
+            valid = false;
+    } else {
+        // PrepareCaptureFrame left the renderer's PBO bound.
+        mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        valid = mapped != nullptr;
+    }
     if (mapped) {
-        const size_t frame_bytes =
-            static_cast<size_t>(g_nds.GPU.GPU3D.GetRenderWidth()) *
-            192u * sizeof(uint32_t);
-        std::memcpy(g_compute_frame, mapped, frame_bytes);
+        // Single streaming pass. The readback surface is up to 448x192x4 and
+        // is walked once per frame on the emu thread, so splitting it into a
+        // memcpy followed by an in-place rewrite cost an extra read and an
+        // extra write of the whole frame for no benefit: the polygon id the
+        // attribute plane needs is derived from the same word the colour
+        // plane keeps.
+        const uint32_t* const src = static_cast<const uint32_t*>(mapped);
         const size_t pixel_count = frame_bytes / sizeof(uint32_t);
         for (size_t i = 0; i < pixel_count; ++i) {
-            const uint32_t packed = g_compute_frame[i];
+            const uint32_t packed = src[i];
             const uint32_t polygon_id =
                 ((packed >> 6) & 0x03u) |
                 (((packed >> 14) & 0x03u) << 2) |
@@ -161,10 +380,14 @@ void compute_finish_readback() {
             g_compute_attr_frame[i] = polygon_id << 24;
             g_compute_frame[i] = packed & 0xFF3F3F3Fu;
         }
-        if (glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE) valid = false;
+        if (!g_compute_pbo_map &&
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER) != GL_TRUE) valid = false;
     }
+    compute_drop_fence();
     g_compute_readback_pending = false;
     const bool failed = compute_gl_stage_failed("frame readback map");
+    profile_add(g_gpu3d_profile.compute_readback_ns, readback_start);
+    ++g_gpu3d_profile.compute_readback_calls;
     if (profiling()) {
         profile_add(g_gpu3d_profile.compute_map_ns, start);
         profile_add(g_gpu3d_profile.compute_sync_ns, start);
@@ -305,7 +528,12 @@ struct Thread {
 };
 
 Thread* Thread_Create(std::function<void()> func) {
-    return new Thread{std::thread(std::move(func))};
+    // Wrapped so the 3D worker registers itself with the always-on host
+    // sampler; the same reason as the 2D pool (host_profile.h).
+    return new Thread{std::thread([f = std::move(func)]() mutable {
+        NdsHostProfThreadScope hostprof_scope(NDS_HOSTPROF_ROLE_RENDER);
+        f();
+    })};
 }
 
 void Thread_Free(Thread* thread) { delete thread; }
@@ -359,6 +587,11 @@ void nds_gpu3d_use_soft_renderer(bool threaded) {
     if (!renderer) {
         auto replacement = std::make_unique<melonDS::SoftRenderer>();
         renderer = replacement.get();
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        // Release the readback objects while the outgoing accelerated
+        // renderer's context is still the current one.
+        compute_readback_shutdown();
+#endif
         g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(replacement));
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         g_compute_rendered_frame = false;
@@ -445,6 +678,50 @@ bool nds_gpu3d_set_internal_scale(uint8_t scale) {
     return true;
 }
 
+bool nds_gpu3d_set_runtime_internal_scale(uint8_t scale) {
+    if (scale < 1u || scale > kMaxInternalScale) return false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
+        &g_nds.GPU.GPU3D.GetCurrentRenderer());
+    if (!renderer) {
+        g_internal_scale = scale;
+        return true;
+    }
+    if (renderer->GetScaleFactor() == scale) {
+        g_internal_scale = scale;
+        return true;
+    }
+    // A terminal compute failure is not something a rebuild gets to erase:
+    // nds_gpu3d_use_compute_renderer() clears g_compute_runtime_failed, and
+    // the run is already unwinding on that flag. Refuse instead, which routes
+    // the caller into its own terminal state.
+    if (g_compute_runtime_failed) return false;
+    if (!nds_compute_host_make_current()) return false;
+    const uint8_t previous = g_internal_scale;
+    if (g_compute_readback_pending) compute_finish_readback();
+    glFinish();
+    g_internal_scale = scale;
+    if (!nds_gpu3d_use_compute_renderer()) {
+        g_internal_scale = previous;
+        return false;
+    }
+    // Same sequence gpu3d_savestate_import() uses after installing a fresh
+    // renderer. Without it ComputeRenderer::RenderFrame early-returns on a
+    // static scene (!Texcache.Update() && RenderFrameIdentical), so the new
+    // renderer never writes its output and the 3D layer stays black until
+    // texture VRAM happens to be dirtied.
+    g_nds.GPU.GPU3D.GetCurrentRenderer().Reset(g_nds.GPU);
+    g_nds.GPU.GPU3D.RenderFrameIdentical = false;
+    return true;
+#else
+    // Nothing to scale: this build has no accelerated renderer, so the only
+    // raster is the native soft one. Report success so a governor stage (or a
+    // governor-off startup pass) is not turned into a fatal error.
+    (void)scale;
+    return true;
+#endif
+}
+
 uint8_t nds_gpu3d_internal_scale() {
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
     auto* renderer = dynamic_cast<melonDS::ComputeRenderer*>(
@@ -456,6 +733,22 @@ uint8_t nds_gpu3d_internal_scale() {
     return 1u;
 #else
     return 1u;
+#endif
+}
+
+void nds_gpu3d_set_display_readback_latency(bool enabled) {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_display_readback_latency = enabled;
+#else
+    (void)enabled;
+#endif
+}
+
+bool nds_gpu3d_display_readback_latency() {
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    return g_display_readback_latency;
+#else
+    return false;
 #endif
 }
 
@@ -522,6 +815,9 @@ bool nds_gpu3d_use_compute_renderer() {
     std::fprintf(stderr, "[gpu3d] compute readback overlap: %s\n",
                  compute_readback_overlap() ? "on" : "off");
     g_nds.GPU.GPU3D.SetCurrentRenderer(std::move(renderer));
+    compute_readback_init(render_width);
+    std::fprintf(stderr, "[gpu3d] compute readback buffer: %s\n",
+                 g_compute_readback_mode);
     g_compute_rendered_frame = false;
     g_compute_readback_pending = false;
     g_compute_frame_ready = false;
@@ -533,6 +829,12 @@ bool nds_gpu3d_use_compute_renderer() {
 
 void nds_gpu3d_profile(NdsGpu3dProfile* out) {
     if (out) *out = g_gpu3d_profile;
+}
+
+void nds_gpu3d_debug_history_reset() {
+    g_gx_run_trace_count = 0;
+    g_gx_write_trace_count = 0;
+    g_gpu3d_profile = {};
 }
 
 void nds_gpu3d_state(NdsGxStateSnapshot* out) {
@@ -623,6 +925,134 @@ bool nds_gpu3d_run_trace_get(uint64_t count, NdsGxRunTraceEntry* out) {
     return true;
 }
 
+bool gpu3d_savestate_export(NdsGpu3dSaveState* out, std::string* error) {
+    if (!out) return false;
+    // GPU3D::DoSavestate waits for the software render thread before walking
+    // its pointer-rich geometry graph. The compute path has no CPU worker but
+    // can have an asynchronous readback; finish it before taking the device
+    // snapshot so no host command references state being replaced.
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_compute_readback_pending) compute_finish_readback();
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) glFinish();
+#endif
+    melonDS::Savestate state;
+    if (state.Error) {
+        if (error) *error = "failed to allocate GPU3D savestate buffer";
+        return false;
+    }
+    g_nds.GPU.GPU3D.DoSavestate(&state);
+    state.Finish();
+    if (state.Error || state.Length() == 0u) {
+        if (error) *error = "failed to serialize GPU3D device state";
+        return false;
+    }
+    const uint8_t* begin = static_cast<const uint8_t*>(state.Buffer());
+    out->device.assign(begin, begin + state.Length());
+    out->arm9_timestamp = g_nds.ARM9Timestamp;
+    return true;
+}
+
+bool gpu3d_savestate_validate(const NdsGpu3dSaveState& in,
+                              std::string* error) {
+    if (in.device.size() < 32u || in.device.size() > 32u * 1024u * 1024u) {
+        if (error) *error = "savestate GPU3D payload size is invalid";
+        return false;
+    }
+    auto read_le32 = [&](size_t offset) {
+        return static_cast<uint32_t>(in.device[offset]) |
+            (static_cast<uint32_t>(in.device[offset + 1]) << 8u) |
+            (static_cast<uint32_t>(in.device[offset + 2]) << 16u) |
+            (static_cast<uint32_t>(in.device[offset + 3]) << 24u);
+    };
+    // This bridge writes exactly one version-12 vendored section. Pin that
+    // ownership before invoking melonDS's generic section finder, whose
+    // compatibility behavior otherwise permits unrelated/reordered sections.
+    const uint16_t major = static_cast<uint16_t>(in.device[4]) |
+        (static_cast<uint16_t>(in.device[5]) << 8u);
+    const uint16_t minor = static_cast<uint16_t>(in.device[6]) |
+        (static_cast<uint16_t>(in.device[7]) << 8u);
+    if (std::memcmp(in.device.data(), "MELN", 4u) != 0 || major != 12u ||
+        minor > 1u || read_le32(8u) != in.device.size() ||
+        std::memcmp(in.device.data() + 16u, "GP3D", 4u) != 0 ||
+        read_le32(20u) != in.device.size() - 16u) {
+        if (error) *error = "savestate GPU3D section envelope is invalid";
+        return false;
+    }
+    // Decode into a detached device first. This both validates the vendored
+    // stream header/sections and reconstructs pointer indices without
+    // touching the live renderer. The top-level section CRC rejects corrupt
+    // bytes before this parser runs.
+    auto candidate = std::make_unique<melonDS::NDS>();
+    melonDS::Savestate state(const_cast<uint8_t*>(in.device.data()),
+                             static_cast<melonDS::u32>(in.device.size()),
+                             false);
+    if (state.Error) {
+        if (error) *error = "savestate GPU3D stream is invalid";
+        return false;
+    }
+    candidate->GPU.GPU3D.DoSavestate(&state);
+    if (state.Error) {
+        if (error) *error = "savestate GPU3D section is corrupt";
+        return false;
+    }
+    return validate_gpu3d_device(candidate->GPU.GPU3D, error);
+}
+
+bool gpu3d_savestate_import(const NdsGpu3dSaveState& in,
+                            std::string* error) {
+    if (!gpu3d_savestate_validate(in, error)) return false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_compute_readback_pending) compute_finish_readback();
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated()) glFinish();
+#endif
+    melonDS::Savestate state(const_cast<uint8_t*>(in.device.data()),
+                             static_cast<melonDS::u32>(in.device.size()),
+                             false);
+    g_nds.GPU.GPU3D.DoSavestate(&state);
+    if (state.Error || !validate_gpu3d_device(g_nds.GPU.GPU3D, error)) {
+        if (state.Error && error) *error = "failed to apply GPU3D device state";
+        return false;
+    }
+    g_nds.ARM9Timestamp = in.arm9_timestamp;
+
+    // Flat VRAM, texture cache entries, framebuffers and every GL object are
+    // host products. Invalidate them and rebuild the current raster from the
+    // restored render list; never persist handles, PBO fences, or pointers.
+    g_texture_flat_gen = 0;
+    g_texpal_flat_gen = 0;
+    std::memset(g_nds.GPU.VRAMFlat_Texture, 0,
+                sizeof g_nds.GPU.VRAMFlat_Texture);
+    std::memset(g_nds.GPU.VRAMFlat_TexPal, 0,
+                sizeof g_nds.GPU.VRAMFlat_TexPal);
+    auto& gpu = g_nds.GPU.GPU3D;
+    gpu.GetCurrentRenderer().Reset(g_nds.GPU);
+    gpu.RenderFrameIdentical = false;
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    g_display_readback_latency = false;
+    g_compute_rendered_frame = false;
+    g_compute_readback_pending = false;
+    g_compute_frame_ready = false;
+    std::memset(g_compute_frame, 0, sizeof g_compute_frame);
+    std::memset(g_compute_attr_frame, 0, sizeof g_compute_attr_frame);
+#endif
+    if (!gpu.AbortFrame) {
+        gpu.GetCurrentRenderer().RenderFrame(g_nds.GPU);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+        if (gpu.IsRendererAccelerated()) {
+            g_compute_rendered_frame = true;
+            compute_submit_readback();
+            compute_finish_readback();
+            if (g_compute_runtime_failed) {
+                if (error) *error =
+                    "failed to rebuild compute renderer after savestate load";
+                return false;
+            }
+        }
+#endif
+    }
+    return true;
+}
+
 void nds_gpu3d_reset() {
     g_nds.ARM9Timestamp = 0;
     g_nds.GPU.GPU3D.Reset();
@@ -698,7 +1128,30 @@ void nds_gpu3d_run(unsigned long long arm9_cycles) {
     auto& g3 = g_nds.GPU.GPU3D;
     const uint32_t stat_before = g3.GXStat;
     const int32_t cc_before = g3.CycleCount;
+    // CPU-SIDE GEOMETRY ENGINE. Called once per scheduler round (~600k/s), so
+    // an unconditional region would cost two tick reads per round for a bucket
+    // that is usually zero. Instead the predicate replicates GPU3D::Run's own
+    // early-out (GPU3D.cpp:2407-2414) from the bridge, which is the same idea
+    // as placing a region past a callee's early-out -- here the callee's guard
+    // is not reachable from outside, so it is mirrored.
+    //
+    // EXACT, not round-sampled: a command drain is rare per round but does
+    // per-vertex 64-bit matrix transforms, per-vertex lighting, backface
+    // culling and Sutherland-Hodgman clipping when it fires
+    // (ExecuteCommand -> SubmitVertex / SubmitPolygon / CalculateLighting),
+    // which is precisely the heavy-tailed shape a round sampler mis-estimates.
+    //
+    // This bucket is why the module exists: MPH's dip frames correlate with
+    // ARM9 dispatch volume, and geometry submission is what a busy game frame
+    // does more of. It was previously inside scheduler_arm9_ns with no way to
+    // separate it from guest instruction execution.
+    const bool geometry_work =
+        g3.GeometryEnabled && !g3.FlushRequest &&
+        (!g3.CmdPIPE.IsEmpty() || (g3.GXStat & (1u << 27)) != 0u);
+    {
+    NdsEmuScopeIf emu_region(NDS_EMU_GEOM, geometry_work);
     g3.Run();
+    }
     ++g_gx_run_trace_count;
     g_gx_run_trace[(g_gx_run_trace_count - 1) % kGxRunTraceSize] = {
         g_gx_run_trace_count, arm9_cycles,
@@ -719,6 +1172,10 @@ void nds_gpu3d_check_fifo_irq() {
 }
 
 void nds_gpu3d_vcount144() {
+    // 3D frame boundary reached from the display tick. EXACT: three calls a
+    // frame, each potentially a full renderer barrier, so sampling them at
+    // 1-in-N would be a lottery ticket on a ~1 ms cost.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount144(g_nds.GPU);
         return;
@@ -734,13 +1191,23 @@ void nds_gpu3d_vblank() {
 }
 
 void nds_gpu3d_vcount215() {
+    // See nds_gpu3d_vcount144. The compute submit/sync/map buckets in
+    // NdsGpu3dProfile are a breakdown of this region, not an addend to it.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
+#if defined(NDS_HAVE_COMPUTE_RENDERER)
+    if (g_nds.GPU.GPU3D.IsRendererAccelerated() &&
+        g_display_readback_latency && g_compute_readback_pending)
+        compute_finish_readback();
+#endif
     if (!profiling()) {
         g_nds.GPU.GPU3D.VCount215(g_nds.GPU);
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
         if (g_nds.GPU.GPU3D.IsRendererAccelerated())
             g_compute_rendered_frame = true;
-        if (g_compute_rendered_frame && compute_readback_overlap() &&
-            nds_gpu2d_requires_3d_readback())
+        if (g_compute_rendered_frame &&
+            (compute_readback_overlap() || g_display_readback_latency) &&
+            (nds_gpu2d_requires_3d_readback() ||
+             g_display_readback_latency))
             compute_submit_readback();
 #endif
         return;
@@ -754,8 +1221,9 @@ void nds_gpu3d_vcount215() {
     profile_add(g_gpu3d_profile.vcount215_ns, start);
     ++g_gpu3d_profile.vcount215_calls;
 #if defined(NDS_HAVE_COMPUTE_RENDERER)
-    if (g_compute_rendered_frame && compute_readback_overlap() &&
-        nds_gpu2d_requires_3d_readback())
+    if (g_compute_rendered_frame &&
+        (compute_readback_overlap() || g_display_readback_latency) &&
+        (nds_gpu2d_requires_3d_readback() || g_display_readback_latency))
         compute_submit_readback();
 #endif
 }
@@ -891,6 +1359,10 @@ uint16_t nds_gpu3d_render_xpos() {
 }
 
 void nds_gpu3d_start_frame() {
+    // See nds_gpu3d_vcount144. This is where the compute renderer pays its
+    // readback stall (compute_finish_readback), the single largest per-call
+    // cost anywhere in the emu phase.
+    NdsEmuScope emu_region(NDS_EMU_GPU3D_FRAME);
     if (g_nds.GPU.GPU3D.AbortFrame) {
         g_nds.GPU.GPU3D.RestartFrame(g_nds.GPU);
         g_nds.GPU.GPU3D.AbortFrame = false;
@@ -900,14 +1372,22 @@ void nds_gpu3d_start_frame() {
         // Reference mode reproduces the original immediate submit+map here.
         // Forced overlap queues at VCount215 and pays only any unfinished
         // portion of the copy at the next frame boundary.
-        if (g_compute_readback_pending) compute_finish_readback();
+        const bool same_frame = nds_gpu2d_requires_3d_readback();
+        // With the display-readback latency off (stage 0 / governor off) the
+        // pending drain is unconditional, exactly as before the governor
+        // existed: holding a pending readback across a direct-present frame is
+        // only correct when the latency mode is what deferred it.
+        const bool drain_pending = same_frame || !g_display_readback_latency;
+        if (g_compute_readback_pending && drain_pending)
+            compute_finish_readback();
         if (g_compute_rendered_frame) {
-            if (nds_gpu2d_requires_3d_readback())
+            if (same_frame || g_display_readback_latency)
                 compute_submit_readback();
             else
                 g_compute_rendered_frame = false;
         }
-        if (g_compute_readback_pending) compute_finish_readback();
+        if (g_compute_readback_pending && drain_pending)
+            compute_finish_readback();
     }
 #endif
 }

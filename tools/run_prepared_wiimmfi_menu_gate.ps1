@@ -17,7 +17,7 @@ param(
     [string] $FirmwarePrefix = 'mkds_instance',
     [int] $Port = 19890,
     [ValidateSet('slirp', 'pcap')]
-    [string] $NetworkBackend = 'pcap',
+    [string] $NetworkBackend = 'slirp',
     [string] $PcapAdapter = '',
     [string] $WfcProvider = 'wiimmfi',
     [int] $InstanceIndex = 0,

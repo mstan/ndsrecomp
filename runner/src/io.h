@@ -14,6 +14,8 @@
 uint32_t nds_io_read(uint32_t addr, uint32_t width);
 void     nds_io_write(uint32_t addr, uint32_t value, uint32_t width);
 void     nds_io_reset();
+// Clear observer history without changing any guest-visible device state.
+void     nds_io_debug_history_reset();
 // Opt-in host-clock RTC (--rtc-host): when true, every guest boot
 // (nds_io_reset) starts the RTC at the host's local time instead of the
 // fixed deterministic power-on datetime. Default false — the oracle gates
@@ -28,7 +30,14 @@ void     nds_set_debug_turbo(bool enabled);
 bool     nds_debug_turbo();
 uint64_t nds_next_system_event_time();
 uint64_t nds_next_timer_overflow_time();
-uint64_t nds_next_timer_overflow_time_for_cpu(int cpu);
+// NOTE: there is deliberately no per-CPU variant. One existed (62dbbc7) for the
+// sole purpose of shortening the scheduler's ARM7 catch-up target to a halted
+// core's next timer overflow, which delivered that overflow's IRQ inside the
+// round instead of at the rendezvous and desynced the ARM7 timeline from the
+// oracle (beads-yjp.48). Per-timer deadlines are observable through
+// nds_timer_debug_state(); they must not become a scheduling deadline for one
+// CPU. The whole-console overflow above is a scheduling deadline only because
+// the idle fast-forward snaps it back onto the rendezvous grid.
 uint64_t nds_debug_spi_deadline();
 uint64_t nds_debug_card_deadline();
 void     nds_run_system_events(uint64_t timestamp);
@@ -310,7 +319,9 @@ void     nds_dump_irq();
 void     nds_io_load_firmware(const uint8_t* p, uint32_t n);
 bool     nds_io_replace_firmware(const uint8_t* p, uint32_t n);
 // Optional mutable firmware backing file. Guest SPI writes are committed
-// atomically at transaction boundaries and retried on every orderly exit.
+// atomically at transaction boundaries and retried on every orderly exit,
+// except after a historical savestate load detaches the session from the
+// canonical profile to prevent stale-state overwrite.
 void     nds_io_set_firmware_save_path(const char* path);
 bool     nds_io_flush_firmware_save();
 // Read-only view over the already-loaded firmware image (empty until
@@ -327,7 +338,9 @@ bool     nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
 void     nds_io_configure_cartridge_save(
              const NdsCartridgeSaveConfig& config);
 // Interactive play defaults to a battery-save file derived from the ROM.
-// Serve/batch gates leave this path empty unless explicitly requested.
+// Serve/batch gates leave this path empty unless explicitly requested. A
+// historical savestate load restores guest bytes session-locally and blocks
+// automatic writes to this canonical file until a fresh process boot.
 void     nds_io_set_cartridge_save_path(const char* path);
 bool     nds_io_flush_cartridge_save();
 bool     nds_io_cartridge_save_snapshot(const uint8_t** data, uint32_t* size,

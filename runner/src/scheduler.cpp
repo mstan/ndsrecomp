@@ -7,13 +7,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "state.h"
+#include "savestate.h"
 #include "runtime_arm.h"
 #include "dispatch_stats.h"
+#include "dispatch_timing.h"
+#include "emu_profile.h"
 #include "io.h"
 #include "gpu3d.h"
 #include "live_overlay.h"
+#include "pc_profile.h"
 #include "spu.h"
 #include "wifi.h"
 
@@ -124,6 +129,13 @@ uint64_t next_scheduled_event_time() {
 }
 
 bool g_sample_active = false;
+bool g_round_active = false;
+std::thread::id g_owner_thread;
+
+struct RoundActivityGuard {
+    RoundActivityGuard() { g_round_active = true; }
+    ~RoundActivityGuard() { g_round_active = false; }
+};
 
 void save_current() {
     if (g_cur < 0) return;
@@ -137,6 +149,9 @@ void save_current() {
 
 void switch_to(int cpu) {
     if (g_cur == cpu) return;
+    // Placed after the same-CPU early-out: the no-op call is the common case
+    // and must not be charged a region boundary.
+    NdsEmuScope emu_region(NDS_EMU_CTXSW);
     const auto t0 = g_sample_active ? ProfileClock::now()
                                     : ProfileClock::time_point{};
     ++g_profile.switches;
@@ -166,7 +181,7 @@ void run_slice(int cpu, uint32_t quantum) {
         switch_to(cpu);
         g_runtime_cycles = g_slot[cpu].cycles;
         const uint64_t cap = g_slot[cpu].cycles + quantum;
-        nds_dma_run(cpu, cap);
+        nds_dma_run(cpu, cap);   // timed inside (io.cpp), like every device
         g_slot[cpu].cycles = g_runtime_cycles;
         return;
     }
@@ -182,6 +197,14 @@ void run_slice(int cpu, uint32_t quantum) {
     switch_to(cpu);
     g_runtime_cycles = g_slot[cpu].cycles;
     const uint64_t cap = g_slot[cpu].cycles + quantum;
+    // GUEST CODE EXECUTION. This region is the single largest consumer of emu
+    // time and the one the old scheduler_arm9_ns conflated with the geometry
+    // engine and the ARM9 timer tick. Everything the guest does is inside it:
+    // native recompiled bank bodies, the dispatch machinery, the inline bus
+    // fast path, and any Tier-3 stretch. TIER3_* and the DISPATCH/BUS
+    // breakdowns carve those back out (the first exclusively, the other two as
+    // non-additive samples), so what remains is native execution.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_EXEC_ARM9 : NDS_EMU_EXEC_ARM7);
     nds_slice_begin(cap);
     if (nds_cpu_halted(cpu)) {
         nds_cpu_wake(cpu);
@@ -198,6 +221,7 @@ void run_slice(int cpu, uint32_t quantum) {
         uint32_t t  = (g_cpu.cpsr & CPSR_T_BIT) ? 1u : 0u;
         nds_clear_unwinding();   // a fresh dispatch is a real entry, not an unwind
         ++g_nds_dispatch_stats[cpu & 1].resume_dispatch;
+        nds_dispatch_tag(NDS_DISPATCH_CLASS_RESUME);
         runtime_dispatch(pc | t);
         // An exact-index stop reached in Tier 3 may have unwound through a
         // nested static IRQ dispatch. Restore the captured guest state after
@@ -263,6 +287,7 @@ void scheduler_init() {
     g_slot[1] = CpuSlot{};
     g_cur = -1;
     g_sys_timestamp = 0;
+    g_owner_thread = std::this_thread::get_id();
     scheduler_profile_reset();
 }
 
@@ -297,6 +322,7 @@ void scheduler_set_cpu_boot(int cpu, uint32_t entry, uint32_t sp,
 }
 
 void scheduler_run_round() {
+    RoundActivityGuard round_activity;
     // melonDS-faithful interleave (docs/scheduler_design.md, Commit A). Each
     // outer iteration is capped at kIterCap SYSTEM cycles (or the next scheduled
     // event, whichever is sooner). ARM9 runs FIRST up to its target and may
@@ -309,6 +335,35 @@ void scheduler_run_round() {
     // cyc/insn) the ARM9 still retires too many instructions per iteration, so
     // the boot is EXPECTED to still deadlock until the ARM9 memory-timing model
     // lands (Commits B-C). Commit A's acceptance is the invariants, not the menu.
+    // WHERE the two cores are (pc_profile.h), on its OWN 1-in-31 countdown and
+    // sampled BEFORE the emu-attribution round region opens. The first cut
+    // rode nds_emu_detail::g_sampling INSIDE the round region, which put the
+    // two hash inserts (each a likely cache miss into a 512 KB table) inside
+    // SCHED_OTHER on exactly the rounds that bucket is measured -- the
+    // gated-on-the-sampler bias emu_profile.h exists to avoid. Measured on the
+    // Kanden A/B: sched_other 0.59 -> 0.88 ms/f, pure artifact. Out here the
+    // real cost (~10 us/s) sits in no bucket and surfaces only as emu_attrib
+    // residual, which is where unattributed machinery belongs.
+    //
+    // The live register file is authoritative for whichever CPU is currently
+    // loaded; g_slot[cpu].state is only refreshed at a context switch, so for
+    // that core the slot copy is up to a round stale and would pile the
+    // histogram onto the last switch point.
+    {
+        static uint64_t pc_note_counter = 0;
+        if ((pc_note_counter++ % 31u) == 0u) {
+            nds_pc_profile_note(0, g_cur == 0 ? g_cpu.R[15]
+                                              : g_slot[0].state.R[15]);
+            nds_pc_profile_note(1, g_cur == 1 ? g_cpu.R[15]
+                                              : g_slot[1].state.R[15]);
+        }
+    }
+    // Opens the emu-attribution round (emu_profile.h). Its self time is
+    // NDS_EMU_SCHED_OTHER -- the interleave machinery below that is not one of
+    // the named phases. RAII because of the power-off early return further
+    // down, which must not leave the region open. Constructed AFTER the PC
+    // note above so the histogram's cost can never be charged to SCHED_OTHER.
+    NdsEmuRound emu_round;
     const uint64_t modulus = profile_modulus();
     const bool sample = modulus && ((g_profile_rounds++ % modulus) == 0u);
     g_sample_active = sample;
@@ -317,7 +372,13 @@ void scheduler_run_round() {
     auto phase_start = round_start;
 
     uint64_t planned = g_sys_timestamp + kIterCap;
-    const uint64_t ev = next_scheduled_event_time();
+    // Five deadline computations, one of them a 64-bit divide pair with a
+    // fixup loop, every round. Cheap per call and expensive per second: the
+    // exact kind of cost that only a partition makes visible.
+    const uint64_t ev = [] {
+        NdsEmuScope emu_region(NDS_EMU_NEXTEV);
+        return next_scheduled_event_time();
+    }();
     // Idle fast-forward: with both CPUs guest-halted, no wake pending and no
     // DMA owning a bus, no instruction can retire before the next scheduled
     // event — jump the rendezvous straight to it instead of grinding
@@ -369,6 +430,12 @@ void scheduler_run_round() {
                 static_cast<uint64_t>(nds_gpu3d_cycles_to_run())
                 << kArm9ClockShift;
             g_slot[0].cycles = std::min(arm9_target, g_slot[0].cycles + debt);
+            // Exact count, no timing: the branch itself is two loads and a
+            // min. What it means is that this round retired NO ARM9
+            // instruction because the geometry engine owed cycles, so a rise
+            // here explains an EXEC_ARM9 fall without a workload change --
+            // the confound that would otherwise read as "the CPU got faster".
+            nds_emu_note_gxstall_round();
         } else {
             run_slice(0, static_cast<uint32_t>(arm9_target - g_slot[0].cycles));
         }
@@ -390,17 +457,26 @@ void scheduler_run_round() {
     while (g_slot[1].started && !g_slot[1].halted &&
            !nds_event_break_hit() && g_slot[1].cycles < rendezvous) {
         const uint64_t before = g_slot[1].cycles;
-        if (nds_cpu_halted(1) && !nds_halt_wake_pending(1)) {
-            uint64_t target = rendezvous;
-            const uint64_t timer_wake = nds_next_timer_overflow_time_for_cpu(1);
-            if (timer_wake > g_slot[1].cycles && timer_wake < target)
-                target = timer_wake;
-            g_slot[1].cycles = target;
-            nds_tick_timers(1, g_slot[1].cycles);
-            if (g_slot[1].cycles == before && !nds_halt_wake_pending(1))
-                break;
-            continue;
-        }
+        // A guest-halted ARM7 goes through run_slice like every other state:
+        // its halt branch consumes the whole quantum in one step, which is
+        // exactly melonDS ARMv4::Execute (ARM.cpp: `NDS.ARM7Timestamp =
+        // NDS.ARM7Target; return;` for Halted==1 with no HaltInterrupted).
+        // RunTimers(1) then runs ONCE at that target, so a timer overflow that
+        // lands mid-round becomes visible to the halted core only AT the
+        // rendezvous.
+        //
+        // beads-yjp.48: 62dbbc7 shortened this loop's target for a halted ARM7
+        // to nds_next_timer_overflow_time_for_cpu(1) and ticked the timers
+        // there, delivering the overflow IRQ at the exact overflow cycle
+        // INSIDE the round. That woke the ARM7 up to one rendezvous early and
+        // shifted its whole timeline: G1 calibration_save's first divergence
+        // was ARM7 retired-instruction ordinal 2849672 leaving HALT at
+        // cyc7=5087805 against the oracle's 5087820 (ARM7 Timer3, IE7=0x40,
+        // was the only enabled wake source), which surfaced downstream as an
+        // SPU output mismatch at audio frame 17402. The whole-console idle
+        // fast-forward above may still skip ahead because it snaps a timer
+        // overflow to the kIterCap rendezvous grid; this per-CPU catch-up loop
+        // has no such grid to snap to, so it must not shorten at all.
         const uint64_t remaining = rendezvous - g_slot[1].cycles;
         const uint32_t quantum = remaining > UINT32_MAX
             ? UINT32_MAX
@@ -550,4 +626,60 @@ uint64_t scheduler_next_event_timestamp() { return next_scheduled_event_time(); 
 bool scheduler_cpu_terminal_halted(int cpu) { return g_slot[cpu & 1].halted; }
 const char* scheduler_cpu_halt_reason(int cpu) {
     return g_slot[cpu & 1].reason ? g_slot[cpu & 1].reason : "";
+}
+
+bool scheduler_savestate_quiescent() {
+    return std::this_thread::get_id() == g_owner_thread && !g_round_active;
+}
+
+bool scheduler_savestate_begin() {
+    // Transactions are synchronous on the scheduler owner. Rejecting every
+    // other thread avoids a check-then-race without charging a mutex/atomic
+    // exchange to every 64-cycle scheduler round.
+    return scheduler_savestate_quiescent();
+}
+
+void scheduler_savestate_end() {}
+
+bool scheduler_savestate_export(NdsSchedulerSaveState* out) {
+    if (!out) return false;
+    save_current();
+    *out = NdsSchedulerSaveState{};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out->cpu[cpu] = g_slot[cpu].state;
+        out->crs_depth[cpu] = g_slot[cpu].crs_depth;
+        out->deferred_cycles[cpu] = g_slot[cpu].deferred_cycles;
+        out->cycles[cpu] = g_slot[cpu].cycles;
+        out->started[cpu] = g_slot[cpu].started ? 1u : 0u;
+        out->terminal_halted[cpu] = g_slot[cpu].halted ? 1u : 0u;
+        std::memcpy(out->crs[cpu], g_slot[cpu].crs,
+                    sizeof(out->crs[cpu]));
+    }
+    out->system_timestamp = g_sys_timestamp;
+    return true;
+}
+
+bool scheduler_savestate_import(const NdsSchedulerSaveState& in,
+                                std::string* error) {
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (in.crs_depth[cpu] > NDS_RUNTIME_CALL_STACK_CAPACITY) {
+            if (error) *error = "savestate call-return stack depth is invalid";
+            return false;
+        }
+        g_slot[cpu] = CpuSlot{};
+        g_slot[cpu].state = in.cpu[cpu];
+        g_slot[cpu].crs_depth = in.crs_depth[cpu];
+        g_slot[cpu].deferred_cycles = in.deferred_cycles[cpu];
+        g_slot[cpu].cycles = in.cycles[cpu];
+        g_slot[cpu].started = in.started[cpu] != 0;
+        g_slot[cpu].halted = in.terminal_halted[cpu] != 0;
+        g_slot[cpu].reason = g_slot[cpu].halted ? "savestate terminal halt"
+                                                : nullptr;
+        std::memcpy(g_slot[cpu].crs, in.crs[cpu], sizeof(g_slot[cpu].crs));
+    }
+    g_sys_timestamp = in.system_timestamp;
+    g_cur = -1;
+    runtime_call_stack_restore(nullptr, 0);
+    runtime_deferred_cycles_set(0);
+    return true;
 }

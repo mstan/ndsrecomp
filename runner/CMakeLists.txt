@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nds_runner VERSION 0.0.1 LANGUAGES C CXX)
+project(nds_runner VERSION 0.6.10 LANGUAGES C CXX)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsCompilerCache.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/NdsJobPools.cmake")
@@ -26,6 +26,9 @@ option(NDS_BOOTSTRAP_FIRMWARE
 option(NDS_ENABLE_COMPUTE_RENDERER
     "Build the preferred melonDS OpenGL 4.3 compute renderer"
     ON)
+set(NDS_SDL_BACKEND "SDL3" CACHE STRING
+    "Host presentation backend: SDL3, SDL2, or NONE")
+set_property(CACHE NDS_SDL_BACKEND PROPERTY STRINGS SDL3 SDL2 NONE)
 option(NDS_ENABLE_PCAP_BACKEND
     "Build the vendored melonDS Net_PCap backend (dynamically loads Npcap/WinPcap at runtime; off by default per docs/adr-melonds-wifi-vendoring.md §2)"
     OFF)
@@ -38,6 +41,14 @@ option(NDS_PROFILE_MEM_TIMING
 set(NDS_PGO_MODE "OFF" CACHE STRING
     "Runner-only GCC PGO mode: OFF, GENERATE, or USE")
 set_property(CACHE NDS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+option(NDS_PGO_PARTIAL_TRAINING
+    "Keep functions the training route never executed on normal optimization \
+instead of letting -fprofile-use size-optimize them as cold"
+    ON)
+option(NDS_PGO_REQUIRE_PROFILE
+    "Fail configuration when NDS_PGO_MODE=USE and no .gcda profile data is \
+present, instead of silently producing an unoptimized binary"
+    ON)
 set(NDS_GENERATED_DIR "" CACHE PATH
     "Optional ignored generated directory override for worktree builds")
 set(NDS_SM64DS_BANK_DIR "" CACHE PATH
@@ -129,6 +140,38 @@ if(TITLE_GROUP_COUNT GREATER 0)
             "${_group_dir}/*_dispatch.c")
         list(SORT _group_bodies)
         list(SORT _group_dispatch)
+        # Optional explicit registration priority. Runtime dispatch is
+        # first-match-wins in registration order; the default order is this
+        # alphabetical sort. A title may ship registration-order.txt in its
+        # bank dir listing bank names (one per line, comments with #) that
+        # must register FIRST, in the listed order; unlisted banks follow in
+        # sorted order. Content validation still gates every row, so for
+        # banks whose byte content differs this changes only which candidate
+        # is CONSULTED first, never which code runs. It exists so a
+        # whole-module bank (e.g. an ARM7 alias) can precede single-page
+        # generation banks that would otherwise suppress its superblock
+        # coalescing (see MPH, beads-0vo).
+        set(_order_file "${_group_dir}/registration-order.txt")
+        if(EXISTS "${_order_file}")
+            file(STRINGS "${_order_file}" _order_names)
+            set(_ordered)
+            foreach(_name IN LISTS _order_names)
+                string(STRIP "${_name}" _name)
+                if(_name STREQUAL "" OR _name MATCHES "^#")
+                    continue()
+                endif()
+                set(_want "${_group_dir}/${_name}_dispatch.c")
+                list(FIND _group_dispatch "${_want}" _idx)
+                if(_idx EQUAL -1)
+                    message(FATAL_ERROR
+                        "registration-order.txt names bank '${_name}' but "
+                        "${_want} does not exist in the group")
+                endif()
+                list(APPEND _ordered "${_want}")
+                list(REMOVE_ITEM _group_dispatch "${_want}")
+            endforeach()
+            list(INSERT _group_dispatch 0 ${_ordered})
+        endif()
         if(NOT _group_bodies OR NOT _group_dispatch)
             message(FATAL_ERROR
                 "title bank group ${_gi} (${_group_dir}) must contain "
@@ -341,7 +384,14 @@ target_include_directories(nds_armv4t PUBLIC
 
 set(NDS_RUNNER_SOURCES
     src/runtime_arm.cpp
+    # Out-of-line runtime_tick / runtime_should_yield / runtime_unwinding for
+    # live shards published before those became header inlines. Must stay a
+    # separate TU: it defines NDS_RUNTIME_ABI_SHIMS to suppress the inlines.
+    src/runtime_abi_shims.cpp
+    src/savestate.cpp
+    src/savestate_slots.cpp
     src/live_overlay.cpp
+    src/live_overlay_platform.cpp
     src/battery_save.cpp
     src/firmware_state.cpp
     src/generated_firmware.cpp
@@ -353,6 +403,7 @@ set(NDS_RUNNER_SOURCES
     src/direct_boot.cpp
     src/io.cpp
     src/wifi_net.cpp
+    src/network_savestate_guard.cpp
     src/net/net_ring.cpp
     src/net/net_classify.cpp
     src/net/net_capture.cpp
@@ -368,6 +419,14 @@ set(NDS_RUNNER_SOURCES
     src/tier3.cpp
     src/coverage_manifest.cpp
     src/diagnostics.cpp
+    src/dispatch_timing.cpp
+    src/emu_profile.cpp
+    src/pc_profile.cpp
+    src/host_prof_ring.cpp
+    src/host_unwind_x64.cpp
+    src/host_profile.cpp
+    src/host_info.cpp
+    src/perf_governor.cpp
     src/profile_report.cpp
     src/scheduler.cpp
     src/debug_server.cpp
@@ -409,19 +468,91 @@ ndsrecomp_limit_link(nds_runner)
 if(NOT NDS_PGO_MODE STREQUAL "OFF")
     if(MSVC)
         message(FATAL_ERROR "NDS_PGO_MODE currently supports GCC/MinGW only")
-    elseif(NDS_PGO_MODE STREQUAL "GENERATE")
+    endif()
+    if(NOT NDS_PGO_MODE STREQUAL "GENERATE" AND
+       NOT NDS_PGO_MODE STREQUAL "USE")
+        message(FATAL_ERROR "NDS_PGO_MODE must be OFF, GENERATE, or USE")
+    endif()
+
+    # A compiler cache must not stand between the profile data and the
+    # optimized objects. ccache's handling of -fprofile-use inputs is not
+    # something a release artifact should depend on, so PGO builds always
+    # compile directly.
+    if(NOT NDSRECOMP_COMPILER_CACHE STREQUAL "OFF")
+        message(FATAL_ERROR
+            "NDS_PGO_MODE=${NDS_PGO_MODE} requires "
+            "-DNDSRECOMP_COMPILER_CACHE=OFF so profile data, not a cache "
+            "hit, decides each object")
+    endif()
+
+    # Deliberately no -fprofile-dir. On mingw-gcc 15.2 it mangles the object
+    # directory into a nested path under the profile directory (prof/C~/Users/
+    # .../objdir/x.gcda); for this tree's path depth gcc cannot create it and
+    # reports "Cannot create directory ... Skip", writing no profile at all.
+    # Verified empirically 2026-08-27. So profiles stay beside the object
+    # files, which makes the build directory the profile store: the GENERATE
+    # and USE phases MUST run in the same build directory. That is also the
+    # cheap path, because PGO flags are private to nds_runner and switching
+    # modes in place never recompiles a generated bank TU.
+    #
+    # gcc derives the profile name from the object file name, so the two
+    # phases must also produce identically named objects. Reconfiguring one
+    # build directory satisfies that automatically.
+
+    if(NDS_PGO_MODE STREQUAL "GENERATE")
         # Instrument only runner-owned host code. Generated ARM banks and
-        # portable support libraries remain byte-for-byte baseline objects.
+        # portable support libraries remain byte-for-byte baseline objects,
+        # so switching modes in place never recompiles a bank TU.
+        # -fprofile-update=atomic is required: the runner counts from the
+        # emulation, audio and presentation threads at once, and mingw-gcc's
+        # non-atomic counters lose and corrupt updates under that.
         target_compile_options(nds_runner PRIVATE
             -fprofile-generate -fprofile-update=atomic)
         target_link_options(nds_runner PRIVATE -fprofile-generate)
-    elseif(NDS_PGO_MODE STREQUAL "USE")
-        target_compile_options(nds_runner PRIVATE
-            -fprofile-use -fprofile-correction)
-        target_link_options(nds_runner PRIVATE -fprofile-use)
     else()
-        message(FATAL_ERROR
-            "NDS_PGO_MODE must be OFF, GENERATE, or USE")
+        # -fprofile-use with no profile data present is not an error: gcc
+        # warns under -Wmissing-profile and still exits 0, so an untrained
+        # tree would quietly produce a binary with none of the optimization
+        # the release is being labelled with. Verified empirically on
+        # mingw-gcc 15.2. Refuse to configure instead.
+        file(GLOB_RECURSE _nds_pgo_probe
+            "${CMAKE_CURRENT_BINARY_DIR}/*.gcda")
+        list(LENGTH _nds_pgo_probe _nds_pgo_count)
+        if(_nds_pgo_count EQUAL 0)
+            if(NDS_PGO_REQUIRE_PROFILE)
+                message(FATAL_ERROR
+                    "NDS_PGO_MODE=USE found no .gcda profile data under "
+                    "${CMAKE_CURRENT_BINARY_DIR}. Configure this same build "
+                    "directory with NDS_PGO_MODE=GENERATE, build it, run the "
+                    "training route, then reconfigure with USE. Set "
+                    "-DNDS_PGO_REQUIRE_PROFILE=OFF only to deliberately "
+                    "accept an untrained binary.")
+            endif()
+            message(WARNING
+                "NDS_PGO_MODE=USE with no profile data: this binary will not "
+                "actually be profile-optimized")
+        else()
+            message(STATUS
+                "ndsrecomp: PGO USE with ${_nds_pgo_count} profile file(s)")
+        endif()
+        # -fprofile-correction is required, not defensive: the runner updates
+        # counters from the emulation, audio and presentation threads, and
+        # mingw-gcc profile output under threads is inconsistent often enough
+        # that gcc would otherwise reject the profile outright.
+        # -Wmissing-profile keeps per-TU training gaps visible in the log
+        # rather than silent.
+        target_compile_options(nds_runner PRIVATE
+            -fprofile-use -fprofile-correction -Wmissing-profile)
+        if(NDS_PGO_PARTIAL_TRAINING)
+            # The training routes cover attract, FMV and one adventure route.
+            # Without this, every function they never reach - multiplayer,
+            # wifi, the settings menus - is treated as cold and size-
+            # optimized, so a narrow training set would pessimize everything
+            # it did not visit.
+            target_compile_options(nds_runner PRIVATE
+                -fprofile-partial-training)
+        endif()
+        target_link_options(nds_runner PRIVATE -fprofile-use)
     endif()
 endif()
 if(NDS_PROFILE_MEM_TIMING)
@@ -479,25 +610,40 @@ if(NDS_ENABLE_PCAP_BACKEND)
 endif()
 # beads-yjp.28: stamped into the coverage manifest so an ingested playthrough
 # can be tied to the build whose static coverage it was measured against.
-# Resolved at configure time; a source tree without git still builds, it just
-# reports "unknown".
-set(NDS_RUNNER_BUILD_ID "unknown")
-find_package(Git QUIET)
-if(GIT_FOUND)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        OUTPUT_VARIABLE _nds_runner_git_id
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(_nds_runner_git_id)
-        set(NDS_RUNNER_BUILD_ID "${_nds_runner_git_id}")
-    endif()
-endif()
-target_compile_definitions(nds_runner PRIVATE
-    NDS_RUNNER_BUILD_ID="${NDS_RUNNER_BUILD_ID}")
+# beads-yjp.44: re-read at BUILD time, not configure time. The old
+# execute_process froze the id at `cmake -B`, so every incremental build after
+# that reported a stale commit -- a shipped v0.6.3 runner reported 12ee1b9
+# while containing 8de5d86-only behaviour, which made its field diagnostics
+# bundle lie about what code the player ran. The script writes the header only
+# when the id actually changes, so an unchanged HEAD costs no recompile, and it
+# still degrades to "unknown" with no git or outside a work tree.
+set(NDS_BUILD_ID_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/nds_build_id.h")
+set(NDS_BUILD_ID_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/NdsBuildIdScript.cmake")
+# Seed at configure time so the header exists before the first compile even if
+# the custom target has not run yet.
+execute_process(COMMAND "${CMAKE_COMMAND}"
+    "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+    "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+    "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+    "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+    -P "${NDS_BUILD_ID_SCRIPT}")
+add_custom_target(nds_build_id ALL
+    BYPRODUCTS "${NDS_BUILD_ID_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DNDS_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DNDS_OUT_FILE=${NDS_BUILD_ID_HEADER}"
+        "-DNDS_VERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/../VERSION"
+        "-DNDS_TITLE_DIR=${NDS_TITLE_BANK_DIR}"
+        "-DNDS_TITLE_VERSION=${NDS_TITLE_VERSION}"
+        -P "${NDS_BUILD_ID_SCRIPT}"
+    COMMENT "Stamping git HEAD into nds_build_id.h"
+    VERBATIM)
+add_dependencies(nds_runner nds_build_id)
 
 target_include_directories(nds_runner PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"   # nds_build_id.h (build-time)
     $<$<BOOL:${NDS_ENABLE_COMPUTE_RENDERER}>:${CMAKE_CURRENT_SOURCE_DIR}/src/melonds_compute>
     $<$<BOOL:${NDS_ENABLE_PCAP_BACKEND}>:${CMAKE_CURRENT_SOURCE_DIR}/vendor/melonds/net>
     src
@@ -572,30 +718,46 @@ if(SM64DS_BANK_SOURCES)
     endif()
 endif()
 
-# SDL is a host-only presentation layer. The runner remains buildable without
-# it for headless deterministic/oracle work; --interactive reports that the
-# configured binary has no frontend in that case.
-# On Android the app's jni CMakeLists adds the SDL2 subproject before this one,
-# exposing plain `SDL2`/`SDL2main` targets (no SDL2::SDL2 namespaced alias);
-# link those and pull in SDL's Android JNI entry (SDL2main) so libmain.so
-# exports Java_org_libsdl_app_SDLActivity_nativeRunMain.
-if(ANDROID AND TARGET SDL2)
-    target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
-    target_link_libraries(nds_runner PRIVATE SDL2 SDL2main log android)
-else()
-    find_package(SDL2 CONFIG QUIET)
-    if(TARGET SDL2::SDL2)
-        target_compile_definitions(nds_runner PRIVATE NDS_HAVE_SDL2=1)
+# SDL is a host-only presentation layer. SDL3 is the default runtime frontend;
+# SDL2 and a no-frontend headless build are explicit compatibility choices.
+if(NDS_SDL_BACKEND STREQUAL "SDL3")
+    find_package(SDL3 CONFIG REQUIRED)
+    if(NOT TARGET SDL3::SDL3)
+        message(FATAL_ERROR "NDS_SDL_BACKEND=SDL3 requires target SDL3::SDL3")
+    endif()
+    target_compile_definitions(nds_runner PRIVATE
+        NDS_HAVE_SDL3=1
+        NDS_SDL_BACKEND_NAME="SDL3")
+    target_link_libraries(nds_runner PRIVATE SDL3::SDL3)
+elseif(NDS_SDL_BACKEND STREQUAL "SDL2")
+    # On Android the app's jni CMakeLists adds the SDL2 subproject before this
+    # one, exposing plain `SDL2`/`SDL2main` targets (no SDL2::SDL2 alias);
+    # link those plus the Android JNI entry so libmain.so exports
+    # Java_org_libsdl_app_SDLActivity_nativeRunMain.
+    if(ANDROID AND TARGET SDL2)
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SDL2=1
+            NDS_SDL_BACKEND_NAME="SDL2")
+        target_link_libraries(nds_runner PRIVATE SDL2 SDL2main log android)
+    else()
+        find_package(SDL2 CONFIG REQUIRED)
+        if(NOT TARGET SDL2::SDL2)
+            message(FATAL_ERROR "NDS_SDL_BACKEND=SDL2 requires target SDL2::SDL2")
+        endif()
+        target_compile_definitions(nds_runner PRIVATE
+            NDS_HAVE_SDL2=1
+            NDS_SDL_BACKEND_NAME="SDL2")
         target_link_libraries(nds_runner PRIVATE SDL2::SDL2)
     endif()
+elseif(NDS_SDL_BACKEND STREQUAL "NONE")
+    target_compile_definitions(nds_runner PRIVATE NDS_SDL_BACKEND_NAME="NONE")
+else()
+    message(FATAL_ERROR "NDS_SDL_BACKEND must be SDL3, SDL2, or NONE")
 endif()
-if(NDS_ENABLE_COMPUTE_RENDERER AND NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2)
-    message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires SDL2")
+if(NDS_ENABLE_COMPUTE_RENDERER AND NDS_SDL_BACKEND STREQUAL "NONE")
+    message(FATAL_ERROR "NDS_ENABLE_COMPUTE_RENDERER requires NDS_SDL_BACKEND=SDL3 or SDL2")
 endif()
-if(NDS_ENABLE_COMPUTE_RENDERER AND CMAKE_DL_LIBS)
-    target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})
-endif()
-if(NDS_ENABLE_PCAP_BACKEND AND CMAKE_DL_LIBS)
+if(CMAKE_DL_LIBS)
     target_link_libraries(nds_runner PRIVATE ${CMAKE_DL_LIBS})
 endif()
 if(WIN32)
@@ -643,6 +805,38 @@ ndsrecomp_link_tomlpp(frontend_config_test)
   target_include_directories(relative_mouse_touch_test PRIVATE src)
   add_test(NAME relative_mouse_touch_test COMMAND relative_mouse_touch_test)
 
+  add_executable(perf_governor_test
+      tests/perf_governor_test.cpp
+      src/perf_governor.cpp)
+  target_include_directories(perf_governor_test PRIVATE src)
+  add_test(NAME perf_governor_test COMMAND perf_governor_test)
+
+  # Always-on host CPU sampler (host_profile.h). Three things are gated here:
+  # the sample ring's residency/eviction/tear rules, the leaf histogram, and --
+  # the one that actually needs proving -- the x64 .pdata/.xdata unwinder, both
+  # against a synthetic table the test builds itself AND against the OS's own
+  # RtlCaptureStackBackTrace over real compiler-generated prologues.
+  add_executable(host_prof_test
+      tests/host_prof_test.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
+      src/host_profile.cpp)
+  target_include_directories(host_prof_test PRIVATE src)
+  if(WIN32)
+    # beads-yjp.70: a scratch DLL with REAL toolchain-emitted unwind data, so
+    # the test can load it, walk it, FreeLibrary it, and then drive both
+    # sampler-side reads at its unmapped range. A module that vanishes out from
+    # under the module map used to fault the sampler and kill the process
+    # silently (no SEH in a MinGW build); this is the gate on that.
+    add_library(host_prof_probe_dll MODULE tests/host_prof_probe_dll.c)
+    set_target_properties(host_prof_probe_dll PROPERTIES
+        PREFIX "" OUTPUT_NAME "host_prof_probe")
+    add_dependencies(host_prof_test host_prof_probe_dll)
+    target_compile_definitions(host_prof_test PRIVATE
+        "NDS_HOST_PROF_PROBE_DLL=\"$<TARGET_FILE:host_prof_probe_dll>\"")
+  endif()
+  add_test(NAME host_prof_test COMMAND host_prof_test)
+
   add_executable(battery_save_test
       tests/battery_save_test.cpp
       src/battery_save.cpp)
@@ -655,6 +849,100 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       src/battery_save.cpp)
   target_include_directories(firmware_state_test PRIVATE src)
   add_test(NAME firmware_state_test COMMAND firmware_state_test)
+
+  add_executable(savestate_test
+      tests/savestate_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      # scheduler_run_round() samples both cores' parked PCs into the always-on
+      # histogram, whose table lives in this translation unit.
+      src/pc_profile.cpp)
+  target_include_directories(savestate_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(savestate_test)
+  target_link_libraries(savestate_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME savestate_test COMMAND savestate_test)
+
+  # Bit-exactness rail for the fused timed-access fast path (yjp.70 ph2 B):
+  # sweeps every region boundary / width / seq / CPU / CP15 configuration
+  # asserting the inline path == the retained reference implementations.
+  # Same link set as savestate_test: the real bus + CP15 + runtime, device
+  # calls stubbed.
+  add_executable(mem_timing_test
+      tests/mem_timing_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      src/pc_profile.cpp)
+  target_include_directories(mem_timing_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(mem_timing_test)
+  target_link_libraries(mem_timing_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME mem_timing_test COMMAND mem_timing_test)
+
+  add_executable(savestate_slots_test
+      tests/savestate_slots_test.cpp
+      src/savestate_slots.cpp)
+  target_include_directories(savestate_slots_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  add_test(NAME savestate_slots_test COMMAND savestate_slots_test)
+
+  add_executable(network_savestate_guard_test
+      tests/network_savestate_guard_test.cpp
+      src/network_savestate_guard.cpp)
+  target_include_directories(network_savestate_guard_test PRIVATE src)
+  add_test(NAME network_savestate_guard_test
+           COMMAND network_savestate_guard_test)
+
+  add_executable(video_savestate_test
+      tests/video_savestate_test.cpp
+      tests/video_savestate_test_stubs.cpp
+      src/vram.cpp
+      src/gpu2d.cpp
+      src/gpu3d.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp
+      vendor/melonds/GPU3D.cpp
+      vendor/melonds/GPU3D_Soft.cpp
+      vendor/melonds/Savestate.cpp)
+  target_include_directories(video_savestate_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  target_compile_definitions(video_savestate_test PRIVATE
+      NDS_BUILD_VIDEO_SAVESTATE_TEST=1)
+  add_test(NAME video_savestate_test COMMAND video_savestate_test)
 
   # AUXSPI backup-chip protocol: pins the write-enable latch's lifetime across
   # chip-select transfers, which is what silently dropped every cartridge save.
@@ -707,13 +995,48 @@ ndsrecomp_link_tomlpp(frontend_config_test)
 
   add_executable(live_overlay_preflight_test
       tests/live_overlay_preflight_test.cpp
-      src/live_overlay.cpp)
+      src/live_overlay.cpp
+      src/live_overlay_platform.cpp
+      # live_overlay_poll() opens an NDS_EMU_OVERLAY region, whose accumulators
+      # and tick calibration live in these two translation units.
+      src/emu_profile.cpp
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
   target_include_directories(live_overlay_preflight_test PRIVATE
       src
       ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
+  set_target_properties(live_overlay_preflight_test PROPERTIES ENABLE_EXPORTS ON)
+  if(WIN32)
+    # beads-yjp.68: the codegen-gate test builds a REAL shard DLL that binds to
+    # this executable's runner data symbols, exactly as a field shard binds to
+    # nds_runner.exe through src/runtime_exports.def. Same mechanism, smaller
+    # surface: an explicit .def names the exports, --out-implib names the
+    # import library the shard links against. ENABLE_EXPORTS alone produces
+    # neither under MinGW.
+    target_link_options(live_overlay_preflight_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_preflight_exports.def"
+        "-Wl,--out-implib,${CMAKE_CURRENT_BINARY_DIR}/liblive_overlay_preflight_test.dll.a")
+    set_property(TARGET live_overlay_preflight_test APPEND PROPERTY
+        LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_preflight_exports.def")
+  endif()
+  if(CMAKE_DL_LIBS)
+    target_link_libraries(live_overlay_preflight_test PRIVATE ${CMAKE_DL_LIBS})
+  endif()
   add_test(NAME live_overlay_preflight_test
            COMMAND live_overlay_preflight_test)
+
+  add_executable(live_overlay_platform_test
+      tests/live_overlay_platform_test.cpp
+      src/live_overlay_platform.cpp)
+  target_include_directories(live_overlay_platform_test PRIVATE src)
+  add_test(NAME live_overlay_platform_test COMMAND live_overlay_platform_test)
 
   add_executable(dispatch_lookup_test
       tests/dispatch_lookup_test.cpp)
@@ -723,14 +1046,144 @@ ndsrecomp_link_tomlpp(frontend_config_test)
       ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME dispatch_lookup_test COMMAND dispatch_lookup_test)
 
+  # beads-yjp.70 phase 2A: the emitted inline code-fetch cost must equal
+  # runtime_code_cycles() exactly. Links the real bus/cp15 units (with the
+  # savestate test's device stubs) so it pins the runtime, not a model.
+  add_executable(code_cycles_fold_test
+      tests/code_cycles_fold_test.cpp
+      tests/savestate_test_stubs.cpp
+      src/savestate.cpp
+      src/bus.cpp
+      src/cp15.cpp
+      src/scheduler.cpp
+      src/spu.cpp
+      src/runtime_arm.cpp
+      src/dispatch_timing.cpp
+      src/emu_profile.cpp
+      src/pc_profile.cpp)
+  target_include_directories(code_cycles_fold_test PRIVATE
+      src
+      vendor/melonds
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/support)
+  ndsrecomp_link_tomlpp(code_cycles_fold_test)
+  target_link_libraries(code_cycles_fold_test PRIVATE nds_armv4t nds_support)
+  add_test(NAME code_cycles_fold_test COMMAND code_cycles_fold_test)
+
   add_executable(gpu2d_window_test
-      tests/gpu2d_window_test.cpp)
-  target_include_directories(gpu2d_window_test PRIVATE src)
+      tests/gpu2d_window_test.cpp
+      # The test #includes src/gpu2d.cpp wholesale, so it inherits the
+      # NDS_EMU_RASTER2D region in nds_gpu2d_render_scanline and needs the
+      # accumulators and tick calibration those two units define.
+      src/emu_profile.cpp
+      src/dispatch_timing.cpp
+      # The worker threads in these units register themselves with the
+      # always-on host CPU sampler (host_profile.h), so the sampler's own
+      # units come along.
+      src/host_profile.cpp
+      src/host_prof_ring.cpp
+      src/host_unwind_x64.cpp)
+  target_include_directories(gpu2d_window_test PRIVATE
+      src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/armv4t
+      ${NDS_ARM_RECOMP_INCLUDE_DIRS})
   add_test(NAME gpu2d_window_test COMMAND gpu2d_window_test)
 
   if(Python3_Interpreter_FOUND)
+    # The deadline-bounded per-instruction machinery has no value anyone can
+    # assert; its correctness is a set of structural properties (fast path
+    # present and slice-bounded, every re-arm site zeroing it, faithful path
+    # still selectable, no divergent shard semantics). Each is one named
+    # assertion in the test.
+    add_test(
+        NAME machinery_perf_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_machinery_perf_guards.py")
+    # beads-yjp.54: the emu-time partition's value is WHERE its regions sit,
+    # not any value it computes. Deleting one region still builds, still runs,
+    # and silently folds that cost back into an enclosing bucket.
+    add_test(
+        NAME emu_attrib_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_emu_attrib_guards.py")
+    # beads-yjp.48: WHEN a halted core's clock may stop is a shape property of
+    # scheduler_run_round(), not a value. Shortening a halted ARM7's catch-up
+    # target to its own next timer overflow still built, still booted, still
+    # matched every frame hash -- and reddened all eight G1 firmware scenarios
+    # with an SPU mismatch 0.15 s downstream of the real defect.
+    add_test(
+        NAME scheduler_halt_fidelity_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scheduler_halt_fidelity.py")
+    add_test(
+        NAME savestate_frontend_guards_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_savestate_frontend_guards.py")
+    # Two runners may share one live-overlay cache directory, so the shard
+    # index read-modify-write has to survive concurrent writers.
+    add_test(
+        NAME live_index_lock_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_index_lock_test.py"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-index-lock-work")
+    # beads-yjp.51: the pending-work queue is what makes a player's backlog
+    # converge across runs and across sessions. Its format is schema-versioned
+    # and must tolerate every corruption, its order must be hottest-first by
+    # execution weight, and it must survive a hard kill of the writer.
+    add_test(
+        NAME live_queue_persist_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_queue_persist_test.py")
+    # The shard wrapper's static_cpu must follow -DNDS_STATIC_CPU, which is
+    # what the runner cross-checks against the bank's metadata CPU.
+    add_test(
+        NAME live_shard_wrapper_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_wrapper_test.py"
+                --gcc "${CMAKE_C_COMPILER}"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-wrapper-work")
+    # beads-yjp.68: the producer-codegen load gate. A shard built at
+    # kCodegenVersion-1 must be refused OUTRIGHT and moved into the cache's
+    # quarantine subtree; one built at kCodegenVersion must pass the gate.
+    # Both halves are driven through the real loader (prepare_bank_dll) with
+    # real DLLs, because that is the only code path a cached shard can take.
+    add_test(
+        NAME live_shard_codegen_gate_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_shard_codegen_gate_test.py"
+                --cc "${CMAKE_C_COMPILER}"
+                --runner-test "$<TARGET_FILE:live_overlay_preflight_test>"
+                --implib-dir "${CMAKE_CURRENT_BINARY_DIR}"
+                --codegen-identity-header
+                "${CMAKE_CURRENT_SOURCE_DIR}/../recompiler/src/codegen_identity.h"
+                --work "${CMAKE_CURRENT_BINARY_DIR}/live-shard-codegen-gate-work")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      add_test(
+          NAME live_overlay_linux_loader_test
+          COMMAND "${Python3_EXECUTABLE}"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/live_overlay_linux_loader_test.py"
+                  --cc "${CMAKE_C_COMPILER}"
+                  --runner-test "$<TARGET_FILE:live_overlay_preflight_test>"
+                  --work "${CMAKE_CURRENT_BINARY_DIR}/live-overlay-linux-loader-work")
+      add_test(
+          NAME live_overlay_linux_process_test
+          COMMAND "$<TARGET_FILE:live_overlay_preflight_test>"
+                  --spawn-command
+                  "${CMAKE_CURRENT_BINARY_DIR}/live-overlay-linux-process-work")
+    endif()
     add_test(
         NAME m7_collect_two_instance_evidence_test
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_collect_two_instance_evidence.py")
+    # beads-yjp.55: the coverage ingest could only ever promote the TARGET of
+    # an interpreted transfer, which the finder had already discovered. The
+    # code still being interpreted lives in the holes between compiled
+    # functions and is recorded only in the root map. Promoting one seed per
+    # interpreted span is what reaches it -- and it must stay exactly ONE, per
+    # span and per mode, or the finder chops each body at every extra seed.
+    add_test(
+        NAME coverage_span_promotion_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_coverage_span_promotion.py")
   endif()

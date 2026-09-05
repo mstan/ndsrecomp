@@ -1,6 +1,62 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+
+// ---- Threaded scanline rendering -----------------------------------------
+// Per-scanline rendering can run on worker threads driven from a per-line
+// latch taken on the scheduler thread. The latch owns every piece of
+// renderer-mutable state (BG2/BG3 affine accumulators, the DISPCAPCNT enable
+// latch) and the 3D line fetch; workers are pure producers of host pixels.
+//
+// The renderer still reads guest VRAM, palette and OAM live, so any guest
+// write to those regions -- or a VRAMCNT remap -- must not be applied while
+// jobs are outstanding. Call nds_gpu2d_memory_fence() before applying such a
+// write; it is a single relaxed load in the common case.
+//
+// See docs/device_work_parallelization.md.
+extern std::atomic<uint32_t> nds_gpu2d_jobs_outstanding;
+// Non-zero only while a display-capture line has been rendered but its write
+// into guest VRAM has not been applied yet. Guest READS of VRAM must fence on
+// this; guest writes already fence on nds_gpu2d_jobs_outstanding.
+extern std::atomic<uint32_t> nds_gpu2d_staged_captures;
+enum NdsGpu2dFenceCause : uint32_t {
+    NDS_GPU2D_FENCE_VRAM = 0,
+    NDS_GPU2D_FENCE_VRAMCNT,
+    NDS_GPU2D_FENCE_PALETTE,
+    NDS_GPU2D_FENCE_OAM,
+    NDS_GPU2D_FENCE_FRAME,
+    NDS_GPU2D_FENCE_PRESENT,
+    NDS_GPU2D_FENCE_SLOTS,
+    NDS_GPU2D_FENCE_CAPTURE,
+    NDS_GPU2D_FENCE_CAUSE_COUNT,
+};
+const char* nds_gpu2d_fence_cause_name(uint32_t index);
+// Blocks until every outstanding line job has been rendered, executing
+// unclaimed jobs on the calling (scheduler) thread rather than idling.
+void nds_gpu2d_drain(uint32_t cause);
+inline void nds_gpu2d_memory_fence(uint32_t cause) {
+    if (nds_gpu2d_jobs_outstanding.load(std::memory_order_relaxed) != 0u)
+        nds_gpu2d_drain(cause);
+}
+// Read-side fence: a guest read of VRAM must not observe memory that a staged
+// capture write has not been applied to yet.
+inline void nds_gpu2d_read_fence() {
+    if (nds_gpu2d_staged_captures.load(std::memory_order_relaxed) != 0u)
+        nds_gpu2d_drain(NDS_GPU2D_FENCE_CAPTURE);
+}
+// Startup configuration. Threading is off by default; the inline path is the
+// same latch/execute sequence with the execute taken immediately.
+void nds_gpu2d_set_threaded(bool enabled, unsigned workers);
+bool nds_gpu2d_threaded();
+// Helper threads for the adaptive (widened) presentation compositor, which is
+// a separate, purely presentation-side per-line pass run at present time --
+// not part of the scanline ring. 0 keeps it entirely on the calling thread.
+// The calling thread always participates and always waits for completion, so
+// this changes only where the work runs, never which frame is presented.
+void nds_gpu2d_set_adaptive_workers(unsigned helpers);
+unsigned nds_gpu2d_adaptive_workers();
+void nds_gpu2d_shutdown_workers();
 
 void nds_gpu2d_reset();
 // Console power-off clears both physical front/back buffers without resetting
@@ -92,6 +148,9 @@ void nds_gpu2d_set_hd_emit(bool enabled);
 // Valid only after nds_gpu2d_adaptive_framebuffer() has run for this frame,
 // which is where the surfaces are filled.
 bool nds_gpu2d_hd_frame(NdsGpu2dHdFrame* out);
+// Same snapshot without the consumption counter bump, for observers (the
+// presented-frame digest ring) that must not look like a presenter.
+bool nds_gpu2d_hd_frame_peek(NdsGpu2dHdFrame* out);
 // Must be called by the frontend once per presented frame, before deciding
 // whether to run the adaptive compositor at all. The adaptive path is skipped
 // entirely on direct-present frames, so without this the surfaces from the
@@ -128,6 +187,27 @@ enum NdsGpu2dDirectClass : uint8_t {
     NDS_GPU2D_DIRECT_CLASS_COUNT,
 };
 const char* nds_gpu2d_direct_class_name(uint32_t index);
+
+// Why nds_gpu2d_adaptive_framebuffer() handed the presenter a native-width
+// composite centred in the adaptive window (a pillarboxed frame) instead of
+// compositing the scene at the adaptive width. WIDE counts the frames that
+// were composited wide.
+enum NdsGpu2dAdaptiveFallback : uint8_t {
+    NDS_GPU2D_ADAPTIVE_WIDE = 0,
+    NDS_GPU2D_ADAPTIVE_ENGINE_B,
+    NDS_GPU2D_ADAPTIVE_CENTER_NATIVE,
+    NDS_GPU2D_ADAPTIVE_LOW_POLYGON,
+    NDS_GPU2D_ADAPTIVE_RENDERER_VIEW,
+    NDS_GPU2D_ADAPTIVE_FORCE_BLANK,
+    NDS_GPU2D_ADAPTIVE_DISPLAY_MODE,
+    NDS_GPU2D_ADAPTIVE_NO_BG0_3D,
+    NDS_GPU2D_ADAPTIVE_HUD_BG,
+    NDS_GPU2D_ADAPTIVE_RENDER_XPOS,
+    NDS_GPU2D_ADAPTIVE_CAPTURE,
+    NDS_GPU2D_ADAPTIVE_TITLE_CENTERED,
+    NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT,
+};
+const char* nds_gpu2d_adaptive_fallback_name(uint32_t index);
 constexpr uint32_t NDS_GPU2D_DIRECT_BG_MASK_COUNT = 8;
 constexpr uint32_t NDS_GPU2D_DIRECT_BG_MODE_COUNT = 8;
 constexpr uint32_t NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT = 4;
@@ -156,5 +236,26 @@ struct NdsGpu2dProfile {
         NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
     uint64_t direct_extra_master_bright_frames[
         NDS_GPU2D_DIRECT_EFFECT_MODE_COUNT];
+    // Threaded-render accounting. Always maintained (not gated on
+    // NDS_PROFILE_GPU) because fence frequency is the whole performance
+    // question and must be observable on any run.
+    uint64_t threaded_lines;
+    uint64_t inline_lines;
+    uint64_t fence_drains[NDS_GPU2D_FENCE_CAUSE_COUNT];
+    uint64_t fenced_lines[NDS_GPU2D_FENCE_CAUSE_COUNT];
+    uint64_t fence_wait_ns;
+    uint64_t fence_helped_lines;
+    uint64_t staged_captures;
+    // Adaptive (widened presentation) compositor band pool: frames composited
+    // with worker help, frames that had to stay serial because no wide-3D
+    // snapshot matched, and lines the helpers took off the calling thread.
+    uint64_t adaptive_band_frames;
+    uint64_t adaptive_serial_frames;
+    uint64_t adaptive_helper_lines;
+    // Per-frame outcome of the adaptive compositor, indexed by
+    // NdsGpu2dAdaptiveFallback. Only counted while the adaptive width is
+    // above native.
+    uint64_t adaptive_fallback_frames[NDS_GPU2D_ADAPTIVE_FALLBACK_COUNT];
 };
 void nds_gpu2d_profile(NdsGpu2dProfile* out);
+void nds_gpu2d_profile_reset();

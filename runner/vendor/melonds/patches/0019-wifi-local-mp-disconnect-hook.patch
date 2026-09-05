@@ -1,0 +1,18 @@
+Subject: Wifi: report authoritative local-MP disconnect transitions
+
+ndsrecomp modification to vendored melonDS src/Wifi.cpp (GPLv3 5(a)
+notice; see patches/README.md for the convention).
+
+Calls the runner-owned nds_wifi_on_local_mp_disconnected hook whenever the
+guest local-wireless state machine leaves MP mode: reset, client deauth, host
+loss, received deauth, and host beacon-slot disable. A validated received UDP
+datagram is evidence that a peer exists; these guest state-machine transitions
+are the corresponding evidence that the session ended. This avoids keeping
+save states disabled until radio power-off after a clean multiplayer exit.
+
+--- a/src/Wifi.cpp
++++ b/src/Wifi.cpp
+@@ (runner hook declarations)
++void nds_wifi_on_local_mp_disconnected();
+@@ (each IsMP = false transition)
++    ::nds_wifi_on_local_mp_disconnected();

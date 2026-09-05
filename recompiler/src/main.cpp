@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "codegen_identity.h"
 #include "config.h"
 #include "function_finder.h"
 #include "reloc_scan.h"
@@ -114,20 +115,125 @@ uint64_t function_key(uint32_t addr, CpuMode mode) {
         (mode == CpuMode::Thumb ? 1u : 0u);
 }
 
-bool read_dispatch_keys(const std::string& path,
-                        std::unordered_set<uint64_t>& keys) {
+// What a bank registered BEFORE this one already owns at a dispatch key: the
+// [addr, size) region its NdsStaticValidation proves, plus the exact bytes it
+// expects there. Only the largest owning span per key is kept -- that is the
+// row the runtime's selection contract (runner/src/dispatch_lookup.h) picks
+// among co-validating candidates.
+struct PrecedingOwner {
+    uint32_t addr = 0u;
+    uint32_t size = 0u;
+    const std::vector<uint8_t>* expected = nullptr;
+};
+
+struct PrecedingDispatch {
+    // Every row key any preceding bank holds. Used by the superblock pass,
+    // which only asks "does someone ahead of me own this address".
+    std::unordered_set<uint64_t> keys;
+    // Keys whose owner carries a content validation, with the largest span.
+    std::unordered_map<uint64_t, PrecedingOwner> owners;
+    // Node-based so PrecedingOwner::expected stays valid as parsing continues.
+    std::unordered_map<std::string, std::vector<uint8_t>> byte_pools;
+};
+
+std::string trimmed(const std::string& s) {
+    std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1u);
+}
+
+// Parse a generated <bank>_dispatch.c. Its shape is fixed by
+// write_bank_dispatch() below: per-function `static const uint8_t <sym>_bytes[]`
+// arrays, then `static const NdsStaticValidation <sym> = {addr, size, ...}`,
+// then the row table `{0xADDRu, Tu, <fn>, &<sym>}` (or `, 0}` for an
+// unvalidated immutable bank). Reading the emitted table rather than a sidecar
+// keeps the pruner honest: it consumes exactly what the runner will link.
+bool read_preceding_dispatch(const std::string& path, PrecedingDispatch& out) {
     std::ifstream f(path);
     if (!f) {
         std::fprintf(stderr, "cannot read preceding dispatch %s\n",
                      path.c_str());
         return false;
     }
+    struct ValidationInfo { uint32_t addr; uint32_t size; std::string bytes; };
+    std::unordered_map<std::string, ValidationInfo> validations;
     std::string line;
+    std::vector<uint8_t>* collecting = nullptr;
+    // A dependency-closure bank also emits `{addr, size, bytes}` range
+    // initializers that look exactly like dispatch rows. Only lines after the
+    // table's own `const NdsDispatchEntry g_dispatch_<bank>[] = {` are rows.
+    bool in_table = false;
     while (std::getline(f, line)) {
+        if (collecting) {
+            if (line.find("};") != std::string::npos) {
+                collecting = nullptr;
+                continue;
+            }
+            for (std::size_t i = line.find("0x"); i != std::string::npos;
+                 i = line.find("0x", i)) {
+                unsigned value = 0u;
+                if (std::sscanf(line.c_str() + i, "0x%2xu", &value) != 1) break;
+                collecting->push_back(static_cast<uint8_t>(value));
+                i += 2u;
+            }
+            continue;
+        }
+        constexpr const char* kBytesPrefix = "static const uint8_t ";
+        if (line.rfind(kBytesPrefix, 0u) == 0u &&
+            line.find("[] = {") != std::string::npos) {
+            const std::size_t begin = std::strlen(kBytesPrefix);
+            const std::size_t end = line.find("[] = {");
+            const std::string symbol = line.substr(begin, end - begin);
+            collecting = &out.byte_pools[symbol];
+            collecting->clear();
+            continue;
+        }
+        constexpr const char* kValidationPrefix =
+            "static const NdsStaticValidation ";
+        if (line.rfind(kValidationPrefix, 0u) == 0u) {
+            const std::size_t begin = std::strlen(kValidationPrefix);
+            const std::size_t space = line.find(' ', begin);
+            if (space == std::string::npos) continue;
+            const std::string symbol = line.substr(begin, space - begin);
+            unsigned addr = 0u, size = 0u;
+            const std::size_t brace = line.find('{', space);
+            if (brace == std::string::npos) continue;
+            if (std::sscanf(line.c_str() + brace, "{0x%Xu, %uu,",
+                            &addr, &size) != 2)
+                continue;
+            validations[symbol] = ValidationInfo{addr, size, symbol + "_bytes"};
+            continue;
+        }
+        if (line.rfind("const NdsDispatchEntry ", 0u) == 0u) {
+            in_table = true;
+            continue;
+        }
+        if (!in_table) continue;
         unsigned addr = 0u, thumb = 0u;
-        if (std::sscanf(line.c_str(), " {0x%Xu, %uu,", &addr, &thumb) == 2)
-            keys.insert((static_cast<uint64_t>(addr) << 1u) |
-                        uint64_t{thumb != 0u});
+        if (std::sscanf(line.c_str(), " {0x%Xu, %uu,", &addr, &thumb) != 2)
+            continue;
+        const uint64_t key = (static_cast<uint64_t>(addr) << 1u) |
+            uint64_t{thumb != 0u};
+        out.keys.insert(key);
+        const std::size_t close = line.rfind('}');
+        if (close == std::string::npos) continue;
+        const std::size_t comma = line.rfind(',', close);
+        if (comma == std::string::npos) continue;
+        const std::string tail = trimmed(line.substr(comma + 1u,
+                                                     close - comma - 1u));
+        if (tail.empty() || tail[0] != '&') continue;
+        auto found = validations.find(tail.substr(1u));
+        if (found == validations.end()) continue;
+        auto pool = out.byte_pools.find(found->second.bytes);
+        if (pool == out.byte_pools.end() ||
+            pool->second.size() != found->second.size)
+            continue;
+        PrecedingOwner& owner = out.owners[key];
+        if (owner.expected && owner.size >= found->second.size) continue;
+        owner.addr = found->second.addr;
+        owner.size = found->second.size;
+        owner.expected = &pool->second;
     }
     return true;
 }
@@ -364,6 +470,159 @@ const ResolvedHleRoutine* find_hle_routine(
     return nullptr;
 }
 
+// ── Tiny-leaf inlining pass (beads-yjp.67) ───────────────────────────────
+//
+// A "tiny leaf" is a guest function that is entirely a straight-line
+// computation ending in `bx lr`: no calls, no branches, no block transfers,
+// no coprocessor or SWI traffic, no PC writes, and no other use of LR. The
+// OS interrupt-mask pair the MPH fight leans on
+// (OS_DisableInterrupts / OS_RestoreInterrupts, five instructions each) is
+// the archetype, and it is 52 percent of all ARM9 dispatch entries in that
+// scene: every call paid a link-slot dispatch round trip plus a resume-switch
+// entry to run five instructions.
+//
+// Recognizing the SHAPE rather than the addresses keeps this general: any
+// title's mask/lock/getter leaves qualify, on either CPU, in ARM or THUMB.
+//
+// Constraints and why each one is here:
+//   * Terminator is exactly an unconditional `bx lr`, and it is the last
+//     instruction of the body. Anything else can leave the expansion without
+//     a fall-through point.
+//   * No instruction other than the terminator may READ OR WRITE LR. The
+//     expansion relies on LR still holding the call site's return address at
+//     the terminator (the terminator re-checks that and dispatches if it
+//     does not, so a violation is caught rather than mis-executed — but a
+//     leaf that manipulates LR would take that slow path every time, which
+//     is worse than not inlining it).
+//   * No instruction may write PC, be conditional, or be undefined: the
+//     expansion is a straight line with no labels, so there is nothing for
+//     an intra-leaf transfer to target.
+//   * Only plain data processing, PSR transfer, multiply and single
+//     load/store ops are admitted. Block transfers, SWP, SWI and coprocessor
+//     ops are excluded — they either carry side effects the expansion would
+//     have to model or (LDM/STM) can touch LR through a register list.
+//   * An HLE-profiled body is never inlined: its descriptor wrapper is the
+//     measurement surface and inlining would make its callers invisible.
+bool inline_leaf_op_allowed(armv4t::IrOp op) {
+    switch (op) {
+        case armv4t::IrOp::AND: case armv4t::IrOp::EOR:
+        case armv4t::IrOp::SUB: case armv4t::IrOp::RSB:
+        case armv4t::IrOp::ADD: case armv4t::IrOp::ADC:
+        case armv4t::IrOp::SBC: case armv4t::IrOp::RSC:
+        case armv4t::IrOp::TST: case armv4t::IrOp::TEQ:
+        case armv4t::IrOp::CMP: case armv4t::IrOp::CMN:
+        case armv4t::IrOp::ORR: case armv4t::IrOp::MOV:
+        case armv4t::IrOp::BIC: case armv4t::IrOp::MVN:
+        case armv4t::IrOp::MRS: case armv4t::IrOp::MSR:
+        case armv4t::IrOp::CLZ:
+        case armv4t::IrOp::MUL: case armv4t::IrOp::MLA:
+        case armv4t::IrOp::LDR: case armv4t::IrOp::STR:
+        case armv4t::IrOp::LDRB: case armv4t::IrOp::STRB:
+        case armv4t::IrOp::LDRH: case armv4t::IrOp::STRH:
+        case armv4t::IrOp::LDRSB: case armv4t::IrOp::LDRSH:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Every register slot an admitted op can name. Conservative by
+// construction: a slot that is unused for a given op reads as whatever the
+// decoder left there, so a false positive costs an un-inlined leaf, never a
+// wrong expansion.
+bool inline_leaf_touches_lr(const armv4t::Instr& ins) {
+    if (ins.rd == 14u || ins.rn == 14u || ins.rs == 14u || ins.rm == 14u)
+        return true;
+    if (ins.op2.kind == armv4t::Op2::Kind::Shifted) {
+        if (ins.op2.shifted.rm == 14u) return true;
+        if (ins.op2.shifted.by_register && ins.op2.shifted.imm_or_rs == 14u)
+            return true;
+    }
+    if (ins.mem.rn == 14u) return true;
+    if (ins.mem.by_register && ins.mem.reg_offset.rm == 14u) return true;
+    return false;
+}
+
+std::unordered_map<uint64_t, armv4t::InlineLeaf> build_inline_leaves(
+        const std::vector<Function>& funcs, const SuperblockPlan& superblocks,
+        const uint8_t* rom, std::size_t rom_size, uint32_t rom_base,
+        const BankNames& names, unsigned max_insns,
+        const std::vector<ResolvedHleRoutine>& hle_routines,
+        const std::unordered_set<uint64_t>& pruned_keys,
+        unsigned* leaf_count) {
+    std::unordered_map<uint64_t, armv4t::InlineLeaf> leaves;
+    if (max_insns == 0u) return leaves;
+    for (std::size_t index = 0; index < funcs.size(); ++index) {
+        const Function& fn = funcs[index];
+        const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
+        if (fn.end_addr <= fn.addr) continue;
+        const uint32_t span = fn.end_addr - fn.addr;
+        if (span % step != 0u) continue;
+        const uint32_t count = span / step;
+        if (count < 2u || count > max_insns) continue;
+        // A leaf whose dispatch row this bank does not own cannot be
+        // admitted at run time (the resolution would name someone else's
+        // body), so there is no point expanding it.
+        if (pruned_keys.count(function_key(fn.addr, fn.mode)) != 0u) continue;
+
+        const uint32_t source = fn.source_addr ? fn.source_addr : fn.addr;
+        if (source < rom_base ||
+            uint64_t{source - rom_base} + span > rom_size) {
+            continue;
+        }
+        const std::size_t base_off = source - rom_base;
+
+        armv4t::InlineLeaf leaf;
+        leaf.addr = fn.addr;
+        leaf.thumb = (fn.mode == CpuMode::Thumb);
+        bool ok = true;
+        for (uint32_t i = 0; i < count && ok; ++i) {
+            const uint32_t pc = fn.addr + i * step;
+            const std::size_t off = base_off + i * step;
+            armv4t::Instr ins;
+            if (fn.mode == CpuMode::Thumb) {
+                const uint16_t hw = static_cast<uint16_t>(
+                    rom[off] | (rom[off + 1] << 8));
+                ins = armv4t::ThumbDecoder::decode(hw, pc);
+            } else {
+                const uint32_t w = static_cast<uint32_t>(rom[off])
+                    | (static_cast<uint32_t>(rom[off + 1]) << 8)
+                    | (static_cast<uint32_t>(rom[off + 2]) << 16)
+                    | (static_cast<uint32_t>(rom[off + 3]) << 24);
+                ins = armv4t::ArmDecoder::decode(w, pc);
+            }
+            if (ins.is_undefined || ins.cond != armv4t::Cond::AL) {
+                ok = false;
+                break;
+            }
+            if (i + 1u == count) {
+                // Terminator.
+                ok = ins.op == armv4t::IrOp::BX && ins.rm == 14u;
+                leaf.terminator_pc = pc;
+                break;
+            }
+            if (!inline_leaf_op_allowed(ins.op) || ins.is_pc_writing ||
+                ins.is_branch || ins.is_call || ins.is_indirect ||
+                inline_leaf_touches_lr(ins) || ins.rd == 15u) {
+                ok = false;
+                break;
+            }
+            leaf.body.push_back(ins);
+        }
+        if (!ok) continue;
+
+        const std::size_t leader = superblocks.leader[index];
+        if (find_hle_routine(hle_routines, funcs[leader]) ||
+            find_hle_routine(hle_routines, fn)) {
+            continue;
+        }
+        leaf.owner_symbol = names.fn_prefix + funcs[leader].name;
+        leaves.emplace(function_key(fn.addr, fn.mode), std::move(leaf));
+    }
+    if (leaf_count) *leaf_count = static_cast<unsigned>(leaves.size());
+    return leaves;
+}
+
 // Emit one guest function's body. Decodes every word in [addr, end_addr)
 // and lowers it via the codegen, with a pre-pass that (1) marks
 // in-function backward branch targets so a `L_<pc>:` label is emitted for
@@ -398,7 +657,11 @@ void emit_function_body(std::FILE* f, const Function& fn,
                             func_names_by_key,
                         bool emit_entry_switch,
                         bool local_fallthrough,
-                        bool trace_live_transfers) {
+                        bool trace_live_transfers,
+                        bool msr_fast_path,
+                        const std::unordered_map<uint64_t, armv4t::InlineLeaf>*
+                            inline_leaves,
+                        unsigned* inline_leaf_sites) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
     ctx.names_by_key = &func_names_by_key;
@@ -406,6 +669,9 @@ void emit_function_body(std::FILE* f, const Function& fn,
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
     ctx.trace_live_transfers = trace_live_transfers;
+    ctx.msr_fast_path = msr_fast_path;
+    ctx.inline_leaves = inline_leaves;
+    ctx.inline_leaf_sites = inline_leaf_sites;
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
 
     // Every decoded instruction is a resumable static entry. Normal calls
@@ -602,12 +868,19 @@ void emit_function_body(std::FILE* f, const Function& fn,
             "    goto L_%08X;\n",
             fn.end_addr, fn.end_addr);
     } else {
+        // B2 validated direct linking; see arm_codegen.cpp's literal
+        // branch/call slots. A body fall-through has the same
+        // compile-time-constant target and the same repeat rate, so it
+        // gets the same per-callsite resolution storage.
         std::fprintf(f,
             "    /* fall-through to 0x%08X */\n"
             "    g_cpu.R[15] = 0x%08Xu;\n"
-            "    runtime_dispatch_literal_fallthrough(0x%08Xu);\n"
+            "    { static NdsLinkSlot _lnk_%08X_f = {0, 0u, 0x%08Xu, 0};\n"
+            "      runtime_link_fallthrough(&_lnk_%08X_f); }\n"
             "    return;\n",
-            fn.end_addr, fn.end_addr, fn.end_addr);
+            fn.end_addr, fn.end_addr,
+            fn.end_addr, fn.end_addr | (fn.mode == CpuMode::Thumb ? 1u : 0u),
+            fn.end_addr);
     }
 }
 
@@ -636,7 +909,8 @@ void write_bank_dispatch(const std::string& dir,
                          bool validate_live_bytes,
                          bool dependency_closure,
                          const SuperblockPlan& superblocks,
-                         const std::vector<ResolvedHleRoutine>& hle_routines) {
+                         const std::vector<ResolvedHleRoutine>& hle_routines,
+                         const std::unordered_set<uint64_t>& pruned_keys) {
     std::FILE* f = std::fopen((dir + "/" + names.dispatch).c_str(), "wb");
     if (!f) { std::fprintf(stderr, "cannot write %s\n", names.dispatch.c_str()); return; }
     std::fprintf(f,
@@ -815,6 +1089,11 @@ void write_bank_dispatch(const std::string& dir,
         const auto& host_fn = funcs[superblocks.leader[index]];
         const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
         for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
+            // beads-lqa.40: a preceding bank already owns this address with an
+            // equal-or-larger proven span over identical bytes.
+            if (!pruned_keys.empty() &&
+                pruned_keys.count(function_key(pc, fn.mode)) != 0u)
+                continue;
             rows.push_back({pc, fn.mode == CpuMode::Thumb ? uint8_t{1}
                                                          : uint8_t{0},
                             names.fn_prefix + host_fn.name,
@@ -849,7 +1128,11 @@ void write_bank_body(const std::string& dir,
                      bool allow_direct_calls,
                      bool trace_live_transfers,
                      const SuperblockPlan& superblocks,
-                     const std::vector<ResolvedHleRoutine>& hle_routines) {
+                     const std::vector<ResolvedHleRoutine>& hle_routines,
+                     bool msr_fast_path,
+                     const std::unordered_map<uint64_t, armv4t::InlineLeaf>&
+                         inline_leaves,
+                     unsigned* inline_leaf_sites) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     // Direct C calls stay within a body shard. Cross-shard transfers use the
     // normal runtime dispatcher, which keeps shards independently compilable
@@ -877,12 +1160,28 @@ void write_bank_body(const std::string& dir,
         "   is never consulted at runtime — an unlowered op aborts via\n"
         "   runtime_unimplemented_op (PRINCIPLES.md). */\n"
         "#include \"runtime_arm.h\"\n\n");
+    std::unordered_set<std::string> shard_bodies;
     for (std::size_t index = first; index < last; ++index) {
         if (superblocks.leader[index] != index) continue;
         std::fprintf(f, "void %s%s(void);\n", names.fn_prefix.c_str(),
                      funcs[index].name.c_str());
+        shard_bodies.insert(names.fn_prefix + funcs[index].name);
     }
     std::fputs("\n", f);
+
+    // An inline-leaf expansion names the leaf's OWNING generated body, so the
+    // runtime can confirm its own resolution picked exactly that body before
+    // the copy is allowed to run. That reference must resolve inside THIS
+    // shard: a body shard is compiled standalone by the live-shard pipeline,
+    // and naming a symbol another shard defines would leave it unresolved at
+    // link time. Same reason direct C calls are restricted to one shard —
+    // shards stay independently compilable. So a leaf whose owner is emitted
+    // elsewhere simply is not inlined here; its call sites keep the ordinary
+    // link call.
+    std::unordered_map<uint64_t, armv4t::InlineLeaf> shard_leaves;
+    for (const auto& entry : inline_leaves)
+        if (shard_bodies.count(entry.second.owner_symbol) != 0u)
+            shard_leaves.emplace(entry.first, entry.second);
     for (std::size_t index = first; index < last; ++index) {
         if (superblocks.leader[index] != index) continue;
         const auto& fn = funcs[index];
@@ -919,7 +1218,9 @@ void write_bank_body(const std::string& dir,
             emit_function_body(
                 f, funcs[member], rom, rom_size, rom_base, name_by_key,
                 !coalesced, member + 1u < block_end,
-                trace_live_transfers);
+                trace_live_transfers, msr_fast_path,
+                shard_leaves.empty() ? nullptr : &shard_leaves,
+                inline_leaf_sites);
         }
         std::fprintf(f, "}\n\n");
         if (hle) {
@@ -951,10 +1252,25 @@ int main(int argc, char** argv) {
     bool unsafe_live_direct_calls = false;
     bool validated_live_direct_calls = false;
     bool coalesce_fallthroughs = false;
+    bool prune_preceding_owned = false;
     bool dispatch_only = false;
     bool stable_address_shards = false;
     unsigned shards = 1u;
     uint32_t max_function_bytes = 0u;
+    bool msr_fast_path = true;
+    // Tiny-leaf inlining budget, in guest instructions INCLUDING the
+    // terminating `bx lr` (beads-yjp.67). 0 disables the pass entirely.
+    unsigned inline_leaf_max_insns = 8u;
+    // Answered before anything else is parsed and before any input is
+    // required: the live-shard provider identity asks a bare recompiler
+    // binary what its emission semantics are, with no config and no image.
+    // See codegen_identity.h for the contract this string carries.
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--codegen-identity") {
+            std::printf("%s%u\n", kCodegenIdentityPrefix, kCodegenVersion);
+            return 0;
+        }
+    }
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]{ return (i+1 < argc) ? argv[++i] : ""; };
@@ -973,12 +1289,17 @@ int main(int argc, char** argv) {
             validated_live_direct_calls = true;
         else if (a == "--coalesce-fallthroughs")
             coalesce_fallthroughs = true;
+        else if (a == "--prune-preceding-owned")
+            prune_preceding_owned = true;
         else if (a == "--dispatch-only") dispatch_only = true;
         else if (a == "--stable-address-shards") stable_address_shards = true;
         else if (a == "--shards") shards = static_cast<unsigned>(
             std::strtoul(next(), nullptr, 0));
         else if (a == "--max-function-bytes") max_function_bytes =
             static_cast<uint32_t>(std::strtoul(next(), nullptr, 0));
+        else if (a == "--no-msr-fast-path") msr_fast_path = false;
+        else if (a == "--inline-leaf-max-insns") inline_leaf_max_insns =
+            static_cast<unsigned>(std::strtoul(next(), nullptr, 0));
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
     if (config_path.empty() || bin_path.empty()) {
@@ -999,6 +1320,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "--coalesce-fallthroughs requires --validate-live-bytes and "
             "does not support --hle-manifest\n");
+        return 2;
+    }
+    if (prune_preceding_owned &&
+        (!validate_live_bytes || coalesce_fallthroughs)) {
+        // Pruning compares the span THIS bank's rows will prove against the
+        // span a preceding bank already proves, so the rows must be validated
+        // at all, and their spans must be final. --coalesce-fallthroughs
+        // enlarges a leader's span after the fact, which would invalidate every
+        // comparison made here; the two passes are not combined.
+        std::fprintf(stderr,
+            "--prune-preceding-owned requires --validate-live-bytes and is "
+            "incompatible with --coalesce-fallthroughs\n");
         return 2;
     }
     if (validated_live_direct_calls && !validate_live_bytes) {
@@ -1151,6 +1484,86 @@ int main(int argc, char** argv) {
         std::vector<Function> funcs = split_functions_for_emission(
             finder.functions(), max_function_bytes, bin.data(), bin.size(),
             cfg.program.load_address);
+
+        BankNames names = bank_names(bank);
+        PrecedingDispatch preceding;
+        for (const std::string& path : preceding_dispatch_paths)
+            if (!read_preceding_dispatch(path, preceding)) return 1;
+
+        // beads-lqa.40: drop rows a preceding bank already owns.
+        //
+        // A capture-derived bank is seeded from addresses the interpreter was
+        // observed branching to, so it re-translates code a bank registered
+        // ahead of it already covers -- as two-instruction landing pads whose
+        // expected bytes come from an image that agrees with the earlier bank's
+        // byte for byte. Both rows then validate at the same instant, the
+        // runtime selects the larger owned span, and this bank's row is dead
+        // weight in the index, the binary and the build.
+        //
+        // A row is dropped only when a preceding row at the same (addr, thumb)
+        // key proves a span that CONTAINS this row's whole function and this
+        // bank's own image holds exactly the bytes that row expects across it.
+        // The pruned row is then unreachable under the runtime's selection
+        // contract in every state except one: the guest holding this function's
+        // bytes while the surrounding bytes of the preceding row's larger span
+        // differ. That state means the guest rewrote the code AROUND a
+        // still-matching fragment, and the cost of being wrong about it is a
+        // Tier-3 fall, never a wrong body -- both rows are byte-proven before
+        // anything executes.
+        std::size_t pruned_rows = 0u, pruned_functions = 0u;
+        std::unordered_set<uint64_t> pruned_keys;
+        if (prune_preceding_owned) {
+            const uint64_t image_begin = cfg.program.load_address;
+            const uint64_t image_end = image_begin + bin.size();
+            auto owned_by_preceding = [&](const Function& fn, uint32_t pc) {
+                const uint64_t key = function_key(pc, fn.mode);
+                auto found = preceding.owners.find(key);
+                if (found == preceding.owners.end()) return false;
+                const PrecedingOwner& owner = found->second;
+                if (!owner.expected || owner.size == 0u) return false;
+                // The comparison reads this bank's image at the owner's guest
+                // addresses, which is only meaningful where the two agree on
+                // what a guest address means. Relocated bodies (source_addr set)
+                // are never pruned.
+                if (fn.source_addr && fn.source_addr != fn.addr) return false;
+                if (owner.addr > fn.addr || fn.end_addr <= fn.addr) return false;
+                if (uint64_t{owner.addr} + owner.size < fn.end_addr) return false;
+                if (owner.addr < image_begin ||
+                    uint64_t{owner.addr} + owner.size > image_end)
+                    return false;
+                return std::memcmp(bin.data() + (owner.addr - image_begin),
+                                   owner.expected->data(), owner.size) == 0;
+            };
+            std::vector<Function> kept;
+            kept.reserve(funcs.size());
+            for (const Function& fn : funcs) {
+                const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+                std::vector<uint64_t> shadowed;
+                std::size_t total = 0u;
+                for (uint32_t pc = fn.addr; pc < fn.end_addr; pc += step) {
+                    ++total;
+                    if (owned_by_preceding(fn, pc))
+                        shadowed.push_back(function_key(pc, fn.mode));
+                }
+                pruned_rows += shadowed.size();
+                for (uint64_t key : shadowed) pruned_keys.insert(key);
+                // Nothing but dispatch reaches a body in a content-validated
+                // bank (direct calls are off without --validated-live-direct-
+                // calls), so a function with no surviving row is unreachable
+                // and is not emitted at all.
+                if (!shadowed.empty() && shadowed.size() == total) {
+                    ++pruned_functions;
+                    continue;
+                }
+                kept.push_back(fn);
+            }
+            funcs.swap(kept);
+            std::printf("[emit] pruned %zu dispatch rows and %zu functions "
+                        "owned by %zu preceding rows\n",
+                        pruned_rows, pruned_functions,
+                        preceding.owners.size());
+        }
+
         std::vector<ResolvedHleRoutine> hle_routines;
         if (!hle_manifest_path.empty() &&
             !resolve_hle_routines(hle_manifest, cfg, bank,
@@ -1189,17 +1602,20 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        BankNames names = bank_names(bank);
-        std::unordered_set<uint64_t> preceding_rows;
-        for (const std::string& path : preceding_dispatch_paths)
-            if (!read_dispatch_keys(path, preceding_rows)) return 1;
         const SuperblockPlan superblocks = build_superblocks(
-            funcs, preceding_rows, coalesce_fallthroughs);
+            funcs, preceding.keys, coalesce_fallthroughs);
         if (coalesce_fallthroughs)
             std::printf("[emit] coalesced %zu fallthrough edges; "
                         "preceding rows=%zu\n",
-                        superblocks.merged_edges, preceding_rows.size());
+                        superblocks.merged_edges, preceding.keys.size());
         unsigned emitted_shards = 0u;
+        unsigned inline_leaf_count = 0u;
+        unsigned inline_leaf_sites = 0u;
+        const std::unordered_map<uint64_t, armv4t::InlineLeaf> inline_leaves =
+            build_inline_leaves(funcs, superblocks, bin.data(), bin.size(),
+                                cfg.program.load_address, names,
+                                inline_leaf_max_insns, hle_routines,
+                                pruned_keys, &inline_leaf_count);
         if (!dispatch_only) {
             write_bank_header(out_dir, funcs, names);
             if (shards == 0u) shards = 1u;
@@ -1220,7 +1636,10 @@ int main(int argc, char** argv) {
                                     validated_live_direct_calls,
                                 validate_live_bytes,
                                 superblocks,
-                                hle_routines);
+                                hle_routines,
+                                msr_fast_path,
+                                inline_leaves,
+                                &inline_leaf_sites);
                 ++emitted_shards;
             };
             if (stable_address_shards) {
@@ -1274,7 +1693,7 @@ int main(int argc, char** argv) {
         write_bank_dispatch(out_dir, funcs, bin.data(), bin.size(),
                             cfg.program.load_address, names,
                             validate_live_bytes, validated_live_direct_calls,
-                            superblocks, hle_routines);
+                            superblocks, hle_routines, pruned_keys);
         std::printf("\n[emit] bank '%s': %zu functions (%u body shard%s%s) -> %s/{%s,%s,%s}\n",
                     bank.c_str(), funcs.size(), emitted_shards,
                     emitted_shards == 1u ? "" : "s",
@@ -1282,6 +1701,17 @@ int main(int argc, char** argv) {
                     out_dir.c_str(),
                     names.body.c_str(), names.header.c_str(),
                     names.dispatch.c_str());
+        // Report the pass rather than asserting it: a leaf that stops
+        // qualifying (a decoder change, a new terminator shape, a superblock
+        // merge) shows up as the count moving, not as silent inaction.
+        std::printf("[emit] inline leaves: %u eligible (<= %u insns), "
+                    "%u BL site%s expanded%s\n",
+                    inline_leaf_count, inline_leaf_max_insns,
+                    inline_leaf_sites, inline_leaf_sites == 1u ? "" : "s",
+                    inline_leaf_max_insns == 0u ? " [pass disabled]" : "");
+        if (!msr_fast_path)
+            std::printf("[emit] MSR CPSR fast path DISABLED "
+                        "(--no-msr-fast-path)\n");
         return 0;
     }
 

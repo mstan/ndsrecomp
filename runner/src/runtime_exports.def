@@ -1,6 +1,7 @@
 EXPORTS
     arm7_cycle_combine
     arm7_refill_cycles
+    arm9_code_fast_invalidate
     arm9_refill_cycles
     arm_cond_passes
     arm_set_nz
@@ -19,6 +20,12 @@ EXPORTS
     bus_write_u8_slow
     bus_write_u16_slow
     bus_write_u32_slow
+    g_cp15_class_ready DATA
+    g_cp15_dcache_page DATA
+    g_cp15_icache_page DATA
+    g_arm9_code_class_shift DATA
+    g_arm9_code_pub_gen DATA
+    g_arm9_itcm_code_limit DATA
     g_busf_dtcm DATA
     g_busf_dtcm_base DATA
     g_busf_dtcm_limit DATA
@@ -27,20 +34,30 @@ EXPORTS
     g_busf_main DATA
     g_busf_wram_hi DATA
     g_busf_wram_lo DATA
+    g_cp15_timing_generation DATA
     g_cpu DATA
     g_insn_count DATA
+    g_last_data_addr DATA
+    g_memt_dtcm_base DATA
+    g_memt_dtcm_size DATA
+    g_memt_itcm_limit DATA
     g_insn_hook_armed DATA
+    g_last_code_pc DATA
     g_nds_active DATA
+    g_nds_fast_limit DATA
+    g_nds_unwinding DATA
     g_runtime_break_pc DATA
     g_runtime_cycles DATA
     g_runtime_deep_trace DATA
     g_runtime_insn_trace DATA
+    g_runtime_live_transfer_trace DATA
     nds_register_hle_profile_descriptors
     runtime_call_cancel_return
     runtime_call_push_return
     runtime_call_should_return
     runtime_call_stack_depth
     runtime_call_stack_restore
+    runtime_clear_fast_limit
     runtime_clz
     runtime_code_cycles
     runtime_coproc_cdp
@@ -53,10 +70,14 @@ EXPORTS
     runtime_dispatch_literal_branch
     runtime_dispatch_literal_call
     runtime_dispatch_literal_fallthrough
+    runtime_link_branch
+    runtime_link_call
+    runtime_link_fallthrough
     runtime_dispatch_bad_entry
     runtime_dispatch_miss
     runtime_dispatch_with_exchange
     runtime_live_transfer
+    runtime_live_transfer_slow
     runtime_note_live_write
     runtime_discovery_note_static
     runtime_exception_return
@@ -66,9 +87,11 @@ EXPORTS
     runtime_hle_profile_begin
     runtime_hle_profile_end
     runtime_init
+    runtime_inline_leaf_admit
     runtime_insn_fp
     runtime_insn_slow
     runtime_mem_cycles
+    runtime_mem_cycles_slow
     runtime_mrs_cpsr
     runtime_mrs_spsr
     runtime_msr_cpsr
@@ -79,13 +102,16 @@ EXPORTS
     runtime_restore_cpsr_from_spsr
     runtime_set_deep_trace
     runtime_should_yield
+    runtime_should_yield_slow
     runtime_shutdown
     runtime_slice_yield
     runtime_swi
     runtime_tick
+    runtime_tick_slow
     runtime_trace_copy_recent
     runtime_trace_dump_recent
     runtime_trace_event
+    runtime_trace_event_slow
     runtime_trace_reset
     runtime_unimplemented_op
     runtime_unwinding

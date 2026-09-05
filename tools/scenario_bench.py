@@ -271,16 +271,36 @@ def profile_snapshot(client: Any) -> dict[str, Any]:
     """One merged snapshot of every always-on attribution counter.
 
     profile is the GPU/scheduler bucket set (zeros unless NDS_PROFILE_* armed
-    the sampling at process start); dispatch_stats and static_coverage are
-    always live. Merging them into one dict is what lets subtract() emit
-    per-phase dispatch composition and tier-3 deltas from the same diff.
+    the sampling at process start); the rest are always live. Merging them
+    into one dict is what lets subtract() emit per-phase dispatch
+    composition, per-class dispatch COST, direct-link behaviour, and tier-3
+    deltas from the same diff -- subtract() is recursive, so a nested
+    counter surface needs nothing here but its name.
+
+    dispatch_stats answers how OFTEN each class ran; dispatch_timing
+    (beads-yjp.44) answers what each one COST; direct_link (beads-yjp.45)
+    answers how those transfers actually resolved. A phase delta that
+    carries only the first cannot tell a real speedup from a shifted
+    composition, which is why all three are captured together.
     """
     snapshot = client.cmd("profile")
-    for name in ("dispatch", "static_coverage"):
-        command = "dispatch_stats" if name == "dispatch" else name
+    for name, command in (("dispatch", "dispatch_stats"),
+                          ("dispatch_timing", "dispatch_timing"),
+                          ("direct_link", "direct_link"),
+                          # beads-yjp.54's always-on emu-time partition. Every
+                          # bucket is a cumulative ns counter, so the same
+                          # snapshot-and-subtract gives a per-phase attribution
+                          # of where emulation time actually went -- the only
+                          # counter surface that can say whether a dispatch
+                          # change moved native execution time (exec_arm9)
+                          # rather than pixel or scheduler work.
+                          ("emu_attrib", "emu_attrib"),
+                          ("static_coverage", "static_coverage")):
         try:
             snapshot[name] = client.cmd(command)
         except RuntimeError as error:
+            # An older runner simply does not have the command. Skip it
+            # rather than fail the whole measurement.
             if not str(error).endswith("unknown cmd"):
                 raise
     return snapshot
@@ -546,6 +566,13 @@ def summarize_window(
             key.removesuffix("_ns"): value / sampled_ns
             for key, value in sched.items()
             if key.endswith("_ns") and key != "sampled_round_ns" and sampled_ns
+        },
+        "emu_attrib_ms_per_frame": {
+            name: bucket["ns"] / denominator / 1.0e6
+            for name, bucket in profile.get("emu_attrib", {})
+                                       .get("buckets", {}).items()
+            if isinstance(bucket, dict)
+            and isinstance(bucket.get("ns"), (int, float))
         },
         "tier3_delta": profile.get("static_coverage", {}),
         "dispatch_delta": profile.get("dispatch", {}),

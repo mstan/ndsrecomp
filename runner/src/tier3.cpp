@@ -19,10 +19,12 @@
 #include "bus.h"
 
 #include "runtime_arm.h"
+#include "dispatch_lookup.h"
 #include "state.h"
 #include "io.h"
 #include "coverage_manifest.h"
 #include "live_overlay.h"
+#include "emu_profile.h"
 
 using armv4t::CPUState;
 using armv4t::Interpreter;
@@ -31,6 +33,7 @@ using armv4t::Instr;
 // Runtime/scheduler hooks (defined in runtime_arm.cpp).
 extern "C" int  nds_has_bank(uint32_t pc, int thumb);
 extern "C" int  nds_slice_over(void);
+extern "C" void runtime_publish_fast_limit(void);
 extern "C" uint32_t nds_exception_base(void);
 
 namespace {
@@ -230,17 +233,54 @@ void sync_out(const CPUState& c) {
 
 void tier3_run(uint32_t /*entry*/) {
     const uint32_t cpu_index = g_nds_active == NDS_ARM7 ? 1u : 0u;
+    // TIER-3 INTERPRETER, carved exclusively out of NDS_EMU_EXEC_*. Before
+    // this the interpreter had instruction and entry COUNTS but no host-time
+    // measurement at all, so "is this title slow because of Tier 3" could only
+    // be argued from counts. EXACT, not round-sampled: one entry runs until a
+    // bank entry, a vector, or the slice cap, so entries are few per round and
+    // each is heavy -- and in a firmware or menu workload this bucket is the
+    // whole cost, which a sampler would report with useless variance.
+    NdsEmuScope emu_region(cpu_index == 0 ? NDS_EMU_TIER3_ARM9
+                                          : NDS_EMU_TIER3_ARM7);
     // Every native-to-Tier3 boundary is a static-coverage root. Recording
     // only the first boundary per CPU forced an otherwise deterministic
     // traversal to reveal one missing dispatch entry per rebuild. The
     // coverage map already deduplicates (CPU, PC, mode, kind) and counts
     // hits, so retain the complete root surface in one discovery pass.
-    coverage_note(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0u,
-                  TIER3_COVERAGE_ROOT, g_cpu.R[14]);
-    coverage_note_generation_entry(
-        g_nds_active == NDS_ARM7 ? 1 : 0, g_cpu.R[15],
-        (g_cpu.cpsr & CPSR_T_BIT) != 0u, TIER3_COVERAGE_ROOT,
-        g_cpu.R[14]);
+    //
+    // beads-yjp.62: this entry is also the ONLY moment that proves a rewritten
+    // guest code window (ITCM, a swapped overlay, a runtime copy) is resident
+    // right now, so a live shard that failed its guard-bytes preflight in some
+    // other scene gets re-queued from here. The same answer suppresses the
+    // filing below: commissioning the compiler for a page whose shard is
+    // already sitting in the cache, unactivated, is what kept a fresh install
+    // recompiling the same pages run after run.
+    const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0u;
+    const uint32_t entry_pc = g_cpu.R[15] & ~1u;
+    const bool entry_dormant =
+        live_overlay_note_tier3_entry(g_nds_active, entry_pc);
+    // Both withholding rules in one place (dispatch_lookup.h). The second
+    // argument is deliberately nds_has_bank(), which returns a SELECTED row --
+    // one whose validation proved byte-identical against guest memory right
+    // now -- and never a merely-present one, so an address owned by a stale
+    // overlay generation still files as the uncovered work it is.
+    //
+    // Cost: one lookup_static_cached() probe per Tier-3 ENTRY, not per
+    // interpreted instruction, and it is the same probe the dispatcher just
+    // took to decide it had to enter Tier 3 at all -- so it lands on that
+    // slot's cached-absent hit with no byte comparison. The comparison only
+    // re-runs when the dispatch epoch bumps or a guest write moves one of the
+    // validation's backing page generations, which is exactly the
+    // per-(cpu, page, generation) amortization this needs.
+    if (nds_tier3_file_decision(entry_dormant,
+                                nds_has_bank(entry_pc, entry_thumb ? 1 : 0) !=
+                                    0) == NdsTier3FileDecision::File) {
+        coverage_note(g_cpu.R[15], entry_thumb, TIER3_COVERAGE_ROOT,
+                      g_cpu.R[14]);
+        coverage_note_generation_entry(
+            g_nds_active == NDS_ARM7 ? 1 : 0, g_cpu.R[15], entry_thumb,
+            TIER3_COVERAGE_ROOT, g_cpu.R[14]);
+    }
     ++g_stats.entries[cpu_index];
     CPUState ic;
     sync_in(ic);
@@ -250,6 +290,29 @@ void tier3_run(uint32_t /*entry*/) {
     if (trace_this_entry) trace_push(ic, 0, ic.R[15], 0, ic.R[15], 0);
 
     long guard = 0;
+    // beads-yjp.53: a transfer the interpreter executes is only a Tier-3
+    // coverage observation if the TARGET has no bank. The note used to be
+    // written the moment the branch retired, one iteration before the loop
+    // asks nds_has_bank() about that same target -- so every Tier-3 -> native
+    // hand-off was recorded as an uncovered entry point. The consequences were
+    // not cosmetic: the coverage manifest is the live compiler's work list, so
+    // the compiler spent whole batches re-covering pages that were ALREADY
+    // running natively (field logs from v0.6.4 show runs 1 and 2 of a session
+    // recompiling exactly the pages the shipped cache already served), and a
+    // field bundle read as "the hot pages never leave Tier 3" when 93% of the
+    // recorded entry hits were at addresses a registered shard owned.
+    //
+    // So hold the observation for one iteration and let the takeover check
+    // that already runs decide. Zero extra dispatch probes: the answer is the
+    // one the loop needs anyway. An observation held when the loop exits at a
+    // scheduler boundary is dropped -- the same call is observed again on
+    // re-entry, and inventing a gap at a boundary is exactly the error being
+    // fixed.
+    bool pending_entry = false;
+    uint32_t pending_pc = 0u;
+    uint32_t pending_caller = 0u;
+    uint8_t pending_kind = 0u;
+    bool pending_thumb = false;
     while (true) {
         uint32_t pc = ic.R[15];
         bool thumb = ic.cpsr.t;
@@ -261,6 +324,27 @@ void tier3_run(uint32_t /*entry*/) {
         // instruction-set state for subsequent fetches.
         sync_out(ic);
 
+        // Deadline-bounded exit polling (beads-yjp.42 phase 1, Tier-3 half).
+        // Same contract as the generated-bank path: while
+        // g_runtime_cycles < g_nds_fast_limit, NONE of this loop's exit
+        // conditions can be true, so the five cross-TU predicate calls per
+        // interpreted instruction collapse to one compare. See
+        // recompiler/armv4t/runtime_arm.h for the publish rule and the re-arm
+        // sites; the argument here is tighter than on the bank path:
+        //   * nds_slice_over  -- the limit never exceeds g_cycle_cap, which is
+        //     exactly what slice_over compares against.
+        //   * nds_irq_pending -- a nonzero pending cache refuses to publish,
+        //     and irq_recompute (its single funnel) clears the deadline.
+        //   * nds_cpu_halted / nds_dma_cpu_stalled -- both are entered by THIS
+        //     CPU's own store during an interpreted instruction, and both
+        //     entry points (nds_cpu_enter_halt, dma_start) already call
+        //     runtime_request_yield_poll, which zeroes the deadline.
+        //   * nds_event_break_hit / g_nds_insn_stop -- set by brk_check, which
+        //     also calls runtime_request_yield_poll, and armed by
+        //     nds_event_break_arm, which clears the deadline explicitly for
+        //     the cross-thread case.
+        const bool poll_exits = g_runtime_cycles >= g_nds_fast_limit;
+
         // insn7/insn9 anchor reached during interpreted code → stop AT this
         // (not-yet-executed) instruction, symmetric with the bank path's
         // runtime_should_yield check. State is fully in `ic`; sync_out below.
@@ -268,12 +352,12 @@ void tier3_run(uint32_t /*entry*/) {
         // instruction. Finish that instruction (and any immediate IRQ entry),
         // then unwind so run_to_event stops at its exact boundary instead of
         // executing the remainder of the Tier-3 slice.
-        if (nds_event_break_hit()) {
+        if (poll_exits && nds_event_break_hit()) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
         }
-        if (g_nds_insn_stop) {
+        if (poll_exits && g_nds_insn_stop) {
             // Propagate the per-instruction stop through any enclosing static
             // dispatch frames (notably BIOS IRQ -> copied-RAM handler).  A bare
             // break returns normally and lets the interrupted bank execute a
@@ -284,7 +368,34 @@ void tier3_run(uint32_t /*entry*/) {
 
         // Tier-1 takeover: a static bank covers this PC — hand back to the
         // dispatcher (it will call the recompiled function).
-        if (nds_has_bank(pc & ~1u, thumb ? 1 : 0)) {
+        const bool covered = nds_has_bank(pc & ~1u, thumb ? 1 : 0) != 0;
+        if (pending_entry) {
+            // Resolve the transfer observation held from the previous
+            // iteration against the takeover answer for its own target.
+            //
+            // Same rule as the ROOT filing above, same order, one helper
+            // (dispatch_lookup.h). `covered` is nds_has_bank() for THIS pc,
+            // which the pending_pc == pc guard makes the pending target's own
+            // answer -- and it is a live-validity answer, not a presence one,
+            // so an address owned only by a stale overlay generation still
+            // files. What it does NOT catch is a page whose shard exists but
+            // is dormant; filing that one puts the page straight back on the
+            // live compiler's work list, which is how one field session spent
+            // twelve runs recompiling the pages its own cache already held.
+            if ((pending_pc & ~1u) == (pc & ~1u) &&
+                nds_tier3_file_decision(
+                    live_overlay_dormant_covers(g_nds_active,
+                                                pending_pc & ~1u),
+                    covered) == NdsTier3FileDecision::File) {
+                coverage_note(pending_pc, pending_thumb, pending_kind,
+                              pending_caller);
+                coverage_note_generation_entry(
+                    g_nds_active == NDS_ARM7 ? 1 : 0, pending_pc,
+                    pending_thumb, pending_kind, pending_caller);
+            }
+            pending_entry = false;
+        }
+        if (covered) {
             nds_preserve_unwind_state();
             break;
         }
@@ -387,6 +498,11 @@ void tier3_run(uint32_t /*entry*/) {
         // across sleep. Tier 3 commits that debt with the first interpreted
         // instruction, just as a generated bank's runtime_tick() does.
         g_runtime_cycles += cyc + runtime_deferred_cycles_take();
+        // Re-evaluated because this instruction just advanced the clock, and
+        // because anything it did that could need service (a HALTCNT store, a
+        // DMA start, an IRQ raise, an event break) has already zeroed the
+        // deadline through its own re-arm site.
+        const bool poll_after = g_runtime_cycles >= g_nds_fast_limit;
         if (traced) {
             trace_push(ic, 2, pc, in.raw, ic.R[15],
                        static_cast<uint8_t>(r));
@@ -397,8 +513,8 @@ void tier3_run(uint32_t /*entry*/) {
         // guest state and unwind exactly like the generated-bank path; the
         // scheduler will move this instruction's cost into deferred debt and
         // run DMA bus units instead of the CPU until completion.
-        if (nds_cpu_halted(g_nds_active) ||
-            nds_dma_cpu_stalled(g_nds_active)) {
+        if (poll_after && (nds_cpu_halted(g_nds_active) ||
+                           nds_dma_cpu_stalled(g_nds_active))) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
@@ -411,10 +527,11 @@ void tier3_run(uint32_t /*entry*/) {
         // its push and eventually overflows the stack.
         if (r == Interpreter::Result::Branched && in.is_call &&
             in.op != armv4t::IrOp::BL_prefix) {
-            coverage_note(ic.R[15], ic.cpsr.t, TIER3_COVERAGE_CALL, pc);
-            coverage_note_generation_entry(
-                g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
-                TIER3_COVERAGE_CALL, pc);
+            pending_entry = true;
+            pending_pc = ic.R[15];
+            pending_thumb = ic.cpsr.t;
+            pending_kind = TIER3_COVERAGE_CALL;
+            pending_caller = pc;
             runtime_call_push_return(pc + (thumb ? 2u : 4u));
         } else if (r == Interpreter::Result::Branched && !in.is_call) {
             // A BX/LDM/POP return may interwork.  The call was pushed in the
@@ -426,11 +543,11 @@ void tier3_run(uint32_t /*entry*/) {
             const bool matched_return =
                 runtime_call_should_return(ic.R[15] & ~1u) != 0;
             if (!matched_return && in.op != armv4t::IrOp::B) {
-                coverage_note(ic.R[15], ic.cpsr.t,
-                              TIER3_COVERAGE_INDIRECT, pc);
-                coverage_note_generation_entry(
-                    g_nds_active == NDS_ARM7 ? 1 : 0, ic.R[15], ic.cpsr.t,
-                    TIER3_COVERAGE_INDIRECT, pc);
+                pending_entry = true;
+                pending_pc = ic.R[15];
+                pending_thumb = ic.cpsr.t;
+                pending_kind = TIER3_COVERAGE_INDIRECT;
+                pending_caller = pc;
             }
         }
 
@@ -470,7 +587,7 @@ void tier3_run(uint32_t /*entry*/) {
 
         // Deliver a pending IRQ to the interpreted CPU (vectors to the BIOS
         // handler bank next iteration).
-        if (!ic.cpsr.i && nds_irq_pending(g_nds_active)) {
+        if (poll_after && !ic.cpsr.i && nds_irq_pending(g_nds_active)) {
             const uint32_t target = nds_exception_base() + 0x18u;
             nds_note_irq_accept(g_nds_active, ic.R[15]);
             Interpreter::enter_irq(ic, ic.R[15]);
@@ -488,12 +605,12 @@ void tier3_run(uint32_t /*entry*/) {
         // The retire hook may have reached an exact-index breakpoint during
         // this instruction. Capture the just-retired state before a coincident
         // slice boundary can return through enclosing BIOS/IRQ host frames.
-        if (g_nds_insn_stop) {
+        if (poll_after && g_nds_insn_stop) {
             sync_out(ic);
             nds_preserve_unwind_state();
             break;
         }
-        if (nds_slice_over()) {
+        if (poll_after && nds_slice_over()) {
             // Tier 3 is often nested under a recompiled BIOS IRQ/vector call.
             // A normal return would resume that stale caller and overwrite the
             // interpreted PC. Preserve the guest state and unwind to the
@@ -502,6 +619,11 @@ void tier3_run(uint32_t /*entry*/) {
             nds_preserve_unwind_state();
             break;
         }
+        // The scan above found nothing to service. Arm the deadline so the
+        // next iterations can skip it entirely. Only from the polled path:
+        // if poll_after was false we did not scan, so we have established
+        // nothing and must not republish.
+        if (poll_after) runtime_publish_fast_limit();
         if (++guard > 50'000'000) {
             sync_out(ic);
             nds_halt("tier3: slice guard (no exit)");

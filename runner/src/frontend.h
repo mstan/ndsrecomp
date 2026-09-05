@@ -4,6 +4,7 @@
 #include <string>
 
 #include "cartridge_config.h"
+#include "perf_governor.h"
 
 // Run the native, human-facing firmware preview. The emulation remains on the
 // same scheduler/device path used by the deterministic debug verifier; SDL is
@@ -173,6 +174,20 @@ struct NdsMphPrimeControlBindings {
 // own dual-stick adaptation of its keyboard/mouse scheme.
 NdsMphPrimeControlBindings nds_default_mph_pad_bindings();
 
+struct NdsVirtualStylusOptions {
+    // Default-on lower-screen pointer helper: hold key/pad_hold to show the
+    // cursor, move it with relative mouse motion or the right stick, and tap
+    // with mouse left / pad_tap. Title-specific control layers may suppress
+    // this when they own the same inputs.
+    bool enabled = true;
+    std::string binding = "Tab";
+    std::string tap_binding = "None";
+    std::string pad_hold_binding = "Pad LT";
+    std::string pad_tap_binding = "Pad A";
+    uint16_t sensitivity = 20;      // 10%..400%
+    uint16_t pad_sensitivity = 100; // 10%..400%
+};
+
 struct NdsFrontendOptions {
     // Optional exact cartridge identity from [game]. When present, every
     // title-owned setting in this config is rejected for any other ROM.
@@ -271,6 +286,7 @@ struct NdsFrontendOptions {
     // Active-high frontend pressed-bit mask (same layout as key_bit()).
     uint16_t relative_mouse_fire_mask = 0;
     bool mph_prime_controls = false;
+    NdsVirtualStylusOptions virtual_stylus{};
     // Default-off compatibility switch for titles that want relative mouse
     // capture to persist across separate top/bottom presentation windows.
     bool mph_prime_unified_window_focus = false;
@@ -289,6 +305,12 @@ struct NdsFrontendOptions {
     NdsCartridgeSaveConfig cartridge_save{};
     NdsNetworkOptions network{};
     NdsLocalWirelessOptions local_wireless{};
+    NdsPerfGovernorMode perf_governor_mode = NdsPerfGovernorMode::Auto;
+    // Populated only after the cartridge identity is verified. This directory
+    // is already per-ROM; input events never supply arbitrary filenames.
+    std::string savestate_directory;
+    std::string savestate_build_id;
+    std::string savestate_rom_sha1;
 };
 
 // Parse [display] settings from a game TOML. Missing [display] is valid.
@@ -383,6 +405,15 @@ struct NdsFrontendLiveStats {
     // requested and active, which makes it a direct harness assertion.
     uint64_t real_presents;
     uint64_t synthetic_presents;
+    uint8_t perf_governor_stage;
+    uint32_t perf_governor_over_frames;
+    uint32_t perf_governor_under_frames;
+    // Stage 2 is being held because this machine flapped out of it (see
+    // NdsPerfGovernorConfig::flap_engage_limit).
+    uint8_t perf_governor_held;
+    // Terminal: a stage could not be applied, so the governor stopped.
+    uint8_t perf_governor_apply_failed;
+    uint64_t perf_governor_transitions;
 };
 void nds_frontend_live_stats(NdsFrontendLiveStats* out);
 
@@ -394,6 +425,9 @@ struct NdsFrontendInputDebugState {
     int active;
     int mph_prime_controls_available;
     int mph_prime_controls_active;
+    int virtual_stylus_available;
+    int virtual_stylus_active;
+    int virtual_stylus_tap_held;
     int relative_mouse_captured;
     uint16_t keyboard_pressed;
     uint16_t mouse_pressed;
@@ -421,7 +455,11 @@ struct NdsFrontendInputDebugState {
     int separate;
 };
 
-bool nds_frontend_debug_key(const char* key_name, bool down);
+// `shift` sets the Shift modifier on the synthesized event. The savestate
+// hotkeys distinguish load (bare F<slot>) from save (Shift+F<slot>) on it, so
+// without it the debug surface can only ever load.
+bool nds_frontend_debug_key(const char* key_name, bool down,
+                            bool shift = false);
 bool nds_frontend_debug_mouse_button(uint8_t button, bool down);
 bool nds_frontend_debug_mouse_motion(int dx, int dy);
 bool nds_frontend_debug_touch(uint16_t x, uint16_t y, bool down);
@@ -446,3 +484,40 @@ struct NdsFrontendBlackBandCapture {
 };
 void nds_frontend_black_band_scan(bool enabled, bool reset);
 void nds_frontend_black_band_capture(NdsFrontendBlackBandCapture* out);
+
+// ---- Presented-frame digest ring -----------------------------------------
+// Always-on FROM PROCESS START whenever NDS_FRAME_HASH=1 is in the
+// environment: every presented real frame appends a digest of the exact
+// surfaces handed to the presenter (plus the HD layer surfaces the presenter
+// consumes) to a ring. A probe QUERIES the window it cares about; it never
+// arms recording, so no frame between launch and probe attach is unobserved.
+//
+// This is the bit-exactness rail for compositor work: two builds launched from
+// the same savestate must produce the same digest for the same frame index.
+// The hash itself costs ~0.3 ms/frame at 21:9 + HD, so the env gate keeps it
+// out of measured runs.
+struct NdsFrontendFrameDigest {
+    uint64_t frame;             // shown_frames at present time
+    uint64_t top_hash;
+    uint64_t bottom_hash;
+    uint64_t hd_hash;           // 0 when no HD surfaces were emitted
+    uint32_t top_width;
+    uint32_t bottom_width;
+    uint32_t flags;             // bit0 direct-present, bit1 HD valid
+    // Bumped by every successful savestate load. The alignment key between two
+    // independently launched processes: `frame` is wall-clock dependent, the
+    // (epoch, position-within-epoch) pair is not.
+    uint32_t epoch;
+};
+enum NdsFrontendFrameDigestFlags : uint32_t {
+    NDS_FRAME_DIGEST_DIRECT_PRESENT = 1u << 0,
+    NDS_FRAME_DIGEST_HD = 1u << 1,
+};
+bool nds_frontend_frame_digest_enabled();
+// Total digests appended since process start (monotonic; the ring keeps the
+// most recent NDS_FRONTEND_FRAME_DIGEST_RING of them).
+uint64_t nds_frontend_frame_digest_count();
+// Copies up to `max` digests whose sequence index is in [from, from + max).
+// Returns the number copied; 0 when the window has already been evicted.
+uint32_t nds_frontend_frame_digests(uint64_t from, uint32_t max,
+                                    NdsFrontendFrameDigest* out);

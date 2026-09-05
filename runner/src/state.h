@@ -28,6 +28,23 @@ extern const char* g_nds_halt_reason;
 // promotion. Normal/release execution keeps this false and misses stay fatal.
 extern bool g_discover_static_misses;
 
+// Forced-interpreter measurement selector (beads-yjp.42). When true every
+// non-BIOS static/live dispatch lookup is reported as a miss, so all game and
+// captured-firmware code executes through Tier 3 on BOTH CPUs. This is the
+// "candidate path forced on" leg of the one-binary selector contract
+// (docs/host_optimization_strategy.md): faithful (false) and forced (true)
+// live in the same build, and the harness verifies which one ran.
+//
+// BIOS banks deliberately stay native. Tier 3 can only execute bytes with
+// write provenance in writable RAM; the immutable BIOS ROM has neither, so
+// forcing it would produce a fatal dispatch miss rather than a measurement.
+// It is also the representative shape: a player who loses native game banks
+// still has native BIOS.
+extern bool g_nds_force_tier3;
+// Cumulative count of lookups the selector converted into a miss. Zero in
+// faithful mode is what proves the selector was off.
+extern unsigned long long g_nds_force_tier3_misses;
+
 // CP15 (ARM9 system-control) state the bus must honor — TCM placement
 // changes what an address means, so the bus reads this directly.
 struct Cp15State {
@@ -40,7 +57,10 @@ struct Cp15State {
     uint32_t dtcm_size;        // bytes
 };
 extern Cp15State g_cp15;
-extern uint32_t g_cp15_timing_generation;
+// g_cp15_timing_generation is declared in recompiler/armv4t/runtime_arm.h
+// (with C linkage): generated code reads it to validate the published ARM9
+// code-fetch class — see NDS_ARM9_CODE_K / nds_code_numc there. Declaring it
+// here as well would give the same object two language linkages.
 uint32_t cp15_debug_mpu_region(unsigned index);
 uint32_t cp15_debug_cache_cfg(unsigned index);
 
@@ -48,6 +68,14 @@ void cp15_reset();
 // True if ARM9 code fetches from addr are I-cache-served (per-PU-region, C1 bit12).
 bool cp15_code_cacheable(uint32_t addr);
 bool cp15_data_cacheable(uint32_t addr);
+// The original per-access MPU region walks (see cp15.cpp). Kept as the
+// fallback for region encodings the page bitmap cannot represent and as
+// the oracle runner/tests/mem_timing_test.cpp sweeps the bitmap against.
+bool cp15_code_cacheable_reference(uint32_t addr);
+bool cp15_data_cacheable_reference(uint32_t addr);
+// Force a cacheability-bitmap resync (tests only; production syncs from
+// the CP15 write / reset / savestate-import paths).
+void cp15_class_rebuild_for_test();
 
 // ── Dispatch + run control (implemented in runtime_arm.cpp) ─────────────
 // Layout-compatible with the generated <bank>_dispatch.c table entries.
@@ -57,6 +85,10 @@ extern "C" void nds_register_dispatch(int cpu, const DispatchEntry* t,
                                       unsigned len, uint32_t exc_base);
 extern "C" void nds_unregister_dispatch(int cpu, const DispatchEntry* t,
                                         unsigned len);
+// Both registration calls are emulation-thread-only (see the convention
+// comment in runtime_arm.cpp). Debug builds pin the first caller's thread;
+// call this to re-pin if emulation ever moves to another thread.
+extern "C" void nds_dispatch_bind_thread(void);
 extern "C" void nds_set_cycle_cap(unsigned long long cap);
 extern "C" void nds_reschedule_slice(unsigned long long system_deadline);
 extern "C" void nds_halt(const char* reason);
@@ -72,8 +104,15 @@ extern "C" void nds_clear_unwinding(void);
 void nds_preserve_unwind_state();
 void nds_restore_unwind_state();
 
+// Re-arm the per-instruction cycle deadline (beads-yjp.42): force the next
+// poll back onto the faithful path. See recompiler/armv4t/runtime_arm.h for
+// the contract and runner/tests/test_machinery_perf_guards.py for the list
+// of sites obliged to call this.
+extern "C" void runtime_clear_fast_limit(void);
+
 // Bus lifecycle / image loading (implemented in bus.cpp).
 void bus_init();
+void bus_debug_history_reset();
 void bus_load_arm9_bios(const uint8_t* p, uint32_t n);
 void bus_load_arm7_bios(const uint8_t* p, uint32_t n);
 void bus_dump_access_ring(uint32_t max_entries);

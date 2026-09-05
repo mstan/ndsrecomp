@@ -18,6 +18,9 @@
 
 #include "wifi_net.h"
 #include "wifi.h"
+#include "emu_profile.h"
+#include "network_savestate_guard.h"
+#include "savestate.h"
 
 #include <atomic>
 #include <chrono>
@@ -287,6 +290,12 @@ void* DynamicLibrary_LoadFunction(DynamicLibrary* lib, const char* name) {
 
 namespace {
 
+NdsNetworkSavestateGuard g_savestate_network_guard;
+
+bool wifi_savestate_eligibility_hook(void*, std::string* error) {
+    return g_savestate_network_guard.AllowSavestate(error);
+}
+
 constexpr int kNetInstance = 0;
 
 // Set once by nds_wifi_configure_network() before the first
@@ -420,6 +429,14 @@ bool PcapAdapterHasIpv4(const melonDS::AdapterData& adapter) {
     return false;
 }
 
+bool PcapAdapterHasLinkLocalIpv4(const melonDS::AdapterData& adapter) {
+    return adapter.IP_v4[0] == 169u && adapter.IP_v4[1] == 254u;
+}
+
+bool PcapAdapterHasLoopbackIpv4(const melonDS::AdapterData& adapter) {
+    return adapter.IP_v4[0] == 127u;
+}
+
 std::string PcapAdapterIpv4String(const melonDS::AdapterData& adapter) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
@@ -469,6 +486,28 @@ bool IsPcapAdapterProbablyVirtual(const melonDS::AdapterData& adapter) {
         }
     }
     return false;
+}
+
+const char* PcapAdapterUnsuitableReason(
+    const melonDS::AdapterData& adapter,
+    bool allow_explicit_virtual_adapter) {
+    const bool loopback = (adapter.Flags & PCAP_IF_LOOPBACK) != 0u;
+    const bool up = (adapter.Flags & PCAP_IF_UP) != 0u;
+    const bool running = (adapter.Flags & PCAP_IF_RUNNING) != 0u;
+    if (loopback) return "adapter is loopback";
+    if (!up) return "adapter is not up";
+    if (!running) return "adapter is not running";
+    if (!PcapAdapterHasMac(adapter)) return "adapter has no MAC address";
+    if (!PcapAdapterHasIpv4(adapter)) return "adapter has no IPv4 address";
+    if (PcapAdapterHasLinkLocalIpv4(adapter))
+        return "adapter IPv4 is link-local/APIPA";
+    if (PcapAdapterHasLoopbackIpv4(adapter))
+        return "adapter IPv4 is loopback";
+    if (!allow_explicit_virtual_adapter &&
+        IsPcapAdapterProbablyVirtual(adapter)) {
+        return "adapter appears to be virtual/VPN";
+    }
+    return nullptr;
 }
 
 bool MacEqual(const uint8_t* a, const std::array<uint8_t, 6>& b) {
@@ -568,23 +607,37 @@ bool IsPcapRequiredBroadcastFrame(const uint8_t* data, int len,
 
 const melonDS::AdapterData* ChoosePcapAdapter(
     const std::vector<melonDS::AdapterData>& adapters,
-    const std::string& requested) {
+    const std::string& requested,
+    std::string* rejection_reason) {
     if (!requested.empty()) {
         for (const melonDS::AdapterData& adapter : adapters) {
-            if (PcapAdapterNameMatches(adapter, requested)) return &adapter;
+            if (!PcapAdapterNameMatches(adapter, requested)) continue;
+
+            const char* reason =
+                PcapAdapterUnsuitableReason(adapter, true);
+            if (reason) {
+                if (rejection_reason) {
+                    *rejection_reason = std::string(reason) + ": " +
+                        PcapAdapterIpv4String(adapter);
+                }
+                return nullptr;
+            }
+            return &adapter;
+        }
+        if (rejection_reason) {
+            *rejection_reason = "no adapter matched requested name";
         }
         return nullptr;
     }
 
     for (const melonDS::AdapterData& adapter : adapters) {
-        const bool loopback = (adapter.Flags & PCAP_IF_LOOPBACK) != 0u;
-        const bool up = (adapter.Flags & PCAP_IF_UP) != 0u;
-        const bool running = (adapter.Flags & PCAP_IF_RUNNING) != 0u;
-        if (!loopback && up && running && PcapAdapterHasMac(adapter) &&
-            PcapAdapterHasIpv4(adapter) &&
-            !IsPcapAdapterProbablyVirtual(adapter)) {
+        if (!PcapAdapterUnsuitableReason(adapter, false)) {
             return &adapter;
         }
+    }
+    if (rejection_reason) {
+        *rejection_reason =
+            "no suitable physical adapter with a routable IPv4 address";
     }
     return nullptr;
 }
@@ -741,6 +794,7 @@ public:
             "[local_mp] enabled instance=%u port=%u\n",
             static_cast<unsigned>(instance_),
             static_cast<unsigned>(base_port_ + instance_));
+        g_savestate_network_guard.SetLocalMpListening(true);
 #else
         melonDS::Platform::Log(melonDS::Platform::Warn,
             "[local_mp] localhost UDP transport is currently Windows-only\n");
@@ -748,6 +802,7 @@ public:
     }
 
     void End() {
+        g_savestate_network_guard.SetLocalMpListening(false);
         packet_queue_.Clear();
         reply_queue_.Clear();
         last_host_id_ = -1;
@@ -1031,6 +1086,11 @@ private:
             frame.payload.assign(datagram + kHeaderBytes,
                                  datagram + kHeaderBytes + len);
 
+            // Receiving a validated datagram is the first authoritative
+            // evidence that another local instance exists. UDP sendto()
+            // success alone only proves that the local stack accepted a
+            // datagram, not that a peer is listening.
+            g_savestate_network_guard.NoteLocalMpPeer();
             stats_frames_received_.fetch_add(1, std::memory_order_relaxed);
             const uint32_t low_type = frame.type & 0xFFFFu;
             if (low_type == 1u) {
@@ -1639,12 +1699,14 @@ int Net_RecvPacket(u8* data, void* userdata) {
 
 void MP_Begin(void* userdata) {
     (void)userdata;
+    g_savestate_network_guard.SetWifiDeviceActive(true);
     if (g_bridge) g_bridge->local_mp.Begin();
 }
 
 void MP_End(void* userdata) {
     (void)userdata;
     if (g_bridge) g_bridge->local_mp.End();
+    g_savestate_network_guard.SetWifiDeviceActive(false);
 }
 
 int MP_SendPacket(u8* data, int len, u64 timestamp, void* userdata) {
@@ -1730,6 +1792,9 @@ void nds_net_platform_shutdown() {
 melonDS::Wifi* nds_wifi3d_attach() {
     if (g_bridge) return g_bridge->wifi.get();
 
+    g_savestate_network_guard.BeginAttach();
+    nds_savestate_set_eligibility_hook(wifi_savestate_eligibility_hook,
+                                       nullptr);
     g_bridge = std::make_unique<WifiBridgeState>();
     g_bridge->network_state.attached = true;
     g_bridge->network_state.network_enabled = g_network_config.enabled;
@@ -1828,17 +1893,23 @@ melonDS::Wifi* nds_wifi3d_attach() {
 
             std::vector<melonDS::AdapterData> adapters =
                 pcap_lib->GetAdapters();
+            std::string pcap_rejection_reason;
             const melonDS::AdapterData* selected =
-                ChoosePcapAdapter(adapters, g_network_config.pcap_adapter);
+                ChoosePcapAdapter(adapters, g_network_config.pcap_adapter,
+                                  &pcap_rejection_reason);
             if (!selected) {
                 std::fprintf(stderr,
                     "[wifi_net] --network-backend pcap could not select an "
-                    "adapter%s%s%s\n",
+                    "adapter%s%s%s: %s. Single-client WFC menu probes should "
+                    "use --network-backend slirp; pcap requires a real LAN "
+                    "adapter with DHCP reachability.\n",
                     g_network_config.pcap_adapter.empty() ? "" :
                         " matching '",
                     g_network_config.pcap_adapter.empty() ? "" :
                         g_network_config.pcap_adapter.c_str(),
-                    g_network_config.pcap_adapter.empty() ? "" : "'");
+                    g_network_config.pcap_adapter.empty() ? "" : "'",
+                    pcap_rejection_reason.empty() ? "no suitable adapter" :
+                        pcap_rejection_reason.c_str());
                 LogPcapAdapters(adapters);
                 std::exit(2);
             }
@@ -1973,6 +2044,10 @@ melonDS::Wifi* nds_wifi3d_attach() {
             g_bridge->worker_thread != nullptr;
     }
 
+    g_savestate_network_guard.SetBackendState(
+        g_network_config.enabled,
+        g_bridge->live_driver != nullptr || g_bridge->replay_driver != nullptr);
+    g_savestate_network_guard.FinishAttach();
     return g_bridge->wifi.get();
 }
 
@@ -2034,6 +2109,22 @@ void nds_wifi_on_client_associated() {
         addr, prev);
 }
 
+void nds_wifi_on_client_state_changed(uint32_t status) {
+    g_savestate_network_guard.SetAssociationStatus(status);
+}
+
+void nds_wifi_on_local_mp_disconnected() {
+    g_savestate_network_guard.ClearLocalMpPeer();
+}
+
+bool nds_wifi_savestate_allowed(std::string* error) {
+    return g_savestate_network_guard.AllowSavestate(error);
+}
+
+NdsSavestateNetworkEligibility nds_wifi_savestate_eligibility() {
+    return g_savestate_network_guard.Evaluate();
+}
+
 bool nds_wifi_local_mp_stats(NdsLocalMpStats* out) {
     if (!g_bridge) return false;
     g_bridge->local_mp.SnapshotStats(out);
@@ -2042,12 +2133,14 @@ bool nds_wifi_local_mp_stats(NdsLocalMpStats* out) {
 
 void nds_wifi3d_detach() {
     if (!g_bridge) return;
+    g_savestate_network_guard.BeginDetach();
     if (g_bridge->net_instance_registered)
         g_bridge->net.UnregisterInstance(kNetInstance);
     // ~WifiBridgeState() stops and joins the worker thread (StopWorker())
     // before net/wifi -- and therefore the Net_Slirp driver and its
     // libslirp Ctx -- are destroyed. See the design comment above.
     g_bridge.reset();
+    g_savestate_network_guard.FinishDetach();
 }
 
 // ── bus-facing implementation of wifi.h (retired wifi.cpp's role) ──────
@@ -2103,6 +2196,7 @@ bool nds_wifi_address(int cpu, uint32_t addr) {
 }
 
 void nds_wifi_reset() {
+    g_savestate_network_guard.ResetGuestWifi();
     melonDS::Wifi* wifi = nds_wifi3d_attach();
     if (wifi) wifi->Reset();
 }
@@ -2154,6 +2248,11 @@ uint64_t nds_wifi_next_event_time() {
 
 void nds_wifi_run_events(uint64_t timestamp) {
     if (!g_bridge || !g_bridge->wifi) return;
+    // Past the null-bridge early-out, so an offline session pays nothing.
+    // While powered on the Wi-Fi US timer schedules a deadline every 8 us,
+    // which both does work here and fragments the 64-cycle rounds -- the two
+    // costs were previously indistinguishable inside one devices_ns bucket.
+    NdsEmuScope emu_region(NDS_EMU_WIFI);
     g_bridge->nds.CurrentSystemTimestamp = timestamp;
     // Drains every event due at or before this guest-cycle rendezvous,
     // exactly mirroring the retired wifi.cpp's

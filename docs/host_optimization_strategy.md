@@ -96,15 +96,134 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   validated instead of recomputing it through `arm_static_guard`. The
   reference builder remains as the safe fallback for any future cache slot
   without a complete snapshot. Runtime-only; no generated-bank change.
-- **B2. Validated direct calls for BL**: B0 measured only
-  ~1.6K–3.1K literal BL dispatches/frame on ARM9, so this is no longer
-  projected as the dominant dispatch win. A safe implementation must
-  preserve ordered overlapping-bank selection and install the same nested
-  static guard as `runtime_dispatch`; a same-bank byte/generation check is
-  insufficient. Keep plain `B` out of this design: it is a tail transfer,
-  and `callee(); return` can grow the host stack around cross-function
-  cycles and skip dispatch preemption. Reconsider after B1/A1 and the
-  fallthrough work are measured.
+- **B2. Validated direct linking for literal transfers — IMPLEMENTED
+  (beads-yjp.45, branch `wt/direct-linking`)**: NOT the native-to-native
+  jump the name suggests. Reading the code settled the shape: every one of
+  this entry's original warnings is load-bearing, and together they leave
+  exactly one redundant step. `runtime_dispatch` performs the tail-dispatch
+  hand-off, the slice-yield preemption point, the `R15` publication, the
+  trace event, the nested `StaticGuardScope`, the lookup, and the guarded
+  call. Only the LOOKUP is redundant for a compile-time-constant target.
+  Deleting the slice yield moves scheduler preemption to different guest
+  instructions and is guest visible; turning a literal `B` into
+  `callee(); return` grows the host stack around a cross-function guest
+  loop, as warned above.
+
+  So B2 keeps the entire guest-visible sequence and replaces only the
+  lookup. Each literal `B` / `BL` / fall-through callsite gets a 24-byte
+  mutable `NdsLinkSlot` in the emitting body: `{fn, key, target_pc,
+  guard}`. It exists because `g_dispatch_cache` is 65,536 128-byte slots
+  per CPU — 8 MiB — direct-mapped on a PC hash, so a hot literal
+  transfer is a near-certain LLC + TLB miss pair. B0's per-class timing
+  measured `cache_hit` at **44.0 ns (ARM9) / 33.2 ns (ARM7)**, the largest
+  measured per-class region. A per-callsite slot is touched by the code
+  that just ran.
+
+  Soundness, in the order the checks run: `key` = `(link_epoch << 1) | cpu`,
+  and `link_epoch` bumps on every `nds_register_dispatch`, every
+  `nds_unregister_dispatch`, and every `runtime_init`, so any change to the
+  candidate set invalidates every slot at once — no repatch walk, no
+  slot registry, and upgrade/downgrade fall out of the same rule. (It is a
+  separate counter from `dispatch_epoch` because `runtime_init` resets that
+  one to 1, which a stale slot would falsely match.) `CPSR.T` must still
+  agree. A content-validated target revalidates its backing-page
+  generations on EVERY use from the resolve-time snapshot, exactly as
+  `cached_lookup_live` does. Resolution itself always runs through
+  `lookup_static_cached`, so ordered overlapping-bank selection and
+  registration priority are inherited rather than reimplemented. Superblock
+  coalescing needs no special case: the dispatch row for an interior member
+  already names the leader body, and the emitter publishes `R15` before the
+  link call.
+
+  EMISSION CHANGED (title banks need regeneration) and
+  `NDS_LIVE_BANK_ABI_VERSION` went 5 → 6, invalidating cached player
+  shards by design. A runner-owned table keyed by target PC was rejected as
+  the runner-only alternative: that IS `g_dispatch_cache`, so it would have
+  moved nothing. `NDS_DIRECT_LINK=0` disables linking wholesale at runtime.
+  Linking is deliberately NOT gated on `g_runtime_deep_trace` — unlike
+  the bus fast path it skips nothing observable (same trace event, same
+  yield decision, same `dispatch_total`, same live-overlay native-hit
+  accounting), and gating it would have made `--serve` byte-lock probes
+  compare two identical unlinked legs. Structural regressions are pinned in
+  `runner/tests/test_machinery_perf_guards.py`.
+- **B2b. Tiny-leaf body inlining at direct BL sites** (beads-yjp.67).
+  LANDED. Measured on MPH Kanden (beads-lqa.42): `OS_DisableInterrupts`
+  (0x020882E0) and `OS_RestoreInterrupts` (0x020882F4) — five-instruction
+  MRS/MSR `bx lr` leaves — were **52 percent of all ARM9 dispatch entries**
+  in the fight, ~1700 calls a frame, with the OS mutex family another 27
+  percent. Each call paid a B2 link-slot dispatch round trip plus a
+  69-case resume-switch entry to run five instructions.
+
+  The recompiler now recognizes the SHAPE — straight-line body, no calls
+  or branches, no block/SWP/SWI/coprocessor ops, no PC write, no
+  conditional, no use of LR other than the terminating unconditional
+  `bx lr`, body ≤ N instructions — and expands that body at direct `BL`
+  sites in the same body shard. `--inline-leaf-max-insns N` sets the
+  budget (default 8, `0` disables the pass); the recompiler prints
+  `[emit] inline leaves: E eligible, S BL sites expanded` per bank.
+
+  Soundness reuses B2's proof rather than adding one. Each expansion is
+  gated on `runtime_inline_leaf_admit(slot, owner)`, which admits only
+  when the call site's own link slot is resolved under the current link
+  epoch, `CPSR.T` still agrees, the resolution named **exactly the
+  generated body whose bytes were inlined** (so an overlapping bank that
+  out-ranks it never runs our copy), and that row's content guard is
+  still live. Anything else falls back to the unchanged `runtime_link_call`,
+  which re-resolves and re-proves. So a content-validated bank keeps its
+  byte-identity gate — this is why the pass is compatible with
+  `--validate-live-bytes` banks, where plain direct C calls are not.
+
+  The leaf keeps its own dispatch entry: other callers, the dispatch
+  table, Tier-3 hand-off and savestate resume all still enter it. A slice
+  yield inside an expansion resumes at the leaf's own entry (R15 is
+  published per instruction exactly as in the standalone body) and returns
+  through the ordinary non-matching-`bx` dispatch, because no call-return
+  push was made. Expansion is restricted to leaves whose owning body is
+  emitted in the SAME shard — a body shard is compiled standalone by the
+  live-shard pipeline, so naming another shard's symbol would leave it
+  unresolved, the same invariant that confines direct C calls to one
+  shard. Cross-shard and cross-bank leaves therefore keep the link call;
+  lifting that is the follow-up.
+
+  EMISSION CHANGED: `kCodegenVersion` 1 → 2, so every cached shard is
+  invalidated by design. `NDS_INLINE_LEAVES=0` (or `NDS_DIRECT_LINK=0`)
+  forces every expansion back through the dispatcher at run time, which
+  is the force-floor control for oracle probes. `nds_direct_link_json`
+  reports `inline_leaf_admits` / `inline_leaf_falls` per CPU; the admit
+  path also notes live-overlay native hits so a live bank reached only
+  through expansions still reports as running natively.
+
+  MPH regeneration counts: **1020 BL sites expanded across the 251 banks**,
+  of which mph_arm9 alone took 463 (304 eligible leaves) — 98 of the 325
+  sites calling 0x020882F4 and 75 of the 218 calling 0x020882E0, the rest
+  being cross-shard or cross-bank.
+
+  NOT DONE, and deliberately: calling `slot->fn()` straight from
+  `runtime_link_*` remains rejected for the reason recorded above (it
+  deletes the cross-shard slice-yield point, and for a literal branch it
+  turns a guest tail transfer into an unbounded host call chain).
+- **B2c. MSR/MRS CPSR field access without a runtime call** (beads-yjp.67).
+  LANDED. `mrs Rd, cpsr` compiled to a cross-TU call to
+  `runtime_mrs_cpsr()`, whose entire body is `return g_cpu.cpsr;` — the
+  generated banks are a separate translation unit, so the call could not
+  be inlined away. It now emits the field read; SPSR still routes through
+  the runtime, which has to select the mode's bank.
+
+  `msr cpsr_<fields>, x` called `runtime_msr_cpsr(value, mask)`. That
+  helper does NO IRQ recheck on either side of the write — a newly
+  unmasked IRQ is delivered at the next `runtime_tick` boundary, exactly
+  as the interpreter oracle delivers it — so enabling interrupts loses
+  nothing by staying inline. What the helper does do is expand the 4-bit
+  field mask, clamp it to the flags byte in User mode, merge, and swap
+  R13/R14 (plus R8..R12 on FIQ) when the MODE bits changed. All of that is
+  decidable at emit time: the mask is a compile-time constant, so the byte
+  mask is too, and a write can only change mode when the mask selects the
+  control byte. The emitter now writes the masked bytes inline when the
+  current mode is privileged and the merged value provably leaves
+  `CPSR[4:0]` alone (unconditionally for a flags-only mask, where the User
+  clamp is a no-op and the mode bits are not in the mask), and calls the
+  faithful helper in every other case. `--no-msr-fast-path` forces the
+  helper at every site.
 - **B3. Per-callsite monomorphic inline cache** for computed transfers
   (BX reg / LDR pc / LDM pc): a static per-site slot {target, fn,
   generation snapshot}; hit = compare + call, miss = dispatch + refill.
@@ -130,8 +249,10 @@ anywhere on ARM9 (confirmed: zero in all sampled shards).
   `-falign-loops` for bank TUs. SIZE UP / SPEED UP, free semantics.
 - **C2. PGO** (`-fprofile-generate` → play the scenario → `-fprofile-use`):
   the strongest whole-binary layout knob; build-time cost is high and
-  profile freshness must be maintained. Worth one measured experiment
-  after A1/B1 land.
+  profile freshness must be maintained. Implemented as `NDS_PGO_MODE`,
+  runner-core only, with a scripted training pipeline — see
+  [PGO release pipeline](pgo_release_pipeline.md) for the exact sequence,
+  the mingw-gcc constraints, and the measured result.
 - **C3. `-mtune=native`** for local builds (keep generic for release).
 - (Rejected precedent: whole-runner GCC LTO produced a 663 MB archive
   and no linked binary — do not retry blindly; scoped LTO of the

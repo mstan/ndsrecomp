@@ -30,6 +30,10 @@
 // path (runner/CMakeLists.txt), not through any melonDS include.
 #include "net/net_ring.h"
 
+// ndsrecomp: save-state local-peer lifecycle hook. See
+// patches/0019-wifi-local-mp-disconnect-hook.patch.
+void nds_wifi_on_local_mp_disconnected();
+
 namespace melonDS
 {
 using Platform::Log;
@@ -240,6 +244,7 @@ void Wifi::Reset()
 
     IsMP = false;
     IsMPClient = false;
+    ::nds_wifi_on_local_mp_disconnected();
     NextSync = 0;
     RXTimestamp = 0;
 
@@ -1036,6 +1041,7 @@ bool Wifi::ProcessTX(TXSlot* slot, int num)
                         Log(LogLevel::Info, "[CLIENT] deauth\n");
                         IsMP = false;
                         IsMPClient = false;
+                        ::nds_wifi_on_local_mp_disconnected();
                     }
                 }
             }
@@ -1625,6 +1631,7 @@ bool Wifi::CheckRX(int type) // 0=regular 1=MP replies 2=MP host frames
                 // TODO: make this more resilient
                 IsMP = false;
                 IsMPClient = false;
+                ::nds_wifi_on_local_mp_disconnected();
             }
         }
 
@@ -1716,6 +1723,7 @@ bool Wifi::CheckRX(int type) // 0=regular 1=MP replies 2=MP host frames
     {
         IsMP = false;
         IsMPClient = false;
+        ::nds_wifi_on_local_mp_disconnected();
         NextSync = 0;
 
         RXTimestamp = 0;
@@ -2448,6 +2456,7 @@ void Wifi::Write(u32 addr, u16 val)
 
     case W_TXSlotBeacon:
         IsMP = (val & 0x8000) != 0;
+        if (!IsMP) ::nds_wifi_on_local_mp_disconnected();
         break;
 
     case W_TXSlotCmd:

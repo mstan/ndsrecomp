@@ -15,15 +15,21 @@
 #include "cart_backup.h"
 #include "state.h"
 #include "scheduler.h"
+#include "savestate.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "spu.h"
 #include "title_patches.h"
 #include "vram.h"
+#include "emu_profile.h"
 
 // Runner-only rare-condition hint owned by runtime_arm.cpp. Generated banks
 // keep calling the unchanged runtime_should_yield ABI.
 extern "C" void runtime_request_yield_poll(void);
+// Re-arm for the per-instruction cycle deadline (beads-yjp.42). Narrower than
+// the hint: it forces the next poll back onto the faithful path without
+// waking the hint's other consumers.
+extern "C" void runtime_clear_fast_limit(void);
 
 uint32_t g_nds_irq_pending_cache[2] = {0, 0};
 
@@ -60,6 +66,14 @@ inline void irq_recompute(int cpu) {
     cpu &= 1;
     g_nds_irq_pending_cache[cpu] =
         (g_ime[cpu] & 1u) ? (g_ie[cpu] & g_if[cpu]) : 0u;
+    // RE-ARM SITE for the per-instruction cycle deadline (beads-yjp.42).
+    // This is the SINGLE funnel for the pending cache -- every IF/IE/IME
+    // write and every nds_raise_irq/nds_clear_irq reaches it -- and the fast
+    // tick path does not look at the cache, so a newly pending IRQ must drop
+    // the deadline or its delivery boundary would slip. Cleared
+    // unconditionally (including on a clear-to-zero) so the next full scan
+    // republishes from live state rather than this function guessing.
+    runtime_clear_fast_limit();
 }
 uint16_t g_exmemcnt[2] = {0x4000u, 0x4000u}; // 0x204, shared ownership bits
 uint16_t g_powercontrol7 = 0x0001u;    // 0x304 POWCNT2 (sound on, Wi-Fi off)
@@ -116,6 +130,8 @@ NdsCartBackup g_cart_backup;
 bool     g_cart_has_ir = false;
 uint8_t  g_cart_ir_cmd = 0;
 std::string g_cart_save_path;
+bool g_cart_persistence_detached = false;
+bool g_cart_detached_warning_emitted = false;
 
 uint32_t load_le32(const uint8_t* p) {
     return uint32_t{p[0]} | (uint32_t{p[1]} << 8u) |
@@ -744,6 +760,7 @@ struct DmaChannel {
 };
 DmaChannel g_dma[2][4] = {};
 uint64_t g_dma_entry_cycle[2] = {};
+bool g_gxfifo_stall = false;
 
 enum class DmaRegion : uint8_t {
     Void, Main, Wram, Io, Palette, Vram, Oam, GbaRom, GbaRam, Wifi
@@ -1028,6 +1045,8 @@ void dma_reg_write(int cpu, uint32_t addr, uint32_t value, uint32_t width) {
 std::vector<uint8_t> g_fw;
 std::string g_fw_save_path;
 bool g_fw_dirty = false;
+bool g_fw_persistence_detached = false;
+bool g_fw_detached_warning_emitted = false;
 uint16_t g_spicnt = 0;       // 0x040001C0
 uint8_t  g_spi_resp = 0;     // byte clocked back on the next SPIDATA read
 uint64_t g_spi_deadline = UINT64_MAX;
@@ -1712,6 +1731,7 @@ void auxspi_write_data(uint8_t val) {
     const uint64_t now = active() == 0 ? (g_runtime_cycles >> 1)
                                        : g_runtime_cycles;
     g_auxspi_deadline = now + delay;
+    nds_reschedule_slice(g_auxspi_deadline);
 }
 
 uint8_t auxspi_read_data() {
@@ -1765,6 +1785,7 @@ void nds_io_reset() {
         g_ipcsync_out[i] = 0; g_postflg[i] = 0;
         g_ime[i] = 0; g_ie[i] = 0; g_if[i] = 0; g_haltcnt[i] = 0;
         g_nds_irq_pending_cache[i] = 0;
+        runtime_clear_fast_limit();   // re-arm site: machine reset
         g_cpu_halted[i] = false;
         g_halt_entry_cycle[i] = 0;
         g_dispstat[i] = 0;
@@ -1861,9 +1882,19 @@ void nds_io_reset() {
     nds_gpu3d_reset();
 }
 
+void nds_io_debug_history_reset() {
+    g_counts = {};
+    g_dma_trace_count = 0;
+    g_card_trace_w = 0;
+    g_card_trace_count = 0;
+    g_card_trace_seq = 0;
+}
+
 void nds_io_load_firmware(const uint8_t* p, uint32_t n) {
     g_fw.assign(p, p + n);
     g_fw_dirty = false;
+    g_fw_persistence_detached = false;
+    g_fw_detached_warning_emitted = false;
     nds_wifi_load_firmware(p, n);
 }
 
@@ -1882,6 +1913,15 @@ void nds_io_set_firmware_save_path(const char* path) {
 
 bool nds_io_flush_firmware_save() {
     if (!g_fw_dirty || g_fw_save_path.empty()) return true;
+    if (g_fw_persistence_detached) {
+        if (!g_fw_detached_warning_emitted) {
+            std::fprintf(stderr,
+                         "[firmware] historical savestate session is detached; "
+                         "canonical firmware was not replaced\n");
+            g_fw_detached_warning_emitted = true;
+        }
+        return true;
+    }
     std::string error;
     if (!nds_battery_save_write_atomic(
             g_fw_save_path, g_fw.data(), g_fw.size(), &error)) {
@@ -1931,6 +1971,8 @@ bool nds_io_load_cartridge(const uint8_t* rom, uint32_t rom_size,
     if (g_cart_backup.sram.size() != g_cart_backup.config.size) {
         g_cart_backup.sram.assign(g_cart_backup.config.size, 0xFFu);
         g_cart_backup.dirty = false;
+        g_cart_persistence_detached = false;
+        g_cart_detached_warning_emitted = false;
         if (!g_cart_save_path.empty()) {
             std::string error;
             switch (nds_battery_save_load_exact(
@@ -1971,6 +2013,15 @@ void nds_io_set_cartridge_save_path(const char* path) {
 bool nds_io_flush_cartridge_save() {
     if (!g_cart_backup.dirty || g_cart_save_path.empty())
         return true;
+    if (g_cart_persistence_detached) {
+        if (!g_cart_detached_warning_emitted) {
+            std::fprintf(stderr,
+                         "[save] historical savestate session is detached; "
+                         "canonical cartridge save was not replaced\n");
+            g_cart_detached_warning_emitted = true;
+        }
+        return true;
+    }
     std::string error;
     if (!nds_battery_save_write_atomic(
             g_cart_save_path, g_cart_backup.sram.data(),
@@ -2168,21 +2219,6 @@ uint64_t nds_next_timer_overflow_time() {
     return best;
 }
 
-uint64_t nds_next_timer_overflow_time_for_cpu(int cpu) {
-    cpu &= 1;
-    uint64_t best = UINT64_MAX;
-    for (int t = 0; t < 4; ++t) {
-        const Timer& T = g_timer[cpu][t];
-        if (!(T.ctrl & 0x80u)) continue;
-        if (T.ctrl & 0x4u) continue;
-        const unsigned long long pre = kPrescaler[T.ctrl & 3u];
-        const unsigned long long span = 0x10000ull - T.counter;
-        const uint64_t when = g_timer_last[cpu] + (span * pre - T.accum);
-        best = std::min(best, when);
-    }
-    return best;
-}
-
 void nds_timer_debug_state(int cpu, NdsTimerDebugState out[4]) {
     if (!out) return;
     cpu &= 1;
@@ -2207,6 +2243,11 @@ uint64_t nds_debug_spi_deadline() { return g_spi_deadline; }
 uint64_t nds_debug_card_deadline() { return g_card_deadline; }
 
 void nds_run_system_events(uint64_t timestamp) {
+    // Region at function entry, not past an early-out: there is none. The five
+    // deadline compares below run unconditionally on every scheduler round, so
+    // the cost being attributed here is exactly the polling, whether or not
+    // any handler fires.
+    NdsEmuScope emu_region(NDS_EMU_SYSEV);
     // These events are one-shot. A handler may schedule its successor only
     // after a guest data-port read, matching melonDS's card-ready handshake.
     if (g_auxspi_deadline <= timestamp) {
@@ -2308,11 +2349,16 @@ void nds_event_break_arm(const char* name, uint64_t target) {
                              std::strcmp(name, "insn9") == 0);
     g_nds_insn_stop = false;
     nds_insn_hook_recompute();
+    // Re-arm site: arming an event break from the debug-server thread must
+    // drop the deadline, or the Tier-3 loop and the bank path would both run
+    // to the slice boundary before noticing the new break.
+    runtime_clear_fast_limit();
 }
 void nds_event_break_disarm() {
     g_brk_ptr = nullptr; g_brk_hit = false;
     g_brk_is_insn = false; g_nds_insn_stop = false;
     nds_insn_hook_recompute();
+    runtime_clear_fast_limit();
 }
 bool nds_event_break_hit() { return g_brk_hit; }
 
@@ -2427,6 +2473,7 @@ void nds_rtc_debug_state(NdsRtcDebugState* out) {
 }
 
 void nds_tick_rtc(unsigned long long system_cycles) {
+    NdsEmuScope emu_region(NDS_EMU_RTC);
     // melonDS schedules event N at floor(N*33513982/32768), starting at N=1.
     // Deriving the due ordinal preserves its fractional phase exactly.
     constexpr uint64_t numerator = 33513982u;
@@ -2459,6 +2506,416 @@ void nds_dump_irq() {
     for (int c = 0; c < 2; ++c)
         std::fprintf(stderr, "  ARM%c IME=%u IE=0x%08X IF=0x%08X IPCSYNC.out=0x%04X\n",
                      c == 0 ? '9' : '7', g_ime[c], g_ie[c], g_if[c], g_ipcsync_out[c]);
+}
+
+bool io_savestate_export(NdsIoCoreSaveState* out) {
+    if (!out) return false;
+    *out = NdsIoCoreSaveState{};
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        out->ipcsync_out[cpu] = g_ipcsync_out[cpu];
+        out->postflg[cpu] = g_postflg[cpu];
+        out->dispstat[cpu] = g_dispstat[cpu];
+        out->vcount_match[cpu] = g_vcount_match[cpu] ? 1u : 0u;
+        out->ime[cpu] = g_ime[cpu];
+        out->ie[cpu] = g_ie[cpu];
+        out->irq_flags[cpu] = g_if[cpu];
+        out->haltcnt[cpu] = g_haltcnt[cpu];
+        out->cpu_halted[cpu] = g_cpu_halted[cpu] ? 1u : 0u;
+        out->halt_entry_cycle[cpu] = g_halt_entry_cycle[cpu];
+        out->fifo_count[cpu] = static_cast<uint8_t>(g_fifo_cnt[cpu]);
+        out->fifo_head[cpu] = static_cast<uint8_t>(g_fifo_head[cpu]);
+        out->fifocnt[cpu] = g_fifocnt[cpu];
+        out->fifo_lastrx[cpu] = g_fifo_lastrx[cpu];
+        std::memcpy(out->fifo[cpu], g_fifo[cpu], sizeof(out->fifo[cpu]));
+        out->dma_entry_cycle[cpu] = g_dma_entry_cycle[cpu];
+        out->timer_last[cpu] = g_timer_last[cpu];
+        out->exmemcnt[cpu] = g_exmemcnt[cpu];
+        out->keycnt[cpu] = g_keycnt[cpu];
+        for (int ch = 0; ch < 4; ++ch) {
+            const DmaChannel& src = g_dma[cpu][ch];
+            NdsIoDmaSaveState& dst = out->dma[cpu][ch];
+            dst.src = src.src;
+            dst.dst = src.dst;
+            dst.cnt = src.cnt;
+            dst.cur_src = src.cur_src;
+            dst.cur_dst = src.cur_dst;
+            dst.remaining = src.remaining;
+            dst.src_inc = src.src_inc;
+            dst.dst_inc = src.dst_inc;
+            dst.start_mode = src.start_mode;
+            dst.burst_index = src.burst_index;
+            dst.running = src.running ? 1u : 0u;
+            dst.in_progress = src.in_progress ? 1u : 0u;
+            dst.burst_start = src.burst_start ? 1u : 0u;
+
+            const Timer& timer = g_timer[cpu][ch];
+            out->timer[cpu][ch] = {
+                timer.reload, timer.counter, timer.ctrl, timer.accum};
+        }
+    }
+    out->vcount = g_vcount;
+    out->next_vcount = g_next_vcount;
+    out->next_vcount_valid = g_next_vcount_valid ? 1u : 0u;
+    out->in_vblank = g_in_vblank ? 1u : 0u;
+    out->display_last = g_display_last;
+    out->gxfifo_stall = g_gxfifo_stall ? 1u : 0u;
+
+    out->divcnt = g_divcnt;
+    std::memcpy(out->div_numer, g_div_numer, sizeof(out->div_numer));
+    std::memcpy(out->div_denom, g_div_denom, sizeof(out->div_denom));
+    std::memcpy(out->div_quot, g_div_quot, sizeof(out->div_quot));
+    std::memcpy(out->div_rem, g_div_rem, sizeof(out->div_rem));
+    out->div_deadline = g_div_deadline;
+    out->sqrtcnt = g_sqrtcnt;
+    std::memcpy(out->sqrt_value, g_sqrt_val, sizeof(out->sqrt_value));
+    out->sqrt_result = g_sqrt_res;
+    out->sqrt_deadline = g_sqrt_deadline;
+
+    out->powercontrol7 = g_powercontrol7;
+    out->keyinput = g_keyinput;
+    out->rcnt = g_rcnt;
+    out->wramcnt = g_wramcnt;
+    out->wifiwaitcnt = g_wifiwaitcnt;
+    out->biosprot = g_biosprot;
+    out->pm_index = g_pm_index;
+    std::memcpy(out->pm_regs, g_pm_regs, sizeof(out->pm_regs));
+    std::memcpy(out->pm_masks, g_pm_masks, sizeof(out->pm_masks));
+    out->pm_hold = g_pm_hold ? 1u : 0u;
+    out->powered_off = g_powered_off ? 1u : 0u;
+    out->tsc_ctrl = g_tsc_ctrl;
+    out->tsc_conv = g_tsc_conv;
+    out->tsc_datapos = g_tsc_datapos;
+    out->tsc_x = g_tsc_x;
+    out->tsc_y = g_tsc_y;
+    std::memcpy(out->io_mem, g_io_mem, sizeof(out->io_mem));
+    return true;
+}
+
+bool io_savestate_validate(const NdsIoCoreSaveState& in,
+                           std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    if (!binary(in.next_vcount_valid) || !binary(in.in_vblank) ||
+        !binary(in.gxfifo_stall) || !binary(in.pm_hold) ||
+        !binary(in.powered_off) || in.vcount > 262u ||
+        in.tsc_datapos < 0 || in.tsc_datapos > 2 ||
+        (in.powercontrol7 & ~0x0003u) != 0u || in.pm_index >= 8u)
+        return fail("savestate IO core scalar is invalid");
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        if (!binary(in.vcount_match[cpu]) || !binary(in.cpu_halted[cpu]) ||
+            in.fifo_count[cpu] > 16u || in.fifo_head[cpu] >= 16u ||
+            (in.fifocnt[cpu] & ~0xC404u) != 0u)
+            return fail("savestate IO CPU state is invalid");
+        for (int ch = 0; ch < 4; ++ch) {
+            const NdsIoDmaSaveState& dma = in.dma[cpu][ch];
+            const bool valid_mode = cpu == 0
+                ? dma.start_mode <= 7u
+                : dma.start_mode == 0u ||
+                    (dma.start_mode >= 0x10u && dma.start_mode <= 0x13u);
+            const bool valid_src_inc = dma.src_inc >= -1 && dma.src_inc <= 1;
+            const bool valid_dst_inc = dma.dst_inc >= -1 && dma.dst_inc <= 1;
+            if (!binary(dma.running) || !binary(dma.in_progress) ||
+                !binary(dma.burst_start) || !valid_mode || !valid_src_inc ||
+                !valid_dst_inc || in.timer[cpu][ch].accum >= 1024u)
+                return fail("savestate DMA/timer state is invalid");
+        }
+    }
+    return true;
+}
+
+bool io_savestate_import(const NdsIoCoreSaveState& in, std::string* error) {
+    if (!io_savestate_validate(in, error)) return false;
+
+    for (int cpu = 0; cpu < 2; ++cpu) {
+        g_ipcsync_out[cpu] = in.ipcsync_out[cpu];
+        g_postflg[cpu] = in.postflg[cpu];
+        g_dispstat[cpu] = in.dispstat[cpu];
+        g_vcount_match[cpu] = in.vcount_match[cpu] != 0;
+        g_ime[cpu] = in.ime[cpu];
+        g_ie[cpu] = in.ie[cpu];
+        g_if[cpu] = in.irq_flags[cpu];
+        g_haltcnt[cpu] = in.haltcnt[cpu];
+        g_cpu_halted[cpu] = in.cpu_halted[cpu] != 0;
+        g_halt_entry_cycle[cpu] = in.halt_entry_cycle[cpu];
+        g_fifo_cnt[cpu] = in.fifo_count[cpu];
+        g_fifo_head[cpu] = in.fifo_head[cpu];
+        g_fifocnt[cpu] = in.fifocnt[cpu];
+        g_fifo_lastrx[cpu] = in.fifo_lastrx[cpu];
+        std::memcpy(g_fifo[cpu], in.fifo[cpu], sizeof(g_fifo[cpu]));
+        g_dma_entry_cycle[cpu] = in.dma_entry_cycle[cpu];
+        g_timer_last[cpu] = in.timer_last[cpu];
+        g_exmemcnt[cpu] = in.exmemcnt[cpu];
+        g_keycnt[cpu] = in.keycnt[cpu];
+        for (int ch = 0; ch < 4; ++ch) {
+            const NdsIoDmaSaveState& src = in.dma[cpu][ch];
+            DmaChannel& dst = g_dma[cpu][ch];
+            dst.src = src.src;
+            dst.dst = src.dst;
+            dst.cnt = src.cnt;
+            dst.cur_src = src.cur_src;
+            dst.cur_dst = src.cur_dst;
+            dst.remaining = src.remaining;
+            dst.src_inc = src.src_inc;
+            dst.dst_inc = src.dst_inc;
+            dst.start_mode = src.start_mode;
+            dst.burst_index = src.burst_index;
+            dst.running = src.running != 0;
+            dst.in_progress = src.in_progress != 0;
+            dst.burst_start = src.burst_start != 0;
+            const NdsIoTimerSaveState& timer = in.timer[cpu][ch];
+            g_timer[cpu][ch] = {
+                timer.reload, timer.counter, timer.ctrl, timer.accum};
+        }
+    }
+    g_vcount = in.vcount;
+    g_next_vcount = in.next_vcount;
+    g_next_vcount_valid = in.next_vcount_valid != 0;
+    g_in_vblank = in.in_vblank != 0;
+    g_display_last = in.display_last;
+    g_gxfifo_stall = in.gxfifo_stall != 0;
+
+    g_divcnt = in.divcnt;
+    std::memcpy(g_div_numer, in.div_numer, sizeof(g_div_numer));
+    std::memcpy(g_div_denom, in.div_denom, sizeof(g_div_denom));
+    std::memcpy(g_div_quot, in.div_quot, sizeof(g_div_quot));
+    std::memcpy(g_div_rem, in.div_rem, sizeof(g_div_rem));
+    g_div_deadline = in.div_deadline;
+    g_sqrtcnt = in.sqrtcnt;
+    std::memcpy(g_sqrt_val, in.sqrt_value, sizeof(g_sqrt_val));
+    g_sqrt_res = in.sqrt_result;
+    g_sqrt_deadline = in.sqrt_deadline;
+
+    g_powercontrol7 = in.powercontrol7;
+    g_keyinput = in.keyinput;
+    g_rcnt = in.rcnt;
+    g_wramcnt = in.wramcnt;
+    g_wifiwaitcnt = in.wifiwaitcnt;
+    g_biosprot = in.biosprot;
+    g_pm_index = in.pm_index;
+    std::memcpy(g_pm_regs, in.pm_regs, sizeof(g_pm_regs));
+    std::memcpy(g_pm_masks, in.pm_masks, sizeof(g_pm_masks));
+    g_pm_hold = in.pm_hold != 0;
+    g_powered_off = in.powered_off != 0;
+    g_tsc_ctrl = in.tsc_ctrl;
+    g_tsc_conv = in.tsc_conv;
+    g_tsc_datapos = in.tsc_datapos;
+    g_tsc_x = in.tsc_x;
+    g_tsc_y = in.tsc_y;
+    std::memcpy(g_io_mem, in.io_mem, sizeof(g_io_mem));
+
+    irq_recompute(0);
+    irq_recompute(1);
+    bus_fast_refresh();
+    return true;
+}
+
+bool io_peripheral_savestate_export(NdsIoPeripheralSaveState* out) {
+    if (!out) return false;
+    *out = NdsIoPeripheralSaveState{};
+    out->romctrl = g_romctrl;
+    out->card_transfer_pos = g_card_transfer_pos;
+    out->card_transfer_len = g_card_transfer_len;
+    out->card_deadline = g_card_deadline;
+    out->card_end_event = g_card_end_event ? 1u : 0u;
+    out->card_irq_cpu = static_cast<uint8_t>(g_card_irq_cpu);
+    std::memcpy(out->card_command, g_card_command,
+                sizeof(out->card_command));
+    out->card_command_mode = static_cast<uint8_t>(g_card_mode);
+    out->card_data_mode = g_card_data_mode;
+    out->card_response = g_card_response;
+    std::memcpy(out->key1_schedule, g_key1_schedule,
+                sizeof(out->key1_schedule));
+    out->card_chip_id = g_card_chip_id;
+    out->key1_available = g_key1_available ? 1u : 0u;
+    out->card_has_ir = g_cart_has_ir ? 1u : 0u;
+
+    out->auxspicnt = g_auxspicnt;
+    out->auxspi_data = g_auxspi_data;
+    out->auxspi_hold = g_auxspi_hold ? 1u : 0u;
+    out->auxspi_pos = g_auxspi_pos;
+    out->auxspi_deadline = g_auxspi_deadline;
+    out->cart_ir_cmd = g_cart_ir_cmd;
+
+    out->backup_type = static_cast<uint8_t>(g_cart_backup.config.type);
+    out->backup_size = g_cart_backup.config.size;
+    out->backup_data = g_cart_backup.sram;
+    out->backup_cmd = g_cart_backup.cmd;
+    out->backup_status = g_cart_backup.status;
+    out->backup_addr = g_cart_backup.addr;
+    out->backup_dirty = g_cart_backup.dirty ? 1u : 0u;
+    out->backup_persistence_detached =
+        g_cart_persistence_detached ? 1u : 0u;
+
+    out->spicnt = g_spicnt;
+    out->spi_response = g_spi_resp;
+    out->spi_deadline = g_spi_deadline;
+    out->firmware_data = g_fw;
+    out->firmware_dirty = g_fw_dirty ? 1u : 0u;
+    out->firmware_persistence_detached =
+        g_fw_persistence_detached ? 1u : 0u;
+    out->firmware_hold = g_fw_hold ? 1u : 0u;
+    out->firmware_cmd = g_fw_cmd;
+    out->firmware_status = g_fw_status;
+    out->firmware_addr = g_fw_addr;
+    out->firmware_data_pos = g_fw_data_pos;
+
+    out->rtc_io = g_rtc_io;
+    out->rtc_input = g_rtc_input;
+    out->rtc_inbit = static_cast<uint32_t>(g_rtc_inbit);
+    out->rtc_inpos = static_cast<uint32_t>(g_rtc_inpos);
+    std::memcpy(out->rtc_output, g_rtc_output, sizeof(out->rtc_output));
+    out->rtc_outbit = static_cast<uint32_t>(g_rtc_outbit);
+    out->rtc_outpos = static_cast<uint32_t>(g_rtc_outpos);
+    out->rtc_cmd = g_rtc_cmd;
+    std::memcpy(out->rtc_datetime, g_rtc_datetime,
+                sizeof(out->rtc_datetime));
+    out->rtc_status1 = g_rtc_status1;
+    out->rtc_status2 = g_rtc_status2;
+    std::memcpy(out->rtc_alarm1, g_rtc_alarm1, sizeof(out->rtc_alarm1));
+    std::memcpy(out->rtc_alarm2, g_rtc_alarm2, sizeof(out->rtc_alarm2));
+    out->rtc_clock_adjust = g_rtc_clock_adjust;
+    out->rtc_free = g_rtc_free;
+    out->rtc_irq_flag = g_rtc_irq_flag;
+    out->rtc_clock_count = g_rtc_clock_count;
+    out->rtc_processed_ticks = g_rtc_processed_ticks;
+    return true;
+}
+
+bool io_peripheral_savestate_validate(const NdsIoPeripheralSaveState& in,
+                                      std::string* error) {
+    auto fail = [&](const char* message) {
+        if (error) *error = message;
+        return false;
+    };
+    auto binary = [](uint8_t value) { return value <= 1u; };
+    const bool aux_busy = (in.auxspicnt & 0x0080u) != 0u;
+    const bool spi_busy = (in.spicnt & 0x0080u) != 0u;
+    if (!binary(in.card_end_event) || in.card_irq_cpu > 1u ||
+        in.card_command_mode > static_cast<uint8_t>(CardCommandMode::Normal) ||
+        in.card_data_mode > 2u || !binary(in.key1_available) ||
+        !binary(in.card_has_ir) || !binary(in.auxspi_hold) ||
+        !binary(in.backup_dirty) ||
+        !binary(in.backup_persistence_detached) ||
+        !binary(in.firmware_dirty) ||
+        !binary(in.firmware_persistence_detached) ||
+        !binary(in.firmware_hold))
+        return fail("savestate cartridge/SPI flag is invalid");
+    if (in.card_transfer_len > 0x4000u ||
+        in.card_response.size() != in.card_transfer_len ||
+        in.card_transfer_pos > in.card_transfer_len ||
+        (in.card_transfer_pos & 3u) != 0u)
+        return fail("savestate gamecard transfer is invalid");
+    if (aux_busy != (in.auxspi_deadline != UINT64_MAX) ||
+        spi_busy != (in.spi_deadline != UINT64_MAX))
+        return fail("savestate SPI busy/deadline state is inconsistent");
+    if (in.backup_type > static_cast<uint8_t>(NdsCartridgeSaveType::Flash) ||
+        in.backup_size > 64u * 1024u * 1024u ||
+        in.backup_data.size() != in.backup_size)
+        return fail("savestate cartridge backup geometry is invalid");
+
+    // These immutable values are derived from the exact ROM/configuration and
+    // loaded firmware. A state may restore protocol phase, but it may not
+    // replace the inserted hardware identity.
+    if (in.card_chip_id != g_card_chip_id ||
+        (in.key1_available != 0u) != g_key1_available ||
+        (in.card_has_ir != 0u) != g_cart_has_ir ||
+        in.backup_type != static_cast<uint8_t>(g_cart_backup.config.type) ||
+        in.backup_size != g_cart_backup.config.size ||
+        in.firmware_data.size() != g_fw.size())
+        return fail("savestate cartridge/firmware identity mismatch");
+
+    if (in.rtc_inbit > 7u || in.rtc_outbit > 7u ||
+        in.rtc_inpos > 0x7FFFFFFFu || in.rtc_outpos > 7u)
+        return fail("savestate RTC serial phase is invalid");
+    auto valid_bcd = [](uint8_t value, uint8_t max) {
+        return (value & 0x0Fu) < 10u && (value >> 4u) < 10u && value <= max;
+    };
+    const uint8_t hour_max = (in.rtc_status1 & 0x02u) ? 0x23u : 0x11u;
+    const uint8_t hour = in.rtc_datetime[4] & 0x3Fu;
+    if (!valid_bcd(in.rtc_datetime[0], 0x99u) ||
+        !valid_bcd(in.rtc_datetime[1], 0x12u) ||
+        in.rtc_datetime[1] == 0u ||
+        !valid_bcd(in.rtc_datetime[2], 0x31u) ||
+        in.rtc_datetime[2] == 0u || in.rtc_datetime[3] > 6u ||
+        !valid_bcd(hour, hour_max) ||
+        !valid_bcd(in.rtc_datetime[5], 0x59u) ||
+        !valid_bcd(in.rtc_datetime[6], 0x59u))
+        return fail("savestate RTC date/time is invalid");
+    return true;
+}
+
+bool io_peripheral_savestate_import(const NdsIoPeripheralSaveState& in,
+                                    std::string* error) {
+    if (!io_peripheral_savestate_validate(in, error)) return false;
+    g_romctrl = in.romctrl;
+    g_card_transfer_pos = in.card_transfer_pos;
+    g_card_transfer_len = in.card_transfer_len;
+    g_card_deadline = in.card_deadline;
+    g_card_end_event = in.card_end_event != 0u;
+    g_card_irq_cpu = in.card_irq_cpu;
+    std::memcpy(g_card_command, in.card_command, sizeof(g_card_command));
+    g_card_mode = static_cast<CardCommandMode>(in.card_command_mode);
+    g_card_data_mode = in.card_data_mode;
+    g_card_response = in.card_response;
+    std::memcpy(g_key1_schedule, in.key1_schedule,
+                sizeof(g_key1_schedule));
+
+    g_auxspicnt = in.auxspicnt;
+    g_auxspi_data = in.auxspi_data;
+    g_auxspi_hold = in.auxspi_hold != 0u;
+    g_auxspi_pos = in.auxspi_pos;
+    g_auxspi_deadline = in.auxspi_deadline;
+    g_cart_ir_cmd = in.cart_ir_cmd;
+
+    g_cart_backup.config.type =
+        static_cast<NdsCartridgeSaveType>(in.backup_type);
+    g_cart_backup.config.size = in.backup_size;
+    g_cart_backup.sram = in.backup_data;
+    g_cart_backup.cmd = in.backup_cmd;
+    g_cart_backup.status = in.backup_status;
+    g_cart_backup.addr = in.backup_addr;
+    g_cart_backup.dirty = in.backup_dirty != 0u;
+    g_cart_persistence_detached =
+        in.backup_persistence_detached != 0u;
+    g_cart_detached_warning_emitted = false;
+
+    g_spicnt = in.spicnt;
+    g_spi_resp = in.spi_response;
+    g_spi_deadline = in.spi_deadline;
+    g_fw = in.firmware_data;
+    g_fw_dirty = in.firmware_dirty != 0u;
+    g_fw_persistence_detached =
+        in.firmware_persistence_detached != 0u;
+    g_fw_detached_warning_emitted = false;
+    g_fw_hold = in.firmware_hold != 0u;
+    g_fw_cmd = in.firmware_cmd;
+    g_fw_status = in.firmware_status;
+    g_fw_addr = in.firmware_addr;
+    g_fw_data_pos = in.firmware_data_pos;
+    nds_wifi_rebind_firmware(g_fw.data(), static_cast<uint32_t>(g_fw.size()));
+
+    g_rtc_io = in.rtc_io;
+    g_rtc_input = in.rtc_input;
+    g_rtc_inbit = static_cast<int>(in.rtc_inbit);
+    g_rtc_inpos = static_cast<int>(in.rtc_inpos);
+    std::memcpy(g_rtc_output, in.rtc_output, sizeof(g_rtc_output));
+    g_rtc_outbit = static_cast<int>(in.rtc_outbit);
+    g_rtc_outpos = static_cast<int>(in.rtc_outpos);
+    g_rtc_cmd = in.rtc_cmd;
+    std::memcpy(g_rtc_datetime, in.rtc_datetime, sizeof(g_rtc_datetime));
+    g_rtc_status1 = in.rtc_status1;
+    g_rtc_status2 = in.rtc_status2;
+    std::memcpy(g_rtc_alarm1, in.rtc_alarm1, sizeof(g_rtc_alarm1));
+    std::memcpy(g_rtc_alarm2, in.rtc_alarm2, sizeof(g_rtc_alarm2));
+    g_rtc_clock_adjust = in.rtc_clock_adjust;
+    g_rtc_free = in.rtc_free;
+    g_rtc_irq_flag = in.rtc_irq_flag;
+    g_rtc_clock_count = in.rtc_clock_count;
+    g_rtc_processed_ticks = in.rtc_processed_ticks;
+    return true;
 }
 
 uint32_t nds_irq_pending(int cpu) {
@@ -2498,7 +2955,6 @@ bool nds_dma_cpu_stalled(int cpu) { return dma_any_running(cpu & 1); }
 // GXFIFO ARM9 stall flag (melonDS CPUStop_GXStall). Set/cleared by the
 // vendored GPU3D via the NDS shim; scheduler consumption lands with the
 // geometry engine's Run() wiring (3D Phase 2).
-static bool g_gxfifo_stall = false;
 void nds_gxfifo_set_stall(bool stalled) { g_gxfifo_stall = stalled; }
 bool nds_gxfifo_stalled() { return g_gxfifo_stall; }
 
@@ -2517,6 +2973,12 @@ void nds_dma_trigger(int cpu, uint32_t start_mode) {
 
 void nds_dma_run(int cpu, unsigned long long target_cycles) {
     cpu &= 1;
+    // EXACT, not round-sampled. The scheduler only calls this after
+    // nds_dma_cpu_stalled() proved a channel is running, so the region opens
+    // only when a burst really is moving -- and a burst can be thousands of
+    // units, which is exactly the heavy tail a 1-in-N round sampler turns into
+    // a lottery ticket.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_DMA_ARM9 : NDS_EMU_DMA_ARM7);
     for (int ch = 0; ch < 4; ++ch) {
         DmaChannel& d = g_dma[cpu][ch];
         // While the GXFIFO stall is asserted only ARM9 channel 0 keeps its
@@ -2589,6 +3051,12 @@ void nds_dma_run(int cpu, unsigned long long target_cycles) {
 // numbers land with the melonDS oracle. VBlank (IF bit 0) fires once per
 // frame. Both cores see it (a display event).
 void nds_tick_display(unsigned long long cyc) {
+    // Exclusive of the 2D scanline raster and the 3D frame boundaries this
+    // drives: both open their own EXACT regions (nds_gpu2d_render_scanline,
+    // nds_gpu3d_start_frame / vcount144 / vcount215), so what accumulates
+    // here is the timeline advance itself -- VCOUNT, HBlank/VBlank edges, IRQ
+    // raising -- and not the pixel or geometry work hanging off it.
+    NdsEmuScope emu_region(NDS_EMU_DISPLAY);
     // The raster advances on the 33.51 MHz system clock
     // (2130 cycles/scanline, 263 physical lines = 560190 cyc/frame). VCOUNT is
     // normally incremented at each scanline start, but is independently
@@ -2688,6 +3156,12 @@ void nds_tick_timers(int cpu, unsigned long long cpu_cycles) {
     unsigned long long delta = cyc - g_timer_last[cpu];
     g_timer_last[cpu] = cyc;
     if (delta == 0) return;
+    // Placed PAST the delta==0 early-out, so the very common no-op call pays
+    // nothing. Covers the MMIO-write call sites in this file as well as the
+    // scheduler's, which is why the region lives here and not at the two
+    // scheduler call sites.
+    NdsEmuScope emu_region(cpu == 0 ? NDS_EMU_TIMERS_ARM9
+                                    : NDS_EMU_TIMERS_ARM7);
     unsigned long long carry = 0;  // overflows from timer N-1 (cascade)
     for (int t = 0; t < 4; ++t) {
         Timer& T = g_timer[cpu][t];

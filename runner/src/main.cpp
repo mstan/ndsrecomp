@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "state.h"
@@ -29,11 +30,19 @@
 #include "runtime_arm.h"
 #include "io.h"
 #include "debug_server.h"
+#include "host_profile.h"
 #include "diagnostics.h"
+#include "dispatch_timing.h"
+#include "emu_profile.h"
+// Generated at BUILD time into the binary dir (cmake/NdsBuildIdScript.cmake),
+// so NDS_RUNNER_BUILD_ID is the commit this binary was actually compiled from
+// rather than whatever HEAD was when cmake last configured.
+#include "nds_build_id.h"
 #include "frontend.h"
 #include "gpu2d.h"
 #include "gpu3d.h"
 #include "live_overlay.h"
+#include "live_overlay_platform.h"
 #include "melonds_compute/TextureUpscale.h"
 #include "net/net_ring.h"
 #include "net/net_capture.h"
@@ -316,12 +325,66 @@ void dump_replay_status() {
     }
 }
 
+// ── Live-overlay backend policy ────────────────────────────────────────────
+//
+// Tier order is static banks > gcc shards > tcc shards > interpreter. Which
+// COMPILER fills the remaining gaps is a separate question from which shards
+// the loader consumes: consumption is backend-blind, so a machine with no gcc
+// still loads gcc-built shards out of a prebuilt cache.
+//
+//   gcc         use the command the launcher/CLI supplied (a dev checkout)
+//   tcc         force the bundled, toolchain-free toolchain beside the exe
+//   auto        gcc when a command was supplied, else the bundled tcc tier
+//   auto-no-gcc force the tcc branch even where gcc IS present — this is how
+//               a dev box exercises the exact path a player gets
+//
+// Precedence: NDS_LIVE_OVERLAY_BACKEND > auto.
+enum class LiveOverlayBackend { Auto, Gcc, Tcc, AutoNoGcc };
+
+LiveOverlayBackend parse_live_overlay_backend(const char* text) {
+    if (!text || !*text) return LiveOverlayBackend::Auto;
+    const std::string value(text);
+    if (value == "gcc") return LiveOverlayBackend::Gcc;
+    if (value == "tcc") return LiveOverlayBackend::Tcc;
+    if (value == "auto-no-gcc") return LiveOverlayBackend::AutoNoGcc;
+    return LiveOverlayBackend::Auto;
+}
+
+// Deliberately argv[0]-based rather than GetModuleFileNameA: main.cpp keeps
+// windows.h out of this translation unit on purpose (see the winsock include
+// ordering note below). The launcher spawns the runner by absolute path, so
+// argv[0] is absolute in the shipped configuration, and the relative case is
+// resolved against the working directory.
+std::filesystem::path exe_dir_from_argv(const char* argv0) {
+    std::error_code ec;
+    if (!argv0 || !*argv0) return std::filesystem::current_path(ec);
+    auto dir = std::filesystem::absolute(
+        std::filesystem::path(argv0), ec).parent_path();
+    return ec ? std::filesystem::current_path(ec) : dir;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 #if defined(__ANDROID__)
     android_redirect_stdio_to_logcat();
 #endif
+    // stderr is the runner's diagnostic stream and is read from files by
+    // harnesses and field-bundle collectors. Under Windows UCRT a redirected
+    // stderr becomes BLOCK buffered, so a force-killed process loses its tail
+    // and a live one shows a stale mid-line file -- which misreported a
+    // savestate load as never-happened during the 2026-08-31 Kanden A/B and
+    // cost the session an hour of phantom debugging. Unbuffered is what the C
+    // standard promises for stderr anyway; pay the syscall per line.
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    // Calibrate the dispatch-cost tick source before anything can dispatch.
+    // It is lazily self-calibrating as a fallback, but the lazy path would
+    // spend its calibration spin inside whichever dispatch happened to be
+    // first, contaminating that one sample.
+    nds_dispatch_timing_init();
+    // Shares dispatch_timing's tick calibration; called here so the first
+    // measured scheduler round is not the one paying for it.
+    nds_emu_profile_init();
     // Wiimmfi: Winsock (Windows only) MUST be initialized before ANY
     // Winsock API call anywhere in this process -- including WSAPoll
     // inside Net_Slirp::PollHostSockets(), reached from the host
@@ -372,6 +435,13 @@ int main(int argc, char** argv) {
     std::string cli_relative_mouse_sensitivity;
     std::string cli_relative_mouse_invert_y;
     std::string cli_relative_mouse_fire_key;
+    std::string cli_virtual_stylus;
+    std::string cli_virtual_stylus_sensitivity;
+    std::string cli_virtual_stylus_pad_sensitivity;
+    std::string cli_virtual_stylus_bind;
+    std::string cli_virtual_stylus_tap_bind;
+    std::string cli_virtual_stylus_pad_hold_bind;
+    std::string cli_virtual_stylus_pad_tap_bind;
     std::string cli_mph_prime_controls;
     std::string cli_mph_prime_unified_window_focus;
     std::string cli_mph_virtual_stylus_sensitivity;
@@ -411,6 +481,7 @@ int main(int argc, char** argv) {
     std::string cli_net_capture_scenario;
     bool cli_live_overlay_enable = false;
     bool cli_live_overlay_auto = false;
+    bool cli_live_overlay_transfer_trace = false;
     bool cli_live_overlay_activation_delay_set = false;
     bool cli_live_overlay_auto_delay_set = false;
     bool cli_live_overlay_auto_cooldown_set = false;
@@ -419,11 +490,14 @@ int main(int argc, char** argv) {
     uint32_t cli_live_overlay_auto_cooldown_ms = 60000u;
     std::string cli_live_overlay_command;
     std::string cli_live_overlay_cache;
+    std::string cli_savestate_dir;
+    std::string cli_perf_governor;
     uint64_t budget = 4000000ull;
     bool serve = false;
     bool interactive = false;
     bool config_explicit = false;
     bool discover_static_misses = false;
+    bool force_tier3 = false;
     bool save_disabled = false;
     // One-shot batch-mode diagnostic: dump the (Wiimmfi M0) network event
     // ring to stderr at the end of a plain (non-serve, non-interactive) run,
@@ -446,6 +520,8 @@ int main(int argc, char** argv) {
             interactive = true;
         } else if (a == "--discover-static-misses") {
             discover_static_misses = true;
+        } else if (a == "--force-tier3") {
+            force_tier3 = true;
         } else if (a == "--rtc-host") {
             // Start the guest RTC at host local time on every boot. Opt-in:
             // the oracle gates compare RTC state, so parity runs keep the
@@ -504,6 +580,20 @@ int main(int argc, char** argv) {
             cli_relative_mouse_invert_y = argv[++i];
         } else if (a == "--relative-mouse-fire-key" && i + 1 < argc) {
             cli_relative_mouse_fire_key = argv[++i];
+        } else if (a == "--virtual-stylus" && i + 1 < argc) {
+            cli_virtual_stylus = argv[++i];
+        } else if (a == "--virtual-stylus-sensitivity" && i + 1 < argc) {
+            cli_virtual_stylus_sensitivity = argv[++i];
+        } else if (a == "--virtual-stylus-pad-sensitivity" && i + 1 < argc) {
+            cli_virtual_stylus_pad_sensitivity = argv[++i];
+        } else if (a == "--virtual-stylus-bind" && i + 1 < argc) {
+            cli_virtual_stylus_bind = argv[++i];
+        } else if (a == "--virtual-stylus-tap-bind" && i + 1 < argc) {
+            cli_virtual_stylus_tap_bind = argv[++i];
+        } else if (a == "--virtual-stylus-pad-hold-bind" && i + 1 < argc) {
+            cli_virtual_stylus_pad_hold_bind = argv[++i];
+        } else if (a == "--virtual-stylus-pad-tap-bind" && i + 1 < argc) {
+            cli_virtual_stylus_pad_tap_bind = argv[++i];
         } else if (a == "--mph-prime-controls" && i + 1 < argc) {
             cli_mph_prime_controls = argv[++i];
         } else if (a == "--mph-prime-unified-window-focus" && i + 1 < argc) {
@@ -584,6 +674,8 @@ int main(int argc, char** argv) {
             cli_live_overlay_enable = true;
         } else if (a == "--live-overlay-auto") {
             cli_live_overlay_auto = true;
+        } else if (a == "--live-overlay-transfer-trace") {
+            cli_live_overlay_transfer_trace = true;
         } else if (a == "--live-overlay-activation-delay-ms" && i + 1 < argc) {
             cli_live_overlay_activation_delay_ms =
                 static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
@@ -600,6 +692,10 @@ int main(int argc, char** argv) {
             cli_live_overlay_command = argv[++i];
         } else if (a == "--live-overlay-cache" && i + 1 < argc) {
             cli_live_overlay_cache = argv[++i];
+        } else if (a == "--savestate-dir" && i + 1 < argc) {
+            cli_savestate_dir = argv[++i];
+        } else if (a == "--performance-governor" && i + 1 < argc) {
+            cli_perf_governor = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::fprintf(stderr,
                 "usage: %s [bios-dir] [cycle-budget] [--rom game.nds] "
@@ -625,6 +721,13 @@ int main(int argc, char** argv) {
                 "[--relative-mouse-sensitivity 10..400] "
                 "[--relative-mouse-invert-y on|off] "
                 "[--relative-mouse-fire-key none|a|b|l|r|x|y] "
+                "[--virtual-stylus on|off] "
+                "[--virtual-stylus-sensitivity 10..400] "
+                "[--virtual-stylus-pad-sensitivity 10..400] "
+                "[--virtual-stylus-bind <key-or-mouse>] "
+                "[--virtual-stylus-tap-bind <key-or-mouse|None>] "
+                "[--virtual-stylus-pad-hold-bind <pad-button|None>] "
+                "[--virtual-stylus-pad-tap-bind <pad-button|None>] "
                 "[--mph-prime-controls on|off] "
                 "[--mph-prime-unified-window-focus on|off] "
                 "[--mph-virtual-stylus-sensitivity 10..400] "
@@ -650,9 +753,13 @@ int main(int argc, char** argv) {
                 "[--net-capture-scenario NAME] "
                 "[--live-overlay-enable --live-overlay-command CMD "
                 "--live-overlay-cache DIR] [--live-overlay-auto] "
+                "[--live-overlay-transfer-trace] "
                 "[--live-overlay-activation-delay-ms N] "
                 "[--live-overlay-auto-delay-ms N] "
-                "[--live-overlay-auto-cooldown-ms N]\n",
+                "[--live-overlay-auto-cooldown-ms N] "
+                "[--savestate-dir DIR] "
+                "[--performance-governor auto|off|stage1|stage2] "
+                "[--force-tier3 | NDS_FORCE_TIER3=1]\n",
                 argv[0]);
             return 0;
         } else if (positional == 0) {
@@ -765,6 +872,16 @@ int main(int argc, char** argv) {
                          "(expected 0, 2, 4, or 8)\n");
             return 2;
         }
+    }
+    if (const char* value = std::getenv("NDS_PERFORMANCE_GOVERNOR")) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(value, &mode)) {
+            std::fprintf(stderr,
+                         "invalid NDS_PERFORMANCE_GOVERNOR "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
     }
     if (const char* value = std::getenv("NDS_FRAME_INTERPOLATION")) {
         if (!nds_parse_frame_interpolation(
@@ -884,6 +1001,16 @@ int main(int argc, char** argv) {
                      "(expected 0, 2, 4, or 8)\n");
         return 2;
     }
+    if (!cli_perf_governor.empty()) {
+        NdsPerfGovernorMode mode = NdsPerfGovernorMode::Invalid;
+        if (!nds_parse_perf_governor_mode(cli_perf_governor.c_str(), &mode)) {
+            std::fprintf(stderr,
+                         "invalid --performance-governor "
+                         "(expected auto, off, stage1, or stage2)\n");
+            return 2;
+        }
+        frontend_options.perf_governor_mode = mode;
+    }
     if (!cli_frame_interpolation.empty() &&
         !nds_parse_frame_interpolation(
             cli_frame_interpolation,
@@ -931,6 +1058,71 @@ int main(int argc, char** argv) {
                      "invalid --relative-mouse-fire-key "
                      "(expected none, a, b, l, r, x, or y)\n");
         return 2;
+    }
+    if (!cli_virtual_stylus.empty() &&
+        !nds_parse_on_off(cli_virtual_stylus,
+                          &frontend_options.virtual_stylus.enabled)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus (expected on or off)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_virtual_stylus_sensitivity,
+            &frontend_options.virtual_stylus.sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_pad_sensitivity.empty() &&
+        !nds_parse_mouse_sensitivity(
+            cli_virtual_stylus_pad_sensitivity,
+            &frontend_options.virtual_stylus.pad_sensitivity)) {
+        std::fprintf(stderr,
+                     "invalid --virtual-stylus-pad-sensitivity "
+                     "(expected 10..400)\n");
+        return 2;
+    }
+    if (!cli_virtual_stylus_bind.empty()) {
+        if (cli_virtual_stylus_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.binding =
+            cli_virtual_stylus_bind;
+    }
+    if (!cli_virtual_stylus_tap_bind.empty()) {
+        if (cli_virtual_stylus_tap_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-tap-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.tap_binding =
+            cli_virtual_stylus_tap_bind;
+    }
+    if (!cli_virtual_stylus_pad_hold_bind.empty()) {
+        if (cli_virtual_stylus_pad_hold_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-pad-hold-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.pad_hold_binding =
+            cli_virtual_stylus_pad_hold_bind;
+    }
+    if (!cli_virtual_stylus_pad_tap_bind.empty()) {
+        if (cli_virtual_stylus_pad_tap_bind.size() >= 64u) {
+            std::fprintf(stderr,
+                         "invalid --virtual-stylus-pad-tap-bind "
+                         "(value too long)\n");
+            return 2;
+        }
+        frontend_options.virtual_stylus.pad_tap_binding =
+            cli_virtual_stylus_pad_tap_bind;
     }
     if (!cli_mph_prime_controls.empty() &&
         !nds_parse_on_off(cli_mph_prime_controls,
@@ -1098,6 +1290,18 @@ int main(int argc, char** argv) {
     if (!diagnostics_enabled) coverage_manifest_disabled = true;
     nds_diagnostics_enable_profile_environment();
 
+    // Always-on host CPU sampler (host_profile.h). Started HERE -- before the
+    // BIOS/firmware load, before boot(), before the first frame -- because the
+    // whole contract of an always-on ring is that the interesting window is
+    // already inside it when someone thinks to ask. Deliberately not gated on
+    // --diagnostics: a diagnostics-off session still gets the debug-server
+    // query surface, and the sampler is the only host-symbol attribution the
+    // runner has. NDS_HOSTPROF=off opts out and then allocates nothing.
+    //
+    // This call also registers the calling thread -- the emu/frontend thread --
+    // as the primary sampling target.
+    nds_hostprof_start();
+
     // Resolve the network config to backend-ready numeric form. Provider
     // name -> table lookup, optional dns_server string -> IPv4, matching
     // the pipeline documented in wifi_net.h's NdsWifiNetworkConfig.
@@ -1240,6 +1444,36 @@ int main(int argc, char** argv) {
 
     g_discover_static_misses = discover_static_misses;
 
+    // Forced-interpreter selector (beads-yjp.42). Env and flag are equivalent;
+    // env exists because the scenario harnesses launch the runner themselves
+    // and pass the parent environment through. Announce it on stderr: a mode
+    // this expensive must never be entered silently, and the launch log is a
+    // second independent witness alongside dispatch_stats.forced_tier3.
+    if (!force_tier3) {
+        if (const char* value = std::getenv("NDS_FORCE_TIER3"))
+            force_tier3 = (value[0] == '1' && value[1] == '\0');
+    }
+    g_nds_force_tier3 = force_tier3;
+    if (force_tier3) {
+        std::fprintf(stderr,
+                     "[force-tier3] selector ON: all non-BIOS dispatch "
+                     "lookups report a miss; every game and captured-firmware "
+                     "instruction runs through the Tier 3 interpreter on both "
+                     "CPUs. This is a measurement mode and is very slow.\n");
+    }
+
+    // Deadline-bounded per-instruction machinery selector (beads-yjp.42).
+    // NDS_CYCLE_FAST_LIMIT=0 runs the faithful path in the SAME binary; it is
+    // the A leg of the A/B and the standing LLE-floor escape hatch. Announced
+    // for the same reason force-tier3 is: a leg must never be silent.
+    if (const char* value = std::getenv("NDS_CYCLE_FAST_LIMIT")) {
+        if (value[0] == '0' && value[1] == '\0')
+            std::fprintf(stderr,
+                         "[cycle-fast-limit] selector OFF: every "
+                         "runtime_should_yield / runtime_tick takes the "
+                         "faithful unbounded path.\n");
+    }
+
     const NdsGpu3dRendererPolicy renderer_policy =
         nds_gpu3d_renderer_policy();
     if (renderer_policy == NdsGpu3dRendererPolicy::Invalid) {
@@ -1294,6 +1528,72 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "[gpu3d] threaded soft renderer: %s\n",
                  gpu3d_threaded ? "on" : "off");
+
+    // GPU2D per-scanline rendering on worker threads, driven from a per-line
+    // latch. ON by default (beads-yjp.70 phase 2C). The inline path is the
+    // identical latch/execute sequence with the execute taken immediately, so
+    // 0 is not a separate code path, and the threaded path is byte-locked
+    // against it by the presented-frame digest ring (NDS_FRAME_HASH=1) and by
+    // gpu2d_window_test's threaded/inline comparison. NDS_GPU2D_THREADED=0
+    // puts the 2D raster back on the emu thread.
+    // See docs/device_work_parallelization.md.
+    bool gpu2d_threaded = true;
+    if (const char* value = std::getenv("NDS_GPU2D_THREADED")) {
+        if (value[0] == '0' && value[1] == '\0') {
+            gpu2d_threaded = false;
+        } else if (value[0] == '1' && value[1] == '\0') {
+            gpu2d_threaded = true;
+        } else {
+            std::fprintf(stderr,
+                         "invalid NDS_GPU2D_THREADED value (expected 0 or 1)\n");
+            return 2;
+        }
+    }
+    // Two workers cover 192 lines comfortably: the emu thread is the sole
+    // producer of latches, so extra workers buy only tail coverage while
+    // widening every fence drain.
+    unsigned gpu2d_workers = 2;
+    if (const char* value = std::getenv("NDS_GPU2D_WORKERS")) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (!end || *end || parsed < 1ul || parsed > 16ul) {
+            std::fprintf(stderr,
+                         "invalid NDS_GPU2D_WORKERS value (expected 1..16)\n");
+            return 2;
+        }
+        gpu2d_workers = static_cast<unsigned>(parsed);
+    }
+    std::fprintf(stderr,
+                 "[gpu2d] threaded scanline render: %s (workers: %u)\n",
+                 gpu2d_threaded ? "on" : "off", gpu2d_workers);
+
+    // Helper threads for the adaptive (widened) presentation compositor: 192
+    // lines at the widened output width plus the HD layer surfaces, run at
+    // present time. It was the single largest 2D item left on the emu thread.
+    // The calling thread still participates and still waits for the last
+    // line, so the presented frame and its latency are unchanged; only the
+    // wall time shrinks.
+    //
+    // Scaled off the host: 3 helpers (4 renderers) on an 8+ thread box, 1 on
+    // 4..7, none below that, so a small host is never oversubscribed by the
+    // scanline pool plus this one plus the 3D soft renderer.
+    const unsigned host_threads = std::thread::hardware_concurrency();
+    unsigned gpu2d_adaptive_workers =
+        host_threads >= 8u ? 3u : (host_threads >= 4u ? 1u : 0u);
+    if (const char* value = std::getenv("NDS_GPU2D_ADAPTIVE_WORKERS")) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (!end || *end || parsed > 16ul) {
+            std::fprintf(stderr, "invalid NDS_GPU2D_ADAPTIVE_WORKERS value "
+                                 "(expected 0..16)\n");
+            return 2;
+        }
+        gpu2d_adaptive_workers = static_cast<unsigned>(parsed);
+    }
+    std::fprintf(stderr,
+                 "[gpu2d] adaptive compositor helpers: %u "
+                 "(host threads: %u)\n",
+                 gpu2d_adaptive_workers, host_threads);
 
     if (cli_generated_firmware) frontend_options.generated_firmware = true;
     if (cli_freebios) frontend_options.freebios = true;
@@ -1456,6 +1756,27 @@ int main(int argc, char** argv) {
             : std::filesystem::path(rom_path).filename().string();
     nds_diagnostics_set_identity(rom_sha1.c_str(), rom_name.c_str(),
                                  NDS_RUNNER_BUILD_ID);
+    if (!cli_savestate_dir.empty() && !rom_sha1.empty()) {
+        frontend_options.savestate_directory =
+            (std::filesystem::path(cli_savestate_dir) / rom_sha1).string();
+        // Measurement escape hatch: savestate identity is build-exact
+        // (savestate.cpp load refuses any other build id), which is right for
+        // players but makes a cross-build A/B on a pinned state impossible --
+        // and a pinned state IS the perf methodology (the Kanden slots,
+        // beads-lqa.42). The override swaps only the IDENTITY the states are
+        // checked and stamped with; the diagnostics identity above still
+        // reports the real NDS_RUNNER_BUILD_ID, so perf bundles never lie
+        // about what code ran. Unset (the norm, and every shipped launcher)
+        // this is byte-for-byte the old behaviour.
+        const char* savestate_id_override =
+            std::getenv("NDS_SAVESTATE_BUILD_ID");
+        frontend_options.savestate_build_id =
+            (savestate_id_override && savestate_id_override[0])
+                ? savestate_id_override
+                : NDS_RUNNER_BUILD_ID;
+        frontend_options.savestate_rom_sha1 = rom_sha1;
+    }
+    nds_diagnostics_set_versions(NDS_FRAMEWORK_VERSION, NDS_GAME_VERSION);
     std::string rom_game_code;
     uint32_t rom_revision = 0;
     if (rom.size() >= 0x20) {
@@ -1568,6 +1889,38 @@ int main(int argc, char** argv) {
         cli_live_overlay_auto_cooldown_ms == 0u) {
         cli_live_overlay_auto_cooldown_ms = 60000u;
     }
+    // Resolve which compiler fills tier-3 gaps before configuring. A shipped
+    // build has no --live-overlay-command (the launcher only supplies one when
+    // it finds a dev provider checkout plus gcc), so AUTO lands on the bundled
+    // tcc toolchain staged beside the exe by tools/make_release.ps1.
+    {
+        const LiveOverlayBackend want =
+            parse_live_overlay_backend(std::getenv("NDS_LIVE_OVERLAY_BACKEND"));
+        const bool have_gcc_command = !cli_live_overlay_command.empty();
+        const bool force_tcc = want == LiveOverlayBackend::Tcc ||
+                               want == LiveOverlayBackend::AutoNoGcc ||
+                               (want == LiveOverlayBackend::Auto &&
+                                !have_gcc_command);
+        if (cli_live_overlay_enable && force_tcc) {
+            const auto exe_dir = exe_dir_from_argv(argv[0]);
+            std::string bundled = live_overlay_bundled_tcc_command(exe_dir);
+            if (!bundled.empty()) {
+                cli_live_overlay_command = std::move(bundled);
+                std::fprintf(stderr,
+                    "[live-overlay] tcc tier using bundled toolchain (%s)\n",
+                    (exe_dir / "overlay_toolchain").string().c_str());
+            } else if (want != LiveOverlayBackend::Auto) {
+                // An explicit request we cannot honour must be loud: silently
+                // running gcc after being told "tcc" would invalidate any
+                // measurement taken of the player path.
+                cli_live_overlay_command.clear();
+                std::fprintf(stderr,
+                    "[live-overlay] tcc tier requested but no bundled "
+                    "toolchain at %s (tier-3 gaps stay interpreted)\n",
+                    (exe_dir / "overlay_toolchain").string().c_str());
+            }
+        }
+    }
     live_overlay_configure(cli_live_overlay_enable, cli_live_overlay_auto,
                            cli_live_overlay_activation_delay_ms,
                            cli_live_overlay_auto_delay_ms,
@@ -1575,6 +1928,7 @@ int main(int argc, char** argv) {
                            cli_live_overlay_command.c_str(),
                            cli_live_overlay_cache.c_str(),
                            rom_sha1.c_str());
+    live_overlay_set_transfer_trace(cli_live_overlay_transfer_trace);
     mph_mouse_aim_policy =
         rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
         frontend_options.relative_mouse_touch;
@@ -1648,6 +2002,9 @@ int main(int argc, char** argv) {
             adaptive_guest_culling &&
             (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u,
         frontend_options.adaptive_max_width[0]);
+    nds_title_patches_set_mph_adaptive(
+        rom_sha1 == "90164d1ac127ee5f9815ea4ae7de798c7b5fc629" &&
+        (frontend_options.adaptive_screens & NDS_ADAPTIVE_TOP) != 0u);
     if (!nds_normalize_touch_calibration(fw)) {
         std::fprintf(stderr, "refusing to start: malformed firmware user-settings layout\n");
         return 1;
@@ -1824,24 +2181,28 @@ int main(int argc, char** argv) {
                                   g_dispatch_sm64ds_arm7_len, 0x00000000u);
 #ifdef NDS_HAVE_SM64DS_RAM_BANKS
             // Content-validated runtime-RAM bank (relocated sound engine +
-            // services); registered after the ROM-derived closure so the
-            // immutable payload rows win for their own address range.
+            // services). Registration order no longer decides anything but a
+            // rank tie (dispatch_lookup.h): where this bank and the ROM-derived
+            // closure both validate an address, the row proving the larger
+            // owned span wins.
             nds_register_dispatch(NDS_ARM7, g_dispatch_sm64ds_arm7_ram,
                                   g_dispatch_sm64ds_arm7_ram_len, 0x00000000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_RAM_BANKS
             // Content-validated ARM9 runtime-RAM bank (ITCM-resident code +
-            // overlays loaded over/past the static image); registered after
-            // the ROM-derived closure so the closure's rows win where the
-            // live bytes still match the static image.
+            // overlays loaded over/past the static image). Where the live
+            // bytes still match the static image both validate, and the
+            // closure's whole-function rows outrank this bank's capture-derived
+            // fragments on owned span (beads-lqa.40).
             nds_register_dispatch(NDS_ARM9, g_dispatch_sm64ds_arm9_ram,
                                   g_dispatch_sm64ds_arm9_ram_len, 0xFFFF0000u);
 #endif
 #ifdef NDS_HAVE_SM64DS_ARM9_GAMEPLAY_RAM_BANKS
             // A later gameplay capture carries different overlay generations
             // at many of the same virtual addresses. Keep it in a separate
-            // content-validated bank: boot/title bytes above win when present,
-            // then this generation becomes eligible after the guest swaps it.
+            // content-validated bank: the two generations' expected bytes
+            // differ, so at most one of them validates at any instant and the
+            // selection between them is content, never order.
             nds_register_dispatch(NDS_ARM9,
                                   g_dispatch_sm64ds_arm9_ram_gameplay,
                                   g_dispatch_sm64ds_arm9_ram_gameplay_len,
@@ -1903,6 +2264,8 @@ int main(int argc, char** argv) {
                                  "executed\n");
         }
         nds_gpu3d_set_threaded(gpu3d_threaded);
+        nds_gpu2d_set_threaded(gpu2d_threaded, gpu2d_workers);
+        nds_gpu2d_set_adaptive_workers(gpu2d_adaptive_workers);
     };
     boot();
 
@@ -1946,6 +2309,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[run] interactive SDL mode from reset\n");
         const int rc = nds_run_interactive_frontend(frontend_options);
         debug_pump_stop();
+        // After the frontend has closed the performance log (and with it
+        // written the hostprof bundle), so the dump covers the whole session
+        // including its last frames.
+        nds_hostprof_stop();
         const bool save_ok = nds_io_flush_cartridge_save();
         const bool firmware_ok = nds_io_flush_firmware_save();
         write_coverage_manifest();

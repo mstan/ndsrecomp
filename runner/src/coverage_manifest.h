@@ -122,13 +122,19 @@ bool coverage_manifest_flush_part(char* error, unsigned error_cap);
 // temporary and renames, so a half-written file is never handed to anyone.
 bool coverage_manifest_write(const char* path, char* error, unsigned error_cap);
 
-// Write a bounded, recency-ordered snapshot for the live compiler. This keeps
-// an automatic promotion from serializing a many-megabyte whole-session dump
-// on the emulation thread; the durable exit/debug manifest remains complete.
-bool coverage_manifest_write_live_snapshot(const char* path,
-                                           uint32_t max_pages,
-                                           char* error,
-                                           unsigned error_cap);
+// A bounded, recency-ordered snapshot for the live compiler, split in two so
+// the emulation thread pays only for the copy (beads-yjp.59). CAPTURE reads the
+// resident page store, the guest page payloads and the Tier-3 counters, so it
+// must run on the emulation thread; WRITE is base64, a sort, a JSON build and
+// an atomic file replace over that frozen copy, and runs on a worker. The
+// document is byte-identical either way. Release the snapshot exactly once.
+struct CoverageLiveSnapshot;
+CoverageLiveSnapshot* coverage_manifest_capture_live_snapshot(
+    uint32_t max_pages);
+bool coverage_manifest_write_captured_snapshot(
+    const CoverageLiveSnapshot* snapshot, const char* path, char* error,
+    unsigned error_cap);
+void coverage_manifest_release_snapshot(CoverageLiveSnapshot* snapshot);
 
 struct CoveragePageStats {
     uint64_t captured;      // distinct (address, contents) pages stored
